@@ -30,7 +30,7 @@ use crate::lsa::{
     RouterLink, RouterLsaBody, SummaryLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK,
     LINK_TYPE_TRANSIT_NETWORK,
 };
-use crate::lsdb::Lsdb;
+use crate::lsdb::{InstallOutcome, Lsdb};
 use crate::neighbor::{self, NeighborState};
 use crate::packet::{self, DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OspfPacket, PacketError};
 use crate::socket::OspfSocket;
@@ -1991,6 +1991,7 @@ impl LinkManager {
                         if let Some(router_id) = *background.router_id.lock().await {
                             background.originate_router_lsas(router_id).await;
                             background.originate_as_external_lsas(router_id).await;
+                            background.flood_external_lsas_across_areas(router_id).await;
                             background.originate_summary_lsas(router_id).await;
                         }
                     }
@@ -2391,18 +2392,11 @@ impl LinkManager {
     /// `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA origination"). Run from
     /// the same tick as `originate_router_lsas`.
     ///
-    /// This is the one genuinely new cross-area mechanism in this crate:
-    /// this router's own redistributed prefixes are installed into *every*
-    /// area it is itself attached to (`self.lsdbs`'s full key set), not just
-    /// one — real RFC 2328 AS-external-LSAs are domain-wide, not area-scoped,
-    /// like Router-/Network-LSAs. This is **not** real ABR translation of
-    /// another router's externally-learned LSA across areas (which stays out
-    /// of scope, see root `CLAUDE.md`) — it's simply this same router
-    /// replicating its own origination into every area it directly
-    /// participates in. No new flooding code is needed beyond the install
-    /// step: `flood_full_neighbors` already resends each link's own area's
-    /// full `Lsdb` periodically, so a freshly-installed Type-5 propagates
-    /// automatically.
+    /// This router's own redistributed prefixes are installed into *every*
+    /// area it is itself attached to (`self.lsdbs`'s full key set), since
+    /// real AS-external-LSAs are domain-wide. Another router's Type-5 is
+    /// carried across areas by `flood_external_lsas_across_areas`. No new
+    /// flooding code: `flood_full_neighbors` resends each link's area `Lsdb`.
     async fn originate_as_external_lsas(&self, local_router_id: Ipv4Addr) {
         let redistributed: Vec<Ipv4Net> = self
             .redistribute_filtered
@@ -2523,6 +2517,67 @@ impl LinkManager {
                 (lsa::LSA_TYPE_NSSA_EXTERNAL, type7_ids),
             ] {
                 withdraw_undesired(&mut lsdb, local_router_id, lsa_type, &desired);
+            }
+        }
+    }
+
+    /// RFC 2328 §3.6/§12.4.4: as an ABR, copies every other router's
+    /// AS-external-LSA (live or `MaxAge`, so a flush propagates) from each
+    /// area's `Lsdb` into every other area that may hold one (never a stub
+    /// area or NSSA) and has no equal-or-newer instance. This router's own
+    /// Type-5s are `originate_as_external_lsas`'s.
+    /// `ponytail:` a copy ages on its own area's clock; one AS-scope `Lsdb`
+    /// (like `nos-ospfv3d`'s) is the upgrade path.
+    async fn flood_external_lsas_across_areas(&self, local_router_id: Ipv4Addr) {
+        if !self.is_area_border_router().await {
+            return;
+        }
+        let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
+            .collect();
+        let settings = self.area_settings.lock().await.clone();
+        for (from, from_lsdb) in &areas {
+            let external: Vec<Arc<Lsa>> = from_lsdb
+                .lock()
+                .await
+                .all()
+                .into_iter()
+                .filter(|l| {
+                    l.header.lsa_type == lsa::LSA_TYPE_AS_EXTERNAL
+                        && l.header.advertising_router != local_router_id
+                })
+                .collect();
+            if external.is_empty() {
+                continue;
+            }
+            for (to, to_lsdb) in &areas {
+                let area = settings.get(to).cloned().unwrap_or_default();
+                if to == from
+                    || !lsa::in_area_scope(lsa::LSA_TYPE_AS_EXTERNAL, area.stub, area.nssa)
+                {
+                    continue;
+                }
+                let mut to_lsdb = to_lsdb.lock().await;
+                for l in &external {
+                    // A flush with nothing to flush is not worth installing.
+                    if l.header.age >= lsa::MAX_AGE && to_lsdb.get(&l.header.key()).is_none() {
+                        continue;
+                    }
+                    if to_lsdb.install((**l).clone()) != InstallOutcome::Rejected {
+                        info!(
+                            from_area = %from,
+                            to_area = %to,
+                            advertising_router = %l.header.advertising_router,
+                            link_state_id = %l.header.link_state_id,
+                            maxage = l.header.age >= lsa::MAX_AGE,
+                            "ospf external lsa copied across areas"
+                        );
+                    }
+                }
             }
         }
     }
@@ -4635,6 +4690,131 @@ mod tests {
             }
         }
         assert_eq!(manager.withdraw_all_self_originated().await, 0);
+    }
+
+    fn foreign_type5(age: u16) -> Lsa {
+        let mut l = Lsa {
+            header: LsaHeader {
+                age,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_AS_EXTERNAL,
+                link_state_id: Ipv4Addr::new(198, 51, 100, 0),
+                advertising_router: Ipv4Addr::new(9, 9, 9, 9),
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::AsExternal(AsExternalLsaBody {
+                network_mask: Ipv4Addr::new(255, 255, 255, 0),
+                metric: 20,
+                e_type2: false,
+                forwarding_address: Ipv4Addr::UNSPECIFIED,
+                external_route_tag: 0,
+            }),
+        };
+        lsa::fill_checksum(&mut l);
+        l
+    }
+
+    /// An ABR with an area 0 and an area 1 (the latter `stub` when asked),
+    /// and the foreign Type-5 installed in area 1.
+    async fn abr_with_external(
+        stub_area0: bool,
+    ) -> (
+        Arc<LinkManager>,
+        Ipv4Addr,
+        Arc<Mutex<Lsdb>>,
+        Arc<Mutex<Lsdb>>,
+    ) {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let net0: Ipv4Net = "192.168.10.0/24".parse().unwrap();
+        let net1: Ipv4Net = "192.168.11.0/24".parse().unwrap();
+        if stub_area0 {
+            manager
+                .set_area_settings(HashMap::from([(
+                    area0,
+                    AreaSettings {
+                        stub: true,
+                        ..AreaSettings::default()
+                    },
+                )]))
+                .await;
+        }
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![(net0, 5)]), (area1, vec![(net1, 7)])]),
+                router_id,
+            )
+            .await;
+        let (l0, l1) = (manager.lsdb_for(area0).await, manager.lsdb_for(area1).await);
+        l1.lock().await.install(foreign_type5(0));
+        (manager, router_id, l0, l1)
+    }
+
+    #[tokio::test]
+    async fn an_abr_copies_a_foreign_type5_into_its_other_areas_and_propagates_a_flush() {
+        let (manager, router_id, l0, l1) = abr_with_external(false).await;
+        let key = foreign_type5(0).header.key();
+        manager.flood_external_lsas_across_areas(router_id).await;
+        assert!(l0.lock().await.get(&key).is_some());
+
+        // A flush in area 1 (same sequence, MaxAge) reaches area 0 too.
+        l1.lock().await.install(foreign_type5(lsa::MAX_AGE));
+        manager.flood_external_lsas_across_areas(router_id).await;
+        assert_eq!(l0.lock().await.get(&key).unwrap().header.age, lsa::MAX_AGE);
+    }
+
+    #[tokio::test]
+    async fn an_abr_never_copies_a_type5_into_a_stub_area_or_over_a_newer_one() {
+        let (manager, router_id, l0, _l1) = abr_with_external(true).await;
+        let key = foreign_type5(0).header.key();
+        manager.flood_external_lsas_across_areas(router_id).await;
+        assert!(l0.lock().await.get(&key).is_none());
+
+        let (manager, router_id, l0, _l1) = abr_with_external(false).await;
+        let mut newer = foreign_type5(0);
+        newer.header.sequence_number += 1;
+        lsa::fill_checksum(&mut newer);
+        l0.lock().await.install(newer);
+        manager.flood_external_lsas_across_areas(router_id).await;
+        assert_eq!(
+            l0.lock().await.get(&key).unwrap().header.sequence_number,
+            lsa::INITIAL_SEQUENCE_NUMBER + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_abr_and_a_flush_with_nothing_held_copy_nothing() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area = Ipv4Addr::UNSPECIFIED;
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        manager
+            .lsdb_for(area)
+            .await
+            .lock()
+            .await
+            .install(foreign_type5(0));
+        manager.flood_external_lsas_across_areas(router_id).await;
+
+        let (manager, router_id, l0, l1) = abr_with_external(false).await;
+        l1.lock().await.install(foreign_type5(lsa::MAX_AGE));
+        manager.flood_external_lsas_across_areas(router_id).await;
+        assert!(l0
+            .lock()
+            .await
+            .get(&foreign_type5(0).header.key())
+            .is_none());
     }
 
     #[tokio::test]

@@ -321,7 +321,7 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     // to type 1 clears it again (the sequence number moves each time).
     let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
     let reorig_pat = format!("ospf lsa originated lsa_type=5 link_state_id={prefix_lsid} ");
-    wait_external_lsa(b, prefix_lsid, 20, false).await?;
+    wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
     for (metric_type, type2) in [("2", true), ("1", false)] {
         let before = a.count(&reorig_pat);
         let mut flags = with_base(A, specific(asbr(ospf(OSPF_ROUTER_ID))));
@@ -333,12 +333,12 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
         ]));
         a.provision_flags(&flags).await?;
         a.wait_new(&reorig_pat, before, 60).await?;
-        wait_external_lsa(b, prefix_lsid, 50, type2).await?;
+        wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 50, type2).await?;
     }
     // Back to the defaults for the flush checks below.
     a.provision_flags(&with_base(A, specific(asbr(ospf(OSPF_ROUTER_ID)))))
         .await?;
-    wait_external_lsa(b, prefix_lsid, 20, false).await?;
+    wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
 
     // RFC 2328 §14.1: dropping the redistribute rule must flush the Type-5 —
     // prematurely aged on router-a, MaxAge-flushed on router-b and its kernel
@@ -371,10 +371,11 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
         .await
 }
 
-/// Polls router-b's `GET /v1/ospf/database` until router-a's live Type-5 for
+/// Polls `r`'s `GET /v1/ospf/database` until `advertiser`'s live Type-5 for
 /// `link_state_id` carries `metric` and the E bit `type2` (60s).
 async fn wait_external_lsa(
     r: &Router,
+    advertiser: &str,
     link_state_id: &str,
     metric: u32,
     type2: bool,
@@ -391,7 +392,7 @@ async fn wait_external_lsa(
             .flatten()
             .any(|l| {
                 l["lsa_type"] == 5
-                    && l["advertising_router"] == OSPF_ROUTER_ID
+                    && l["advertising_router"] == advertiser
                     && l["link_state_id"] == link_state_id
                     && l["age"].as_u64().is_some_and(|a| a < 3600)
                     && l["external_metric"] == metric
@@ -1522,6 +1523,80 @@ pub async fn ospf_nssa(w: &mut World) -> anyhow::Result<()> {
     a.wait(&removed).await
 }
 
+/// RFC 2328 §3.6 ABR external flooding, self-contained, three routers.
+/// router-a is in the backbone only (eth0.0); router-b is the ABR (eth0.0 in
+/// area 0, the bd-ospf bridge in normal area 1); router-c, on the bridge only,
+/// redistributes a static route. router-a must learn router-c's Type-5 (metric
+/// 20) only because router-b copies it into the backbone, route it, and lose
+/// both when the rule is cleared and the flush is carried across too.
+pub async fn ospf_external_flood(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    w.start(C, None, &[]).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let lsid = ASBR_PREFIX.split('/').next().unwrap_or(ASBR_PREFIX);
+    let area1 = |router_id: &str, svi: &str| {
+        let mut flags = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            router_id,
+            "--ospf-area",
+            OSPF_AREA_1,
+            "--ospf-profile",
+            OSPF_PROFILE_AREA1,
+        ]);
+        flags.extend(ospf_broadcast_profile(svi, OSPF_PROFILE_AREA1));
+        flags
+    };
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&with_base(
+        B,
+        area1(OSPF_ROUTER_ID_B, OSPF_BROADCAST_ADDRESS_B),
+    ))
+    .await?;
+    c.provision_flags(&with_base(
+        C,
+        asbr(area1(OSPF_ROUTER_ID_C, OSPF_BROADCAST_ADDRESS_C)),
+    ))
+    .await?;
+
+    both_full_p2p(a, b).await?;
+    c.wait(&format!(
+        "ospf neighbor reached full link=broadcast-domain:{BD} neighbor={OSPF_ROUTER_ID_B}"
+    ))
+    .await?;
+    c.wait(&format!(
+        "ospf lsa originated.*lsa_type=5 link_state_id={lsid}"
+    ))
+    .await?;
+
+    log("router-b (ABR) copies router-c's type-5 into the backbone; router-a routes it");
+    let copy = |maxage: bool| {
+        format!(
+            "ospf external lsa copied across areas from_area={OSPF_AREA_1} to_area={OSPF_AREA} advertising_router={OSPF_ROUTER_ID_C} link_state_id={lsid} maxage={maxage}"
+        )
+    };
+    b.wait(&copy(false)).await?;
+    wait_external_lsa(a, OSPF_ROUTER_ID_C, lsid, 20, false).await?;
+    a.wait(&format!(
+        "added route prefix={ASBR_PREFIX} .*source=Some(Ospf)"
+    ))
+    .await?;
+
+    log("clearing the rule: the flush crosses the ABR and router-a drops the route");
+    let removed = format!("removed route prefix={ASBR_PREFIX}");
+    c.provision(&["--clear-redistribute-to-ospf"]).await?;
+    c.wait(&format!(
+        "ospf lsa prematurely aged.*lsa_type=5 link_state_id={lsid}"
+    ))
+    .await?;
+    b.wait(&copy(true)).await?;
+    a.wait(&removed).await
+}
+
 /// RFC 5250 opaque LSAs against a real third-party router, self-contained.
 /// FRR (`router-f`) peers router-a over router-a's eth1 on its own network
 /// and originates a type 10 (segment routing's Extended Link, opaque type 8)
@@ -2359,7 +2434,7 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
         .await?;
     b.wait_new(&v2_route, v2_r0, 60).await?;
     let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
-    wait_external_lsa(b, prefix_lsid, 20, false).await?;
+    wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
 
     let aged = either_form(legacy, extended, |t| {
         format!("ospfv3 lsa prematurely aged lsa_type={t} ")
@@ -2380,7 +2455,7 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     // The `redistribute ospf` rule is untouched: its Type-5 and route stay.
     a.assert_quiet(v2_aged, v2_aged0, 12).await?;
     b.assert_quiet(&v2_removed, v2_removed0, 1).await?;
-    wait_external_lsa(b, prefix_lsid, 20, false).await?;
+    wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
 
     let v2_flushed_pat =
         format!("ospf lsa maxage flushed.*lsa_type=5.*advertising_router={OSPF_ROUTER_ID}");

@@ -321,6 +321,15 @@ $C -X PUT -H 'Content-Type: application/json' -d '"p-area1"' \
   $B/v1/transactions/abr/interface/loopback-rt1/ospf-profile
 ```
 
+### Carry external routes across areas
+
+An ABR copies the type-5 LSAs it learns in one area into every other area that may hold them. There is nothing to configure:
+
+- **When it happens.** Any router in two or more areas does it on its 2-second tick, for type-5 LSAs from other routers: live ones, and ones at maximum age so that a withdrawal travels too. The ABR's own type-5 LSAs are installed in each of its areas when it originates them.
+- **Where it does not.** Stub areas and NSSAs never get a copy; use `area-type nssa` to redistribute from inside one.
+- **Check it.** On the ABR the log says `ospf external lsa copied across areas` with `from_area`/`to_area`. On a router in the other area, `GET /v1/ospf/database` lists the type-5 LSA with the original advertising router, and `show route rt1 <prefix>` shows `[ospf]` at the distance to that router plus the LSA metric (20 by default).
+- **Remove it.** Clearing `redistribute ospf` on the ASBR ages its LSA out; the ABR carries the flush into the other areas and every router drops the route within seconds.
+
 ### Make an area a stub, and summarize it with ranges
 
 A stub area (RFC 2328 §3.6) carries no AS-external LSAs; its ABR sends a default route into it instead. Here `eth0.0` is in area 0.0.0.1 on both routers, router-b is the ABR (its loopback is in the backbone), and router-a is inside the stub area. Every router on the area's links must set the same type, or their Hellos are dropped (`dropping ospf hello with mismatched e-bit`). Changing it restarts the area's adjacencies.
@@ -509,7 +518,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Authentication (RFC 2328 Appendix D, RFC 5709, RFC 7474).** Described [above](#authenticate-a-link-and-change-its-key). A packet that fails authentication is dropped and logged (`ospf packet authentication failed`). A replayed or out-of-order packet (a sequence number that does not increase) is dropped and logged too.
 
-**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Only static routes can be redistributed, and every one carries the rule's [metric and metric type](#choose-the-metric-and-metric-type-of-redistributed-routes) (default 20, type 1); the forwarding address is always 0.0.0.0.
+**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. An ABR also copies every other router's type-5 LSA (and its flush) into its other areas, except stub areas and NSSAs, so externals cross area borders (see [below](#carry-external-routes-across-areas)). A copy ages on the clock of the area that holds it. Only static routes can be redistributed, and every one carries the rule's [metric and metric type](#choose-the-metric-and-metric-type-of-redistributed-routes) (default 20, type 1); the forwarding address is always 0.0.0.0.
 
 **Ranking external routes received from other routers (RFC 2328 §16.4).**
 - An intra-area or inter-area route always beats an external one, even a cheaper one. Type 1 beats type 2, even a cheaper type 2.
