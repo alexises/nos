@@ -1,6 +1,6 @@
 # nos-lacp — LACP (IEEE 802.1AX) Daemon
 
-A real, from-scratch Link Aggregation Control Protocol implementation for NOS (binary `nos-lacpd`, a single fixed process — see root `CLAUDE.md`'s "Process supervision" section for why, the same reasoning as `nos-interfaced`/`nos-logd`: `PortAggregate` has no per-VRF/per-instance multiplicity to key a dynamic per-object spawn off).
+A real, from-scratch Link Aggregation Control Protocol implementation for NOS (binary `nos-lacpd`, a single fixed process — see `docs/architecture/supervision.md` for why, the same reasoning as `nos-interfaced`/`nos-logd`: `PortAggregate` has no per-VRF/per-instance multiplicity to key a dynamic per-object spawn off).
 
 ## Scope and the critical design boundary
 

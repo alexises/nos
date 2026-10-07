@@ -1,6 +1,6 @@
 # nos-lldp — LLDP (IEEE 802.1AB) Daemon
 
-A real, from-scratch Link Layer Discovery Protocol implementation for NOS (binary `nos-lldpd`, a single fixed process — see root `CLAUDE.md`'s "Process supervision" section; same reasoning as `nos-lacpd`/`nos-interfaced`/`nos-logd`: LLDP has no per-VRF/per-instance multiplicity to key a dynamic per-object spawn off).
+A real, from-scratch Link Layer Discovery Protocol implementation for NOS (binary `nos-lldpd`, a single fixed process — see `docs/architecture/supervision.md`; same reasoning as `nos-lacpd`/`nos-interfaced`/`nos-logd`: LLDP has no per-VRF/per-instance multiplicity to key a dynamic per-object spawn off).
 
 ## Scope
 

@@ -2779,7 +2779,7 @@
         "type": "object"
       },
       "PolicyDefinition": {
-        "description": "A named RPL script (see root `CLAUDE.md`'s \"Routing policy language\n(RPL)\"), referenced by name from a `BgpPeerGroup`'s `import_policy`/\n`export_policy`. Only the source text crosses the wire/IPC — each\nconsumer (`nos-bgpd`) compiles and caches its own bytecode locally,\nmatching the existing \"each daemon re-resolves its own state from config\ndiffs\" idiom, rather than `nos-proto` carrying a bytecode wire format.",
+        "description": "A named RPL script (see `docs/architecture/rpl.md`), referenced by name from a `BgpPeerGroup`'s `import_policy`/\n`export_policy`. Only the source text crosses the wire/IPC — each\nconsumer (`nos-bgpd`) compiles and caches its own bytecode locally,\nmatching the existing \"each daemon re-resolves its own state from config\ndiffs\" idiom, rather than `nos-proto` carrying a bytecode wire format.",
         "properties": {
           "name": {
             "type": "string"

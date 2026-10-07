@@ -169,7 +169,7 @@ pub enum RibRequest {
     /// One-shot: this table's Linux VRF interface name, if its driver has
     /// allocated/created one. The only cross-daemon consumer today is
     /// `nos-interfaced`'s Linux driver, resolving which device to enslave
-    /// an interface into — see root `CLAUDE.md`'s "Endpoint broker"
+    /// an interface into — see `docs/architecture/endpoint-broker.md`
     /// section for how it finds this instance's socket
     /// (`ServiceRef::RibTable`). No table name is carried on the request:
     /// which table you're asking about is implicit in which per-table
