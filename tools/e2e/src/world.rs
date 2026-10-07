@@ -7,7 +7,7 @@ use reqwest::Method;
 
 use crate::consts::*;
 use crate::docker::{Dock, IMAGE};
-use crate::router::{log, Id, Router, A, B, C};
+use crate::router::{log, Id, Router, A, B, C, D, E};
 
 pub struct World {
     pub dock: Dock,
@@ -20,7 +20,7 @@ impl World {
     pub async fn new() -> anyhow::Result<Self> {
         let dock = Dock::connect()?;
         let mut routers = BTreeMap::new();
-        for id in [A, B, C] {
+        for id in [A, B, C, D, E] {
             let running = dock
                 .docker
                 .inspect_container(id.name, None)
@@ -119,10 +119,12 @@ impl World {
         self.start(B, None, watchdog_args).await
     }
 
-    const CONTAINERS: [&'static str; 10] = [
+    const CONTAINERS: [&'static str; 12] = [
         "router-a",
         "router-b",
         "router-c",
+        "router-d",
+        "router-e",
         "router-r",
         "router-g",
         "router-f",

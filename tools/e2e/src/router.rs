@@ -54,6 +54,23 @@ pub const C: Id = Id {
     peer_ip: IP_A,
     remote_as: ASN_A,
 };
+/// `ospf-remote-lfa`'s fourth and fifth ring routers (BGP never used).
+pub const D: Id = Id {
+    name: "router-d",
+    ip: IP_D,
+    asn: ASN_C,
+    rid: "4.4.4.4",
+    peer_ip: IP_A,
+    remote_as: ASN_A,
+};
+pub const E: Id = Id {
+    name: "router-e",
+    ip: IP_E,
+    asn: ASN_C,
+    rid: "5.5.5.5",
+    peer_ip: IP_A,
+    remote_as: ASN_A,
+};
 /// The `rest` phase's throwaway router.
 pub const R: Id = Id {
     name: "router-r",

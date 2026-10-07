@@ -89,6 +89,7 @@ pub fn desired<S: BuildHasher>(
             source: RouteSource::Evpn,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         })
         .collect();
     (entries, best.into_values().collect())
@@ -259,6 +260,7 @@ mod tests {
             source,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         let best: HashMap<IpNet, RibEntry> = [
             entry("10.1.0.0/24", RouteSource::Connected),

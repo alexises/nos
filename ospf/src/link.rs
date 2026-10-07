@@ -1953,6 +1953,9 @@ pub struct LinkManager {
     /// H-bit, with max-metric transit links. An atomic like
     /// `prefix_suppression`.
     host_router: AtomicBool,
+    /// RFC 7490 remote LFA (`OspfInstance.remote_lfa`): `compute_routes`
+    /// looks for a tunnel backup where there is no basic LFA.
+    remote_lfa: AtomicBool,
     /// Each area's last RFC 8770 state — (H-bit honoured, routers with the
     /// H-bit) — only to log a change.
     host_bit_state: Mutex<HashMap<Ipv4Addr, (bool, usize)>>,
@@ -2068,6 +2071,7 @@ impl LinkManager {
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
             host_router: AtomicBool::new(false),
+            remote_lfa: AtomicBool::new(false),
             host_bit_state: Mutex::new(HashMap::new()),
             restarting: AtomicBool::new(false),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
@@ -2119,6 +2123,10 @@ impl LinkManager {
 
     pub fn set_host_router(&self, on: bool) {
         self.host_router.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_remote_lfa(&self, on: bool) {
+        self.remote_lfa.store(on, Ordering::Relaxed);
     }
 
     fn max_metric_state(&self) -> std::sync::MutexGuard<'_, MaxMetric> {
@@ -2778,6 +2786,7 @@ impl LinkManager {
                     backbone: area_id.is_unspecified(),
                     skip_summaries: false,
                     virtual_links: &virtual_hops,
+                    remote_lfa: false,
                 };
                 let view = spf::intra_area_routes(local_router_id, &lsas, &ctx);
                 let ranges = settings.get(area_id).map_or(&[][..], |s| &s.ranges[..]);
@@ -3178,6 +3187,7 @@ impl LinkManager {
                 backbone,
                 skip_summaries: backbone_abr && !backbone,
                 virtual_links: &virtual_hops,
+                remote_lfa: self.remote_lfa.load(Ordering::Relaxed),
             };
             for entry in spf::compute_in(router_id, &lsas, &ctx) {
                 let prefix = entry.prefix;

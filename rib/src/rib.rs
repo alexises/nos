@@ -74,6 +74,9 @@ pub struct RibEntry {
     /// `interface_id` of `backup` — it can leave over a different link than
     /// the primary, and an IPv6 link-local backup needs one just the same.
     pub backup_interface_id: Option<u32>,
+    /// `backup` is an RFC 7490 remote LFA: a PQ node reached through this
+    /// table's IP-in-IP device (`rlfa<table-id>`), not a neighbor.
+    pub backup_tunnel: bool,
 }
 
 impl RibEntry {
@@ -360,6 +363,7 @@ pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
                     source: RouteSource::Static,
                     backup: None,
                     backup_interface_id: None,
+                    backup_tunnel: false,
                 });
             }
         } else {
@@ -396,6 +400,7 @@ mod tests {
             source,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         rib.insert(entry("10.1.0.0/16", RouteSource::Ospf));
         rib.insert(entry("10.2.0.0/16", RouteSource::Static));
@@ -457,6 +462,7 @@ mod tests {
             source: RouteSource::Ospf,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Ospf);
         rib.evpn.local = None;
@@ -480,6 +486,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         assert_eq!(
             rib.best_route(&prefix).unwrap().next_hops[0].0,
@@ -500,6 +507,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix,
@@ -507,6 +515,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Static);
     }
@@ -518,6 +527,7 @@ mod tests {
             source,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         }
     }
 
@@ -581,6 +591,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -588,6 +599,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         assert_eq!(rib.best_routes().len(), 2);
     }
@@ -603,6 +615,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -610,6 +623,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -617,6 +631,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
 
         let all = rib.all_routes();
@@ -641,6 +656,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix: narrow,
@@ -648,6 +664,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
 
         let (matched, candidates) = rib.lookup("10.0.1.5".parse().unwrap()).unwrap();
@@ -695,6 +712,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.replace_source(
             RouteSource::Static,
@@ -704,6 +722,7 @@ mod tests {
                 source: RouteSource::Static,
                 backup: None,
                 backup_interface_id: None,
+                backup_tunnel: false,
             }],
         );
         let candidates = rib
@@ -727,6 +746,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.replace_source(RouteSource::Static, Vec::new());
         assert!(rib.is_empty());
@@ -742,6 +762,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.upsert(RibEntry {
             prefix,
@@ -749,6 +770,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.upsert(RibEntry {
             prefix,
@@ -756,6 +778,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         let candidates = rib
             .all_routes()
@@ -781,6 +804,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         assert_eq!(
             rib.upsert_and_diff(entry.clone()),
@@ -799,6 +823,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         // Static already wins this prefix, so a new/changed Bgp candidate
         // never becomes the winner — no kernel-visible change.
@@ -809,6 +834,7 @@ mod tests {
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
+                backup_tunnel: false,
             }),
             BestPathChange::Unchanged
         );
@@ -824,6 +850,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         assert_eq!(
             rib.upsert_and_diff(bgp_entry),
@@ -833,6 +860,7 @@ mod tests {
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
+                backup_tunnel: false,
             })
         );
         let static_entry = RibEntry {
@@ -841,6 +869,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         assert_eq!(
             rib.upsert_and_diff(static_entry.clone()),
@@ -858,6 +887,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Bgp),
@@ -875,6 +905,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix,
@@ -882,6 +913,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         // Static still wins after Bgp's candidate is removed.
         assert_eq!(
@@ -900,6 +932,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix,
@@ -907,6 +940,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Static),
@@ -916,6 +950,7 @@ mod tests {
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
+                backup_tunnel: false,
             })
         );
     }
@@ -930,6 +965,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.insert(RibEntry {
             prefix,
@@ -937,6 +973,7 @@ mod tests {
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
         rib.remove(&prefix, RouteSource::Bgp);
         let candidates = rib

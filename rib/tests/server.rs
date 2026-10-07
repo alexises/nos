@@ -19,6 +19,7 @@ fn sample_rib() -> Rib {
         source: RouteSource::Static,
         backup: None,
         backup_interface_id: None,
+        backup_tunnel: false,
     });
     // Two competing candidates for the same prefix, to prove ordering.
     rib.insert(RibEntry {
@@ -27,6 +28,7 @@ fn sample_rib() -> Rib {
         source: RouteSource::Bgp,
         backup: None,
         backup_interface_id: None,
+        backup_tunnel: false,
     });
     rib.insert(RibEntry {
         prefix: narrow,
@@ -34,6 +36,7 @@ fn sample_rib() -> Rib {
         source: RouteSource::Static,
         backup: None,
         backup_interface_id: None,
+        backup_tunnel: false,
     });
     rib
 }

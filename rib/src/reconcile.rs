@@ -72,7 +72,13 @@ pub async fn run(
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(
             &config_socket,
-            vec![DiffScope::RoutingTables, DiffScope::StaticRoutingInstances],
+            // `OspfInstances`: an instance's `remote-lfa` adds or removes this
+            // table's IP-in-IP device.
+            vec![
+                DiffScope::RoutingTables,
+                DiffScope::StaticRoutingInstances,
+                DiffScope::OspfInstances,
+            ],
         )
         .await
         {
@@ -178,6 +184,10 @@ async fn resync(
             let routes = guard.best_routes_for_kernel();
             drop(guard);
 
+            if let Err(e) = driver.sync_tunnel(table, remote_lfa(&cfg, table)).await {
+                warn!(table = %table, error = %e, "failed to sync the remote lfa tunnel device");
+            }
+
             debug!(table = %table, prefixes = routes.len(), "recomputed RIB");
             for (prefix, entry) in &routes {
                 trace!(
@@ -199,6 +209,17 @@ async fn resync(
             warn!(table = %table, error = %e, "failed to fetch running config, keeping previous RIB");
         }
     }
+}
+
+/// Whether this table's OSPF instance runs RFC 7490 remote LFA (so the
+/// table needs its IP-in-IP device, to tunnel to and to be tunnelled to).
+fn remote_lfa(cfg: &Config, table: &str) -> bool {
+    cfg.routing_tables
+        .iter()
+        .find(|t| t.name == table)
+        .and_then(|t| t.ospf_instance.as_ref())
+        .and_then(|name| cfg.ospf_instances.iter().find(|i| &i.name == name))
+        .is_some_and(|i| i.remote_lfa)
 }
 
 /// Brings the kernel in line with `rib`: the L3 VNI devices and remote VTEPs
@@ -354,6 +375,7 @@ fn connected_entries(
             source: RouteSource::Connected,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         });
     }
     entries
@@ -481,6 +503,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         }
     }
 
@@ -599,6 +622,23 @@ mod tests {
     }
 
     #[test]
+    fn remote_lfa_follows_the_tables_ospf_instance() {
+        let mut cfg = cfg_with_table(RoutingTable {
+            name: "rt1".into(),
+            ospf_instance: Some("o1".into()),
+            ..Default::default()
+        });
+        cfg.ospf_instances.push(nos_proto::OspfInstance {
+            name: "o1".into(),
+            ..Default::default()
+        });
+        assert!(!remote_lfa(&cfg, "rt1"));
+        cfg.ospf_instances[0].remote_lfa = true;
+        assert!(remote_lfa(&cfg, "rt1"));
+        assert!(!remote_lfa(&cfg, "rt2"));
+    }
+
+    #[test]
     fn table_not_found_publishes_idle_target() {
         let cfg = Config::default();
         let target = compute_redistribute_target(&cfg, "rt1", &HashMap::new());
@@ -689,6 +729,7 @@ mod tests {
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
+                backup_tunnel: false,
             },
         );
 
@@ -722,6 +763,7 @@ mod tests {
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         routes.insert(entry.prefix, entry);
 
@@ -873,6 +915,7 @@ mod tests {
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
+                backup_tunnel: false,
             },
         );
 

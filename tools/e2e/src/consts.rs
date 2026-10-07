@@ -31,6 +31,9 @@ pub const IP_B: &str = "10.50.0.3";
 pub const IP_C: &str = "10.50.0.4";
 /// The throwaway router of the `rest` phase's destructive checks.
 pub const IP_R: &str = "10.50.0.5";
+/// `ospf-remote-lfa`'s fourth and fifth ring routers.
+pub const IP_D: &str = "10.50.0.13";
+pub const IP_E: &str = "10.50.0.14";
 /// The `lldp` phase's second management address on router-b: TEST-NET-1, on
 /// no interface, so it is advertised with the "unknown" interface numbering.
 pub const MGMT_NOWHERE: &str = "192.0.2.1";
@@ -313,6 +316,15 @@ pub const OSPF_BROADCAST_ADDRESS_C: &str = "203.0.113.67/28";
 /// A destination with no neighbor of its own, on router-b's loopback, so
 /// router-a can only learn it through a real SPF computation.
 pub const OSPF_SPF_LOOPBACK_ADDRESS: &str = "203.0.113.80/32";
+/// `ospf-remote-lfa`: the five-router ring a-b-c-d-e-a. Ring link `i` (from
+/// the `i`-th router's eth1 to the next one's eth2) is `10.61.i.0/24`, `.1`
+/// on eth1 and `.2` on eth2; router `i`'s loopback is `10.62.0.i/32`.
+pub const RLFA_RING_PREFIX: &str = "10.61";
+pub const RLFA_LOOPBACK_PREFIX: &str = "10.62.0";
+/// The ring's routing table is every router's first (`rt1`), kernel table
+/// id 100 (see `LOOPBACK_DEVICE`), so its VRF and tunnel device names are fixed.
+pub const RLFA_VRF: &str = "vrf100";
+pub const RLFA_DEVICE: &str = "rlfa100";
 /// `next-hop-reachability`: what router-b advertises with its own loopback
 /// (`OSPF_SPF_LOOPBACK_ADDRESS`) as NEXT_HOP — a TEST-NET-2 sub-block, so a
 /// log grep for it never matches `REDISTRIBUTE_PREFIX`'s /24 line and vice

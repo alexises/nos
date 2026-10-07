@@ -969,6 +969,10 @@ pub struct Args {
     /// `true` turns it on, `false` off.
     #[arg(long)]
     pub ospf_host_router: Option<bool>,
+    /// RFC 7490 `remote-lfa` for that instance (requires `--ospf-instance`):
+    /// `true` turns it on, `false` off.
+    #[arg(long)]
+    pub ospf_remote_lfa: Option<bool>,
 
     /// If set (requires `--ospf-instance`), ensures this OSPF area under it
     /// (`OspfAreaOp::Ensure`).
@@ -2482,6 +2486,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     grace_period: (grace_period != 0).then_some(grace_period),
                 },
             ));
+        }
+        if let Some(enabled) = args.ospf_remote_lfa {
+            ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetRemoteLfa {
+                name: name.clone(),
+                enabled,
+            }));
         }
         if let Some(enabled) = args.ospf_prefix_suppression {
             ops.push(ConfigOp::OspfInstance(

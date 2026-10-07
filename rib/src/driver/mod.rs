@@ -93,6 +93,15 @@ pub trait RibDriver: Send + Sync {
     /// Router's MAC (the bridge's address), `None` when there is no L3 VNI.
     /// Must run before `apply` installs the table's `Evpn` routes, which
     /// leave through the bridge. The default builds nothing.
+    /// RFC 7490 remote LFA: with `enabled`, ensures `table_name`'s IP-in-IP
+    /// device (`rlfa<table-id>`), which carries this table's tunnel backups
+    /// out and decapsulates other routers' into the table; without, deletes
+    /// it. Must run before `apply` installs a `backup_tunnel` route. The
+    /// default builds nothing.
+    async fn sync_tunnel(&self, _table_name: &str, _enabled: bool) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     async fn sync_l3vni(
         &self,
         _table_name: &str,

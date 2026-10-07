@@ -51,6 +51,10 @@ pub struct RouteEntry {
     /// Set on an `Evpn` candidate.
     #[serde(default)]
     pub evpn: Option<EvpnRouteInfo>,
+    /// `backup` is an RFC 7490 remote LFA: the PQ node the backup tunnels
+    /// (IP-in-IP) to, not a neighbor.
+    #[serde(default)]
+    pub backup_tunnel: bool,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -133,6 +137,11 @@ pub struct OspfRoute {
     /// `next_hops` is empty and `backup_next_hop` `None` when set.
     #[serde(default)]
     pub discard: bool,
+    /// RFC 7490 remote LFA: the PQ node (its loopback) to tunnel to when
+    /// the primary fails — set only when `backup_next_hop` is `None`.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[serde(default)]
+    pub backup_tunnel: Option<IpAddr>,
 }
 
 /// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,

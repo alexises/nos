@@ -423,9 +423,14 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
         lines.push(format!("{}", entry.prefix));
         for (i, candidate) in entry.candidates.iter().enumerate() {
             let marker = if i == 0 { "*" } else { " " };
-            let backup = candidate
-                .backup
-                .map_or_else(String::new, |b| format!(" backup {b}"));
+            let backup = candidate.backup.map_or_else(String::new, |b| {
+                let tunnel = if candidate.backup_tunnel {
+                    "tunnel "
+                } else {
+                    ""
+                };
+                format!(" backup {tunnel}{b}")
+            });
             let via = if candidate.discard {
                 "discard".to_string()
             } else {
@@ -1088,6 +1093,7 @@ mod tests {
                 backup: None,
                 discard: true,
                 evpn: None,
+                backup_tunnel: false,
             }],
         }];
         assert_eq!(
@@ -1110,6 +1116,7 @@ mod tests {
                     router_mac: "02:00:00:00:00:03".to_string(),
                     vni: 5000,
                 }),
+                backup_tunnel: false,
             }],
         }];
         assert_eq!(
@@ -1128,11 +1135,31 @@ mod tests {
                 backup: Some("10.0.1.3".parse().unwrap()),
                 discard: false,
                 evpn: None,
+                backup_tunnel: false,
             }],
         }];
         assert_eq!(
             render_prefix_routes(&routes),
             "203.0.113.80/32\n  * via 10.0.0.2, 10.0.1.2 [ospf] backup 10.0.1.3"
+        );
+    }
+
+    #[test]
+    fn remote_lfa_backup_renders_as_a_tunnel() {
+        let routes = [PrefixRoutes {
+            prefix: "203.0.113.80/32".parse().unwrap(),
+            candidates: vec![nos_proto::RouteEntry {
+                gateways: vec!["10.0.0.2".parse().unwrap()],
+                source: nos_proto::RouteSourceKind::Ospf,
+                backup: Some("203.0.113.84".parse().unwrap()),
+                discard: false,
+                evpn: None,
+                backup_tunnel: true,
+            }],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "203.0.113.80/32\n  * via 10.0.0.2 [ospf] backup tunnel 203.0.113.84"
         );
     }
 
