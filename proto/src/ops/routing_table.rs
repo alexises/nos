@@ -2,7 +2,9 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, Redistribute, RestApi, RoutingTable, RoutingTableEvpn};
+use crate::schema::{
+    Config, Redistribute, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
+};
 
 use super::OpError;
 
@@ -35,8 +37,10 @@ pub enum RoutingTableOp {
         name: String,
         redistribute: Redistribute,
     },
+    /// Removes the rule for target `to`.
     ClearRedistribute {
         name: String,
+        to: RedistributeTarget,
     },
     Delete {
         name: String,
@@ -87,7 +91,7 @@ impl RoutingTableOp {
                         ospf_instance: None,
                         ospfv3_instance: None,
                         static_routing_instance: None,
-                        redistribute: None,
+                        redistribute: Vec::new(),
                     });
                 }
                 Ok(())
@@ -113,11 +117,17 @@ impl RoutingTableOp {
                 Ok(())
             }
             RoutingTableOp::SetRedistribute { name, redistribute } => {
-                find_table_mut(config, name)?.redistribute = Some(redistribute.clone());
+                let rules = &mut find_table_mut(config, name)?.redistribute;
+                match rules.iter_mut().find(|r| r.to == redistribute.to) {
+                    Some(r) => *r = redistribute.clone(),
+                    None => rules.push(redistribute.clone()),
+                }
                 Ok(())
             }
-            RoutingTableOp::ClearRedistribute { name } => {
-                find_table_mut(config, name)?.redistribute = None;
+            RoutingTableOp::ClearRedistribute { name, to } => {
+                find_table_mut(config, name)?
+                    .redistribute
+                    .retain(|r| r.to != *to);
                 Ok(())
             }
             RoutingTableOp::Delete { name } => {
@@ -201,7 +211,7 @@ mod tests {
             bgp_instance: None,
             ospf_instance: None,
             static_routing_instance: None,
-            redistribute: None,
+            redistribute: Vec::new(),
         }
     }
 
@@ -229,7 +239,7 @@ mod tests {
                 bgp_instance: Some("r1".to_string()),
                 ospf_instance: None,
                 static_routing_instance: None,
-                redistribute: None,
+                redistribute: Vec::new(),
             }],
             ..Default::default()
         };
@@ -387,21 +397,49 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.routing_tables[0].redistribute,
-            Some(Redistribute {
+            vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            })
+            }]
         );
+
+        // A second target is added beside it; re-setting one replaces only it.
+        for (to, policy) in [
+            (RedistributeTarget::Ospf, None),
+            (RedistributeTarget::Bgp, Some("p".to_string())),
+        ] {
+            RoutingTableOp::SetRedistribute {
+                name: "rt1".to_string(),
+                redistribute: Redistribute {
+                    from: RedistributeSource::Static,
+                    to,
+                    policy,
+                    metric: None,
+                    metric_type: None,
+                },
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        let rules = &cfg.routing_tables[0].redistribute;
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].policy.as_deref(), Some("p"));
+        assert_eq!(rules[1].to, RedistributeTarget::Ospf);
 
         RoutingTableOp::ClearRedistribute {
             name: "rt1".to_string(),
+            to: RedistributeTarget::Bgp,
         }
         .apply(&mut cfg)
         .unwrap();
-        assert_eq!(cfg.routing_tables[0].redistribute, None);
+        assert_eq!(cfg.routing_tables[0].redistribute.len(), 1);
+        assert_eq!(
+            cfg.routing_tables[0].redistribute[0].to,
+            RedistributeTarget::Ospf
+        );
     }
 
     #[test]
@@ -427,7 +465,7 @@ mod tests {
         assert_eq!(
             cfg.routing_tables[0]
                 .redistribute
-                .as_ref()
+                .first()
                 .and_then(|r| r.policy.as_deref()),
             Some("p1")
         );

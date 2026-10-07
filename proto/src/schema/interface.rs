@@ -526,7 +526,7 @@ mod tests {
             bgp_instance: None,
             ospf_instance: None,
             static_routing_instance: None,
-            redistribute: None,
+            redistribute: Vec::new(),
         }
     }
 

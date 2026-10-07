@@ -38,6 +38,7 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "address",
     "tag",
     "prefix",
+    "to",
 ];
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -112,7 +113,7 @@ fn find_element(items: &[Value], sel: &str) -> Option<usize> {
     items.iter().position(|el| match el {
         Value::Object(o) => element_key_field(o)
             .and_then(|k| scalar_text(&o[k]))
-            .is_some_and(|t| t == sel),
+            .is_some_and(|t| t == sel || norm(&t) == norm(sel)),
         Value::String(s) => s == sel || norm(s) == norm(sel),
         Value::Number(n) => n.to_string() == sel,
         _ => false,
@@ -187,7 +188,7 @@ fn check_element_key(value: &Value, key: &str) -> Result<(), PathError> {
         return Ok(());
     };
     match scalar_text(&o[field]) {
-        Some(t) if t != key => Err(PathError::Invalid(format!(
+        Some(t) if t != key && norm(&t) != norm(key) => Err(PathError::Invalid(format!(
             "body {field} '{t}' does not match path key '{key}'"
         ))),
         _ => Ok(()),
@@ -294,6 +295,7 @@ mod tests {
             "switching_profiles": [{"name": "sw", "members": [{"broadcast_domain": "bd", "tag": {"Dot1q": 5}}]}],
             "prefix_lists": [{"name": "pl", "entries": [{"cidr": "10.0.0.0/8", "range": null}]}],
             "lldp": {"tx_hold": null},
+            "routing_tables": [{"name": "rt1", "redistribute": [{"from": "Static", "to": "Ospf"}]}],
         })
     }
 
@@ -334,6 +336,7 @@ mod tests {
             ],
             vec!["switching-profile", "sw", "member", "bd"],
             vec!["prefix-list", "pl", "entry", "10.0.0.0/8"],
+            vec!["routing-table", "rt1", "redistribute", "ospf"],
             vec![
                 "bgp-instance",
                 "r1",
@@ -380,6 +383,18 @@ mod tests {
         let err = set(&mut d, &p("bgp-instance/r2"), json!({"name": "other"})).unwrap_err();
         assert!(matches!(err, PathError::Invalid(_)));
         assert_eq!(d, doc());
+    }
+
+    #[test]
+    fn set_appends_an_enum_keyed_element_case_insensitively() {
+        let mut d = doc();
+        set(
+            &mut d,
+            &p("routing-table/rt1/redistribute/bgp"),
+            json!({"from": "Static", "to": "Bgp"}),
+        )
+        .unwrap();
+        assert_eq!(d["routing_tables"][0]["redistribute"][1]["to"], "Bgp");
     }
 
     #[test]

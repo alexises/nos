@@ -570,21 +570,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "The OSPFv3 instance's routes are installed into this routing table (its VRF). An instance can be claimed by at most one routing table. `delete` removes the association.",
         ),
         Topic::RoutingTableRedistribute => (
-            "Redistribute this table's static routes into its associated BGP or OSPF instance.",
+            "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.",
             concat!(
-                "Sets the redistribute field on a routing table ('from static to bgp' or 'from \
-             static to ospf' — redistributing into OSPF makes this router a real RFC 2328 ASBR, \
-             originating an AS-external-LSA per redistributed prefix). Both bgp-instance/\
-             ospf-instance (matching the chosen target) and static-routing-instance must already \
-             be set on the table for the rule to be valid — checked at commit time, not when the \
-             rule is set. An optional trailing 'policy <name>' clause names an RPL policy (or \
-             accept-all/deny-all) to filter redistributed routes through before they reach BGP/ \
-             OSPF; omitted, redistribution stays unfiltered (accept-all), unlike a peer-group's \
-             import-policy/export-policy, which default to deny-all. For 'to ospf' only, \
-             'metric <1-16777215>' (default 20) and 'metric-type <1|2>' (default 1) set the \
-             external metric and metric type of the AS-external-LSAs.",
+                "`redistribute <bgp|ospf|ospfv3>` adds one rule per target, so static routes can \
+             feed several protocols at once (`from` is always static). Redistributing into \
+             OSPF/OSPFv3 makes this router a real ASBR, originating an AS-external-LSA per \
+             redistributed prefix. Both the target's instance (bgp-instance/ospf-instance/\
+             ospfv3-instance) and static-routing-instance must already be set on the table for \
+             the rule to be valid, checked at commit time, not when the rule is set. An \
+             optional 'policy <name>' names an RPL policy (or accept-all/deny-all) to filter \
+             redistributed routes through; omitted, redistribution stays unfiltered \
+             (accept-all), unlike a peer-group's import-policy/export-policy, which default to \
+             deny-all. For 'ospf' only, 'metric <1-16777215>' (default 20) and 'metric-type \
+             <1|2>' (default 1) set the external metric and metric type of the AS-external-LSAs.",
                 " ",
-                "Clear this table's redistribution rule.",
+                "`delete redistribute <target>` removes that rule.",
             ),
         ),
         Topic::RoutingTableRestApi => (
