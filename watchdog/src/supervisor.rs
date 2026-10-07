@@ -7,6 +7,10 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use nos_proto::Role;
 use tokio::io::AsyncWriteExt;
+#[allow(
+    clippy::disallowed_types,
+    reason = "the supervisor's whole job is spawning the daemons (#228)"
+)]
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -91,6 +95,10 @@ impl BackoffPolicy {
 
 /// Supervises one child process: spawn, wait, restart with exponential
 /// backoff, forever, until `shutdown` reports `true`.
+#[allow(
+    clippy::disallowed_types,
+    reason = "the supervisor's whole job is spawning the daemons (#228)"
+)]
 pub async fn supervise_one(
     spec: ProcessSpec,
     policy: BackoffPolicy,

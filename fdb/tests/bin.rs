@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test code spawns the built binaries (#228)"
+)]
 //! Builds and runs the `nos-fdbd` binary itself: its `--help` parses, and
 //! having an integration test is what makes `cargo test --workspace` build
 //! the binary next to `nos-watchdogd`, where `watchdog/tests/system.rs`

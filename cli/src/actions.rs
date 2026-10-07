@@ -1102,6 +1102,10 @@ pub fn new_policy_tempfile() -> std::io::Result<tempfile::NamedTempFile> {
 /// — see root `CLAUDE.md`'s "nos-cli editing UX". `None` means no editor
 /// could be spawned at all (already reported to stderr); the caller should
 /// point the user at `show source`/`set source line <n> <text>` instead.
+#[allow(
+    clippy::disallowed_types,
+    reason = "the one CLI exception (#228): launching the user's $EDITOR"
+)]
 fn edit_in_external_editor(source: &str) -> Option<String> {
     let editor = std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))

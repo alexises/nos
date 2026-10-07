@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test code spawns the built binaries (#228)"
+)]
 //! The whole stack, unprivileged (#131): the real `nos-watchdogd` supervising
 //! every real daemon (Linux drivers swapped for `noop`, every path under a
 //! temp dir), provisioned by the real `nos-provision` through a real login,
