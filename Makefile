@@ -11,7 +11,7 @@ COVERAGE_MIN ?= 90
 
 .PHONY: help ci-image toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
-        e2e-preflight docs-fix
+        e2e-preflight docs-fix claude-md-size
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -92,7 +92,10 @@ mutants: ## Run mutation testing (needs a nightly toolchain; slow — CI only ru
 docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
 
-check: build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
+claude-md-size: ## Fail when a CLAUDE.md exceeds its ceiling in tools/ci/claude-md-budget.txt
+	tools/ci/check-claude-md.sh
+
+check: claude-md-size build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
 
 ci: check deny audit ## Everything check does, plus deny/audit (skips slow nightly-only miri/mutants)
 

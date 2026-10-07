@@ -238,6 +238,8 @@ make help    # list all available targets
 make coverage  # line coverage, fails under COVERAGE_MIN (CI runs this) — excluded: tools/e2e, the Linux drivers, raw-socket FFI (see below)
 ```
 
+- `make claude-md-size` (part of `make check`) keeps every `CLAUDE.md` under its ceiling in `tools/ci/claude-md-budget.txt`; move detail to `docs/` instead of raising it. Targets: root 20 KB, crates 8 KB, bgp/ospf 12 KB (#252).
+
 **No external commands (#228).** Production code never shells out: use a crate (`rtnetlink`, `bollard`) or FFI. `clippy.toml` bans `std::process::Command`/`tokio::process::Command`, so `make clippy` fails on it. Exceptions carry `#[allow(clippy::disallowed_types, reason = "…")]`: the watchdog supervisor, `nos`'s `$EDITOR` launch, and tests that run built binaries or an independent oracle. `tools/e2e` needs none (it drives docker via `bollard`). A new exception needs its reason justified in the PR.
 
 `COVERAGE_MIN` in the `Makefile` is 90% (#104, #131): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `ospf{,v3}/src/socket.rs` (#131): a mock under them would only test the mock, and `nos-e2e` is their real test.
