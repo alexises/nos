@@ -12,7 +12,7 @@ COPY . .
 
 # Empty by default (no new deps, no behavior change). Set to
 # "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
-# bgp/CLAUDE.md's "Memory profiling" note.
+# docs/architecture/development.md's "Memory profiling" note.
 ARG CARGO_FEATURES=
 RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision
 

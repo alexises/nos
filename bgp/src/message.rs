@@ -584,7 +584,7 @@ pub fn is_valid_bgp_identifier(id: Ipv4Addr) -> bool {
 /// RFC 7911 support existed) and is set once, right after this session
 /// reaches `Established` and negotiation is known — see
 /// `fsm::run`'s `Action::ReportEstablished` handling. Only ever non-empty
-/// for a `route_server_client` peer-group (see `bgp/CLAUDE.md`'s "Route
+/// for a `route_server_client` peer-group (see `docs/protocols/bgp-internals.md`'s "Route
 /// reflection and route server" section for why ADD-PATH isn't advertised
 /// unconditionally like this crate's other capabilities).
 #[derive(Debug, Clone, Default)]

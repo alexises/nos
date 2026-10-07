@@ -1,6 +1,6 @@
 # Max bytes per tracked CLAUDE.md (wc -c). Lower, never raise (#252). Targets: root 20480, crates 8192, bgp/ospf 12288.
 CLAUDE.md 20480
-bgp/CLAUDE.md 88713
+bgp/CLAUDE.md 12288
 cli/CLAUDE.md 39162
 config/CLAUDE.md 9363
 fdb/CLAUDE.md 31833

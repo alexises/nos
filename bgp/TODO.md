@@ -4,11 +4,6 @@ Snapshot as of commit `0022cb7` (RFC 4271 §9.1.2.2 best-path). Tracks what's
 built vs. missing so follow-up sessions can pick items off this list instead
 of re-auditing the codebase. Update this file as items are implemented.
 
-**Caveat:** `bgp/CLAUDE.md`'s "Scope" section is stale — it says UPDATE/RIB
-integration is out of scope, but commits `81f5fb5`→`0022cb7` added exactly
-that plus IPv6, auth, and full best-path. The code is authoritative, not
-that doc (worth fixing `bgp/CLAUDE.md` too, separately).
-
 ## Implemented
 
 - **Transport/FSM**: VRF-scoped TCP, active+passive per RFC 4271, states
@@ -16,7 +11,7 @@ that doc (worth fixing `bgp/CLAUDE.md` too, separately).
   retry loop, not as FSM states). OPEN validation, hold-timer reset,
   keepalive=hold/3.
 - **Messages**: OPEN/UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH (RFC 2918,
-  both directions — see `bgp/CLAUDE.md`'s "Route refresh" section).
+  both directions — see `docs/protocols/bgp-internals.md`'s "Route refresh" section).
 - **Capabilities**: 4-byte ASN, MultiProtocol AFI/SAFI, Extended Next-Hop
   (RFC 8950), Route-Refresh (RFC 2918, code 2), ADD-PATH (RFC 7911, code 69
   — only ever advertised for a `route_server_client` peer-group). Nothing
@@ -34,7 +29,7 @@ that doc (worth fixing `bgp/CLAUDE.md` too, separately).
 - **Route server (RFC 7947)**: `route_server_client` peer-groups get a fully
   transparent AS_PATH (no local-ASN prepend) and, via ADD-PATH, see every
   other route-server-client's path for a prefix, not just the single
-  instance-wide best path — see `bgp/CLAUDE.md`'s "Route reflection and
+  instance-wide best path — see `docs/protocols/bgp-internals.md`'s "Route reflection and
   route server" section.
 - **Collision resolution**: real RFC 4271 §6.8, router-ID based.
 - **Session auth**: RFC 2385 MD5 + RFC 5925 TCP-AO with key rotation.
@@ -51,7 +46,7 @@ that doc (worth fixing `bgp/CLAUDE.md` too, separately).
 - **AFI/SAFI**: VPNv4/VPNv6/MPLS L3VPN, multicast, FlowSpec.
 - **EVPN** (AFI 25 / SAFI 70): received routes are stored per peer and
   pushed to `nos-fdbd`; local MACs pushed by `nos-fdbd` are originated as
-  Type-2/Type-3 (see `bgp/CLAUDE.md`'s "EVPN" and `fdb/CLAUDE.md`). Still
+  Type-2/Type-3 (see `docs/protocols/bgp-internals.md`'s "EVPN" and `fdb/CLAUDE.md`). Still
   missing: a Loc-RIB with best-path selection (and so MAC mobility) and
   re-advertisement / route reflection of received EVPN routes, import/export
   policy (RPL's `Input` is prefix-shaped — EVPN bypasses it), Type-1/4/5
