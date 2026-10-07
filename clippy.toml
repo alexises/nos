@@ -2,3 +2,9 @@
 # 5 is reachable with ~6 more small extractions (rpl/parser, bgp/rib,
 # rib/driver/linux, nos-provision) if this is ever worth tightening.
 excessive-nesting-threshold = 6
+
+# No external commands outside tools/e2e and tests (#228): use a crate or FFI.
+disallowed-types = [
+  { path = "std::process::Command", reason = "no external commands outside tools/e2e and tests; see CLAUDE.md" },
+  { path = "tokio::process::Command", reason = "no external commands outside tools/e2e and tests; see CLAUDE.md" },
+]

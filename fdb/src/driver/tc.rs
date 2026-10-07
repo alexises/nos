@@ -457,6 +457,10 @@ mod tests {
     /// `unshare -Urn cargo test -p nos-fdb tc:: -- --ignored`.
     #[test]
     #[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+    #[allow(
+        clippy::disallowed_types,
+        reason = "test code: `tc` is the independent oracle for the netlink encoder (#228)"
+    )]
     fn the_kernel_accepts_every_message_and_reads_them_back_as_intended() {
         let run = |args: &[&str]| {
             let o = std::process::Command::new(args[0])
