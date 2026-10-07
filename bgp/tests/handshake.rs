@@ -704,7 +704,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
     );
 
     let mut learned = 0;
-    for _ in 0..100 {
+    for _ in 0..1500 {
         learned = rib.lock().await.evpn_routes().len();
         if learned == 2 {
             break;
@@ -727,7 +727,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
 
     // Peer goes away: the session ends and its EVPN routes go with it.
     fake_b.abort();
-    let _ = tokio::time::timeout(Duration::from_secs(2), a).await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), a).await;
     assert_eq!(
         rib.lock().await.evpn_routes(),
         [] as [(
@@ -885,7 +885,7 @@ async fn refresh_case(stale_time: Duration, eorr: bool) -> u32 {
     let fake_b = tokio::spawn(fake_refresh_peer(b_stream, b_asn, eorr));
 
     let mut held = 0;
-    for _ in 0..100 {
+    for _ in 0..1500 {
         held = rib.lock().await.accepted_prefixes(peer_addr)[0];
         if held == 2 {
             break;

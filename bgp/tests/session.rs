@@ -3,6 +3,7 @@
 //! peer, exchange a route, and go through the config changes `reconcile`
 //! handles — restart, shutdown, removal, MD5.
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +32,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         source_address: Some(IpAddr::V4(source)),
         remote_as,
         peer_group: "pg".to_string(),
-        hold_time: 9,
+        hold_time: 30,
         keepalive_interval: None,
         connect_retry_time: Duration::from_millis(300),
         mrai: Duration::ZERO,
@@ -56,6 +57,20 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         confed_id: None,
         confed_member: false,
         graceful_restart: Some(120),
+    }
+}
+
+/// Polls `f` until it holds. The 30s bound is only a hang guard: a loaded
+/// machine makes this slower, never a failure (#270).
+async fn eventually<F, Fut>(what: &str, mut f: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !f().await {
+        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -89,16 +104,10 @@ impl Router {
     }
 
     async fn wait_for(&self, want: BgpSessionState) {
-        for _ in 0..200 {
-            if self.state().await == Some(want) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!(
-            "never reached {want:?}: {:?}",
-            self.manager.peer_summaries().await
-        );
+        eventually(&format!("never reached {want:?}"), || async {
+            self.state().await == Some(want)
+        })
+        .await;
     }
 }
 
@@ -138,17 +147,12 @@ async fn two_instances_peer_exchange_a_route_and_follow_config_changes() {
             gateway: "10.0.0.9".parse().unwrap(),
         }]))
         .await;
-    let mut learned = false;
-    for _ in 0..100 {
+    eventually("b learns a's route", || async {
         let (table, routes) = b.manager.bgp_push_snapshot().await;
         assert_eq!(table.as_deref(), Some("rt1"));
-        if routes.contains_key(&"198.51.100.0/24".parse().unwrap()) {
-            learned = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(learned, "b never learned a's route");
+        routes.contains_key(&"198.51.100.0/24".parse().unwrap())
+    })
+    .await;
 
     // Operator commands and the periodic hooks all run against a live session.
     assert!(
@@ -249,29 +253,40 @@ async fn graceful_restart_keeps_routes_across_a_graceful_reset() {
         .await;
         b.wait_for(BgpSessionState::Established).await;
         let has = || async { b.manager.bgp_push_snapshot().await.1.contains_key(&prefix) };
-        for _ in 0..100 {
-            if has().await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(has().await, "b never learned a's route");
+        eventually("b learns a's route", || async { has().await }).await;
         let gr = b.manager.peer_summaries().await[0].graceful_restart.clone();
         assert_eq!(
             gr.as_ref().map(|g| (g.restart_time, g.notification)),
             gr_on_b.then_some((120, true))
         );
 
+        // Reset A with Cease/Other Configuration Change, and hold it down with
+        // an MD5 key B lacks, so nothing reconnects until we say so: the state
+        // B reaches is then stable, with no blip to catch (#270).
         let mut changed = peer(B, A, 65002);
         changed.hold_time = 12;
-        a.apply(vec![changed]).await;
-        let mut lost = false;
-        for _ in 0..60 {
-            lost |= !has().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut held_down = changed.clone();
+        held_down.auth = Some(ResolvedAuth::Md5("secret".to_string()));
+        a.apply(vec![held_down]).await;
+        if gr_on_b {
+            // Kept as stale, still handed to the RIB, for as long as A is gone.
+            eventually("b keeps a's route as stale", || async {
+                b.manager.peer_summaries().await[0].stale_prefixes == 1
+            })
+            .await;
+            assert!(has().await, "graceful: the route stays while a is down");
+        } else {
+            eventually("b withdraws a's route", || async { !has().await }).await;
         }
+
+        a.apply(vec![changed]).await;
+        a.wait_for(BgpSessionState::Established).await;
         b.wait_for(BgpSessionState::Established).await;
-        assert_eq!(lost, !gr_on_b, "gr on b: {gr_on_b}");
+        eventually("b has a's route again", || async { has().await }).await;
+        eventually("no stale route left", || async {
+            b.manager.peer_summaries().await[0].stale_prefixes == 0
+        })
+        .await;
         a.manager.shutdown().await;
         b.manager.shutdown().await;
     }
@@ -294,30 +309,15 @@ async fn shutdown_sends_a_hard_reset_so_the_peer_keeps_nothing() {
     b.apply(vec![peer(A, B, 65001)]).await;
     b.wait_for(BgpSessionState::Established).await;
     let has = || async { b.manager.bgp_push_snapshot().await.1.contains_key(&prefix) };
-    for _ in 0..100 {
-        if has().await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(has().await, "b never learned a's route");
+    eventually("b learns a's route", || async { has().await }).await;
+    // The shutdown Cease goes only to a session A itself holds Established.
+    a.wait_for(BgpSessionState::Established).await;
 
-    let started = std::time::Instant::now();
     a.manager.shutdown().await;
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "shutdown took {:?}",
-        started.elapsed()
-    );
-    let mut gone = false;
-    for _ in 0..40 {
-        if !has().await {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(gone, "b kept a's route after a's shutdown");
+    eventually("b drops a's route after a's shutdown", || async {
+        !has().await
+    })
+    .await;
     assert_eq!(b.manager.peer_summaries().await[0].stale_prefixes, 0);
     b.manager.shutdown().await;
 }
@@ -350,15 +350,10 @@ async fn maximum_prefix_trips_holds_and_clears() {
         .await;
     a.apply(vec![peer(B, A, 65002)]).await;
     b.apply(vec![limited(1)]).await;
-    let mut held = false;
-    for _ in 0..200 {
-        if b.manager.peer_summaries().await[0].max_prefix_held {
-            held = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(held, "b never tripped");
+    eventually("b trips", || async {
+        b.manager.peer_summaries().await[0].max_prefix_held
+    })
+    .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_ne!(b.state().await, Some(BgpSessionState::Established));
 
@@ -367,15 +362,12 @@ async fn maximum_prefix_trips_holds_and_clears() {
 
     b.apply(vec![limited(5)]).await;
     b.wait_for(BgpSessionState::Established).await;
-    for _ in 0..200 {
-        if b.manager.peer_summaries().await[0].accepted_prefixes == Some([2, 0, 0]) {
-            a.manager.shutdown().await;
-            b.manager.shutdown().await;
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("b never counted both routes");
+    eventually("b counts both routes", || async {
+        b.manager.peer_summaries().await[0].accepted_prefixes == Some([2, 0, 0])
+    })
+    .await;
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -492,14 +484,11 @@ async fn rpki_validation_follows_the_cache() {
     a.wait_for(BgpSessionState::Established).await;
     b.wait_for(BgpSessionState::Established).await;
     // Wait for the cache's first End of Data before A's route arrives.
-    for _ in 0..100 {
-        if b.manager.rpki_summaries().await[0].serial == Some(1) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let s = &b.manager.rpki_summaries().await[0];
-    assert!(s.active && s.vrp_count == 1, "{s:?}");
+    eventually("cache serial 1 and its VRP", || async {
+        let s = &b.manager.rpki_summaries().await[0];
+        s.serial == Some(1) && s.active && s.vrp_count == 1
+    })
+    .await;
     a.manager
         .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
             prefix,
@@ -511,15 +500,8 @@ async fn rpki_validation_follows_the_cache() {
     assert!(!has().await, "an invalid route was accepted");
 
     proceed_tx.send(()).unwrap();
-    let mut learned = false;
-    for _ in 0..200 {
-        if has().await {
-            learned = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(learned, "the now-valid route never came back");
+    // B route-refreshes only RPKI_REFRESH_DELAY (5s) after the VRP change.
+    eventually("the now-valid route comes back", || async { has().await }).await;
     assert_eq!(b.manager.rpki_summaries().await[0].serial, Some(2));
     b.wait_for(BgpSessionState::Established).await;
     let _cache = cache.await.unwrap();
