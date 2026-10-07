@@ -143,7 +143,7 @@ async fn tail(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
             },
             // Per this codebase's connection-lifecycle convention (see root
-            // CLAUDE.md's "Endpoint broker"/`SubscribeDiff` notes), a
+            // `docs/architecture/endpoint-broker.md`/`SubscribeDiff` notes), a
             // subscriber is only expected to send its request and never
             // write again — so any activity here at all (EOF, a read error,
             // or even an unexpected extra request) means it's time to tear

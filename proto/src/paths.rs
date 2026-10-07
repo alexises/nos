@@ -3,7 +3,7 @@
 //! (which the watchdog itself is told about via `--config-socket` and never
 //! resolves), `nos-logd`'s own socket (which the watchdog similarly passes
 //! directly, via `--log-socket`, to every other process it spawns — see
-//! root `CLAUDE.md`'s "Process supervision" section — rather than having
+//! `docs/architecture/supervision.md` — rather than having
 //! each one resolve it through the broker), and `nos-watchdogd`'s own broker
 //! socket (the one address every other client must still know up front in
 //! order to resolve everything else).

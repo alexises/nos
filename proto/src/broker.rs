@@ -19,7 +19,7 @@ pub enum ServiceRef {
     RibTable(String),
     /// The single `nos-interfaced` instance, which manages every configured
     /// interface in one process (unlike `RibTable`, there is no per-name
-    /// variant — see root `CLAUDE.md`'s "Endpoint broker" section).
+    /// variant — see `docs/architecture/endpoint-broker.md`).
     Interfaces,
     /// The single `nos-logd` instance, resolved directly like `Config`/
     /// `Interfaces` rather than through the registry — there is exactly one

@@ -2,7 +2,7 @@
 //! NOS-internal dependencies, like `nos-tcp-auth`: it's a plain library
 //! consumed by `nos-proto` (commit-time validation of `PolicyDefinition`
 //! source) and `nos-bgp` (compiling, caching, and executing policies against
-//! real routes). See root `CLAUDE.md`'s "Routing policy language (RPL)"
+//! real routes). See `docs/architecture/rpl.md`
 //! section for the language and architecture this implements.
 
 pub mod ast;

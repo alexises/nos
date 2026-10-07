@@ -6,8 +6,7 @@ use crate::validators::unique_in;
 use super::Config;
 use nos_proto_derive::Cli;
 
-/// A named RPL script (see root `CLAUDE.md`'s "Routing policy language
-/// (RPL)"), referenced by name from a `BgpPeerGroup`'s `import_policy`/
+/// A named RPL script (see `docs/architecture/rpl.md`), referenced by name from a `BgpPeerGroup`'s `import_policy`/
 /// `export_policy`. Only the source text crosses the wire/IPC — each
 /// consumer (`nos-bgpd`) compiles and caches its own bytecode locally,
 /// matching the existing "each daemon re-resolves its own state from config

@@ -111,7 +111,7 @@ const AGE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// before the process exits: one resend period plus a second of margin.
 /// With `max-metric router-lsa on-shutdown`'s hold (at most
 /// `MAX_METRIC_SHUTDOWN_HOLD_MAX`) it must fit `nos-watchdogd`'s 10s
-/// SIGINT-to-SIGKILL budget (root `CLAUDE.md`, "Process supervision") with a
+/// SIGINT-to-SIGKILL budget (`docs/architecture/supervision.md`) with a
 /// second to spare for the exit — see the assertion below. The flush is kicked
 /// out at once (`LinkCommand::FloodNow`), so the window buys one `RXMT_INTERVAL`
 /// retransmission on top.

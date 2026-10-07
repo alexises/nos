@@ -77,8 +77,7 @@ struct Args {
     port_aggregate_registry_path: PathBuf,
 
     /// Unix socket to forward this process's log events to. Passed directly
-    /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
-    /// "Process supervision" section), the same way `--config-socket` is.
+    /// by nos-watchdog to every process it spawns (see `docs/architecture/supervision.md`), the same way `--config-socket` is.
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 }

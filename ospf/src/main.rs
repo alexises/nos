@@ -35,8 +35,7 @@ struct Args {
     listen_socket: Option<PathBuf>,
 
     /// Unix socket to forward this process's log events to. Passed directly
-    /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
-    /// "Process supervision" section).
+    /// by nos-watchdog to every process it spawns (see `docs/architecture/supervision.md`).
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 

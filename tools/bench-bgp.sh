@@ -1099,7 +1099,7 @@ cmd_run() {
 
   # dhat only writes its report file when nos-bgpd exits -- SIGTERM (docker
   # stop's default) reaches it the same way SIGINT does (see root
-  # CLAUDE.md's "Process supervision"), so this has to happen before the
+  # `docs/architecture/supervision.md`), so this has to happen before the
   # unconditional `docker rm -f` below, not after.
   if [[ -n "${PROFILE_MEMORY:-}" && "$kind" == nos* ]]; then
     local profile_out="$WORKDIR/dhat-heap-$kind-$count.json"

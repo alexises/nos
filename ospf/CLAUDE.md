@@ -1,6 +1,6 @@
 # nos-ospf — OSPF Component
 
-OSPF daemon for NOS (binary `nos-ospfd`, one process per `OspfInstance`, dynamically spawned by `nos-watchdog` — see root `CLAUDE.md`'s "Process supervision" section).
+OSPF daemon for NOS (binary `nos-ospfd`, one process per `OspfInstance`, dynamically spawned by `nos-watchdog` — see `docs/architecture/supervision.md`).
 
 ## Scope
 
@@ -237,4 +237,4 @@ A port of `nos-ospfv3d`'s RFC 5187 work (`ospfv3/CLAUDE.md`), nos↔nos only:
 
 ## Watchdog/broker wiring
 
-`nos-watchdogd` gives every `nos-ospfd` instance a real `--listen-socket` (`/run/nos/ospf-<name>.sock`) and registers it in `EndpointRegistry` under `EndpointKind::OspfInstance` — the `ServiceRef`/registry plumbing that already existed generically (see root `CLAUDE.md`'s "Endpoint broker") is now actually wired up, not just present.
+`nos-watchdogd` gives every `nos-ospfd` instance a real `--listen-socket` (`/run/nos/ospf-<name>.sock`) and registers it in `EndpointRegistry` under `EndpointKind::OspfInstance` — the `ServiceRef`/registry plumbing that already existed generically (see `docs/architecture/endpoint-broker.md`) is now actually wired up, not just present.
