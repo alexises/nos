@@ -296,3 +296,86 @@ pub const ALL: &[&str] = &[
     "pki",
     "pki-rotation",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOC: &str = include_str!("../../../../docs/e2e-phases.md");
+
+    /// Add new groups here. (`run`'s match is not introspectable, so a name in
+    /// `ALL` that `run` does not dispatch only fails when run: "unknown phase".)
+    const GROUPS: [&str; 6] = ["base", "drivers", "rpl", "ospf-suite", "multi", "pki-suite"];
+
+    struct Row {
+        phase: String,
+        groups: Vec<String>,
+        requires: Vec<String>,
+    }
+
+    /// The table rows of `docs/e2e-phases.md`: lines starting with ``| ` ``.
+    fn rows() -> Vec<Row> {
+        let list = |cell: &str| -> Vec<String> {
+            cell.split(',')
+                .map(|s| s.trim().trim_matches('`').to_owned())
+                .filter(|s| !s.is_empty() && s != "-" && s != "self-contained")
+                .collect()
+        };
+        DOC.lines()
+            .filter(|l| l.starts_with("| `"))
+            .map(|l| {
+                let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();
+                assert_eq!(cells.len(), 5, "row needs 5 cells: {l}");
+                Row {
+                    phase: cells[0].trim_matches('`').to_owned(),
+                    groups: list(cells[2]),
+                    requires: list(cells[3]),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn doc_table_matches_registry() {
+        let rows = rows();
+        let names: Vec<&str> = rows.iter().map(|r| r.phase.as_str()).collect();
+        for p in ALL {
+            assert!(names.contains(p), "docs/e2e-phases.md has no row for `{p}`");
+        }
+        for n in &names {
+            assert!(
+                ALL.contains(n),
+                "docs/e2e-phases.md row `{n}` is not in phases::ALL"
+            );
+        }
+        assert_eq!(
+            names, ALL,
+            "table order must equal phases::ALL order (or a row is duplicated)"
+        );
+
+        for g in GROUPS {
+            let members = group(g).unwrap_or_else(|| panic!("group `{g}` missing"));
+            for m in members {
+                assert!(ALL.contains(m), "group `{g}` member `{m}` is not in ALL");
+            }
+        }
+        for (i, r) in rows.iter().enumerate() {
+            let mut want: Vec<&str> = GROUPS
+                .into_iter()
+                .filter(|g| group(g).is_some_and(|m| m.contains(&r.phase.as_str())))
+                .collect();
+            let mut have: Vec<&str> = r.groups.iter().map(String::as_str).collect();
+            want.sort_unstable();
+            have.sort_unstable();
+            assert_eq!(have, want, "Groups cell of `{}`", r.phase);
+            for q in &r.requires {
+                let at = ALL.iter().position(|p| p == q);
+                assert!(
+                    at.is_some_and(|at| at < i),
+                    "`{}` requires `{q}`, which must be in ALL before it",
+                    r.phase
+                );
+            }
+        }
+    }
+}
