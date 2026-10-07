@@ -13,10 +13,16 @@ use crate::world::World;
 
 pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
+    // #275: the link watcher streams the kernel's own view; baselines because
+    // an earlier phase may already have created lo100.
+    let changed = format!("link state changed name={LOOPBACK_DEVICE}");
+    let removed = format!("link removed name={LOOPBACK_DEVICE}");
+    let (changed_base, removed_base) = (a.count(&changed), a.count(&removed));
     a.provision(&["--loopback-address", LOOPBACK_ADDRESS])
         .await?;
     a.wait(&format!("created loopback device device={LOOPBACK_DEVICE}"))
         .await?;
+    a.wait_new(&changed, changed_base, 30).await?;
     a.wait("enslaved interface to vrf interface=loopback-rt1")
         .await?;
     a.wait(&format!(
@@ -32,7 +38,8 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
     a.wait(&format!(
         "deleted loopback device interface=loopback-rt1 device={LOOPBACK_DEVICE}"
     ))
-    .await
+    .await?;
+    a.wait_new(&removed, removed_base, 30).await
 }
 
 /// Sets eth0's MTU, then clears it: unset is 1500, enforced (#117), and

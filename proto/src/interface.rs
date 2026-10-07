@@ -118,6 +118,38 @@ pub struct LacpAggregateMembers {
     pub active_members: Vec<String>,
 }
 
+/// One kernel link's observed state, streamed by `nos-interfaced`'s link
+/// watcher (`InterfaceRequest::SubscribeLinks`). Keyed by kernel device name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkState {
+    pub name: String,
+    pub ifindex: u32,
+    /// `IFF_UP`: the link is administratively up.
+    pub admin_up: bool,
+    /// `IFF_LOWER_UP` and an operational state of up/unknown (a dummy or
+    /// bridge device reports unknown).
+    pub carrier: bool,
+}
+
+impl LinkState {
+    /// Usable for traffic: administratively up with carrier.
+    pub fn is_up(&self) -> bool {
+        self.admin_up && self.carrier
+    }
+
+    /// Why the link is down, `None` when it is up. Consumers add their own
+    /// `"absent"` for a device that is not in the table at all.
+    pub fn down_reason(&self) -> Option<&'static str> {
+        if !self.admin_up {
+            Some("admin-down")
+        } else if !self.carrier {
+            Some("no-carrier")
+        } else {
+            None
+        }
+    }
+}
+
 /// Messages sent from a client to `nos-interfaced`'s IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -140,6 +172,10 @@ pub enum InterfaceRequest {
     /// (not deferred to the periodic re-apply tick), gating which of its
     /// `Lacp`-mode members are currently enslaved. No reply.
     PushLacpMembers(LacpAggregateMembers),
+    /// Streaming: replies `LinkSnapshot`, then `LinkChanged`/`LinkRemoved`
+    /// (and a fresh `LinkSnapshot` after any lag) until the client closes the
+    /// connection. The client never writes again after this request.
+    SubscribeLinks,
 }
 
 /// Messages sent from `nos-interfaced` to a client.
@@ -158,4 +194,73 @@ pub enum InterfaceEvent {
     PortAggregates(Vec<PortAggregateStatus>),
     /// Reply to `GetPortAggregate` when the named aggregate exists.
     PortAggregate(PortAggregateStatus),
+    /// First reply to `SubscribeLinks`, and again after a lag: replaces the
+    /// consumer's whole link table. `observed == false` means this driver
+    /// does not watch the kernel (noop): consumers must not gate on it.
+    LinkSnapshot {
+        observed: bool,
+        links: Vec<LinkState>,
+    },
+    /// One link appeared or changed state.
+    LinkChanged(LinkState),
+    /// One link disappeared.
+    LinkRemoved { name: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ls(admin_up: bool, carrier: bool) -> LinkState {
+        LinkState {
+            name: "eth0".into(),
+            ifindex: 2,
+            admin_up,
+            carrier,
+        }
+    }
+
+    #[test]
+    fn down_reason_table() {
+        assert_eq!(ls(true, true).down_reason(), None);
+        assert!(ls(true, true).is_up());
+        assert_eq!(ls(false, true).down_reason(), Some("admin-down"));
+        assert_eq!(ls(false, false).down_reason(), Some("admin-down"));
+        assert_eq!(ls(true, false).down_reason(), Some("no-carrier"));
+        assert!(!ls(true, false).is_up());
+    }
+
+    #[test]
+    fn link_variants_round_trip_and_old_indexes_hold() {
+        let ev = InterfaceEvent::LinkSnapshot {
+            observed: true,
+            links: vec![ls(true, true)],
+        };
+        let b = postcard::to_allocvec(&ev).unwrap();
+        assert_eq!(b[0], 6);
+        assert!(matches!(
+            postcard::from_bytes::<InterfaceEvent>(&b).unwrap(),
+            InterfaceEvent::LinkSnapshot { observed: true, links } if links == vec![ls(true, true)]
+        ));
+        let b = postcard::to_allocvec(&InterfaceEvent::LinkChanged(ls(false, false))).unwrap();
+        assert_eq!(b[0], 7);
+        let b = postcard::to_allocvec(&InterfaceEvent::LinkRemoved { name: "x".into() }).unwrap();
+        assert_eq!(b[0], 8);
+        assert_eq!(
+            postcard::to_allocvec(&InterfaceEvent::NotFound).unwrap()[0],
+            2
+        );
+        assert_eq!(
+            postcard::to_allocvec(&InterfaceRequest::SubscribeLinks).unwrap(),
+            vec![6]
+        );
+        assert!(matches!(
+            postcard::from_bytes::<InterfaceRequest>(&[6]).unwrap(),
+            InterfaceRequest::SubscribeLinks
+        ));
+        assert_eq!(
+            postcard::to_allocvec(&InterfaceRequest::GetPortAggregates).unwrap(),
+            vec![3]
+        );
+    }
 }

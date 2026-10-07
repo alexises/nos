@@ -1,18 +1,19 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, Stream as FStream, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, Stream};
 use nos_proto::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
     PortAggregateStatus, Role, SubinterfaceStatus,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::driver::InterfaceDriver;
+use crate::driver::links::LinkEvent;
+use crate::driver::{InterfaceDriver, LinkWatch};
 use crate::state::{BroadcastDomainState, InterfaceState, Interfaces, PortAggregateState};
 
 /// Bundles this instance's shared in-memory state (for the read-only query
@@ -66,6 +67,7 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
             )
         }
         InterfaceRequest::PushLacpMembers(_) => role == Role::Lacpd,
+        InterfaceRequest::SubscribeLinks => matches!(role, Role::Ospfd | Role::Ospfv3d),
     }
 }
 
@@ -102,6 +104,11 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Arc<Co
                     role = role.as_str(), name = %name,
                     "interface request refused: this role may not send it"
                 );
+                break;
+            }
+            Ok(InterfaceRequest::SubscribeLinks) => {
+                debug!(role = role.as_str(), name = %name, "link subscriber connected");
+                stream_links(&mut reader, &mut writer, || ctx.driver.watch_links()).await;
                 break;
             }
             Ok(req) => dispatch(&ctx, req).await,
@@ -161,6 +168,58 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
         InterfaceRequest::PushLacpMembers(msg) => {
             apply_lacp_push(ctx, msg).await;
             None
+        }
+        // Streaming: `handle_connection` owns the connection for it.
+        InterfaceRequest::SubscribeLinks => None,
+    }
+}
+
+/// Serves one `SubscribeLinks`: the snapshot, then every change, until the
+/// client writes anything (it must not) or closes, or a write fails. After a
+/// lag it sends a fresh snapshot rather than leave a silent gap.
+async fn stream_links<R, W>(reader: &mut R, writer: &mut W, watch: impl Fn() -> LinkWatch)
+where
+    R: FStream + Unpin,
+    W: Sink<InterfaceEvent> + Unpin,
+{
+    let first = watch();
+    let mut rx = first.rx;
+    let snapshot = InterfaceEvent::LinkSnapshot {
+        observed: first.observed,
+        links: first.links,
+    };
+    if writer.send(snapshot).await.is_err() {
+        return;
+    }
+    loop {
+        let event = tokio::select! {
+            ev = async {
+                match rx.as_mut() {
+                    Some(r) => Some(r.recv().await),
+                    None => std::future::pending().await,
+                }
+            } => ev.expect("only Some arm completes"),
+            _ = reader.next() => return,
+        };
+        let out = match event {
+            Ok(LinkEvent::Changed(l)) => InterfaceEvent::LinkChanged(l),
+            Ok(LinkEvent::Removed(name)) => InterfaceEvent::LinkRemoved { name },
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!(skipped = n, "link subscriber lagged, resending snapshot");
+                let w = watch();
+                rx = w.rx;
+                InterfaceEvent::LinkSnapshot {
+                    observed: w.observed,
+                    links: w.links,
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                rx = None;
+                continue;
+            }
+        };
+        if writer.send(out).await.is_err() {
+            return;
         }
     }
 }
@@ -279,5 +338,116 @@ mod authz_tests {
         // nos-ribd derives connected prefixes from both, and nothing else.
         assert!(allowed(Role::Ribd, &InterfaceRequest::GetInterfaces));
         assert!(!allowed(Role::Ribd, &push));
+    }
+
+    #[test]
+    fn only_the_ospf_daemons_may_subscribe_to_links() {
+        for role in Role::ALL {
+            assert_eq!(
+                allowed(role, &InterfaceRequest::SubscribeLinks),
+                matches!(role, Role::Ospfd | Role::Ospfv3d),
+                "{role:?} subscribe"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use crate::driver::links::LinkHub;
+    use futures::channel::mpsc;
+    use nos_proto::LinkState;
+
+    fn l(name: &str, up: bool) -> LinkState {
+        LinkState {
+            name: name.into(),
+            ifindex: 1,
+            admin_up: up,
+            carrier: up,
+        }
+    }
+
+    type Req = Result<InterfaceRequest, std::io::Error>;
+
+    #[tokio::test]
+    async fn snapshot_then_changes_then_eof_ends() {
+        let hub = Arc::new(LinkHub::new(16));
+        hub.upsert(l("a", true));
+        let (req_tx, mut req_rx) = mpsc::unbounded::<Req>();
+        let (mut ev_tx, mut ev_rx) = mpsc::unbounded::<InterfaceEvent>();
+        let h = hub.clone();
+        let task = tokio::spawn(async move {
+            stream_links(&mut req_rx, &mut ev_tx, || h.watch()).await;
+        });
+        let first = ev_rx.next().await.unwrap();
+        assert!(
+            matches!(first, InterfaceEvent::LinkSnapshot { observed: true, links } if links == vec![l("a", true)])
+        );
+        hub.upsert(l("a", false));
+        assert!(
+            matches!(ev_rx.next().await.unwrap(), InterfaceEvent::LinkChanged(s) if s == l("a", false))
+        );
+        hub.remove("a");
+        assert!(
+            matches!(ev_rx.next().await.unwrap(), InterfaceEvent::LinkRemoved { name } if name == "a")
+        );
+        drop(req_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lag_sends_fresh_snapshot() {
+        let hub = Arc::new(LinkHub::new(1));
+        let (_req_tx, mut req_rx) = mpsc::unbounded::<Req>();
+        let (mut ev_tx, mut ev_rx) = mpsc::unbounded::<InterfaceEvent>();
+        let h = hub.clone();
+        let task = tokio::spawn(async move {
+            stream_links(&mut req_rx, &mut ev_tx, || h.watch()).await;
+        });
+        assert!(matches!(
+            ev_rx.next().await.unwrap(),
+            InterfaceEvent::LinkSnapshot { .. }
+        ));
+        // Single-threaded runtime: the task cannot poll until we yield.
+        for n in ["a", "b", "c"] {
+            hub.upsert(l(n, true));
+        }
+        let mut last = None;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), ev_rx.next()).await
+        {
+            last = Some(ev);
+        }
+        match last.unwrap() {
+            InterfaceEvent::LinkSnapshot { links, .. } => assert_eq!(links, hub.watch().links),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn unobserved_sends_snapshot_then_waits() {
+        let (req_tx, mut req_rx) = mpsc::unbounded::<Req>();
+        let (mut ev_tx, mut ev_rx) = mpsc::unbounded::<InterfaceEvent>();
+        let task = tokio::spawn(async move {
+            stream_links(&mut req_rx, &mut ev_tx, || LinkWatch {
+                observed: false,
+                links: vec![],
+                rx: None,
+            })
+            .await;
+        });
+        assert!(matches!(
+            ev_rx.next().await.unwrap(),
+            InterfaceEvent::LinkSnapshot {
+                observed: false,
+                ..
+            }
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!task.is_finished());
+        drop(req_tx);
+        task.await.unwrap();
     }
 }

@@ -547,6 +547,14 @@ mod tests {
         async fn link_local_address(&self, _kernel_interface: &str) -> Option<Ipv6Addr> {
             None
         }
+
+        fn watch_links(&self) -> crate::driver::LinkWatch {
+            crate::driver::LinkWatch {
+                observed: false,
+                links: Vec::new(),
+                rx: None,
+            }
+        }
     }
 
     #[tokio::test]
