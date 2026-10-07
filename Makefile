@@ -2,7 +2,7 @@
 export RUSTFLAGS ?= -D warnings
 
 IMAGE ?= nos:local
-# e.g. CARGO_FEATURES=nos-bgp/dhat-heap make docker-build — see bgp/CLAUDE.md's
+# e.g. CARGO_FEATURES=nos-bgp/dhat-heap make docker-build — see docs/architecture/development.md's
 # "Memory profiling" note. Empty by default: no behavior change.
 CARGO_FEATURES ?=
 # Line-coverage floor for `make coverage` (and CI, which runs it) — 90%

@@ -81,7 +81,7 @@
 #             PROFILE_MEMORY=1   nos/nos-quiet only: pass --profile-memory-out
 #                                to the DUT's nos-bgpd (needs an image built
 #                                with CARGO_FEATURES=nos-bgp/dhat-heap, see
-#                                bgp/CLAUDE.md's "Memory profiling"); the
+#                                docs/architecture/development.md's "Memory profiling"); the
 #                                report is copied to
 #                                target/bench-bgp/dhat-heap-<dut>-<N>.json
 #                                before the DUT container is torn down

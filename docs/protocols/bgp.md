@@ -2,7 +2,7 @@
 
 NOS speaks BGP-4 (RFC 4271) over IPv4 and IPv6. Use it to peer with upstream providers and customers over eBGP, to carry routes between your own routers over iBGP (with or without route reflectors), to act as a route server at an exchange point, and to carry EVPN routes for VXLAN. Every BGP instance runs inside one routing table (a VRF): it opens its sessions from that VRF and installs its best routes into it.
 
-This page covers sessions and their options. Which routes a session accepts and advertises is decided by routing policies, covered in [Routing policy](routing-policy.md). How NOS implements BGP internally is in [`bgp/CLAUDE.md`](../../bgp/CLAUDE.md).
+This page covers sessions and their options. Which routes a session accepts and advertises is decided by routing policies, covered in [Routing policy](routing-policy.md). How NOS implements BGP internally is in [BGP internals](bgp-internals.md); the rules for editing the crate are in [`bgp/CLAUDE.md`](../../bgp/CLAUDE.md).
 
 - [How BGP is configured](#how-bgp-is-configured)
 - [Bringing up a session](#bringing-up-a-session)
@@ -302,6 +302,7 @@ Every OPEN advertises these capabilities, with no option to turn them off:
 - four-octet AS numbers (RFC 6793), see below;
 - route refresh (RFC 2918) and enhanced route refresh (RFC 7313);
 - extended messages up to 65535 bytes (RFC 8654), used only when the peer also advertises it;
+- extended optional parameters (RFC 9072), used in an OPEN only when its capabilities exceed 255 bytes;
 - multiprotocol extensions (RFC 4760) for each configured address family.
 
 A malformed attribute in a received UPDATE does not reset the session: the routes in that UPDATE are treated as withdrawn and logged (RFC 7606). Only a message that cannot be parsed at all closes the session.
@@ -476,7 +477,7 @@ The algorithm values are `HmacSha1_96` and `AesCmac96`. `exclude_options: true` 
 
 ### GTSM (RFC 5082)
 
-`set max-hops <n>` turns on the Generalized TTL Security Mechanism: the router sends the session's packets with TTL (or IPv6 hop limit) 255, and the kernel drops incoming packets whose TTL is below `256 - n`. Use `1` for a directly connected peer, so that nobody further away can inject packets into the session. The range is 1 to 254; `delete max-hops` turns it off. Set it on both sides.
+`set max-hops <n>` turns on the Generalized TTL Security Mechanism: the router sends the session's packets with TTL (or IPv6 hop limit) 255, and the kernel drops incoming packets whose TTL is below `256 - n`. Use `1` for a directly connected peer, so that nobody further away can inject packets into the session. The range is 1 to 254; `delete max-hops` turns it off. Set it on both sides. The default TTL of 1 for directly connected eBGP is not implemented.
 
 ### Administrative shutdown (RFC 4486, RFC 9003)
 
@@ -821,6 +822,7 @@ These are known gaps, so plan around them:
 - A route's attributes cannot be displayed. `show route` shows the chosen next hop, and the log records each learned route.
 - There is no soft reconfiguration: changing a peer-group or its policies resets its sessions.
 - The well-known communities have no built-in effect (see [Communities](#communities)).
+- Malformed UPDATEs: attribute flags are not validated and a duplicate attribute keeps the last one (RFC 7606 §3(c), §3(g)); a malformed multiprotocol attribute resets the session.
 
 ## Configuration reference
 
