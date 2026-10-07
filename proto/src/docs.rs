@@ -335,6 +335,18 @@ topics! {
     OspfAreaRange,
     /// `OspfAreaRange.not_advertise`
     OspfAreaRangeAdvertise,
+    /// `OspfArea.virtual_links`
+    OspfAreaVirtualLink,
+    /// `OspfVirtualLink.hello_interval`
+    OspfVirtualLinkHelloInterval,
+    /// `OspfVirtualLink.dead_interval`
+    OspfVirtualLinkDeadInterval,
+    /// `OspfVirtualLink.auth`
+    OspfVirtualLinkAuth,
+    /// `simple-password` sugar on `OspfVirtualLink.auth`
+    OspfVirtualLinkSimplePassword,
+    /// `crypto-key` sugar on `OspfVirtualLink.auth`
+    OspfVirtualLinkCryptoKey,
     /// `OspfArea.nssa_translate_always`
     OspfAreaNssaTranslateAlways,
     /// `OspfArea.nssa_default_originate`

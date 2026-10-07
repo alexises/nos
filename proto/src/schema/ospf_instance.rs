@@ -31,7 +31,7 @@ pub struct OspfInstance {
     pub router_id: Ipv4Addr,
 
     /// This instance's OSPF areas, keyed by `area_id` — see `OspfArea`.
-    #[garde(dive, custom(|areas, _ctx: &Config| unique_area_ids(areas)))]
+    #[garde(dive, custom(|areas, _ctx: &Config| unique_area_ids(areas, self.router_id)))]
     #[cli(topic = OspfArea)]
     pub areas: Vec<OspfArea>,
 
@@ -159,7 +159,7 @@ impl Default for OspfInstance {
 /// No two areas within the same instance may share an `area_id` — mirrors
 /// `static_routing_instance::unique_subnets`. Scoped to `self.areas` only
 /// (per-instance, not global — unlike `OspfProfile.name`).
-fn unique_area_ids(areas: &[OspfArea]) -> garde::Result {
+fn unique_area_ids(areas: &[OspfArea], router_id: Ipv4Addr) -> garde::Result {
     let mut seen: Vec<Ipv4Addr> = Vec::new();
     for a in areas {
         if seen.contains(&a.area_id) {
@@ -169,6 +169,11 @@ fn unique_area_ids(areas: &[OspfArea]) -> garde::Result {
         }
         seen.push(a.area_id);
         super::ospf_area::valid_area_settings(a)?;
+        if a.virtual_links.iter().any(|v| v.router_id == router_id) {
+            return Err(garde::Error::new(
+                "a virtual link can't end at this instance's own router id",
+            ));
+        }
     }
     Ok(())
 }

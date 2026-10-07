@@ -264,6 +264,14 @@ pub enum OpError {
         area_id: Ipv4Addr,
         cidr: ipnet::Ipv4Net,
     },
+    #[error(
+        "virtual link to '{router_id}' not found in area '{area_id}' of ospf instance '{instance}'"
+    )]
+    OspfVirtualLinkNotFound {
+        instance: String,
+        area_id: Ipv4Addr,
+        router_id: Ipv4Addr,
+    },
 }
 
 #[cfg(test)]

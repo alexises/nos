@@ -33,6 +33,7 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "broadcast_domain",
     "subnet",
     "cidr",
+    "router_id",
     "key_id",
     "send_id",
     "address",

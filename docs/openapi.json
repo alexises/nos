@@ -2248,6 +2248,13 @@
               "integer",
               "null"
             ]
+          },
+          "virtual_links": {
+            "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+            "items": {
+              "$ref": "#/components/schemas/OspfVirtualLink"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -2562,6 +2569,47 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "OspfVirtualLink": {
+        "description": "One RFC 2328 §15 virtual link, configured on its transit area and keyed by\nthe far endpoint's router id. Timers and authentication are the link's own\n(Appendix C.3), not a profile's: a virtual link has no attach point.",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OspfAuth",
+                "description": "`None` is `AuType` 0 (no authentication). Checked like a profile's."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dead_interval": {
+            "description": "`None` defaults to 40s. Strictly greater than `hello_interval` when\nboth are set.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "hello_interval": {
+            "description": "`None` defaults to 10s, as for a profile.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "router_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "router_id"
         ],
         "type": "object"
       },
@@ -26838,6 +26886,703 @@
           }
         },
         "summary": "Set: The `stub-default-cost` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/virtual-link": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: Every `virtual-link` entry.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+                  "items": {
+                    "$ref": "#/components/schemas/OspfVirtualLink"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: Every `virtual-link` entry.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospf_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "area",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+                "items": {
+                  "$ref": "#/components/schemas/OspfVirtualLink"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+                  "items": {
+                    "$ref": "#/components/schemas/OspfVirtualLink"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: Every `virtual-link` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/virtual-link/{virtual_link}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: One `virtual-link`, addressed by its `router_id`.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OspfVirtualLink"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: One `virtual-link`, addressed by its `router_id`.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospf_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "area",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "virtual_link",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OspfVirtualLink"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OspfVirtualLink"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: One `virtual-link`, addressed by its `router_id`.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/virtual-link/{virtual_link}/auth": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `auth` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OspfAuth",
+                  "description": "`None` is `AuType` 0 (no authentication). Checked like a profile's."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `auth` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospf_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "area",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "virtual_link",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OspfAuth",
+                "description": "`None` is `AuType` 0 (no authentication). Checked like a profile's."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OspfAuth",
+                  "description": "`None` is `AuType` 0 (no authentication). Checked like a profile's."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `auth` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/virtual-link/{virtual_link}/dead-interval": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `dead-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`None` defaults to 40s. Strictly greater than `hello_interval` when\nboth are set.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `dead-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospf_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "area",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "virtual_link",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "`None` defaults to 40s. Strictly greater than `hello_interval` when\nboth are set.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`None` defaults to 40s. Strictly greater than `hello_interval` when\nboth are set.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `dead-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/virtual-link/{virtual_link}/hello-interval": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `hello-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`None` defaults to 10s, as for a profile.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `hello-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospf_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "area",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "virtual_link",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "`None` defaults to 10s, as for a profile.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`None` defaults to 10s, as for a profile.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `hello-interval` setting.",
         "tags": [
           "transactions"
         ]

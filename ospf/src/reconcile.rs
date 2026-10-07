@@ -157,6 +157,12 @@ async fn resync(
         own.max_metric_on_shutdown,
         own.max_metric_administrative,
     );
+    for a in &own.areas {
+        for v in &a.virtual_links {
+            // Config only until the virtual adjacency lands (#225).
+            info!(transit_area = %a.area_id, endpoint = %v.router_id, "virtual link configured, not yet active");
+        }
+    }
     links.set_area_settings(area_settings(&own.areas)).await;
 
     let mut desired_links = Vec::new();

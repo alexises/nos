@@ -990,6 +990,10 @@ pub struct Args {
     /// Removes that range from `--ospf-area` (`OspfAreaOp::RemoveRange`).
     #[arg(long, requires = "ospf_area")]
     pub ospf_clear_area_range: Option<Ipv4Net>,
+    /// `<transit-area>:<router-id>`, with `--ospf-instance`: an RFC 2328 §15
+    /// virtual link through that area (`OspfAreaOp::SetVirtualLink`, upserted).
+    #[arg(long, requires = "ospf_instance")]
+    pub ospf_virtual_link: Option<String>,
     /// If set (requires `--ospf-area`), ensures this OSPF profile under it
     /// (`OspfProfileOp::Ensure`).
     #[arg(long)]
@@ -2507,6 +2511,28 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         bail!("--ospf-router-id requires --ospf-instance to also be set");
     }
 
+    if let Some(spec) = &args.ospf_virtual_link {
+        let instance = args.ospf_instance.clone().unwrap_or_default();
+        let (area, router) = spec
+            .split_once(':')
+            .context("--ospf-virtual-link: expected <transit-area>:<router-id>")?;
+        let area_id: Ipv4Addr = area
+            .parse()
+            .with_context(|| format!("--ospf-virtual-link: bad area {area:?}"))?;
+        let router_id: Ipv4Addr = router
+            .parse()
+            .with_context(|| format!("--ospf-virtual-link: bad router id {router:?}"))?;
+        ops.push(ConfigOp::OspfArea(OspfAreaOp::Ensure {
+            instance: instance.clone(),
+            area_id,
+        }));
+        ops.push(ConfigOp::OspfArea(OspfAreaOp::SetVirtualLink {
+            instance,
+            area_id,
+            router_id,
+        }));
+    }
+
     if let Some(area_id) = args.ospf_area {
         let instance = args
             .ospf_instance
@@ -2944,6 +2970,28 @@ mod tests {
             }),
         );
         assert!(err(&["--ospf-area-type", "stub"]).contains("--ospf-area"));
+    }
+
+    #[test]
+    fn ospf_virtual_link_flag() {
+        let ops = ops(&[
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-virtual-link",
+            "0.0.0.1:2.2.2.2",
+        ])
+        .unwrap();
+        has(
+            &ops,
+            &ConfigOp::OspfArea(OspfAreaOp::SetVirtualLink {
+                instance: "o".into(),
+                area_id: "0.0.0.1".parse().unwrap(),
+                router_id: "2.2.2.2".parse().unwrap(),
+            }),
+        );
+        assert!(err(&["--ospf-virtual-link", "0.0.0.1:2.2.2.2"]).contains("ospf-instance"));
     }
 
     #[test]

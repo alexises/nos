@@ -47,7 +47,7 @@ pub use lldp::{LldpDestination, LldpSettings};
 pub use logging::{
     parse_fingerprint, LoggingSettings, SyslogFacility, SyslogServer, SyslogTls, SyslogTransport,
 };
-pub use ospf_area::{OspfArea, OspfAreaRange, OspfAreaType};
+pub use ospf_area::{OspfArea, OspfAreaRange, OspfAreaType, OspfVirtualLink};
 pub use ospf_instance::OspfInstance;
 pub use ospf_profile::{
     NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfProfile, DEAD_INTERVAL_DEFAULT,

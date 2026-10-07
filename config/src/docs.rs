@@ -1393,6 +1393,50 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Remove an address range.",
             ),
         ),
+        Topic::OspfAreaVirtualLink => (
+            "Join the backbone across this area with an OSPF virtual link (RFC 2328 §15).",
+            concat!(
+                "Adds a virtual link whose transit area is this one, to the area border router \
+             with the given router id, which must also be attached to the backbone. Not \
+             allowed on the backbone, a stub area or an NSSA. Configuration only for now: no \
+             adjacency is formed yet.",
+                " ",
+                "Remove a virtual link.",
+            ),
+        ),
+        Topic::OspfVirtualLinkHelloInterval => (
+            "Set a virtual link's Hello interval, in seconds.",
+            concat!("Sets the Hello interval (default 10).", " ", "Back to the default."),
+        ),
+        Topic::OspfVirtualLinkDeadInterval => (
+            "Set a virtual link's dead interval, in seconds.",
+            concat!(
+                "Sets the dead interval (default 40); it must exceed the Hello interval when both are set.",
+                " ",
+                "Back to the default.",
+            ),
+        ),
+        Topic::OspfVirtualLinkAuth => (
+            "A virtual link's authentication: a simple password or crypto keys.",
+            "Usually set with `simple-password` or `crypto-key`. `delete auth` removes it, back to \
+             AuType 0 (no authentication).",
+        ),
+        Topic::OspfVirtualLinkSimplePassword => (
+            "Set a virtual link's simple password.",
+            "Sets one RFC 2328 Appendix D.2 plaintext password (up to 8 bytes), replacing any \
+             crypto keys. Stored clear-text, like every other field in this config.",
+        ),
+        Topic::OspfVirtualLinkCryptoKey => (
+            "Set (or replace) one of a virtual link's cryptographic auth keys.",
+            concat!(
+                "Adds one RFC 2328 Appendix D.3 / RFC 5709 key, by key-id and algorithm, \
+             replacing a key with the same id; exactly one key must be current to validate.",
+                " ",
+                "Remove one of a virtual link's cryptographic auth keys by key-id.",
+                " ",
+                "Mark one of a virtual link's cryptographic auth keys as current.",
+            ),
+        ),
         Topic::OspfAreaNssaTranslateAlways => (
             "Always translate this NSSA's Type-7 routes, as its area border router.",
             concat!(
