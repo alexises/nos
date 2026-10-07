@@ -39,7 +39,7 @@ pub use fdb::{
 };
 pub use interface::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpAggregateMembers,
-    PortAggregateStatus, SubinterfaceStatus,
+    LinkState, PortAggregateStatus, SubinterfaceStatus,
 };
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;

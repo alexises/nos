@@ -1,18 +1,22 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use nos_proto::{
     loopback_table_name, InterfaceAddress, IpNet, PortAggregateMode, ServiceRef, VlanTag,
 };
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use rtnetlink::packet_route::link::{BondMode, LinkAttribute, LinkMessage};
-use rtnetlink::{Handle, LinkBond, LinkBridge, LinkDummy, LinkUnspec, LinkVlan};
-use tracing::{debug, info, trace};
+use rtnetlink::{Handle, LinkBond, LinkBridge, LinkDummy, LinkUnspec, LinkVlan, MulticastGroup};
+use tracing::{debug, info, trace, warn};
 
+use super::links::{self, Delta, LinkHub};
 use super::{
-    bridge_registry, port_aggregate_registry, rib_client, DriverError, InterfaceDriver, DEFAULT_MTU,
+    bridge_registry, port_aggregate_registry, rib_client, DriverError, InterfaceDriver, LinkWatch,
+    DEFAULT_MTU,
 };
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState, SubinterfaceState};
 use crate::watchdog_client;
@@ -104,6 +108,8 @@ fn mtu_change(link: &LinkMessage, want: u32) -> Option<u32> {
 /// ever has one real `lo` per netns) is created and destroyed by this
 /// driver.
 pub struct LinuxInterfaceDriver {
+    /// Kernel link table fed by `run_link_watcher`.
+    links: Arc<LinkHub>,
     handle: Handle,
     watchdog_socket: PathBuf,
     /// This driver's own private persisted domain-name -> bridge-id map —
@@ -123,7 +129,10 @@ impl LinuxInterfaceDriver {
     ) -> Result<Self, DriverError> {
         let (connection, handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
+        let links = Arc::new(LinkHub::new(links::HUB_CAPACITY));
+        tokio::spawn(run_link_watcher(links.clone()));
         Ok(Self {
+            links,
             handle,
             watchdog_socket,
             bridge_registry_path,
@@ -800,6 +809,59 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         }
         None
     }
+
+    fn watch_links(&self) -> LinkWatch {
+        self.links.watch()
+    }
+}
+
+/// Feeds `hub` from `RTMGRP_LINK` (subscribe first, dump second) and a 30 s
+/// re-dump. Runs for the process lifetime; the table is warm before any
+/// subscriber. ponytail: the re-dump is the only recovery from ENOBUFS and
+/// from a dump overtaking a queued event; upgrade to a sequence-checked dump.
+async fn run_link_watcher(hub: Arc<LinkHub>) {
+    loop {
+        match rtnetlink::new_multicast_connection(&[MulticastGroup::Link]) {
+            Ok((connection, handle, mut messages)) => {
+                tokio::spawn(connection);
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tokio::select! {
+                        msg = messages.next() => match msg {
+                            Some((m, _)) => match links::decode(m.payload) {
+                                Some(Delta::Upsert(l)) => hub.upsert(l),
+                                Some(Delta::Remove(n)) => hub.remove(&n),
+                                None => {}
+                            },
+                            None => break,
+                        },
+                        // The first tick fires at once: the initial dump.
+                        _ = tick.tick() => dump_links(&handle, &hub).await,
+                    }
+                }
+                warn!("link watcher netlink stream ended, reconnecting");
+            }
+            Err(e) => warn!(error = %e, "link watcher could not open netlink, retrying"),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// A failed dump keeps the old table (no flap to empty).
+async fn dump_links(handle: &Handle, hub: &LinkHub) {
+    let mut stream = handle.link().get().execute();
+    let mut all = Vec::new();
+    loop {
+        match stream.try_next().await {
+            Ok(Some(m)) => all.extend(links::link_state(&m)),
+            Ok(None) => break,
+            Err(e) => {
+                warn!(error = %e, "link dump failed, keeping previous table");
+                return;
+            }
+        }
+    }
+    hub.replace_all(all);
 }
 
 /// Pure, netlink-free: `desired`/`observed` are both plain address lists —

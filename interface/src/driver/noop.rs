@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use tracing::debug;
 
-use super::{DriverError, InterfaceDriver};
+use super::{DriverError, InterfaceDriver, LinkWatch};
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
 /// Platform-agnostic default: logs the state that would be applied but
@@ -73,5 +73,13 @@ impl InterfaceDriver for NoopInterfaceDriver {
 
     async fn link_local_address(&self, _kernel_interface: &str) -> Option<std::net::Ipv6Addr> {
         None
+    }
+
+    fn watch_links(&self) -> LinkWatch {
+        LinkWatch {
+            observed: false,
+            links: Vec::new(),
+            rx: None,
+        }
     }
 }

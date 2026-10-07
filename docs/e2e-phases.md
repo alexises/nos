@@ -21,7 +21,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `auth` | BGP | base | - | A matching `md5-password` (RFC 2385) on both peer-groups establishes, a mismatched one does not. |
 | `ao` | BGP | base | - | RFC 5925 TCP-AO: matching key establishes, mismatched `exclude-options` does not, `TCP_AO_INFO` readback, hitless key rollover, removal of a key still in use resets. |
 | `gtsm` | BGP | base | - | `max-hops 1` (RFC 5082) on both peer-groups still establishes with TTL 255 / min-TTL 255. |
-| `loopback` | Drivers | drivers | - | A loopback interface gets a real dummy kernel device, VRF enslavement, address and a `connected` route, then is deleted. |
+| `loopback` | Drivers | drivers | - | A loopback interface gets a real dummy kernel device, VRF enslavement, address and a `connected` route, then is deleted; `nos-interfaced`'s link watcher logs `link state changed`/`link removed` for the device (#275). |
 | `mtu` | Drivers | drivers | - | A non-default `mtu` on `eth0` is applied to the real kernel link and reported over REST; clearing it restores 1500. |
 | `port-aggregate` | Drivers | drivers | - | A static (`xor`) `PortAggregate` creates a real bond over `eth1`+`eth2`, enslaves both and lists the bond address as `connected`, then is removed. |
 | `lacp` | Drivers | drivers | - | A `Lacp`-mode aggregate runs a real 802.1AX LACPDU exchange to `Distributing` and the kernel bond enslavement follows it; member loss, priorities, passive mode, `min-links`, individual ports and a Marker PDU are covered. |

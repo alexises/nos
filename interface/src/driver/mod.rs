@@ -9,6 +9,7 @@
 //! `state.rs`/`reconcile.rs`.
 
 pub mod bridge_registry;
+pub mod links;
 pub mod linux;
 pub mod noop;
 pub mod port_aggregate_registry;
@@ -17,6 +18,7 @@ pub mod rib_client;
 use async_trait::async_trait;
 use thiserror::Error;
 
+pub use links::LinkWatch;
 pub use linux::LinuxInterfaceDriver;
 pub use noop::NoopInterfaceDriver;
 
@@ -125,4 +127,9 @@ pub trait InterfaceDriver: Send + Sync {
     /// consumer with no kernel access of its own (`nos-ospfv3d`, sourcing
     /// RFC 5340 Hello/Link-LSA traffic from it).
     async fn link_local_address(&self, kernel_interface: &str) -> Option<std::net::Ipv6Addr>;
+
+    /// Snapshot of the kernel's link table plus a receiver for later changes,
+    /// for `InterfaceRequest::SubscribeLinks`. The noop driver reports
+    /// `observed: false` and never fires.
+    fn watch_links(&self) -> LinkWatch;
 }
