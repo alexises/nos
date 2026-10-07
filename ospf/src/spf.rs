@@ -561,6 +561,52 @@ pub fn nssa_translations(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<(Ipv4Net, u32
         .collect()
 }
 
+/// RFC 2328 §16.7: a virtual link's far end, as seen in its transit area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualEndpoint {
+    /// The endpoint's intra-area distance — the virtual link's cost.
+    pub cost: u32,
+    /// The first-hop router addresses toward it (sorted).
+    pub next_hops: Vec<Ipv4Addr>,
+    /// The endpoint's own interface address in the transit area: where the
+    /// virtual link's packets go.
+    pub address: Ipv4Addr,
+}
+
+/// RFC 2328 §16.7 for one virtual link: `endpoint`'s intra-area path from
+/// `root` over the transit area's `lsas`, or `None` while it has none (the
+/// virtual link is down). `ponytail:` the endpoint's address is the
+/// `link_data` of its Router-LSA's first type-1/type-2 link, not the
+/// interface on the computed path — the same for a single-homed endpoint.
+pub fn virtual_link_endpoint(
+    root: Ipv4Addr,
+    lsas: &[Arc<Lsa>],
+    endpoint: Ipv4Addr,
+) -> Option<VirtualEndpoint> {
+    let live = live_lsas(lsas);
+    let (routers, networks, hosts) = routers_and_networks(&live);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &hosts);
+    let vertex = Vertex::Router(endpoint);
+    let cost = *dist.get(&vertex)?;
+    let next_hops = router_hops(&next_hop, vertex);
+    let address = routers
+        .get(&endpoint)?
+        .links
+        .iter()
+        .find(|l| {
+            matches!(
+                l.link_type,
+                LINK_TYPE_POINT_TO_POINT | LINK_TYPE_TRANSIT_NETWORK
+            )
+        })?
+        .link_data;
+    (endpoint != root && !next_hops.is_empty()).then_some(VirtualEndpoint {
+        cost,
+        next_hops,
+        address,
+    })
+}
+
 /// The Dijkstra core: standard lazy-deletion priority-queue shortest path,
 /// tracking each finalized vertex's distance and derived next-hop set. An
 /// equal-distance relaxation unions the new parent's hops in (RFC 2328
@@ -1235,6 +1281,45 @@ mod tests {
                 attached_routers: attached,
             }),
         })
+    }
+
+    /// RFC 2328 §16.7: reachable over two hops (cost, first hop, the
+    /// endpoint's own address), a changed endpoint address follows its
+    /// Router-LSA, and no path (or root itself) is no endpoint.
+    #[test]
+    fn virtual_link_endpoint_follows_the_transit_area_path() {
+        let (root, mid, end) = (router_id(1), router_id(2), router_id(3));
+        let root_lsa = router_lsa(root, vec![p2p(mid, addr(10, 0, 0, 1), 2)]);
+        let mid_lsa = router_lsa(
+            mid,
+            vec![
+                p2p(root, addr(10, 0, 0, 2), 2),
+                p2p(end, addr(10, 0, 1, 1), 3),
+            ],
+        );
+        let end_lsa = |own| router_lsa(end, vec![p2p(mid, own, 3)]);
+        let lsas = [
+            root_lsa.clone(),
+            mid_lsa.clone(),
+            end_lsa(addr(10, 0, 1, 2)),
+        ];
+        assert_eq!(
+            virtual_link_endpoint(root, &lsas, end),
+            Some(VirtualEndpoint {
+                cost: 5,
+                next_hops: vec![addr(10, 0, 0, 2)],
+                address: addr(10, 0, 1, 2),
+            })
+        );
+        let moved = [root_lsa.clone(), mid_lsa, end_lsa(addr(10, 0, 1, 9))];
+        assert_eq!(
+            virtual_link_endpoint(root, &moved, end).map(|e| e.address),
+            Some(addr(10, 0, 1, 9))
+        );
+        // The middle router gone: no intra-area path, the link is down.
+        let cut = [root_lsa, end_lsa(addr(10, 0, 1, 2))];
+        assert_eq!(virtual_link_endpoint(root, &cut, end), None);
+        assert_eq!(virtual_link_endpoint(root, &lsas, root), None);
     }
 
     #[test]

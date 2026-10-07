@@ -994,6 +994,10 @@ pub struct Args {
     /// virtual link through that area (`OspfAreaOp::SetVirtualLink`, upserted).
     #[arg(long, requires = "ospf_instance")]
     pub ospf_virtual_link: Option<String>,
+    /// `<transit-area>:<router-id>`, with `--ospf-instance`: removes that
+    /// virtual link (`OspfAreaOp::RemoveVirtualLink`).
+    #[arg(long, requires = "ospf_instance")]
+    pub ospf_clear_virtual_link: Option<String>,
     /// If set (requires `--ospf-area`), ensures this OSPF profile under it
     /// (`OspfProfileOp::Ensure`).
     #[arg(long)]
@@ -1360,6 +1364,20 @@ fn l3vni_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
     Ok(ops)
+}
+
+/// `<transit-area>:<router-id>`, as `--ospf-virtual-link`/`--ospf-clear-virtual-link` take it.
+fn virtual_link_spec(flag: &str, spec: &str) -> anyhow::Result<(Ipv4Addr, Ipv4Addr)> {
+    let (area, router) = spec
+        .split_once(':')
+        .with_context(|| format!("{flag}: expected <transit-area>:<router-id>"))?;
+    let area_id: Ipv4Addr = area
+        .parse()
+        .with_context(|| format!("{flag}: bad area {area:?}"))?;
+    let router_id: Ipv4Addr = router
+        .parse()
+        .with_context(|| format!("{flag}: bad router id {router:?}"))?;
+    Ok((area_id, router_id))
 }
 
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
@@ -2513,21 +2531,21 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 
     if let Some(spec) = &args.ospf_virtual_link {
         let instance = args.ospf_instance.clone().unwrap_or_default();
-        let (area, router) = spec
-            .split_once(':')
-            .context("--ospf-virtual-link: expected <transit-area>:<router-id>")?;
-        let area_id: Ipv4Addr = area
-            .parse()
-            .with_context(|| format!("--ospf-virtual-link: bad area {area:?}"))?;
-        let router_id: Ipv4Addr = router
-            .parse()
-            .with_context(|| format!("--ospf-virtual-link: bad router id {router:?}"))?;
+        let (area_id, router_id) = virtual_link_spec("--ospf-virtual-link", spec)?;
         ops.push(ConfigOp::OspfArea(OspfAreaOp::Ensure {
             instance: instance.clone(),
             area_id,
         }));
         ops.push(ConfigOp::OspfArea(OspfAreaOp::SetVirtualLink {
             instance,
+            area_id,
+            router_id,
+        }));
+    }
+    if let Some(spec) = &args.ospf_clear_virtual_link {
+        let (area_id, router_id) = virtual_link_spec("--ospf-clear-virtual-link", spec)?;
+        ops.push(ConfigOp::OspfArea(OspfAreaOp::RemoveVirtualLink {
+            instance: args.ospf_instance.clone().unwrap_or_default(),
             area_id,
             router_id,
         }));
@@ -2974,7 +2992,7 @@ mod tests {
 
     #[test]
     fn ospf_virtual_link_flag() {
-        let ops = ops(&[
+        let set = ops(&[
             "--ospf-instance",
             "o",
             "--ospf-router-id",
@@ -2984,7 +3002,7 @@ mod tests {
         ])
         .unwrap();
         has(
-            &ops,
+            &set,
             &ConfigOp::OspfArea(OspfAreaOp::SetVirtualLink {
                 instance: "o".into(),
                 area_id: "0.0.0.1".parse().unwrap(),
@@ -2992,6 +3010,23 @@ mod tests {
             }),
         );
         assert!(err(&["--ospf-virtual-link", "0.0.0.1:2.2.2.2"]).contains("ospf-instance"));
+        let cleared = ops(&[
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-clear-virtual-link",
+            "0.0.0.1:2.2.2.2",
+        ])
+        .unwrap();
+        has(
+            &cleared,
+            &ConfigOp::OspfArea(OspfAreaOp::RemoveVirtualLink {
+                instance: "o".into(),
+                area_id: "0.0.0.1".parse().unwrap(),
+                router_id: "2.2.2.2".parse().unwrap(),
+            }),
+        );
     }
 
     #[test]

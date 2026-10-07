@@ -2250,7 +2250,7 @@
             ]
           },
           "virtual_links": {
-            "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+            "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Up while the endpoint is reachable in this area.",
             "items": {
               "$ref": "#/components/schemas/OspfVirtualLink"
             },
@@ -26919,7 +26919,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+                  "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Up while the endpoint is reachable in this area.",
                   "items": {
                     "$ref": "#/components/schemas/OspfVirtualLink"
                   },
@@ -26980,7 +26980,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+                "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Up while the endpoint is reachable in this area.",
                 "items": {
                   "$ref": "#/components/schemas/OspfVirtualLink"
                 },
@@ -26995,7 +26995,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Config only for now; no adjacency is formed.",
+                  "description": "RFC 2328 §15 virtual links whose transit area is this one, keyed by\nthe far endpoint's router id: a backbone adjacency tunnelled across\nthis area to a router that is also attached to area 0.0.0.0, joining\na partitioned or detached backbone. Not allowed on the backbone or on\na stub area or NSSA. Up while the endpoint is reachable in this area.",
                   "items": {
                     "$ref": "#/components/schemas/OspfVirtualLink"
                   },

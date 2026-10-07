@@ -325,6 +325,11 @@ pub const OSPF_BROADCAST_SUBNET: &str = "203.0.113.64/28";
 pub const OSPF_AREA_1: &str = "0.0.0.1";
 pub const OSPF_PROFILE_AREA1: &str = "ospf-profile-area1";
 pub const OSPF_ABR_LOOPBACK_ADDRESS: &str = "203.0.113.96/32";
+/// `ospf-virtual-link`: router-c's area-2 loopback, behind a virtual link
+/// through area 1 — a prefix no other phase uses.
+pub const OSPF_AREA_2: &str = "0.0.0.2";
+pub const OSPF_PROFILE_AREA2: &str = "ospf-profile-area2";
+pub const OSPF_VLINK_LOOPBACK_ADDRESS: &str = "203.0.113.104/32";
 /// `ospf-stub`: router-b's (the ABR's) area-0 loopback, and the area range
 /// over it. Not the range's own network address, so its Type-3 keeps a
 /// different link-state id from the range's and is flushed, not rewritten.

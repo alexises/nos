@@ -1597,6 +1597,178 @@ pub async fn ospf_external_flood(w: &mut World) -> anyhow::Result<()> {
     a.wait(&removed).await
 }
 
+/// RFC 2328 §15 virtual link, self-contained, three routers (the
+/// `ospf-external-flood` topology): router-a in the backbone only (eth0.0),
+/// router-b the ABR (eth0.0 in area 0, the bd-ospf bridge in area 1), router-c
+/// on the bridge only with its loopback in area 2 — detached from the backbone
+/// until a virtual link b<->c through area 1 joins it. The virtual adjacency
+/// must reach Full over the real VRF raw sockets, both Router-LSAs carry the
+/// type-4 link in area 0 and the V bit in area 1, router-c's area-2 summary
+/// reaches router-a through it, and router-c dropping its end takes the
+/// adjacency down on router-b within the dead interval.
+pub async fn ospf_virtual_link(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    w.start(C, None, &[]).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let area1 = |router_id: &str, svi: &str| {
+        let mut flags = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            router_id,
+            "--ospf-area",
+            OSPF_AREA_1,
+            "--ospf-profile",
+            OSPF_PROFILE_AREA1,
+        ]);
+        flags.extend(ospf_broadcast_profile(svi, OSPF_PROFILE_AREA1));
+        flags
+    };
+    let vlink = |router_id: &str, endpoint: &str, flag: &str| {
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            router_id,
+            flag,
+            &format!("{OSPF_AREA_1}:{endpoint}"),
+        ])
+    };
+    let loopback_id = OSPF_VLINK_LOOPBACK_ADDRESS.trim_end_matches("/32");
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&with_base(
+        B,
+        area1(OSPF_ROUTER_ID_B, OSPF_BROADCAST_ADDRESS_B),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        vlink(OSPF_ROUTER_ID_B, OSPF_ROUTER_ID_C, "--ospf-virtual-link"),
+    ))
+    .await?;
+    c.provision_flags(&with_base(
+        C,
+        area1(OSPF_ROUTER_ID_C, OSPF_BROADCAST_ADDRESS_C),
+    ))
+    .await?;
+    let mut c_area2 = strings(&[
+        "--ospf-area",
+        OSPF_AREA_2,
+        "--ospf-profile",
+        OSPF_PROFILE_AREA2,
+        "--loopback-address",
+        OSPF_VLINK_LOOPBACK_ADDRESS,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE_AREA2,
+    ]);
+    c_area2.extend(vlink(
+        OSPF_ROUTER_ID_C,
+        OSPF_ROUTER_ID_B,
+        "--ospf-virtual-link",
+    ));
+    c.provision_flags(&with_base(C, c_area2)).await?;
+
+    both_full_p2p(a, b).await?;
+    c.wait(&format!(
+        "ospf neighbor reached full link=broadcast-domain:{BD} neighbor={OSPF_ROUTER_ID_B}"
+    ))
+    .await?;
+
+    log("the virtual link b<->c comes up from area 1's spf and reaches full");
+    let b_link = format!("vlink-{OSPF_AREA_1}-{OSPF_ROUTER_ID_C}");
+    let c_link = format!("vlink-{OSPF_AREA_1}-{OSPF_ROUTER_ID_B}");
+    b.wait(&format!("ospf virtual link up link={b_link} "))
+        .await?;
+    c.wait(&format!("ospf virtual link up link={c_link} "))
+        .await?;
+    b.wait(&format!(
+        "ospf neighbor reached full link={b_link} neighbor={OSPF_ROUTER_ID_C}"
+    ))
+    .await?;
+    c.wait(&format!(
+        "ospf neighbor reached full link={c_link} neighbor={OSPF_ROUTER_ID_B}"
+    ))
+    .await?;
+
+    log("type-4 links in area 0 (at router-a), V bits in area 1, c's summary at router-a");
+    for (holder, router, far) in [
+        (a, OSPF_ROUTER_ID_B, OSPF_ROUTER_ID_C),
+        (a, OSPF_ROUTER_ID_C, OSPF_ROUTER_ID_B),
+    ] {
+        wait_lsa(holder, &format!("{router}'s type-4 link to {far}"), |l| {
+            l["area_id"] == OSPF_AREA
+                && l["lsa_type"] == 1
+                && l["advertising_router"] == router
+                && l["virtual_links"]
+                    .as_array()
+                    .is_some_and(|v| v.iter().any(|x| x == far))
+        })
+        .await?;
+    }
+    for (holder, router) in [(c, OSPF_ROUTER_ID_B), (b, OSPF_ROUTER_ID_C)] {
+        wait_lsa(holder, &format!("{router}'s area-1 V bit"), |l| {
+            l["area_id"] == OSPF_AREA_1
+                && l["lsa_type"] == 1
+                && l["advertising_router"] == router
+                && l["router_flags"].as_u64().is_some_and(|f| f & 0x04 != 0)
+        })
+        .await?;
+    }
+    wait_lsa(a, "router-c's area-2 summary in area 0", |l| {
+        l["area_id"] == OSPF_AREA
+            && l["lsa_type"] == 3
+            && l["advertising_router"] == OSPF_ROUTER_ID_C
+            && l["link_state_id"] == loopback_id
+            && l["age"].as_u64().is_some_and(|a| a < 3600)
+    })
+    .await?;
+
+    log("router-c drops its end: router-b's virtual neighbor dies within the dead interval");
+    c.provision(&vlink(
+        OSPF_ROUTER_ID_C,
+        OSPF_ROUTER_ID_B,
+        "--ospf-clear-virtual-link",
+    ))
+    .await?;
+    c.wait(&format!("ospf virtual link down link={c_link}"))
+        .await?;
+    b.wait_new(
+        &format!("ospf neighbor state changed to down link={b_link}"),
+        0,
+        60,
+    )
+    .await
+}
+
+/// Polls `r`'s `GET /v1/ospf/database` until one LSA satisfies `pred` (60s).
+async fn wait_lsa(
+    r: &Router,
+    what: &str,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..60 {
+        let body = r
+            .rest_expect(Method::GET, "/v1/ospf/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        if report[0]["result"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(&pred)
+        {
+            return Ok(());
+        }
+        last = body;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("{}: no {what} in its database: {last}", r.name())
+}
+
 /// RFC 5250 opaque LSAs against a real third-party router, self-contained.
 /// FRR (`router-f`) peers router-a over router-a's eth1 on its own network
 /// and originates a type 10 (segment routing's Extended Link, opaque type 8)
