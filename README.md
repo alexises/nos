@@ -63,7 +63,7 @@ show bgp brief
 ```
 
 User documentation (concepts, the `nos` shell, the REST API and how they map to each other) is in [`docs/`](docs/README.md).
-See `cli/CLAUDE.md` for the full command reference.
+See [`docs/cli.md`](docs/cli.md) for the full command reference.
 
 ## Development
 

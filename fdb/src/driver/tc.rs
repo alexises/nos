@@ -1,5 +1,5 @@
 //! Raw `RTM_NEWQDISC` / `RTM_NEWTFILTER` / `RTM_DELTFILTER` for EVPN local bias
-//! (RFC 8365 §8.3.1, see `fdb/CLAUDE.md`): the bridge only sees the inner
+//! (RFC 8365 §8.3.1, see `docs/protocols/evpn-vxlan.md` "Implementation notes"): the bridge only sees the inner
 //! frame, so the *outer* source of a core-origin BUM frame is classified by
 //! `flower` on the VXLAN device's ingress (`enc_src_ip`) into `skb->mark`, and
 //! `fw` + `gact drop` on a segment port's egress acts on the mark.

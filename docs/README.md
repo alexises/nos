@@ -16,7 +16,7 @@ Read these in order the first time:
 ## Reference material
 
 - The OpenAPI 3 document for the REST API is checked in as [`openapi.json`](openapi.json). A running router serves the same document at `https://<address>:<port>/openapi.json`, and a browsable explorer at `https://<address>:<port>/swagger-ui/` (see [The REST API](api.md#the-openapi-document)).
-- Developer-facing: [architecture pages](architecture/README.md) (how NOS is built); [`e2e-phases.md`](e2e-phases.md) lists every `nos-e2e` end-to-end phase, what it requires and what it proves.
+- Developer-facing: [architecture pages](architecture/README.md) (how NOS is built); [`schema-reference.md`](schema-reference.md) (config tree design patterns) and [`ipc-protocols.md`](ipc-protocols.md) (wire types per daemon); [`e2e-phases.md`](e2e-phases.md) lists every `nos-e2e` end-to-end phase, what it requires and what it proves.
 - Every shell command has built-in help: type `help`, or press `?` while typing (see [The CLI](cli.md#getting-help-help--and-tab)).
 
 `openapi.json` is regenerated from the code and checked by a test, so it always matches what `nos-restd` serves. After changing the API, run `make docs-fix` to update it.

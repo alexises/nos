@@ -5222,7 +5222,7 @@ async fn kernel_c(w: &World, mac: &str) -> anyhow::Result<(String, String)> {
 /// static neighbours both ways and no IPv6 on the CE (no ND/MLD). Not for
 /// nos's sake: each CE link crosses a docker network, a *learning* bridge.
 /// A broadcast the CE sends through one PE comes back to it through the DF
-/// (no local bias, see fdb/CLAUDE.md), and that docker bridge then learns the
+/// (no local bias, see docs/protocols/evpn-vxlan.md "Implementation notes"), and that docker bridge then learns the
 /// CE's MAC behind the PE's side and drops every unicast the PE sends it. A
 /// direct link has no such switch in between. IPv6 goes before the CE's bond
 /// is built (`dataplane_ce`), so the bond never sends any.

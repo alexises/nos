@@ -10,7 +10,7 @@ Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-v
 
 ## VRF resolution
 
-`BgpInstance.routing_table` is a reflexive field (`proto/CLAUDE.md`); `nos-bgpd` resolves it to a Linux VRF name through `ServiceRef::RibTable` + `RibRequest::GetVrfName` (`session::VrfRequirement`):
+`BgpInstance.routing_table` is a reflexive field (`docs/schema-reference.md`); `nos-bgpd` resolves it to a Linux VRF name through `ServiceRef::RibTable` + `RibRequest::GetVrfName` (`session::VrfRequirement`):
 - `Invalid` (no owning table): a config error, never a "default VRF" fallback; nothing is opened, error logged every resync.
 - `Pending` (table exists, VRF not yet created): transient, `debug` log, retried by the 10s tick (VRF readiness is no config diff).
 - `Resolved(name)`: the only state in which anything opens.
