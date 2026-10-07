@@ -1914,7 +1914,7 @@ impl LinkManager {
     /// inter-area or external route (`spf::intra_area_routes`). Run after the
     /// intra-area passes, so this tick's own prefixes are summarized.
     /// `ponytail:` no area ranges, no backbone check (ABR = 2+ areas), no
-    /// up/down-bit loop prevention — `ospf/CLAUDE.md`'s ABR ceilings.
+    /// up/down-bit loop prevention — `docs/protocols/ospf-internals.md`'s ABR ceilings.
     async fn originate_inter_area_lsas(&self, local_router_id: Ipv4Addr, done: &mut Originated) {
         let attached = self.attached_areas().await;
         if attached.len() < 2 {

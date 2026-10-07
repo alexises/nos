@@ -8,7 +8,7 @@ use super::sugar;
 
 /// This profile's own proposed Hello interval when left unset. RFC 2328
 /// Appendix C.3's point-to-point/broadcast default — the only network type
-/// this NOS models today (see `ospf/CLAUDE.md`).
+/// this NOS models today (see `docs/protocols/ospf-internals.md`).
 pub const HELLO_INTERVAL_DEFAULT: u16 = 10;
 
 /// This profile's own proposed router dead interval when left unset. RFC
@@ -201,7 +201,7 @@ pub struct OspfProfile {
     /// Overrides what OSPF *believes* this link's MTU is — for the wire's
     /// `DbdPacket.interface_mtu` field and DBD pagination sizing — independent
     /// of the interface's real kernel MTU (mirrors real OSPF implementations'
-    /// `mtu-bytes`-style override). See `ospf/CLAUDE.md`'s "Exchange" section.
+    /// `mtu-bytes`-style override). See `docs/protocols/ospf-internals.md`'s "LSA exchange and the LSDB".
     #[garde(skip)]
     #[cli(topic = OspfProfileMtu)]
     pub mtu: Option<u16>,

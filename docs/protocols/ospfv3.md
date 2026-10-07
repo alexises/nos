@@ -40,7 +40,7 @@ A link needs an IPv6 address to be advertised. Neighbours talk over IPv6 link-lo
 
 Routes are recomputed right away on every LSDB change and pushed to the routing table, with the same timing notes as OSPFv2 (see "Shortest paths and costs" in `ospf.md`).
 
-How the OSPFv3 implementation works internally is described in [`ospfv3/CLAUDE.md`](../../ospfv3/CLAUDE.md).
+How the OSPFv3 implementation works internally is described in [OSPFv3 internals](ospfv3-internals.md).
 
 ## Common operations
 

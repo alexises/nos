@@ -4,7 +4,7 @@
 //! `BroadcastDomain`'s bridge/SVI), not the shared VRF device, since OSPF
 //! has no transport layer of its own. Joins the `AllSPFRouters` (224.0.0.5)
 //! multicast group on the link's own local address, since RFC 2328 Hello is
-//! always multicast, point-to-point links included (see `ospf/CLAUDE.md`).
+//! always multicast, point-to-point links included (see `docs/protocols/ospf-internals.md`).
 //!
 //! # Why the specific interface, not the VRF
 //! TCP's own VRF-wide bind (`bgp/src/tcp.rs`) is safe because a TCP socket
@@ -90,7 +90,7 @@ impl OspfSocket {
 
     /// Sends `payload` (an already-encoded OSPF packet, see `crate::packet`)
     /// to 224.0.0.5 — Hello is always multicast, point-to-point links
-    /// included (see `ospf/CLAUDE.md`). The kernel fills in the IP header
+    /// included (see `docs/protocols/ospf-internals.md`). The kernel fills in the IP header
     /// (no `IP_HDRINCL` set).
     pub fn send_multicast(&self, payload: &[u8]) -> io::Result<()> {
         let dest = SockAddr::from(SocketAddrV4::new(ALL_SPF_ROUTERS, 0));

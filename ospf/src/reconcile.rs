@@ -504,7 +504,7 @@ fn attach_points_for(cfg: &nos_proto::Config, profile: &str) -> Vec<String> {
 
 /// One `Subinterface.ospf_profile` attach point, with enough structure to
 /// resolve and build a `LinkConfig`. Point-to-point only this phase (see
-/// `ospf/CLAUDE.md`) — loopback and `BroadcastDomain` attach points stay
+/// `docs/protocols/ospf-internals.md`) — loopback and `BroadcastDomain` attach points stay
 /// log-only, handled entirely by `attach_points_for` above.
 struct SubinterfaceAttachPoint {
     interface: String,
@@ -579,7 +579,7 @@ struct LoopbackAttachPoint {
 
 /// Every `Interface.ospf_profile` attach point (a loopback, per
 /// `nos_proto::loopback_table_name`) referencing `profile` — these have no
-/// live link/socket (see `ospf/CLAUDE.md`'s "log-only" note), just a
+/// live link/socket (see `docs/protocols/ospf-internals.md`'s "log-only" note), just a
 /// stub-network subnet for `LinkManager::stub_networks`.
 fn loopback_attach_points(cfg: &nos_proto::Config, profile: &str) -> Vec<LoopbackAttachPoint> {
     cfg.interfaces
@@ -645,7 +645,7 @@ const DEFAULT_OSPF_MTU: u16 = 1500;
 
 /// Resolves the effective MTU OSPF uses for a link — for the wire's
 /// `DbdPacket.interface_mtu` field and DBD pagination sizing (see
-/// `ospf/CLAUDE.md`'s "Exchange" section) — as `profile.mtu` if set, else
+/// `docs/protocols/ospf-internals.md`'s "LSA exchange and the LSDB") — as `profile.mtu` if set, else
 /// `resolved_mtu` (the link's real interface MTU, when one exists), else
 /// `DEFAULT_OSPF_MTU`.
 fn resolve_effective_mtu(profile: &nos_proto::OspfProfile, resolved_mtu: Option<u32>) -> u16 {
@@ -661,7 +661,7 @@ fn resolve_effective_mtu(profile: &nos_proto::OspfProfile, resolved_mtu: Option<
 /// but reading `InterfaceStatus.addresses` directly (a loopback's L3 config
 /// is flat, no subinterface lookup) — feeds `LinkManager`'s `stub_networks`
 /// map, since a loopback has no live link/socket of its own to carry this
-/// through `LinkConfig` (see `ospf/CLAUDE.md`'s "log-only" loopback note).
+/// through `LinkConfig` (see `docs/protocols/ospf-internals.md`'s "log-only" loopback note).
 async fn resolve_loopback_prefix(
     watchdog_socket: &Path,
     interface: &str,

@@ -171,7 +171,7 @@ pub struct LinkConfig {
     /// `DbdPacket.interface_mtu` field and used to size real RFC 2328 §10.8
     /// DBD pagination (`exchange::pop_chunk`'s `max_headers` budget) when
     /// `LinkManager.dbd_max_headers` has no explicit test override. See
-    /// `ospf/CLAUDE.md`'s "Exchange" section.
+    /// `docs/protocols/ospf-internals.md`'s "LSA exchange and the LSDB".
     pub mtu: u16,
     /// `mtu-ignore`: skip the RFC 2328 §10.6 DBD Interface MTU check.
     pub mtu_ignore: bool,
@@ -2557,7 +2557,7 @@ impl LinkManager {
 
     /// RFC 2328 §12.4.3-style self-origination of this router's own
     /// redistributed prefixes as AS-external-LSAs (ASBR-only — see
-    /// `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA origination"). Run from
+    /// `docs/protocols/ospf-internals.md`'s "ASBR and AS-external-LSA origination"). Run from
     /// the same tick as `originate_router_lsas`.
     ///
     /// This router's own redistributed prefixes are installed into *every*
@@ -2752,7 +2752,7 @@ impl LinkManager {
 
     /// RFC 2328 §12.4.3-style self-origination of this router's own ABR
     /// Summary-LSAs (Type-3 network-summary, Type-4 ASBR-summary) — see
-    /// `ospf/CLAUDE.md`'s "ABR and Summary-LSA origination". ABR-ness is
+    /// `docs/protocols/ospf-internals.md`'s "ABR and Summary-LSA origination". ABR-ness is
     /// purely derived from live state (`self.lsdbs.keys().len() >= 2`),
     /// mirroring how this crate already derives DR-ness/ASBR-ness from live
     /// state rather than a config flag — no explicit "am I an ABR" field.

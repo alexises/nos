@@ -8,8 +8,8 @@ interface/CLAUDE.md 20929
 lacp/CLAUDE.md 21458
 lldp/CLAUDE.md 18651
 log/CLAUDE.md 6248
-ospf/CLAUDE.md 87569
-ospfv3/CLAUDE.md 15905
+ospf/CLAUDE.md 12288
+ospfv3/CLAUDE.md 8192
 pki/CLAUDE.md 11113
 proto/CLAUDE.md 31566
 rest/CLAUDE.md 16497
