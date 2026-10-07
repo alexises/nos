@@ -1604,8 +1604,9 @@ pub async fn ospf_external_flood(w: &mut World) -> anyhow::Result<()> {
 /// until a virtual link b<->c through area 1 joins it. The virtual adjacency
 /// must reach Full over the real VRF raw sockets, both Router-LSAs carry the
 /// type-4 link in area 0 and the V bit in area 1, router-c's area-2 summary
-/// reaches router-a through it, and router-c dropping its end takes the
-/// adjacency down on router-b within the dead interval.
+/// reaches router-a through it, both install a kernel route to router-c's
+/// loopback over it (#226), and router-c dropping its end takes the adjacency
+/// down on router-b within the dead interval and both routes with it.
 pub async fn ospf_virtual_link(w: &mut World) -> anyhow::Result<()> {
     w.up(&[]).await?;
     w.start(C, None, &[]).await?;
@@ -1726,6 +1727,23 @@ pub async fn ospf_virtual_link(w: &mut World) -> anyhow::Result<()> {
     })
     .await?;
 
+    // #226: SPF across the type-4 link (RFC 2328 §16.1). Router-a routes to
+    // router-c's loopback through router-b (its only neighbor); router-b
+    // through the transit area, to router-c's bridge address, never the
+    // virtual neighbor address as such.
+    log("kernel routes to router-c's area-2 loopback over the virtual link");
+    let c_bridge = OSPF_BROADCAST_ADDRESS_C
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let added = |gateway: &str| {
+        format!(
+            "added route prefix={OSPF_VLINK_LOOPBACK_ADDRESS} gateway={gateway} next_hops=1 .*source=Some(Ospf)"
+        )
+    };
+    a.wait(&added(IP_B)).await?;
+    b.wait(&added(c_bridge)).await?;
+
     log("router-c drops its end: router-b's virtual neighbor dies within the dead interval");
     c.provision(&vlink(
         OSPF_ROUTER_ID_C,
@@ -1740,6 +1758,22 @@ pub async fn ospf_virtual_link(w: &mut World) -> anyhow::Result<()> {
         0,
         60,
     )
+    .await?;
+
+    // §16.2: router-c still summarizes its loopback into area 1, but
+    // router-b, a backbone ABR, doesn't route on area 1's summaries, so
+    // both routes go with the virtual link.
+    log("both routes are removed, while router-c's area-1 summary stays at router-b");
+    let removed = format!("removed route prefix={OSPF_VLINK_LOOPBACK_ADDRESS} ");
+    b.wait_new(&removed, 0, 30).await?;
+    a.wait_new(&removed, 0, 30).await?;
+    wait_lsa(b, "router-c's area-2 summary in area 1", |l| {
+        l["area_id"] == OSPF_AREA_1
+            && l["lsa_type"] == 3
+            && l["advertising_router"] == OSPF_ROUTER_ID_C
+            && l["link_state_id"] == loopback_id
+            && l["age"].as_u64().is_some_and(|a| a < 3600)
+    })
     .await
 }
 
