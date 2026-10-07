@@ -27,4 +27,4 @@ There is an external query API: `server.rs` serves `nos_proto::log::{LogRequest,
 
 ## Wire protocol
 
-`nos_proto::log`'s `LogRequest`/`LogEvent` share one socket for three shapes, distinguished by request variant rather than three separate listeners: `Push(LogEntry)` (fire-and-forget, from every other daemon), `GetLogs { source, limit }` and `Tail { source }` (`nos-cli`'s snapshot and live-tail queries respectively). See `proto/CLAUDE.md`'s `log` entry for the exact types.
+`nos_proto::log`'s `LogRequest`/`LogEvent` share one socket for three shapes, distinguished by request variant rather than three separate listeners: `Push(LogEntry)` (fire-and-forget, from every other daemon), `GetLogs { source, limit }` and `Tail { source }` (`nos-cli`'s snapshot and live-tail queries respectively). See `docs/ipc-protocols.md` for the exact types.

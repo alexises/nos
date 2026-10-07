@@ -46,7 +46,7 @@ of re-auditing the codebase. Update this file as items are implemented.
 - **AFI/SAFI**: VPNv4/VPNv6/MPLS L3VPN, multicast, FlowSpec.
 - **EVPN** (AFI 25 / SAFI 70): received routes are stored per peer and
   pushed to `nos-fdbd`; local MACs pushed by `nos-fdbd` are originated as
-  Type-2/Type-3 (see `docs/protocols/bgp-internals.md`'s "EVPN" and `fdb/CLAUDE.md`). Still
+  Type-2/Type-3 (see `docs/protocols/bgp-internals.md`'s "EVPN" and `docs/protocols/evpn-vxlan.md` "Implementation notes"). Still
   missing: a Loc-RIB with best-path selection (and so MAC mobility) and
   re-advertisement / route reflection of received EVPN routes, import/export
   policy (RPL's `Input` is prefix-shaped — EVPN bypasses it), Type-1/4/5
