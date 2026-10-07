@@ -3115,6 +3115,19 @@ async fn ring_link(w: &World, n: usize) -> anyhow::Result<()> {
         .map(drop)
 }
 
+/// `ip link set eth2 <state>` in router-b's netns (the end of ring link 1).
+async fn set_eth2(w: &World, state: &str) -> anyhow::Result<()> {
+    w.dock
+        .ip(
+            NETNS_HELPER_IMAGE,
+            Some("router-b"),
+            false,
+            &["link", "set", "eth2", state],
+        )
+        .await
+        .map(drop)
+}
+
 /// RFC 7490 remote LFA over a real five-router ring (a-b-c-d-e-a, direct veth
 /// pairs, unit costs, `remote-lfa` on all five). For router-a, router-b's
 /// loopback has no basic LFA — router-e's shortest path to it runs back
@@ -3207,6 +3220,47 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a's GET /v1/routes/rt1 shows no tunnel backup via {d_lo} for {b_prefix}: {body}");
     }
 
+    // #277: a nos-interfaced kill tears no link down. The kill is followed at
+    // once by a config change, so a resync runs while its answers are refused;
+    // the running links keep their values and every adjacency stays up.
+    let b = w.get(B)?;
+    let stops = (a.count("ospf link stopped"), b.count("ospf link stopped"));
+    let downs = (
+        a.count("ospf neighbor state changed to down"),
+        b.count("ospf neighbor state changed to down"),
+    );
+    let (fallback0, stream0) = (
+        a.count("ospf link resolution failed, keeping running link"),
+        a.count("ospf link stream connected"),
+    );
+    log("killing router-a's nos-interfaced");
+    w.dock.kill_process("router-a", "nos-interfaced").await?;
+    let mut flags = ring_flags(A, 1, "eth1", &format!("{RLFA_RING_PREFIX}.1.1/24"), true);
+    flags.extend(strings(&["--ospf-max-metric-on-startup", "5"]));
+    a.provision_flags(&flags).await?;
+    a.wait_new(
+        "ospf link resolution failed, keeping running link",
+        fallback0,
+        10,
+    )
+    .await?;
+    a.wait_new("ospf link stream connected", stream0, 20)
+        .await?;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    for (r, n_stop, n_down) in [(a, stops.0, downs.0), (b, stops.1, downs.1)] {
+        for (pat, n) in [
+            ("ospf link stopped", n_stop),
+            ("ospf neighbor state changed to down", n_down),
+        ] {
+            if r.count(pat) > n {
+                bail!("{}: '{pat}' moved after a nos-interfaced kill", r.name());
+            }
+        }
+    }
+    let mut flags = ring_flags(A, 1, "eth1", &format!("{RLFA_RING_PREFIX}.1.1/24"), true);
+    flags.extend(strings(&["--ospf-max-metric-on-startup", "0"]));
+    a.provision_flags(&flags).await?;
+
     // The data plane: cut router-a's link to router-b (deleting the veth
     // flushes the primary at once) and ping router-b's loopback from
     // router-a's VRF. The echo requests must reach router-d as IP-in-IP to
@@ -3214,6 +3268,8 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
     let via_e =
         format!("added route prefix={b_prefix} gateway={RLFA_RING_PREFIX}.5.1 .*backup=false");
     let via_e0 = a.count(&via_e);
+    let absent = "ospf link kernel interface down link=eth1.0 .*reason=absent";
+    let absent0 = a.count(absent);
     let filter = format!("ip proto 4 and dst host {d_lo}");
     let tcpdump = ["timeout", "30", "tcpdump", "-c", "1", "-ni", "any", &filter];
     let (captured, pinged) =
@@ -3246,7 +3302,8 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
 
     // SPF reconverges: the primary moves to router-e and, the ring now being
     // a line, no backup is left.
-    a.wait_new(&via_e, via_e0, 60).await?;
+    a.wait_new(absent, absent0, 5).await?;
+    a.wait_new(&via_e, via_e0, 15).await?;
     a.wait(&format!("removed route prefix={b_prefix} .*backup=true"))
         .await?;
 
@@ -3255,14 +3312,44 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
         format!("added route prefix={b_prefix} gateway={RLFA_RING_PREFIX}.1.2 .*backup=false");
     let (direct0, tunnel0) = (a.count(&direct), a.count(&tunnel));
     ring_link(w, 1).await?;
-    // ponytail: nos-ospfd's raw socket stays bound to the deleted device and
-    // never reopens on a recreated one (not remote-LFA specific): restart it
-    // on both ends (the watchdog respawns it).
-    for r in ["router-a", "router-b"] {
-        w.dock.kill_process(r, "nos-ospfd").await?;
-    }
     a.wait_new(&direct, direct0, 90).await?;
     a.wait_new(&tunnel, tunnel0, 60).await?;
+
+    // #277: carrier loss alone tears the link down at once, with no dead
+    // timer. router-b sets its end down; router-a sees the peer's carrier go.
+    let full = format!(
+        "ospf neighbor reached full link=eth1.0 neighbor={}",
+        ring_router_id(2)
+    );
+    let (nc, ad, full0) = (
+        a.count("ospf link kernel interface down link=eth1.0 .*reason=no-carrier"),
+        b.count("ospf link kernel interface down link=eth2.0 .*reason=admin-down"),
+        a.count(&full),
+    );
+    let dead0 = (
+        a.count("ospf neighbor state changed to down"),
+        b.count("ospf neighbor state changed to down"),
+    );
+    set_eth2(w, "down").await?;
+    a.wait_new(
+        "ospf link kernel interface down link=eth1.0 .*reason=no-carrier",
+        nc,
+        5,
+    )
+    .await?;
+    b.wait_new(
+        "ospf link kernel interface down link=eth2.0 .*reason=admin-down",
+        ad,
+        5,
+    )
+    .await?;
+    if a.count("ospf neighbor state changed to down") > dead0.0
+        || b.count("ospf neighbor state changed to down") > dead0.1
+    {
+        bail!("a dead timer expired: link-down detection did not come from the stream");
+    }
+    set_eth2(w, "up").await?;
+    a.wait_new(&full, full0, 60).await?;
 
     // remote-lfa off deletes the device.
     d.provision_flags(&ring_flags(

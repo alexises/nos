@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 ## Scope
 
-`nos-ospfd` resolves its instance, areas and profiles from `nos-configd` and runs RFC 2328 on every `Subinterface.ospf_profile` (point-to-point) and `BroadcastDomain.ospf_profile` (broadcast, DR/BDR) attach point: raw protocol-89 socket, Hello to `Full`, per-area LSDB, SPF pushed to `nos-ribd` (`RibRequest::PushOspfRoutes`). A loopback (`Interface.ospf_profile`) has no peer and is log-only: it only feeds `LinkManager.stub_networks`. Modules: `main`, `config_client`, `watchdog_client`, `rib_client`, `interface_client`, `packet`, `lsa`, `lsdb`, `exchange`, `neighbor`, `election`, `socket`, `link`, `spf`, `rib_push_client`, `reconcile`, `server`, `boot`.
+`nos-ospfd` resolves its instance, areas and profiles from `nos-configd` and runs RFC 2328 on every `Subinterface.ospf_profile` (point-to-point) and `BroadcastDomain.ospf_profile` (broadcast, DR/BDR) attach point: raw protocol-89 socket, Hello to `Full`, per-area LSDB, SPF pushed to `nos-ribd` (`RibRequest::PushOspfRoutes`). A loopback (`Interface.ospf_profile`) has no peer and is log-only: it only feeds `LinkManager.stub_networks`. Modules: `main`, `config_client`, `watchdog_client`, `rib_client`, `interface_client`, `link_client`, `packet`, `lsa`, `lsdb`, `exchange`, `neighbor`, `election`, `socket`, `link`, `spf`, `rib_push_client`, `reconcile`, `server`, `boot`.
 
 ## Shared with OSPFv3
 
@@ -27,6 +27,8 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - Shutdown (`LinkManager::shutdown`) flushes self-originated LSAs and keeps links up `PREMATURE_AGE_FLOOD_WINDOW` (6s); with RFC 6987's on-shutdown hold the sum stays <= 9s (`const` assertion) inside the watchdog's 10s SIGINT budget (`stop_grace_period: 15s` for `docker stop`).
 - Origination runs on its own 2s tick and aging on a 1s tick (`--lsa-age-multiplier`, test-only), both independent of the 10s config re-apply tick. LSAs leave with `INF_TRANS_DELAY` added to the wire age only.
 - `run()`'s select is `biased;` (Hello first, RFC 4222); `note_alive` runs after `accept_crypto_sequence`; any packet proves liveness only for a neighbor at `ExStart` or later.
+
+- Link state (#277): gating happens only in `reconcile::resync`, never in `link::run`; a down kernel device (`link_client::gate`) is left out of `desired_links` and `apply_links` aborts it. Ungated when never connected or `observed = false`. An unresolved VRF/address/bridge keeps the running link's value (`merge_running`) while the config still gives the attach point an address, so only the stream or a config removal tears a link down. `LinkConfig.ifindex` restarts a link on a recreated device.
 
 ## Authentication
 
@@ -51,7 +53,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 ## Wiring and tests
 
-- `config_client`, `watchdog_client`, `rib_client` and `interface_client` are reimplemented here, not shared (star dependency graph).
+- `config_client`, `watchdog_client`, `rib_client`, `interface_client` and `link_client` are reimplemented here, not shared (star dependency graph).
 - `nos-watchdogd` gives each instance `--listen-socket` (`/run/nos/ospf-<name>.sock`, `EndpointKind::OspfInstance`); `server.rs` serves `GetNeighbors`/`GetDatabase` and takes `ribd`'s fire-and-forget `RedistributeRoutes` (`docs/architecture/endpoint-broker.md`).
 - `link::tests` run whole `LinkManager`s over an in-memory wire under `start_paused = true`; `socket.rs` is excluded from coverage (`nos-e2e` is its test). Verify kernel, IPC or wire changes with the matching `nos-e2e` phase.
 - Mark a deliberate corner-cut with a `ponytail:` comment naming its ceiling; ones that cut an RFC feature also go on the "not supported" list in `docs/protocols/ospf.md`.
