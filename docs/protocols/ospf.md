@@ -330,6 +330,24 @@ An ABR copies the type-5 LSAs it learns in one area into every other area that m
 - **Check it.** On the ABR the log says `ospf external lsa copied across areas` with `from_area`/`to_area`. On a router in the other area, `GET /v1/ospf/database` lists the type-5 LSA with the original advertising router, and `show route rt1 <prefix>` shows `[ospf]` at the distance to that router plus the LSA metric (20 by default).
 - **Remove it.** Clearing `redistribute ospf` on the ASBR ages its LSA out; the ABR carries the flush into the other areas and every router drops the route within seconds.
 
+### Join an area to the backbone through another area (virtual link)
+
+An area must touch the backbone (0.0.0.0). When it can't, a virtual link (RFC 2328 §15) runs a backbone adjacency across a normal transit area between two of its ABRs. Here router-c has only area 0.0.0.1 (shared with router-b, which is also in the backbone) and its loopback in area 0.0.0.2:
+
+```
+configure vlink
+set ospf instance o1 area 0.0.0.1 virtual-link 2.2.2.2
+commit
+```
+
+on router-c (`2.2.2.2` is router-b's router ID), and the mirror image on router-b (`virtual-link 3.3.3.3`). Over REST, `PUT {"router_id":"2.2.2.2"}` on `…/ospf-instance/o1/area/0.0.0.1/virtual-link/2.2.2.2`.
+
+- **When it comes up.** Each end checks every 2 seconds whether the other end is reachable inside the transit area. If it is, the link comes up with that path's cost (`ospf virtual link up link=vlink-0.0.0.1-2.2.2.2 neighbor=… local=… cost=…`); if not, it goes down (`ospf virtual link down`). A cost change alone doesn't restart the adjacency; a new address for the far end does.
+- **What it runs.** A backbone adjacency, unicast between the two ends' transit-area addresses: Hellos with mask 0, no DR, the link's own timers and authentication (`hello-interval`, `dead-interval`, `simple-password`, `crypto-key` on the `virtual-link`, as on a profile). Both ends must agree, as on any link.
+- **Check it.** `show ospf neigh` lists `vlink-<transit-area>-<router-id>` in area 0.0.0.0, `Full`. In `GET /v1/ospf/database`, each end's area-0 router LSA lists the other in `virtual_links`, and its router LSA in the transit area has the V bit (`router_flags` & 4). Router-c counts as an ABR: its area-0.0.0.2 summaries reach the backbone over the link.
+- **Remove it.** `delete … virtual-link <router-id>`. The other end drops the neighbour after its dead interval (`ospf neighbor state changed to down link=vlink-…`) unless it is removed there too.
+- **Not yet.** Routes across the virtual link: the SPF ignores its type-4 links for now, so routers in the backbone hold the detached area's summaries but install no route for them (#226).
+
 ### Make an area a stub, and summarize it with ranges
 
 A stub area (RFC 2328 §3.6) carries no AS-external LSAs; its ABR sends a default route into it instead. Here `eth0.0` is in area 0.0.0.1 on both routers, router-b is the ABR (its loopback is in the backbone), and router-a is inside the stub area. Every router on the area's links must set the same type, or their Hellos are dropped (`dropping ospf hello with mismatched e-bit`). Changing it restarts the area's adjacencies.
@@ -536,7 +554,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 - If both IDs of a prefix are already taken (`10.0.0.0/16` and `10.0.0.0/24`, then the host route `10.0.0.255/32`), that prefix is not advertised, and the router logs `ospf lsa link state id collision, not originating`.
 - LSAs from other routers that use host-bits IDs are read as their prefix, so they compete with and merge into routes for the same prefix.
 
-**Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, unless an area range covers it, and each ASBR as a type-4 LSA. A virtual link can be configured (see [Area](#area)) but is inert for now. Any router in two or more areas acts as an ABR, including towards a stub area, whether or not one of its areas is the backbone. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
+**Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, unless an area range covers it, and each ASBR as a type-4 LSA. A configured virtual link counts as a backbone attachment. Any router in two or more areas acts as an ABR, including towards a stub area, whether or not one of its areas is the backbone. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
 
 **Transit-only networks (RFC 6860).** Described [above](#hide-transit-only-networks-rfc-6860). With prefix suppression on, an NSSA type-7 LSA's forwarding address is a loopback's address, or `0.0.0.0` if the router has no loopback in the area, never a hidden link's.
 
@@ -559,7 +577,9 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **NSSA (RFC 3101).** Described [above](#redistribute-from-inside-a-stub-like-area-nssa). In an NSSA, Hellos carry the N bit and not the E bit, a type-5 or type-11 LSA is neither sent nor accepted, and a type-7 LSA is never sent or accepted outside one. A type-7 LSA from an ABR has the P bit clear, so no other ABR translates it. The translator doesn't copy the type-7 forwarding address into its type-5 LSA, so traffic to a translated route goes through the translator. Its election has no stability delay: a translator that loses it flushes its type-5 LSAs at once.
 
-**Not supported:** virtual links, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
+**Virtual links (RFC 2328 §15).** Described [above](#join-an-area-to-the-backbone-through-another-area-virtual-link). The far end's address is taken from the first point-to-point or transit link of its router LSA in the transit area. Database description packets carry the transit link's MTU, not 0, and the MTU check is skipped. DoNotAge (RFC 1793) is not used. Routes across the link are not computed yet.
+
+**Not supported:** routes across a virtual link, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
 
 ## Configuration reference
 
@@ -593,7 +613,7 @@ The instance's JSON also carries `routing_table`, `redistribute_policy`, `redist
 | NSSA translate always | `set … area <area-id> nssa-translate-always enable`; `delete … nssa-translate-always` | `…/area/<area-id>/nssa-translate-always` | `true`/`false`; `false` by default | only on an NSSA | as an ABR, always translate the area's type-7 LSAs, not only when elected | `show ospf database` in another area |
 | NSSA default originate | `set … area <area-id> nssa-default-originate enable`; `delete … nssa-default-originate` | `…/area/<area-id>/nssa-default-originate` | `true`/`false`; `false` by default | only on an NSSA | as an ABR, originate a `0.0.0.0/0` type-7 LSA into the area | `show route <table> 0.0.0.0` inside the area |
 | ranges | `set … area <area-id> range <cidr> [not-advertise]`; `delete … range <cidr>`; `delete … range <cidr> not-advertise` | `…/area/<area-id>/range/<cidr>` (`/` as `%2F`) | IPv4 prefix, `not_advertise` false by default | prefixes unique within the area | as an ABR, the area's prefixes inside the range are advertised to the other areas as one type-3 LSA (largest cost) with a local discard route, or not at all with `not-advertise` | `show ospf database` in another area, `show route <table>` on the ABR |
-| virtual links | `set … area <area-id> virtual-link <router-id> [hello-interval <s>] [dead-interval <s>] [simple-password <p> \| crypto-key …]`; `delete … virtual-link <router-id>` | `…/area/<area-id>/virtual-link/<router-id>` | list keyed by the far endpoint's router ID; timers and auth as in [Profile](#profile) | not on `0.0.0.0`, a stub area or an NSSA; endpoint unique within the area and not this router's own ID; dead interval above hello interval; auth as a profile's (key ID 0-255) | RFC 2328 §15 transit-area configuration. Accepted and saved, but no adjacency is formed yet (the daemon only logs `virtual link configured, not yet active`) | `show ospf neigh` shows nothing for it yet |
+| virtual links | `set … area <area-id> virtual-link <router-id> [hello-interval <s>] [dead-interval <s>] [simple-password <p> \| crypto-key …]`; `delete … virtual-link <router-id>` | `…/area/<area-id>/virtual-link/<router-id>` | list keyed by the far endpoint's router ID; timers and auth as in [Profile](#profile) | not on `0.0.0.0`, a stub area or an NSSA; endpoint unique within the area and not this router's own ID; dead interval above hello interval; auth as a profile's (key ID 0-255) | a backbone adjacency to that router across this transit area, up while it is reachable here (RFC 2328 §15, §16.7); no routes across it yet | `show ospf neigh` (`vlink-<area-id>-<router-id>`), `virtual_links`/`router_flags` in `GET /v1/ospf/database` |
 
 ### Profile
 

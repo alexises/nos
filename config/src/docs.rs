@@ -1398,8 +1398,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             concat!(
                 "Adds a virtual link whose transit area is this one, to the area border router \
              with the given router id, which must also be attached to the backbone. Not \
-             allowed on the backbone, a stub area or an NSSA. Configuration only for now: no \
-             adjacency is formed yet.",
+             allowed on the backbone, a stub area or an NSSA. The backbone adjacency comes up \
+             while that router is reachable inside this area, at that path's cost.",
                 " ",
                 "Remove a virtual link.",
             ),

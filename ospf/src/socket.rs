@@ -63,9 +63,25 @@ impl OspfSocket {
         // distinguishes it from a real peer's — treats itself as a
         // neighbor, chasing its own DBD negotiation over unicast loopback.
         socket.set_multicast_loop_v4(false)?;
-        // Link-local scope only (conventional; this NOS has no virtual links).
+        // Link-local scope only (a virtual link has its own socket, above).
         socket.set_ttl(1)?;
         socket.set_multicast_ttl_v4(1)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            inner: AsyncFd::new(socket)?,
+        })
+    }
+
+    /// A virtual link's socket (RFC 2328 §15): unicast only, so no multicast
+    /// group, scoped to the VRF device (the endpoint may be several hops
+    /// away, over any transit-area interface) and bound to `local_addr`, so
+    /// the kernel only hands it packets addressed to us. That still includes
+    /// the transit link's own unicast traffic from the same neighbor (same
+    /// addresses); `link::run` drops it by Area ID and source.
+    pub fn open_virtual(vrf: &str, local_addr: Ipv4Addr) -> io::Result<Self> {
+        let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
+        socket.bind_device(Some(vrf.as_bytes()))?;
+        socket.bind(&SockAddr::from(SocketAddrV4::new(local_addr, 0)))?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,

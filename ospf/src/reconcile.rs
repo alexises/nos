@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::config_client;
 use crate::interface_client;
-use crate::link::{AreaSettings, LinkAuthConfig, LinkConfig, LinkManager};
+use crate::link::{AreaSettings, LinkAuthConfig, LinkConfig, LinkManager, VirtualLinkConfig};
 use crate::packet;
 use crate::rib_client;
 use crate::watchdog_client;
@@ -157,12 +157,7 @@ async fn resync(
         own.max_metric_on_shutdown,
         own.max_metric_administrative,
     );
-    for a in &own.areas {
-        for v in &a.virtual_links {
-            // Config only until the virtual adjacency lands (#225).
-            info!(transit_area = %a.area_id, endpoint = %v.router_id, "virtual link configured, not yet active");
-        }
-    }
+    links.set_virtual_links(virtual_links(&own.areas)).await;
     links.set_area_settings(area_settings(&own.areas)).await;
 
     let mut desired_links = Vec::new();
@@ -192,7 +187,7 @@ async fn resync(
                 .dead_interval
                 .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
             let priority = profile.priority.unwrap_or(nos_proto::PRIORITY_DEFAULT);
-            let auth = resolve_auth(profile);
+            let auth = resolve_auth(profile.auth.as_ref(), profile.extended_sequence_numbers);
 
             for attach in subinterface_attach_points(&cfg, &profile.name) {
                 let link_name = attach.display_name();
@@ -234,6 +229,7 @@ async fn resync(
                     auth: auth.clone(),
                     stub: area.area_type.is_stub(),
                     nssa: area.area_type.is_nssa(),
+                    virtual_link: None,
                 });
             }
 
@@ -295,6 +291,7 @@ async fn resync(
                     auth: auth.clone(),
                     stub: area.area_type.is_stub(),
                     nssa: area.area_type.is_nssa(),
+                    virtual_link: None,
                 });
             }
         }
@@ -309,6 +306,25 @@ async fn resync(
     links
         .reconcile(desired_links, desired_stubs, own.router_id)
         .await;
+}
+
+/// Every area's RFC 2328 §15 virtual links (the area is the transit area),
+/// with the Appendix C.3 defaults for unset timers.
+fn virtual_links(areas: &[nos_proto::OspfArea]) -> Vec<VirtualLinkConfig> {
+    areas
+        .iter()
+        .flat_map(|a| {
+            a.virtual_links.iter().map(|v| VirtualLinkConfig {
+                transit_area: a.area_id,
+                endpoint: v.router_id,
+                hello_interval: v
+                    .hello_interval
+                    .unwrap_or(nos_proto::HELLO_INTERVAL_DEFAULT),
+                dead_interval: v.dead_interval.unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT),
+                auth: resolve_auth(v.auth.as_ref(), false),
+            })
+        })
+        .collect()
 }
 
 /// Each area's RFC 2328 §3.5/§3.6 and RFC 3101 settings, for `LinkManager`'s
@@ -698,8 +714,8 @@ fn subinterface_kernel_interface(interface: &str, tag: u16) -> String {
 /// without a fallback: `OspfProfile`'s own commit-time validation
 /// (`schema::ospf_profile::valid_auth`) already guarantees exactly one does
 /// whenever `auth` is `Crypto`.
-fn resolve_auth(profile: &nos_proto::OspfProfile) -> LinkAuthConfig {
-    match &profile.auth {
+fn resolve_auth(auth: Option<&OspfAuth>, extended: bool) -> LinkAuthConfig {
+    match auth {
         None => LinkAuthConfig::None,
         Some(OspfAuth::Simple { password }) => LinkAuthConfig::Simple {
             password: password.clone().into_bytes(),
@@ -718,7 +734,7 @@ fn resolve_auth(profile: &nos_proto::OspfProfile) -> LinkAuthConfig {
                     })
                     .collect(),
                 current_key_id,
-                extended: profile.extended_sequence_numbers,
+                extended,
             }
         }
     }

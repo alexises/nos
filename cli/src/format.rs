@@ -1566,6 +1566,8 @@ mod tests {
             external_metric: None,
             external_type2: false,
             checksum: 0xabcd,
+            router_flags: Some(0),
+            virtual_links: Vec::new(),
         };
         assert_eq!(
             render_ospf_database("o1", &[lsa]),

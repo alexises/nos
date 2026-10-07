@@ -80,7 +80,7 @@ pub struct OspfArea {
     /// the far endpoint's router id: a backbone adjacency tunnelled across
     /// this area to a router that is also attached to area 0.0.0.0, joining
     /// a partitioned or detached backbone. Not allowed on the backbone or on
-    /// a stub area or NSSA. Config only for now; no adjacency is formed.
+    /// a stub area or NSSA. Up while the endpoint is reachable in this area.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = OspfAreaVirtualLink)]

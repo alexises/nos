@@ -144,12 +144,15 @@ pub fn opaque_type(link_state_id: Ipv4Addr) -> u8 {
 pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
 pub const LINK_TYPE_TRANSIT_NETWORK: u8 = 2;
 pub const LINK_TYPE_STUB_NETWORK: u8 = 3;
+/// RFC 2328 §12.4.1.3: a virtual link, in the backbone's Router-LSA.
+pub const LINK_TYPE_VIRTUAL: u8 = 4;
 
-/// RFC 2328 A.4.2's Router-LSA flags: B (area border router) and E (AS
-/// boundary router). V (virtual link endpoint) is never set — no virtual
-/// links.
+/// RFC 2328 A.4.2's Router-LSA flags: B (area border router), E (AS
+/// boundary router) and V (endpoint of a fully adjacent virtual link, set in
+/// the transit area's Router-LSA).
 pub const ROUTER_FLAG_B: u8 = 0x01;
 pub const ROUTER_FLAG_E: u8 = 0x02;
+pub const ROUTER_FLAG_V: u8 = 0x04;
 /// RFC 3101 A.2: Nt — an NSSA border router that always translates Type-7s.
 pub const ROUTER_FLAG_NT: u8 = 0x10;
 /// RFC 8770 §3: H — a host router, never used for transit.
@@ -698,6 +701,24 @@ mod tests {
         let decoded = decode_lsa(&encoded).unwrap();
         assert_eq!(decoded.header.lsa_type, lsa.header.lsa_type);
         assert_eq!(decoded.header.link_state_id, lsa.header.link_state_id);
+        assert_eq!(decoded.body, lsa.body);
+    }
+
+    /// RFC 2328 §12.4.1.3: a type-4 (virtual) link and the V bit survive the
+    /// wire.
+    #[test]
+    fn virtual_link_router_lsa_round_trips() {
+        let mut lsa = router_lsa();
+        lsa.body = LsaBody::Router(RouterLsaBody {
+            flags: ROUTER_FLAG_B | ROUTER_FLAG_V,
+            links: vec![RouterLink {
+                link_id: Ipv4Addr::new(9, 9, 9, 8),
+                link_data: Ipv4Addr::new(203, 0, 113, 66),
+                link_type: LINK_TYPE_VIRTUAL,
+                metric: 7,
+            }],
+        });
+        let decoded = decode_lsa(&encode_lsa(&lsa)).unwrap();
         assert_eq!(decoded.body, lsa.body);
     }
 

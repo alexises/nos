@@ -102,6 +102,15 @@ pub struct LsaSummary {
     pub external_metric: Option<u32>,
     /// That LSA's E bit: a metric type 2 external.
     pub external_type2: bool,
+    /// A Router-LSA's flags (RFC 2328 A.4.2: B 0x01, E 0x02, V 0x04, Nt
+    /// 0x10, H 0x80); `None` for every other type.
+    #[serde(default)]
+    pub router_flags: Option<u8>,
+    /// A Router-LSA's virtual links (type-4 links, RFC 2328 §12.4.1.3): the
+    /// far endpoints' router ids.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub virtual_links: Vec<Ipv4Addr>,
 }
 
 /// Messages sent from a client to one `nos-ospfd` instance's IPC socket.

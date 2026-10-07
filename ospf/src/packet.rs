@@ -588,6 +588,14 @@ pub fn router_id(pkt: &OspfPacket) -> Ipv4Addr {
     }
 }
 
+/// The header's Area ID, peeked before decoding (no key needed): RFC 2328
+/// §8.2's receive demux — a link drops another area's packet, which is how a
+/// virtual link and the transit link it shares addresses with keep apart.
+pub fn area_id(data: &[u8]) -> Option<Ipv4Addr> {
+    let octets: [u8; 4] = data.get(8..12)?.try_into().ok()?;
+    Some(Ipv4Addr::from(octets))
+}
+
 /// Reads the wire crypto sequence number iff `data`'s `AuType` is Crypto (2)
 /// and it's long enough to contain one — a raw peek needing no key
 /// knowledge, used by `link.rs` for its own stateful RFC 2328 D.4.3
