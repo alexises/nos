@@ -1038,6 +1038,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Make this router a host router that never carries transit traffic (RFC 8770).",
             "Sets the H-bit in this router's Router-LSA: routers that support RFC 8770 never route through it, only to it, once every router in the area advertises that support; its transit links also cost 65535, for routers that don't. Its own prefixes stay reachable, and it is never a loop-free alternate. Can't be combined with `redistribute … to ospf` on its routing table, since a host router is not an AS boundary router. `delete` turns it off.",
         ),
+        Topic::OspfInstanceRemoteLfa => (
+            "Protect links that have no loop-free alternate with a tunnel to a remote node (RFC 7490).",
+            "For a destination whose only next hop has no basic loop-free alternate, installs a backup route that tunnels the traffic (IP-in-IP) to a PQ node: a router reachable without the protected link that itself reaches the destination without it — typical on rings of five or more routers. Link protection only. Also creates an IP-in-IP device in this router's routing table that decapsulates tunnelled traffic from any source, so this router can be another one's PQ node: enable it on every router of the area. `delete` turns it off.",
+        ),
         Topic::OspfArea => (
             "Create an OSPF area in the transaction if it doesn't already exist.",
             concat!(

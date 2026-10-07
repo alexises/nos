@@ -226,6 +226,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                         source: RouteSource::Bgp,
                         backup: r.backup_next_hop,
                         backup_interface_id: None,
+                        backup_tunnel: false,
                     }),
                 );
                 full_replace = true;
@@ -237,6 +238,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                     source: RouteSource::Bgp,
                     backup: r.backup_next_hop,
                     backup_interface_id: None,
+                    backup_tunnel: false,
                 };
                 match guard.upsert_and_diff(entry) {
                     BestPathChange::Unchanged => {}
@@ -350,8 +352,9 @@ fn ospf_entry(r: OspfRoute) -> RibEntry {
         prefix: r.prefix,
         next_hops: if r.discard { Vec::new() } else { r.next_hops },
         source: RouteSource::Ospf,
-        backup: r.backup_next_hop.filter(|_| !r.discard),
+        backup: r.backup_next_hop.or(r.backup_tunnel).filter(|_| !r.discard),
         backup_interface_id: r.backup_interface_id,
+        backup_tunnel: r.backup_next_hop.is_none() && r.backup_tunnel.is_some() && !r.discard,
     }
 }
 
@@ -370,6 +373,7 @@ fn to_prefix_routes(
                 backup: e.backup,
                 discard: e.is_discard(),
                 evpn: evpn_info(e, evpn),
+                backup_tunnel: e.backup_tunnel,
             })
             .collect(),
     }
@@ -413,6 +417,7 @@ mod authz_tests {
             backup_interface_id: None,
             metric: 3,
             discard: true,
+            backup_tunnel: None,
         };
         let entry = ospf_entry(route.clone());
         assert!(entry.is_discard());
@@ -428,6 +433,23 @@ mod authz_tests {
     }
 
     #[test]
+    fn a_remote_lfa_becomes_a_tunnel_backup() {
+        let pq: std::net::IpAddr = "10.255.0.4".parse().unwrap();
+        let entry = ospf_entry(OspfRoute {
+            prefix: "10.255.0.2/32".parse().unwrap(),
+            next_hops: vec![("10.1.2.2".parse().unwrap(), None)],
+            backup_next_hop: None,
+            backup_interface_id: None,
+            metric: 2,
+            discard: false,
+            backup_tunnel: Some(pq),
+        });
+        assert_eq!((entry.backup, entry.backup_tunnel), (Some(pq), true));
+        let shown = to_prefix_routes(entry.prefix, &[entry], &EvpnState::default());
+        assert!(shown.candidates[0].backup_tunnel);
+    }
+
+    #[test]
     fn an_evpn_candidate_shows_its_router_mac_and_vni() {
         let vtep: std::net::IpAddr = "10.50.0.3".parse().unwrap();
         let entry = RibEntry {
@@ -436,6 +458,7 @@ mod authz_tests {
             source: RouteSource::Evpn,
             backup: None,
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         let evpn = EvpnState {
             remotes: [(vtep, [2, 0, 0, 0, 0, 3])].into(),

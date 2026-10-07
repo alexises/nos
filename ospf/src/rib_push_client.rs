@@ -12,7 +12,9 @@ use std::net::IpAddr;
 
 /// A route's equal-cost next hops (sorted), its LFA backup (if any) and its
 /// SPF metric.
-type Hops = (Vec<IpAddr>, Option<IpAddr>, u32);
+/// Next hops, backup (`true`: an RFC 7490 remote LFA tunnel to that PQ node),
+/// metric.
+type Hops = (Vec<IpAddr>, Option<(IpAddr, bool)>, u32);
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -166,7 +168,9 @@ async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Hops> {
                 IpNet::V4(e.prefix),
                 (
                     e.next_hops.into_iter().map(IpAddr::V4).collect(),
-                    e.backup_next_hop.map(IpAddr::V4),
+                    e.backup_next_hop
+                        .map(|b| (IpAddr::V4(b), false))
+                        .or(e.backup_tunnel.map(|pq| (IpAddr::V4(pq), true))),
                     e.metric,
                 ),
             )
@@ -193,11 +197,12 @@ fn to_routes(routes: &HashMap<IpNet, Hops>) -> Vec<OspfRoute> {
 /// RFC 2328 next hops are routable IPv4 addresses: no interface id needed.
 /// No next hop at all is an area range's discard route
 /// (`LinkManager::compute_routes`).
-fn to_route(prefix: IpNet, (next_hops, backup_next_hop, metric): &Hops) -> OspfRoute {
+fn to_route(prefix: IpNet, (next_hops, backup, metric): &Hops) -> OspfRoute {
     OspfRoute {
         prefix,
         next_hops: next_hops.iter().map(|gw| (*gw, None)).collect(),
-        backup_next_hop: *backup_next_hop,
+        backup_next_hop: backup.filter(|(_, tunnel)| !tunnel).map(|(a, _)| a),
+        backup_tunnel: backup.filter(|(_, tunnel)| *tunnel).map(|(a, _)| a),
         backup_interface_id: None,
         metric: *metric,
         discard: next_hops.is_empty(),
@@ -260,6 +265,7 @@ mod tests {
                 next_hops: vec![("10.0.0.2".parse().unwrap(), None)],
                 backup_next_hop: None,
                 backup_interface_id: None,
+                backup_tunnel: None,
                 metric: 10,
                 discard: false,
             })]
@@ -279,6 +285,7 @@ mod tests {
                 next_hops: Vec::new(),
                 backup_next_hop: None,
                 backup_interface_id: None,
+                backup_tunnel: None,
                 metric: 5,
                 discard: true,
             })]
@@ -310,6 +317,7 @@ mod tests {
                 next_hops: vec![("10.0.2.1".parse().unwrap(), None)],
                 backup_next_hop: None,
                 backup_interface_id: None,
+                backup_tunnel: None,
                 metric: 10,
                 discard: false,
             }),
@@ -325,7 +333,7 @@ mod tests {
         let bk: IpAddr = "10.0.9.9".parse().unwrap();
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
         let last_sent = HashMap::from([(p, (vec![gw], None, 10))]);
-        let new_routes = HashMap::from([(p, (vec![gw], Some(bk), 10))]);
+        let new_routes = HashMap::from([(p, (vec![gw], Some((bk, false)), 10))]);
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
@@ -333,10 +341,21 @@ mod tests {
                 next_hops: vec![(gw, None)],
                 backup_next_hop: Some(bk),
                 backup_interface_id: None,
+                backup_tunnel: None,
                 metric: 10,
                 discard: false,
             })]
         );
+    }
+
+    #[test]
+    fn a_remote_lfa_is_pushed_as_backup_tunnel() {
+        let gw: IpAddr = "10.0.0.1".parse().unwrap();
+        let pq: IpAddr = "10.255.0.4".parse().unwrap();
+        let p: IpNet = "10.0.0.0/24".parse().unwrap();
+        let route = to_route(p, &(vec![gw], Some((pq, true)), 10));
+        assert_eq!(route.backup_next_hop, None);
+        assert_eq!(route.backup_tunnel, Some(pq));
     }
 
     #[test]
@@ -352,6 +371,7 @@ mod tests {
                 next_hops: vec![(a, None), (b, None)],
                 backup_next_hop: None,
                 backup_interface_id: None,
+                backup_tunnel: None,
                 metric: 10,
                 discard: false,
             })]

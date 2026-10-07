@@ -404,6 +404,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
         }

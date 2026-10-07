@@ -235,6 +235,8 @@ topics! {
     OspfInstanceMaxMetricAdministrative,
     /// `OspfInstance.host_router`
     OspfInstanceHostRouter,
+    /// `OspfInstance.remote_lfa`
+    OspfInstanceRemoteLfa,
     /// `OspfInstance.areas`
     OspfArea,
     /// `OspfArea.profiles`

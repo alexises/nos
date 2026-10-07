@@ -147,11 +147,13 @@ async fn resync(
         max_metric_on_shutdown = ?own.max_metric_on_shutdown,
         max_metric_administrative = own.max_metric_administrative,
         host_router = own.host_router,
+        remote_lfa = own.remote_lfa,
         "ospf instance config resolved"
     );
     links.set_graceful_restart(own.graceful_restart_grace_period);
     links.set_prefix_suppression(own.prefix_suppression);
     links.set_host_router(own.host_router);
+    links.set_remote_lfa(own.remote_lfa);
     links.set_max_metric(
         own.max_metric_on_startup,
         own.max_metric_on_shutdown,

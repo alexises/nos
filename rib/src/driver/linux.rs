@@ -20,7 +20,8 @@ use rtnetlink::packet_route::route::{
 };
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{
-    Handle, LinkBridge, LinkUnspec, LinkVrf, LinkVxlan, RouteMessageBuilder, RouteNextHopBuilder,
+    Handle, LinkBridge, LinkIpIp, LinkUnspec, LinkVrf, LinkVxlan, RouteMessageBuilder,
+    RouteNextHopBuilder,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -48,6 +49,22 @@ struct L3State {
     bound_master: Option<u32>,
     remotes: BTreeMap<IpAddr, Mac>,
 }
+
+/// RFC 7490 remote LFA's IP-in-IP device for one table (`rlfa252` at most).
+fn tunnel_name(table_id: u32) -> String {
+    format!("rlfa{table_id}")
+}
+
+/// The tunnel device's only address. An interface with no IPv4 address fails
+/// every `rp_filter` check (strict or loose), so decapsulated packets would be
+/// dropped; RFC 7600's IPv4 dummy address, host scope, is never picked as a
+/// source. ponytail: strict `rp_filter` (1) still drops them — loose (2, what
+/// distributions default to) or off is required on PQ nodes.
+const TUNNEL_ADDRESS: Ipv4Addr = Ipv4Addr::new(192, 0, 0, 8);
+/// `RT_SCOPE_HOST`.
+const SCOPE_HOST: u8 = 254;
+/// Underlay MTU 1500 minus the outer IPv4 header.
+const TUNNEL_MTU: u32 = 1480;
 
 /// The L3 VNI's bridge: `brv16777215` is 11 chars, under `IFNAMSIZ`.
 fn bridge_name(vni: u32) -> String {
@@ -216,6 +233,8 @@ pub struct LinuxRibDriver {
     installed: Mutex<HashMap<u32, HashMap<Slot, Hops>>>,
     /// Per table id: the L3 VNI devices `sync_l3vni` built.
     l3: Mutex<HashMap<u32, L3State>>,
+    /// Per table id: the ifindex of the remote LFA device `sync_tunnel` built.
+    tunnels: Mutex<HashMap<u32, u32>>,
 }
 
 impl LinuxRibDriver {
@@ -229,6 +248,7 @@ impl LinuxRibDriver {
             registry_path,
             installed: Mutex::new(HashMap::new()),
             l3: Mutex::new(HashMap::new()),
+            tunnels: Mutex::new(HashMap::new()),
         })
     }
 
@@ -423,6 +443,18 @@ impl LinuxRibDriver {
         Ok(())
     }
 
+    /// Deletes `table_id`'s remote LFA device, if any (its tunnel backups go
+    /// with it).
+    async fn remove_tunnel(&self, table_id: u32) -> Result<(), DriverError> {
+        self.tunnels.lock().unwrap().remove(&table_id);
+        let name = tunnel_name(table_id);
+        if let Some(link) = self.find_link(&name).await? {
+            self.handle.link().del(link.header.index).execute().await?;
+            info!(device = %name, table_id, "deleted remote lfa tunnel device");
+        }
+        Ok(())
+    }
+
     /// Ensures the VRF device for `table_id` exists and is up, returning
     /// its ifindex.
     async fn ensure_vrf(&self, vrf_ifname: &str, table_id: u32) -> Result<u32, DriverError> {
@@ -513,32 +545,47 @@ impl LinuxRibDriver {
         hops: &Hops,
         source: Option<RouteSource>,
         backup: bool,
+        tunnel: bool,
     ) -> Result<(), DriverError> {
         let gateway = show_gateways(&gateways(hops));
         // An `Evpn` route leaves `onlink` through the L3 VNI's bridge: its
         // gateway is the remote VTEP, resolved by `sync_l3vni`'s neighbour.
+        // A remote LFA backup leaves `onlink` through the table's IP-in-IP
+        // device, which takes the gateway (the PQ node) as the outer
+        // destination and looks it up in the VRF.
         let evpn = source == Some(RouteSource::Evpn);
-        let hops = if evpn {
+        let tunnel = tunnel && backup;
+        let onlink_dev = if evpn {
             let Some(bridge) = self.l3.lock().unwrap().get(&table_id).map(|s| s.bridge) else {
                 debug!(%prefix, table_id, "l3 vni bridge not built yet, evpn route deferred");
                 return Ok(());
             };
-            hops.iter().map(|(gw, _)| (*gw, Some(bridge))).collect()
+            Some(bridge)
+        } else if tunnel {
+            let Some(dev) = self.tunnels.lock().unwrap().get(&table_id).copied() else {
+                debug!(%prefix, table_id, "remote lfa tunnel device not built yet, backup deferred");
+                return Ok(());
+            };
+            Some(dev)
         } else {
-            hops.clone()
+            None
+        };
+        let hops: Hops = match onlink_dev {
+            Some(dev) => hops.iter().map(|(gw, _)| (*gw, Some(dev))).collect(),
+            None => hops.clone(),
         };
         let Some(mut route) = build_route(prefix, &hops, table_id, backup) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(());
         };
-        if evpn {
+        if onlink_dev.is_some() {
             route.header.flags.insert(RouteFlags::Onlink);
         }
         self.route_channel.add(route).await.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to add route");
         })?;
         let discard = hops.is_empty();
-        info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, "added route");
+        info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, "added route");
         Ok(())
     }
 
@@ -581,7 +628,7 @@ impl LinuxRibDriver {
         changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError> {
         type Slots = HashMap<Slot, Hops>;
-        let items: Vec<(IpNet, Slots, Slots, Option<RouteSource>)> = {
+        let items: Vec<(IpNet, Slots, Slots, Option<RouteSource>, bool)> = {
             let installed = self.installed.lock().unwrap();
             let table_installed = installed.get(&table_id);
             changes
@@ -597,11 +644,12 @@ impl LinuxRibDriver {
                         })
                         .collect();
                     let source = new.as_ref().map(|e| e.source);
+                    let tunnel = new.as_ref().is_some_and(|e| e.backup_tunnel);
                     let new: Slots = new
                         .as_ref()
                         .map(|e| slots(*prefix, e).into_iter().collect())
                         .unwrap_or_default();
-                    (*prefix, old, new, source)
+                    (*prefix, old, new, source, tunnel)
                 })
                 .collect()
         };
@@ -616,39 +664,37 @@ impl LinuxRibDriver {
                 None => table_installed.remove(&slot),
             };
         };
-        let errors = drain(
-            items
-                .into_iter()
-                .map(|(prefix, old, new, source)| async move {
-                    // Remove before add, per prefix (a changed gateway at the
-                    // same priority would otherwise hit EEXIST).
-                    // A changed next-hop set is a del+add like a changed gateway.
-                    let same = |a: Option<&Hops>, b: &Hops| a.map(gateways) == Some(gateways(b));
-                    let mut result = Ok(());
-                    for (slot, hops) in &old {
-                        if !same(new.get(slot), hops) {
-                            match self.remove_route(table_id, prefix, hops, slot.1).await {
-                                Ok(()) => set(*slot, None),
-                                Err(e) => result = result.and(Err(e)),
-                            }
-                        }
-                    }
-                    for (slot, hops) in new {
-                        if same(old.get(&slot), &hops) {
-                            set(slot, Some(hops));
-                            continue;
-                        }
-                        match self
-                            .add_route(table_id, prefix, &hops, source, slot.1)
-                            .await
-                        {
-                            Ok(()) => set(slot, Some(hops)),
+        let errors = drain(items.into_iter().map(
+            |(prefix, old, new, source, tunnel)| async move {
+                // Remove before add, per prefix (a changed gateway at the
+                // same priority would otherwise hit EEXIST).
+                // A changed next-hop set is a del+add like a changed gateway.
+                let same = |a: Option<&Hops>, b: &Hops| a.map(gateways) == Some(gateways(b));
+                let mut result = Ok(());
+                for (slot, hops) in &old {
+                    if !same(new.get(slot), hops) {
+                        match self.remove_route(table_id, prefix, hops, slot.1).await {
+                            Ok(()) => set(*slot, None),
                             Err(e) => result = result.and(Err(e)),
                         }
                     }
-                    result
-                }),
-        )
+                }
+                for (slot, hops) in new {
+                    if same(old.get(&slot), &hops) {
+                        set(slot, Some(hops));
+                        continue;
+                    }
+                    match self
+                        .add_route(table_id, prefix, &hops, source, slot.1, tunnel)
+                        .await
+                    {
+                        Ok(()) => set(slot, Some(hops)),
+                        Err(e) => result = result.and(Err(e)),
+                    }
+                }
+                result
+            },
+        ))
         .await;
         errors.into_iter().next().map_or(Ok(()), Err)
     }
@@ -705,9 +751,12 @@ impl LinuxRibDriver {
             let gateway = show_gateways(&gateways);
             let discard = gateways.is_empty();
             async move {
-                if let Some(message) = message {
+                if let Some(mut message) = message {
+                    // The kernel answers ESRCH to a delete that carries
+                    // RTNH_F_ONLINK, which an `Evpn` or tunnel route dumps with.
+                    message.header.flags.remove(RouteFlags::Onlink);
                     self.route_channel.del(message).await.map_err(|e| {
-                        warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
+                        warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to remove route");
                         ((prefix, backup), gateways, e)
                     })?;
                     info!(%prefix, %gateway, table_id, backup, discard, "removed route");
@@ -719,9 +768,10 @@ impl LinuxRibDriver {
 
         let add_failed = drain(to_add.into_iter().map(|(slot, _)| {
             let source = best_routes.get(&slot.0).map(|e| e.source);
+            let tunnel = best_routes.get(&slot.0).is_some_and(|e| e.backup_tunnel);
             let hops = desired_full.get(&slot).cloned().unwrap_or_default();
             async move {
-                self.add_route(table_id, slot.0, &hops, source, slot.1)
+                self.add_route(table_id, slot.0, &hops, source, slot.1, tunnel)
                     .await
                     .map_err(|e| (slot, e))
             }
@@ -783,6 +833,7 @@ impl RibDriver for LinuxRibDriver {
         if let Some(l3) = l3 {
             self.remove_l3vni(l3.vni).await?;
         }
+        self.remove_tunnel(table_id).await?;
 
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         if let Some(link) = self.find_link(&vrf_ifname).await? {
@@ -799,6 +850,57 @@ impl RibDriver for LinuxRibDriver {
 
     async fn table_id(&self, table_name: &str) -> Option<u32> {
         table_registry::lookup_table_id(&self.registry_path, table_name)
+    }
+
+    async fn sync_tunnel(&self, table_name: &str, enabled: bool) -> Result<(), DriverError> {
+        let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
+        if !enabled {
+            return self.remove_tunnel(table_id).await;
+        }
+        let vrf = self
+            .ensure_vrf(&table_registry::vrf_ifname(table_id), table_id)
+            .await?;
+        let name = tunnel_name(table_id);
+        let index = if let Some(link) = self.find_link(&name).await? {
+            link.header.index
+        } else {
+            // NBMA ipip (no remote): the outer destination is each route's
+            // gateway, and `dev <vrf>` makes the outer lookup use the VRF's
+            // table. An `external` (collect_md) device would look it up in
+            // main instead — see #187's kernel spike.
+            self.handle
+                .link()
+                .add(
+                    LinkIpIp::new(&name)
+                        .dev(vrf)
+                        .controller(vrf)
+                        .mtu(TUNNEL_MTU)
+                        .build(),
+                )
+                .execute()
+                .await?;
+            let index = self
+                .find_link(&name)
+                .await?
+                .map(|l| l.header.index)
+                .ok_or_else(|| DriverError::Other(format!("{name} does not exist (yet)")))?;
+            info!(device = %name, table_id, "created remote lfa tunnel device");
+            index
+        };
+        let mut add = self
+            .handle
+            .address()
+            .add(index, IpAddr::V4(TUNNEL_ADDRESS), 32)
+            .replace();
+        add.message_mut().header.scope = SCOPE_HOST.into();
+        add.execute().await?;
+        self.handle
+            .link()
+            .set(LinkUnspec::new_with_index(index).up().build())
+            .execute()
+            .await?;
+        self.tunnels.lock().unwrap().insert(table_id, index);
+        Ok(())
     }
 
     async fn sync_l3vni(
@@ -842,7 +944,12 @@ impl RibDriver for LinuxRibDriver {
 // ponytail: older kernels dump IPv6 ECMP siblings as separate routes, not
 // one `RTA_MULTIPATH`; nothing pushes IPv6 ECMP yet (ospfv3 is single-path),
 // merge siblings per slot here once it does.
+/// A `RTM_F_CLONED` entry is a kernel exception (e.g. the PMTU a tunnel
+/// learned), dumped beside the route it belongs to: never a route of ours.
 fn extract_route(route: &RouteMessage) -> Option<(Slot, Vec<IpAddr>)> {
+    if route.header.flags.contains(RouteFlags::Cloned) {
+        return None;
+    }
     let gateway_of = |attr: &RouteAttribute| match attr {
         RouteAttribute::Gateway(addr) => route_address_to_ip(addr),
         _ => None,
@@ -1066,6 +1173,7 @@ mod tests {
             source: RouteSource::Ospf,
             backup: Some(addr("10.0.0.2")),
             backup_interface_id: None,
+            backup_tunnel: false,
         };
         assert_eq!(
             slots(p, &entry),
@@ -1109,6 +1217,15 @@ mod tests {
             extract_route(&route),
             Some(((p, false), vec![addr("2001:db8::2"), addr("2001:db8::9")]))
         );
+    }
+
+    #[test]
+    fn a_cloned_exception_is_not_a_route() {
+        let p = net("10.62.0.2/32");
+        let mut route = build_route(p, &vec![(addr("10.62.0.4"), None)], 100, false).unwrap();
+        assert!(extract_route(&route).is_some());
+        route.header.flags.insert(RouteFlags::Cloned);
+        assert_eq!(extract_route(&route), None);
     }
 
     #[test]

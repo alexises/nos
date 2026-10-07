@@ -515,6 +515,38 @@ How it behaves:
 - **Check it.** Every router logs `ospf host-bit state changed area=0.0.0.0 honoured=true host_routers=1` when the bit appears in the area (`honoured=false` if some router lacks support). On another router, routes through the host router disappear from `show route` and so do backup next hops through it.
 - `delete ospf instance o1 host-router` turns it off.
 
+### Protect links that have no loop-free alternate (RFC 7490 remote LFA)
+
+On a ring of five or more routers, a destination behind a neighbour often has no [loop-free alternate](#features-and-behaviour): every other neighbour's shortest path to it comes back through this router. A remote LFA tunnels the traffic to a router further away (the *PQ node*) that reaches the destination without the failed link. Turn it on on **every** router of the area:
+
+```
+configure rlfa
+set ospf instance o1 remote-lfa
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/rlfa
+$C -X PUT -H 'Content-Type: application/json' -d 'true' $B/v1/transactions/rlfa/ospf-instance/o1/remote-lfa
+$C -X POST $B/v1/transactions/rlfa/commit
+```
+
+How it behaves:
+
+- **The tunnel device.** The routing table gets an IP-in-IP device, `rlfa<table-id>` (e.g. `rlfa100`), in its VRF. It carries this router's tunnel backups out, and decapsulates other routers' tunnelled traffic into the table, so that this router can be a PQ node. Each router needs it, which is why the setting goes on every router.
+- **The PQ node** is a router that this router reaches without the protected link (P-space) and that reaches the neighbour without it (Q-space), and that advertises a `/32` stub, its loopback: the tunnel goes to that address. Among several, the cheapest path wins. Give every router a loopback in OSPF.
+- **Which routes.** Only routes with one next hop over a point-to-point link and no basic loop-free alternate. Equal-cost routes and routes with a basic alternate are left alone.
+- **Failover.** The backup is installed in the kernel at the backup metric, like a basic alternate, so traffic moves to the tunnel as soon as the primary route is withdrawn (its link goes down). Once OSPF reconverges, the route moves to its new path and the tunnel backup goes away.
+- **Check it.** `show route rt1` shows `backup tunnel <pq-loopback>` after the primary; over REST, the candidate has `backup_tunnel: true`. `nos-ribd` logs `created remote lfa tunnel device` and `added route … backup=true … tunnel=true`.
+- `delete ospf instance o1 remote-lfa` turns it off and deletes the device.
+
+Things to know:
+
+- **Security.** The device accepts IP-in-IP from any source to any address of the routing table. Filter protocol 4 at the edge of the network if that matters.
+- **`rp_filter`.** A PQ node must not run strict reverse-path filtering (`net.ipv4.conf.*.rp_filter = 1`) on the device: loose (`2`, most distributions' default) or off works.
+- **One routing table per router** can use it: decapsulated traffic lands in the first such device's table.
+- **Not done:** node protection, protection of LAN links, the extended P-space (RFC 7490 §4.2), MPLS/LDP or segment-routing tunnels, and OSPFv3. Interoperates with other NOS routers only: another vendor's router can be a PQ node only if it decapsulates plain IP-in-IP sent to its loopback.
+
 ### Stop running OSPF
 
 - On one link: `delete interface eth0 ospf` (or `delete ospf` inside the interface, subinterface or broadcast domain). Over REST, `DELETE …/interface/eth0/subinterface/0/ospf-profile`.
@@ -533,7 +565,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Equal-cost multipath (RFC 2328 §16.1).** When a destination is reachable over several paths with the same lowest metric, NOS keeps all of their next hops and installs one multipath kernel route; the kernel spreads flows across them. It is automatic, with no configuration. `show route` lists every next hop: `* via 203.0.113.2, 203.0.113.6 [ospf]`. A next hop whose link goes down stays in the multipath route until OSPF reconverges (the kernel keeps it unless `ignore_routes_with_linkdown` is set).
 
-**Loop-free alternates (RFC 5286).** For each OSPF route, NOS also looks for a backup next hop through another neighbour (not one of the route's own next hops) whose own shortest path to the destination does not come back through this router. A link that costs 65535 in either direction (a [stub router](#drain-traffic-away-from-a-router-rfc-6987-stub-router) at either end) is never used for one. If there is one, it is installed in the kernel alongside the primary, at a worse metric, so traffic moves to it as soon as the primary next hop is withdrawn. It is computed automatically, with no configuration. `show route` shows it after the primary: `* via 203.0.113.2 [ospf] backup 203.0.113.3`. Only link protection is provided (no node protection and no remote LFA).
+**Loop-free alternates (RFC 5286).** For each OSPF route, NOS also looks for a backup next hop through another neighbour (not one of the route's own next hops) whose own shortest path to the destination does not come back through this router. A link that costs 65535 in either direction (a [stub router](#drain-traffic-away-from-a-router-rfc-6987-stub-router) at either end) is never used for one. If there is one, it is installed in the kernel alongside the primary, at a worse metric, so traffic moves to it as soon as the primary next hop is withdrawn. It is computed automatically, with no configuration. `show route` shows it after the primary: `* via 203.0.113.2 [ospf] backup 203.0.113.3`. Only link protection is provided (no node protection). Where there is none, a [remote LFA](#protect-links-that-have-no-loop-free-alternate-rfc-7490-remote-lfa) can tunnel around the failure.
 
 **Authentication (RFC 2328 Appendix D, RFC 5709, RFC 7474).** Described [above](#authenticate-a-link-and-change-its-key). A packet that fails authentication is dropped and logged (`ospf packet authentication failed`). A replayed or out-of-order packet (a sequence number that does not increase) is dropped and logged too.
 
@@ -598,6 +630,7 @@ All paths are relative to `/v1/transactions/{tx}/`. `delete` forms marked *relat
 | max-metric on shutdown | `set ospf instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ospf instance <name> max-metric router-lsa on-shutdown` | `ospf-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router this long before withdrawing the LSAs on stop; not on a graceful restart | `reason="on-shutdown"` in the log |
 | max-metric administrative | `set ospf instance <name> max-metric router-lsa administrative`; `delete ospf instance <name> max-metric router-lsa administrative` | `ospf-instance/<name>/max-metric-administrative` | boolean; off by default | | stub router until removed | `show route <table>` on another router |
 | host router | `set ospf instance <name> host-router`; `delete ospf instance <name> host-router` | `ospf-instance/<name>/host-router` | boolean; off by default | refused with `redistribute … to ospf` on its routing table | H-bit and max-metric transit links: never used for transit (RFC 8770) | `ospf host-bit state changed` in every router's log |
+| remote LFA | `set ospf instance <name> remote-lfa`; `delete ospf instance <name> remote-lfa` | `ospf-instance/<name>/remote-lfa` | boolean; off by default | | tunnel backups to a PQ node where there is no loop-free alternate, and an IP-in-IP device that decapsulates (RFC 7490) | `show route <table>`: `backup tunnel <address>` |
 | areas | `edit ospf instance <name> area <area-id>`; relative `edit area <area-id>` | `ospf-instance/<name>/area/<area-id>` | list of areas | area IDs unique within the instance | see [Area](#area) | `show config` |
 | routing table | set on the table: `set routing-table <table> ospf-instance <name>`; `delete routing-table <table> ospf-instance` | `routing-table/<table>/ospf-instance` | instance name; unset by default | the instance must exist; one table per instance | runs the instance in that table's VRF and installs its routes there | `show ospf neigh`, `show route <table>` |
 

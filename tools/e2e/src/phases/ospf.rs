@@ -8,7 +8,7 @@ use anyhow::bail;
 use reqwest::Method;
 
 use crate::consts::*;
-use crate::router::{log, strings, Router, A, B, C};
+use crate::router::{log, strings, Id, Router, A, B, C, D, E};
 use crate::world::World;
 
 const BD: &str = OSPF_BROADCAST_DOMAIN;
@@ -3041,4 +3041,243 @@ pub async fn ospf_p2mp(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), p0, 90).await?;
     b.wait_new(&became_dr, dr0, 60).await?;
     a.wait_ospf_route_gone(&stub, 10).await
+}
+
+// --- RFC 7490 remote LFA ---
+
+/// The ring, in order: ring link `i` joins `RING[i-1]`'s eth1 to the next
+/// router's eth2.
+const RING: [Id; 5] = [A, B, C, D, E];
+
+fn ring_router_id(n: usize) -> String {
+    format!("9.9.10.{n}")
+}
+
+fn ring_loopback(n: usize) -> String {
+    format!("{RLFA_LOOPBACK_PREFIX}.{n}")
+}
+
+/// Router `n` (1-based) of the ring: `iface`'s tag-0 subinterface at
+/// `address` in OSPF, its loopback in OSPF, and `remote-lfa` set to `on`.
+fn ring_flags(id: Id, n: usize, iface: &str, address: &str, on: bool) -> Vec<String> {
+    strings(&[
+        "--interface",
+        iface,
+        "--address",
+        address,
+        "--asn",
+        &id.asn.to_string(),
+        "--router-id",
+        id.rid,
+        "--remote-as",
+        &id.remote_as.to_string(),
+        "--peer",
+        id.peer_ip,
+        "--ospf-instance",
+        OSPF_INSTANCE,
+        "--ospf-router-id",
+        &ring_router_id(n),
+        "--ospf-area",
+        OSPF_AREA,
+        "--ospf-profile",
+        OSPF_PROFILE,
+        "--ospf-interface-profile",
+        OSPF_PROFILE,
+        "--ospf-remote-lfa",
+        &on.to_string(),
+        "--loopback-address",
+        &format!("{}/32", ring_loopback(n)),
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+}
+
+/// Ring link `n`: a direct veth pair from `RING[n-1]`'s eth1 to the next
+/// router's eth2, created by the privileged helper (as `link_veths`).
+async fn ring_link(w: &World, n: usize) -> anyhow::Result<()> {
+    let (from, to) = (RING[n - 1].name, RING[n % RING.len()].name);
+    let (pid_from, pid_to) = (
+        w.dock.pid(from).await?.to_string(),
+        w.dock.pid(to).await?.to_string(),
+    );
+    log(format!("creating ring link {n}: {from} eth1 <-> {to} eth2"));
+    w.dock
+        .ip(
+            NETNS_HELPER_IMAGE,
+            None,
+            true,
+            &[
+                "link", "add", "eth1", "netns", &pid_from, "type", "veth", "peer", "name", "eth2",
+                "netns", &pid_to,
+            ],
+        )
+        .await
+        .map(drop)
+}
+
+/// RFC 7490 remote LFA over a real five-router ring (a-b-c-d-e-a, direct veth
+/// pairs, unit costs, `remote-lfa` on all five). For router-a, router-b's
+/// loopback has no basic LFA — router-e's shortest path to it runs back
+/// through router-a — but one PQ node, router-d (P-space {e, d}, Q-space
+/// {c, d}): router-a installs a backup that tunnels to router-d's loopback.
+/// Cutting router-a's link to router-b then carries a ping as IP-in-IP
+/// through router-d until SPF moves the primary to router-e.
+#[allow(clippy::too_many_lines)]
+pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
+    for id in RING {
+        w.start(id, None, &[]).await?;
+    }
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:bookworm-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    for n in 1..=RING.len() {
+        ring_link(w, n).await?;
+    }
+    // Containers start with forwarding off, and the PQ node and the routers
+    // between it and router-b forward the decapsulated packets.
+    for id in RING {
+        w.dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                id.name,
+                &["sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"],
+            )
+            .await?;
+    }
+    for (i, id) in RING.into_iter().enumerate() {
+        let n = i + 1;
+        let prev = if n == 1 { RING.len() } else { n - 1 };
+        let r = w.get(id)?;
+        r.provision_flags(&ring_flags(
+            id,
+            n,
+            "eth1",
+            &format!("{RLFA_RING_PREFIX}.{n}.1/24"),
+            true,
+        ))
+        .await?;
+        r.provision_flags(&ring_flags(
+            id,
+            n,
+            "eth2",
+            &format!("{RLFA_RING_PREFIX}.{prev}.2/24"),
+            true,
+        ))
+        .await?;
+    }
+    let (a, d) = (w.a()?, w.get(D)?);
+    for (link, neighbor) in [("eth1.0", 2), ("eth2.0", 5)] {
+        a.wait_new(
+            &format!(
+                "ospf neighbor reached full link={link} neighbor={}",
+                ring_router_id(neighbor)
+            ),
+            0,
+            90,
+        )
+        .await?;
+    }
+    // Every rLFA router builds the decapsulating device: any may be a PQ node.
+    d.wait(&format!(
+        "created remote lfa tunnel device device={RLFA_DEVICE}"
+    ))
+    .await?;
+
+    let (b_lo, d_lo) = (ring_loopback(2), ring_loopback(4));
+    let b_prefix = format!("{b_lo}/32");
+    let tunnel =
+        format!("added route prefix={b_prefix} gateway={d_lo} .*backup=true .*tunnel=true");
+    a.wait_new(&tunnel, 0, 90).await?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    let shown = table.as_array().into_iter().flatten().any(|p| {
+        p["prefix"] == b_prefix.as_str()
+            && p["candidates"][0]["backup"] == d_lo.as_str()
+            && p["candidates"][0]["backup_tunnel"] == true
+    });
+    if !shown {
+        bail!("router-a's GET /v1/routes/rt1 shows no tunnel backup via {d_lo} for {b_prefix}: {body}");
+    }
+
+    // The data plane: cut router-a's link to router-b (deleting the veth
+    // flushes the primary at once) and ping router-b's loopback from
+    // router-a's VRF. The echo requests must reach router-d as IP-in-IP to
+    // its loopback, while SPF has not yet moved the primary.
+    let via_e =
+        format!("added route prefix={b_prefix} gateway={RLFA_RING_PREFIX}.5.1 .*backup=false");
+    let via_e0 = a.count(&via_e);
+    let filter = format!("ip proto 4 and dst host {d_lo}");
+    let tcpdump = ["timeout", "30", "tcpdump", "-c", "1", "-ni", "any", &filter];
+    let (captured, pinged) =
+        tokio::join!(w.dock.in_netns(HOST_IMAGE, "router-d", &tcpdump), async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            log("cutting router-a's link to router-b");
+            w.dock
+                .ip(
+                    NETNS_HELPER_IMAGE,
+                    Some("router-a"),
+                    false,
+                    &["link", "del", "eth1"],
+                )
+                .await?;
+            w.dock
+                .in_netns(
+                    HOST_IMAGE,
+                    "router-a",
+                    &[
+                        "ping", "-I", RLFA_VRF, "-c", "20", "-i", "0.2", "-W", "1", &b_lo,
+                    ],
+                )
+                .await
+        });
+    let pinged = pinged?;
+    log(format!("router-a's ping to {b_lo}: {}", pinged.trim()));
+    let captured =
+        captured.map_err(|e| anyhow::anyhow!("no ip-in-ip to {d_lo} on router-d: {e:#}"))?;
+    log(format!("router-d: {}", captured.trim()));
+
+    // SPF reconverges: the primary moves to router-e and, the ring now being
+    // a line, no backup is left.
+    a.wait_new(&via_e, via_e0, 60).await?;
+    a.wait(&format!("removed route prefix={b_prefix} .*backup=true"))
+        .await?;
+
+    // The link back: the direct primary and the tunnel backup return.
+    let direct =
+        format!("added route prefix={b_prefix} gateway={RLFA_RING_PREFIX}.1.2 .*backup=false");
+    let (direct0, tunnel0) = (a.count(&direct), a.count(&tunnel));
+    ring_link(w, 1).await?;
+    // ponytail: nos-ospfd's raw socket stays bound to the deleted device and
+    // never reopens on a recreated one (not remote-LFA specific): restart it
+    // on both ends (the watchdog respawns it).
+    for r in ["router-a", "router-b"] {
+        w.dock.kill_process(r, "nos-ospfd").await?;
+    }
+    a.wait_new(&direct, direct0, 90).await?;
+    a.wait_new(&tunnel, tunnel0, 60).await?;
+
+    // remote-lfa off deletes the device.
+    d.provision_flags(&ring_flags(
+        D,
+        4,
+        "eth1",
+        &format!("{RLFA_RING_PREFIX}.4.1/24"),
+        false,
+    ))
+    .await?;
+    d.wait(&format!(
+        "deleted remote lfa tunnel device device={RLFA_DEVICE}"
+    ))
+    .await?;
+    w.remove(D).await;
+    w.remove(E).await;
+    Ok(())
 }

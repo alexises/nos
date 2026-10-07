@@ -13,6 +13,7 @@ fn sample_prefix_routes() -> PrefixRoutes {
             backup: None,
             discard: false,
             evpn: None,
+            backup_tunnel: false,
         }],
     }
 }

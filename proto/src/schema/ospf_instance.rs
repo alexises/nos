@@ -16,6 +16,7 @@ use nos_proto_derive::Cli;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
+#[allow(clippy::struct_excessive_bools)] // one independent RFC knob per flag
 pub struct OspfInstance {
     #[garde(
         length(min = 1, max = 64),
@@ -133,6 +134,16 @@ pub struct OspfInstance {
     #[garde(skip)]
     #[cli(topic = OspfInstanceHostRouter, words = "host-router")]
     pub host_router: bool,
+
+    /// RFC 7490 remote loop-free alternates: for a destination with no basic
+    /// LFA, a backup that tunnels (IP-in-IP) to a PQ node's loopback. Also
+    /// makes this router's routing table decapsulate IP-in-IP from any
+    /// source, so it can be another router's PQ node — enable it on every
+    /// router of the area. Off by default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfInstanceRemoteLfa, words = "remote-lfa")]
+    pub remote_lfa: bool,
 }
 
 /// The placeholder a new `OspfInstance` starts from (`edit` on a missing one).
@@ -150,6 +161,7 @@ impl Default for OspfInstance {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
         }
@@ -201,6 +213,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
         }

@@ -82,6 +82,11 @@ pub struct RouteEntry {
     /// `next_hops` that provably won't loop the packet back through us), if
     /// one exists. Filled in by `compute` after every collector has run.
     pub backup_next_hop: Option<Ipv4Addr>,
+    /// RFC 7490 remote LFA: the PQ node's loopback to tunnel (IP-in-IP) to
+    /// when the single primary next hop fails and there is no
+    /// `backup_next_hop`. Filled in by `compute_in` when
+    /// `Context.remote_lfa` is set.
+    pub backup_tunnel: Option<Ipv4Addr>,
     /// The vertex this destination hangs off (the router/network whose
     /// distance the metric was built from) — what the loop-free test is
     /// evaluated against, since the leaf metric cancels out of it.
@@ -142,6 +147,7 @@ impl RouteEntry {
             next_hops: Vec::new(),
             metric,
             backup_next_hop: None,
+            backup_tunnel: None,
             egress: Vertex::Router(Ipv4Addr::UNSPECIFIED),
             class: PathClass::Inter,
         }
@@ -159,6 +165,8 @@ pub struct Context<'a> {
     /// The §16.7 first hops in the transit area toward each virtual link's
     /// endpoint: the next hops of a type-4 edge out of root.
     pub virtual_links: &'a [VirtualNextHops],
+    /// RFC 7490: look for a remote LFA for routes without a basic one.
+    pub remote_lfa: bool,
 }
 
 /// One virtual link's §16.7 next hops, for `Context`.
@@ -184,6 +192,7 @@ pub fn apply_transit(existing: &mut RouteEntry, candidate: RouteEntry) {
             // ponytail: the LFA was computed for the backbone path; none for
             // a transit-replaced route.
             existing.backup_next_hop = None;
+            existing.backup_tunnel = None;
         }
         Ordering::Equal => merge_equal(existing, candidate),
         Ordering::Greater => {}
@@ -443,6 +452,11 @@ pub fn compute_in(root: Ipv4Addr, lsas: &[Arc<Lsa>], ctx: &Context) -> Vec<Route
     for route in out.values_mut() {
         route.backup_next_hop = pick_backup(route, &alternates, &dist);
     }
+    if ctx.remote_lfa {
+        remote_lfas(
+            root, &routers, &networks, &hosts, &dist, &next_hop, &mut out,
+        );
+    }
 
     out.into_values().collect()
 }
@@ -552,6 +566,169 @@ fn pick_backup(
         })
         .min()
         .map(|(_, addr)| addr)
+}
+
+/// RFC 7490 remote LFA, link protection over root's point-to-point links:
+/// for every route whose single next hop has no basic LFA, a PQ node to
+/// tunnel to.
+///
+/// - **P-space** of root for the link to neighbor E: routers none of whose
+///   shortest paths from root use that link (their next-hop set lacks E's
+///   address on it). Plain P-space only — an extended P-space node must be
+///   reached through a given neighbor, which a tunnel route can't pin.
+/// - **Q-space** of E: routers none of whose shortest paths *to* E use the
+///   link, i.e. `dist(Q,E) < dist(Q,root) + cost(root,E)` — reverse distances
+///   (`reverse_distances`), since link costs can be asymmetric.
+/// - A PQ node must advertise a /32 stub (`host_stub`, the tunnel's
+///   destination) and carry transit (no RFC 8770 host router). Per route,
+///   among PQ nodes whose own shortest path to the egress vertex doesn't come
+///   back through root (`dist(PQ,E') < dist(PQ,root) + dist(root,E')`), the
+///   cheapest `dist(root,PQ) + dist(PQ,E')` wins, ties by address.
+///
+/// `ponytail:` one reverse Dijkstra to root, one per protected neighbor and
+/// one forward Dijkstra per PQ candidate on every SPF run (RFC 7490 §4.4's
+/// incremental computation is the upgrade); no node protection, no transit
+/// network protection, IPv4 only.
+fn remote_lfas(
+    root: Ipv4Addr,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    hosts: &HashSet<Ipv4Addr>,
+    dist: &HashMap<Vertex, u32>,
+    next_hop: &HashMap<Vertex, Vec<NextHop>>,
+    out: &mut HashMap<Ipv4Net, RouteEntry>,
+) {
+    let Some(root_lsa) = routers.get(&root) else {
+        return;
+    };
+    // (neighbor E, its address toward us = the next hop, our cost to it)
+    let links: Vec<(Ipv4Addr, Ipv4Addr, u32)> = root_lsa
+        .links
+        .iter()
+        .filter(|l| l.link_type == LINK_TYPE_POINT_TO_POINT && l.metric != MAX_LINK_METRIC)
+        .filter_map(|l| {
+            own_link_data(routers, l.link_id, LINK_TYPE_POINT_TO_POINT, root)
+                .map(|addr| (l.link_id, addr, u32::from(l.metric)))
+        })
+        .collect();
+    let unprotected =
+        |r: &RouteEntry, addr: Ipv4Addr| r.backup_next_hop.is_none() && r.next_hops == [addr];
+    if !out
+        .values()
+        .any(|r| links.iter().any(|&(_, addr, _)| unprotected(r, addr)))
+    {
+        return;
+    }
+    let to_root = reverse_distances(root, routers, networks, hosts);
+    let mut from: HashMap<Ipv4Addr, HashMap<Vertex, u32>> = HashMap::new();
+    for (e, addr, cost) in links {
+        if !out.values().any(|r| unprotected(r, addr)) {
+            continue;
+        }
+        let to_e = reverse_distances(e, routers, networks, hosts);
+        let pq: Vec<(Ipv4Addr, Ipv4Addr)> = routers
+            .iter()
+            .filter(|(&id, _)| id != root && id != e && !hosts.contains(&id))
+            .filter(|(&id, _)| {
+                let hops = router_hops(next_hop, Vertex::Router(id));
+                !hops.is_empty() && !hops.contains(&addr)
+            })
+            .filter(|(&id, _)| {
+                let v = Vertex::Router(id);
+                to_e.get(&v).is_some_and(|&q_e| {
+                    to_root
+                        .get(&v)
+                        .is_none_or(|&q_root| q_e < q_root.saturating_add(cost))
+                })
+            })
+            .filter_map(|(&id, body)| host_stub(body).map(|stub| (id, stub)))
+            .collect();
+        for route in out.values_mut().filter(|r| unprotected(r, addr)) {
+            let Some(&root_to_egress) = dist.get(&route.egress) else {
+                continue;
+            };
+            route.backup_tunnel = pq
+                .iter()
+                .filter_map(|&(id, stub)| {
+                    let d = from.entry(id).or_insert_with(|| {
+                        run_dijkstra(id, routers, networks, hosts, &Context::default()).0
+                    });
+                    let pq_to_egress = *d.get(&route.egress)?;
+                    let pq_to_root = *d.get(&Vertex::Router(root))?;
+                    let root_to_pq = *dist.get(&Vertex::Router(id))?;
+                    (pq_to_egress < pq_to_root.saturating_add(root_to_egress))
+                        .then_some((root_to_pq.saturating_add(pq_to_egress), stub))
+                })
+                .min()
+                .map(|(_, stub)| stub);
+        }
+    }
+}
+
+/// The lowest /32 stub a router advertises (its loopback) — a remote LFA
+/// tunnel's destination, since a router-id isn't necessarily routable.
+fn host_stub(body: &RouterLsaBody) -> Option<Ipv4Addr> {
+    body.links
+        .iter()
+        .filter(|l| l.link_type == LINK_TYPE_STUB_NETWORK && l.link_data == Ipv4Addr::BROADCAST)
+        .map(|l| l.link_id)
+        .min()
+}
+
+/// Every vertex's shortest distance *to* `target` (Dijkstra over reversed
+/// edges): a router's p2p/transit link costs what that router advertises, a
+/// network-to-router edge 0. A host router (RFC 8770) other than `target` is
+/// never transited. No virtual links.
+fn reverse_distances(
+    target: Ipv4Addr,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    hosts: &HashSet<Ipv4Addr>,
+) -> HashMap<Vertex, u32> {
+    // Incoming edges per vertex: (from, cost).
+    let mut incoming: HashMap<Vertex, Vec<(Vertex, u32)>> = HashMap::new();
+    for &id in routers.keys() {
+        for (to, cost, _) in neighbors(Vertex::Router(id), routers, networks, false) {
+            incoming
+                .entry(to)
+                .or_default()
+                .push((Vertex::Router(id), cost));
+        }
+    }
+    for &id in networks.keys() {
+        for (to, cost, _) in neighbors(Vertex::Network(id), routers, networks, false) {
+            incoming
+                .entry(to)
+                .or_default()
+                .push((Vertex::Network(id), cost));
+        }
+    }
+    let target = Vertex::Router(target);
+    let mut dist: HashMap<Vertex, u32> = HashMap::from([(target, 0)]);
+    let mut visited: HashSet<Vertex> = HashSet::new();
+    let mut heap = BinaryHeap::from([HeapEntry {
+        dist: 0,
+        vertex: target,
+    }]);
+    while let Some(HeapEntry { dist: d, vertex }) = heap.pop() {
+        if !visited.insert(vertex) {
+            continue;
+        }
+        if vertex != target && matches!(vertex, Vertex::Router(id) if hosts.contains(&id)) {
+            continue;
+        }
+        for &(from, cost) in incoming.get(&vertex).into_iter().flatten() {
+            let candidate = d.saturating_add(cost);
+            if candidate < *dist.get(&from).unwrap_or(&u32::MAX) {
+                dist.insert(from, candidate);
+                heap.push(HeapEntry {
+                    dist: candidate,
+                    vertex: from,
+                });
+            }
+        }
+    }
+    dist
 }
 
 /// One area's intra-area-only view — the subset of RFC 2328 §16.1 SPF fit
@@ -956,6 +1133,7 @@ fn collect_network_routes(
                 next_hops,
                 metric: d,
                 backup_next_hop: None,
+                backup_tunnel: None,
                 egress: vertex,
                 class: PathClass::Intra,
             },
@@ -1003,6 +1181,7 @@ fn collect_stub_routes(
                     next_hops: next_hops.clone(),
                     metric: d.saturating_add(u32::from(link.metric)),
                     backup_next_hop: None,
+                    backup_tunnel: None,
                     egress: vertex,
                     class: PathClass::Intra,
                 },
@@ -1058,6 +1237,7 @@ fn collect_intra_area_stub_routes(
                     next_hops: next_hops.clone(),
                     metric: d.saturating_add(u32::from(link.metric)),
                     backup_next_hop: None,
+                    backup_tunnel: None,
                     egress: vertex,
                     class: PathClass::Intra,
                 },
@@ -1100,6 +1280,7 @@ fn collect_summary_routes(
                 next_hops,
                 metric: d.saturating_add(s.metric),
                 backup_next_hop: None,
+                backup_tunnel: None,
                 egress: vertex,
                 class: PathClass::Inter,
             },
@@ -1190,6 +1371,7 @@ fn collect_external_routes(
                 next_hops,
                 metric: d.saturating_add(ext.metric),
                 backup_next_hop: None,
+                backup_tunnel: None,
                 egress,
                 class: if ext.e_type2 {
                     PathClass::External2 { ext: ext.metric }
@@ -1307,6 +1489,10 @@ pub(crate) fn merge_equal(existing: &mut RouteEntry, other: RouteEntry) {
         .is_some_and(|b| existing.next_hops.contains(&b))
     {
         existing.backup_next_hop = None;
+    }
+    // A remote LFA protects a single next hop only.
+    if existing.next_hops.len() > 1 {
+        existing.backup_tunnel = None;
     }
 }
 
@@ -1489,6 +1675,7 @@ mod tests {
             backbone: true,
             skip_summaries: false,
             virtual_links: &hops,
+            remote_lfa: false,
         };
         let routes = compute_in(root, &virtual_backbone(true), &ctx);
         for (prefix, metric) in [
@@ -1580,6 +1767,7 @@ mod tests {
             next_hops: vec![addr(10, 0, 0, 2)],
             metric,
             backup_next_hop: None,
+            backup_tunnel: None,
             egress: Vertex::Router(router_id(3)),
             class,
         };
@@ -2406,6 +2594,86 @@ mod tests {
         assert_eq!(r.next_hops, vec![addr(10, 0, 12, 2)]);
         // 3 reaches 2 directly (1) < 3→root (1) + root→2 (1).
         assert_eq!(r.backup_next_hop, Some(addr(10, 0, 13, 3)));
+    }
+
+    /// An `n`-router ring (1-2-…-n-1), `cost(i, j)` the cost router `i`
+    /// advertises toward `j`, each router with a loopback `10.255.0.i/32`
+    /// unless listed in `no_loopback`.
+    fn ring(n: u8, cost: impl Fn(u8, u8) -> u16, no_loopback: &[u8]) -> Vec<Arc<Lsa>> {
+        let next = |i: u8| i % n + 1;
+        let prev = |i: u8| if i == 1 { n } else { i - 1 };
+        // The link between i and j (i < j) is 10.i.j.0/24, each end .i/.j.
+        let end = |i: u8, j: u8| addr(10, i.min(j), i.max(j), i);
+        (1..=n)
+            .map(|i| {
+                let mut links = vec![
+                    p2p(router_id(next(i)), end(i, next(i)), cost(i, next(i))),
+                    p2p(router_id(prev(i)), end(i, prev(i)), cost(i, prev(i))),
+                ];
+                if !no_loopback.contains(&i) {
+                    links.push(stub(addr(10, 255, 0, i), Ipv4Addr::BROADCAST, 1));
+                }
+                router_lsa(router_id(i), links)
+            })
+            .collect()
+    }
+
+    fn with_remote_lfa(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
+        let ctx = Context {
+            remote_lfa: true,
+            ..Context::default()
+        };
+        compute_in(root, lsas, &ctx)
+    }
+
+    #[test]
+    fn five_node_ring_gets_a_remote_lfa_to_the_pq_node() {
+        let lsas = ring(5, |_, _| 1, &[]);
+        let r = route_to(&with_remote_lfa(router_id(1), &lsas), "10.255.0.2/32");
+        assert_eq!(r.next_hops, vec![addr(10, 1, 2, 2)]);
+        // R5 reaches R2 back through R1: no basic LFA.
+        assert_eq!(r.backup_next_hop, None);
+        // P-space {R5, R4} ∩ Q-space {R3, R4}: R4, by its loopback.
+        assert_eq!(r.backup_tunnel, Some(addr(10, 255, 0, 4)));
+        // Off unless asked for.
+        let r = route_to(&compute(router_id(1), &lsas), "10.255.0.2/32");
+        assert_eq!(r.backup_tunnel, None);
+    }
+
+    #[test]
+    fn a_basic_lfa_needs_no_tunnel() {
+        let r = route_to(
+            &with_remote_lfa(router_id(1), &triangle(1)),
+            "192.168.2.0/24",
+        );
+        assert_eq!(r.backup_next_hop, Some(addr(10, 0, 13, 3)));
+        assert_eq!(r.backup_tunnel, None);
+    }
+
+    /// R4→R3 costs 10 while R3→R4 costs 1: R4's own shortest path to R2 runs
+    /// back through R1 (3 < 11), so R4 is not in R2's Q-space — which only a
+    /// reverse SPF sees (from R2 forward, R4 is 2 away, R1 1).
+    #[test]
+    fn q_space_uses_reverse_distances() {
+        let lsas = ring(5, |i, j| if (i, j) == (4, 3) { 10 } else { 1 }, &[]);
+        let r = route_to(&with_remote_lfa(router_id(1), &lsas), "10.255.0.2/32");
+        assert_eq!(r.backup_next_hop, None);
+        assert_eq!(r.backup_tunnel, None);
+    }
+
+    #[test]
+    fn a_pq_node_without_a_loopback_is_skipped() {
+        let lsas = ring(5, |_, _| 1, &[4]);
+        let r = route_to(&with_remote_lfa(router_id(1), &lsas), "10.255.0.2/32");
+        assert_eq!(r.backup_tunnel, None);
+    }
+
+    #[test]
+    fn an_ecmp_route_gets_no_tunnel() {
+        let lsas = ring(4, |_, _| 1, &[]);
+        let r = route_to(&with_remote_lfa(router_id(1), &lsas), "10.255.0.3/32");
+        assert_eq!(r.next_hops.len(), 2);
+        assert_eq!(r.backup_tunnel, None);
     }
 
     #[test]

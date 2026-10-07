@@ -51,6 +51,11 @@ pub enum OspfInstanceOp {
         name: String,
         enabled: bool,
     },
+    /// Turns RFC 7490 remote LFA on or off.
+    SetRemoteLfa {
+        name: String,
+        enabled: bool,
+    },
     Delete {
         name: String,
     },
@@ -73,6 +78,7 @@ impl OspfInstanceOp {
                         max_metric_on_shutdown: None,
                         max_metric_administrative: false,
                         host_router: false,
+                        remote_lfa: false,
                         redistribute_metric: None,
                         redistribute_metric_type: None,
                     });
@@ -105,6 +111,10 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetHostRouter { name, enabled } => {
                 find_instance_mut(config, name)?.host_router = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetRemoteLfa { name, enabled } => {
+                find_instance_mut(config, name)?.remote_lfa = *enabled;
                 Ok(())
             }
             OspfInstanceOp::Delete { name } => {
@@ -147,6 +157,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
         }
