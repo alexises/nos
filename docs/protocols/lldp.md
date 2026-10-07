@@ -237,4 +237,4 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI forms are
 
 `tx-interval`, `tx-hold` and `management-address` are system-wide: they are typed the same way from anywhere in configuration mode.
 
-Implementation notes for developers are in [`lldp/CLAUDE.md`](../../lldp/CLAUDE.md).
+Implementation notes for developers are in [`docs/internals/lldp.md`](../internals/lldp.md).

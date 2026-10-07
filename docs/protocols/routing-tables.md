@@ -328,4 +328,4 @@ A static routing instance and its routes. Relative forms, after `edit static-rou
 
 `routing-table` on interfaces, subinterfaces, loopbacks and broadcast domains is documented with those objects.
 
-How NOS maps routing tables onto Linux VRFs is described in [`rib/CLAUDE.md`](../../rib/CLAUDE.md).
+How NOS maps routing tables onto Linux VRFs is described in [`docs/internals/rib.md`](../internals/rib.md).

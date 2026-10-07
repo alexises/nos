@@ -207,4 +207,4 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | lacp-mode | `set interface <if> lacp mode active\|passive`; `delete … lacp mode` | `interface/<if>/lacp-mode`, body `"Active"` or `"Passive"` | `active` (default) or `passive` | | the LACP Activity advertised for this member; `passive` sends nothing until the partner is heard active; a change restarts this member's LACP only; meaningful while it is in a `lacp` aggregate | `show lacp` (`mode`) |
 | lacp-port-priority | `set interface <if> lacp-port-priority <n>` / `set lacp-port-priority <n>`; `delete … lacp-port-priority` | `interface/<if>/lacp-port-priority` | 0-65535; default 32768 | | the Actor Port Priority advertised for this member; a change restarts this member's LACP only; meaningful while it is in a `lacp` aggregate | `show lacp` (`port priority`) |
 
-Implementation notes for developers are in [`lacp/CLAUDE.md`](../../lacp/CLAUDE.md) and [`interface/CLAUDE.md`](../../interface/CLAUDE.md).
+Implementation notes for developers are in [`docs/internals/lacp.md`](../internals/lacp.md) and [`docs/internals/interface.md`](../internals/interface.md).
