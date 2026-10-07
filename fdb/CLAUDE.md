@@ -32,7 +32,7 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 - `bgp_client.rs` originates this domain's Type-3, Type-2 (MAC and MAC+IP) into `ServiceRef::BgpInstance(mac_redistribute)`, `Full` on every (re)connect.
 - **Route-Target filtering is fdbd's** (`fdb::desired`): `nos-bgpd` pushes every received EVPN route.
 - Symmetric IRB (#188): `Ready.irb` from `RibRequest::GetEvpnIrb`.
-- Type-5, the L3 VNI and the Router's MAC are `nos-ribd`'s (`rib/CLAUDE.md` "EVPN IP-VRF"); MAC mobility is resolved in `nos-bgpd`.
+- Type-5, the L3 VNI and the Router's MAC are `nos-ribd`'s (`docs/internals/rib.md` "EVPN IP-VRF"); MAC mobility is resolved in `nos-bgpd`.
 
 ## Ethernet Segments, DF and local bias: invariants
 

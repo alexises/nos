@@ -426,7 +426,7 @@ impl Churn {
 /// This port's own advertised `Actor_State` byte — see 802.1AX Table 6-4.
 /// `Activity` follows the configured `lacp-mode`; `Aggregation` is always set
 /// (our own bit stays set: only configured member ports run LACP at all, so
-/// we never declare ourselves Individual — see `lacp/CLAUDE.md`);
+/// we never declare ourselves Individual — see `docs/internals/lacp.md`);
 /// `Timeout` is the aggregate's `LacpRate` (set = Fast, asking the partner
 /// to send every second); the rest reflect the live state machines.
 fn actor_state_byte(

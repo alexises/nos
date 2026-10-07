@@ -191,4 +191,4 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 
 A loopback cannot have subinterfaces, a switching profile, a port aggregate or LLDP.
 
-Implementation notes for developers are in [`interface/CLAUDE.md`](../../interface/CLAUDE.md).
+Implementation notes for developers are in [`docs/internals/interface.md`](../internals/interface.md).
