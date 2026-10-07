@@ -4,7 +4,7 @@
 //! (`ServiceRef::OspfInstance`).
 //!
 //! Neighbor establishment reaches the full RFC 2328 §10.5 ladder (`Down`
-//! through `Full`), backed by a real per-area LSDB — see `ospf/CLAUDE.md`.
+//! through `Full`), backed by a real per-area LSDB — see `docs/protocols/ospf-internals.md`.
 
 use std::net::Ipv4Addr;
 

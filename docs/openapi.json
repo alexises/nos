@@ -2378,7 +2378,7 @@
         "type": "object"
       },
       "OspfInstance": {
-        "description": "A named OSPF instance. Basic configuration only today — `router_id`, the\nrouting-table (VRF) association mirroring `BgpInstance`'s own minimal\nshape, and `areas` (dotted-quad-keyed, see `OspfArea`). No interfaces\nbeyond what a nested area's profiles can be attached to yet, and no wire\nprotocol — this is a config-only skeleton, see `ospf/CLAUDE.md`.",
+        "description": "A named OSPF instance. Basic configuration only today — `router_id`, the\nrouting-table (VRF) association mirroring `BgpInstance`'s own minimal\nshape, and `areas` (dotted-quad-keyed, see `OspfArea`). No interfaces\nbeyond what a nested area's profiles can be attached to yet, and no wire\nprotocol — this is a config-only skeleton, see `docs/protocols/ospf-internals.md`.",
         "properties": {
           "areas": {
             "description": "This instance's OSPF areas, keyed by `area_id` — see `OspfArea`.",
@@ -2535,7 +2535,7 @@
             ]
           },
           "mtu": {
-            "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `ospf/CLAUDE.md`'s \"Exchange\" section.",
+            "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `docs/protocols/ospf-internals.md`'s \"LSA exchange and the LSDB\".",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -25822,7 +25822,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `ospf/CLAUDE.md`'s \"Exchange\" section.",
+                  "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `docs/protocols/ospf-internals.md`'s \"LSA exchange and the LSDB\".",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -25894,7 +25894,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `ospf/CLAUDE.md`'s \"Exchange\" section.",
+                "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `docs/protocols/ospf-internals.md`'s \"LSA exchange and the LSDB\".",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -25911,7 +25911,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `ospf/CLAUDE.md`'s \"Exchange\" section.",
+                  "description": "`None` resolves to the attach point's own real interface MTU (queried\nfrom `nos-interfaced`), falling back to 1500 if unavailable.\nOverrides what OSPF *believes* this link's MTU is — for the wire's\n`DbdPacket.interface_mtu` field and DBD pagination sizing — independent\nof the interface's real kernel MTU (mirrors real OSPF implementations'\n`mtu-bytes`-style override). See `docs/protocols/ospf-internals.md`'s \"LSA exchange and the LSDB\".",
                   "format": "int32",
                   "minimum": 0,
                   "type": [

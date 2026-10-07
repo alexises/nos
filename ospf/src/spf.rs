@@ -3,7 +3,7 @@
 //! live neighbor-table dependency), plus stub-network leaf processing and a
 //! directly-connected filter, extended with a real, 2-area-scoped ABR
 //! mechanism (Type-3/Type-4 Summary-LSA collector passes — see
-//! `ospf/CLAUDE.md`'s "ABR and Summary-LSA origination"). No I/O —
+//! `docs/protocols/ospf-internals.md`'s "ABR and Summary-LSA origination"). No I/O —
 //! `crate::link::LinkManager::compute_routes` is the only caller of
 //! `compute`, feeding it one area's `Lsdb::all()` snapshot at a time and
 //! merging each area's own result (`RouteEntry`-per-prefix, cheaper wins on

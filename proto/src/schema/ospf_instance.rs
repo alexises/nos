@@ -12,7 +12,7 @@ use nos_proto_derive::Cli;
 /// routing-table (VRF) association mirroring `BgpInstance`'s own minimal
 /// shape, and `areas` (dotted-quad-keyed, see `OspfArea`). No interfaces
 /// beyond what a nested area's profiles can be attached to yet, and no wire
-/// protocol — this is a config-only skeleton, see `ospf/CLAUDE.md`.
+/// protocol — this is a config-only skeleton, see `docs/protocols/ospf-internals.md`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]

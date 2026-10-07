@@ -73,7 +73,7 @@ pub struct BroadcastDomainStatus {
     /// created it (or under the `noop` driver, a synthesized placeholder).
     /// `nos-ospfd` needs this to bind its raw protocol-89 socket to the
     /// domain's own bridge device rather than the shared VRF device (see
-    /// `ospf/CLAUDE.md`'s "LSA exchange" section for why per-link binding,
+    /// `docs/protocols/ospf-internals.md`'s "LSA exchange and the LSDB" for why per-link binding,
     /// not VRF-wide binding, is required).
     pub bridge_name: Option<String>,
 }

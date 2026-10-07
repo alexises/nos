@@ -11,9 +11,9 @@
 //! masks included.
 //!
 //! AS-external-LSA (type 5, Appendix A.4.5) is implemented for ASBR-only
-//! redistribution (see `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA
+//! redistribution (see `docs/protocols/ospf-internals.md`'s "ASBR and AS-external-LSA
 //! origination"), and Summary-LSA (types 3/4, Appendix A.4.4) is implemented
-//! for a real, 2-area-scoped ABR mechanism (see `ospf/CLAUDE.md`'s "ABR and
+//! for a real, 2-area-scoped ABR mechanism (see `docs/protocols/ospf-internals.md`'s "ABR and
 //! Summary-LSA origination"), stub areas and area ranges (#35), and RFC 3101
 //! NSSA-external (type 7, the Type-5 body) for NSSA areas — virtual links
 //! remain out of scope.

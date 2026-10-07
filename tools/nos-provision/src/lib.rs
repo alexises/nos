@@ -553,7 +553,7 @@ pub struct Args {
     /// If set, attaches this OSPF profile name to `--routing-table`'s
     /// loopback interface (`InterfaceOp::SetOspfProfile`) — for verifying
     /// `nos-ospfd` originates a real stub-network Router-LSA link for it
-    /// (see `ospf/CLAUDE.md`'s SPF section). Mutually exclusive with
+    /// (see `docs/protocols/ospf-internals.md`'s "SPF and route installation"). Mutually exclusive with
     /// `--clear-ospf-loopback-profile`.
     #[arg(long)]
     pub ospf_loopback_profile: Option<String>,

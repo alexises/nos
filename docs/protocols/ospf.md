@@ -38,7 +38,7 @@ The configuration has three levels, plus the places you attach it:
 
 OSPF routes appear in `show route` with the source `ospf`. When the same prefix is also known from another source, the other source wins: connected, then static, then BGP, then OSPF.
 
-How the OSPF implementation works internally is described in [`ospf/CLAUDE.md`](../../ospf/CLAUDE.md).
+How the OSPF implementation works internally is described in [OSPF internals](ospf-internals.md).
 
 ## Common operations
 
