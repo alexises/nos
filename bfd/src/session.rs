@@ -25,8 +25,27 @@ pub trait Tx: Send + Sync {
 /// returned sequence numbers arrive on, and the helper tasks to stop with it.
 pub struct EchoPath {
     pub tx: Arc<dyn EchoTx>,
-    pub rx: mpsc::Receiver<u32>,
+    pub rx: mpsc::Receiver<Looped>,
     pub tasks: Vec<tokio::task::AbortHandle>,
+}
+
+/// What came back through the peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Looped {
+    /// An affiliated Echo payload's sequence number.
+    Seq(u32),
+    /// An unaffiliated session's own Control packet (RFC 9747), with the
+    /// state it carried.
+    Control(BfdState),
+}
+
+/// The Tx of a session with no Control traffic (RFC 9747).
+pub struct NoTx;
+
+impl Tx for NoTx {
+    fn send(&self, _: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Drop for EchoPath {
@@ -57,13 +76,15 @@ pub struct Status {
     pub echo_active: bool,
     /// Negotiated Echo transmit interval, microseconds; 0 while inactive.
     pub echo_interval_us: u32,
+    /// RFC 9747: Echo is the whole session, there is no Control traffic.
+    pub echo_only: bool,
 }
 
 /// Where a session's Echo packets leave: the IP packet looped through the
 /// neighbour (`socket::L2Echo` for real, a recorder in tests).
 pub trait EchoTx: Send + Sync {
-    /// Sends the echo `seq` of the session with local discriminator `disc`.
-    fn send(&self, disc: u32, seq: u32) -> io::Result<()>;
+    /// Sends one Echo packet carrying `payload`.
+    fn send(&self, payload: &[u8]) -> io::Result<()>;
 }
 
 /// The Echo function's running state.
@@ -135,16 +156,27 @@ impl Core {
     }
 
     pub fn status(&self) -> Status {
+        let (tx_interval_us, detection_time_us) = if self.unaffiliated() {
+            let iv = self.echo_interval_us();
+            (
+                iv,
+                iv.saturating_mul(u32::from(self.profile.detect_multiplier)),
+            )
+        } else {
+            (
+                self.timers.tx_interval_us(self.state).unwrap_or(SLOW_US),
+                self.timers
+                    .detection_time_us()
+                    .map_or(0, |us| u32::try_from(us).unwrap_or(u32::MAX)),
+            )
+        };
         Status {
             state: self.state,
             diag: self.diag,
             local_discriminator: self.local_disc,
             remote_discriminator: self.remote_disc,
-            tx_interval_us: self.timers.tx_interval_us(self.state).unwrap_or(SLOW_US),
-            detection_time_us: self
-                .timers
-                .detection_time_us()
-                .map_or(0, |us| u32::try_from(us).unwrap_or(u32::MAX)),
+            tx_interval_us,
+            detection_time_us,
             control_plane_independent: LOCAL_CPI && self.remote_cpi,
             auth_method: self.auth.cfg().map(|a| a.method),
             auth_key_id: self.auth.cfg().map(|a| a.key_id),
@@ -155,6 +187,7 @@ impl Core {
             } else {
                 0
             },
+            echo_only: self.unaffiliated(),
         }
     }
 
@@ -168,15 +201,33 @@ impl Core {
     /// and the remote advertised a nonzero Required Min Echo RX (§6.4).
     fn echo_wanted(&self) -> bool {
         self.echo_path
-            && self.profile.echo_mode == EchoMode::Affiliated
             && !self.profile.shutdown
-            && self.state == BfdState::Up
-            && self.remote_echo_rx > 0
+            && match self.profile.echo_mode {
+                EchoMode::Affiliated => self.state == BfdState::Up && self.remote_echo_rx > 0,
+                EchoMode::Unaffiliated => true,
+                EchoMode::Disabled => false,
+            }
     }
 
-    /// max(our echo interval, the remote's Required Min Echo RX), microseconds.
+    /// RFC 9747: the session is its own looped Control packets.
+    fn unaffiliated(&self) -> bool {
+        self.profile.echo_mode == EchoMode::Unaffiliated
+    }
+
+    /// Whether silence counts: an unaffiliated session only watches once Up
+    /// (before that it just retries at one packet a second).
+    fn watching(&self) -> bool {
+        !self.unaffiliated() || self.state == BfdState::Up
+    }
+
+    /// max(our echo interval, the remote's Required Min Echo RX), microseconds;
+    /// RFC 9747 §3: at most one packet a second until Up.
     fn echo_interval_us(&self) -> u32 {
-        (self.profile.echo_interval * MS).max(self.remote_echo_rx)
+        if self.watching() {
+            (self.profile.echo_interval * MS).max(self.remote_echo_rx)
+        } else {
+            SLOW_US
+        }
     }
 
     /// What we advertise as Desired Min TX: §6.8.3 keeps Control at one
@@ -204,13 +255,16 @@ impl Core {
             sent: 0,
             acked: 0,
         });
+        if self.unaffiliated() {
+            return false; // no Control session to Poll
+        }
         self.timers
             .change(self.effective_tx(), self.profile.min_rx_interval * MS);
         !was_polling && self.timers.poll()
     }
 
-    /// The sequence number of an echo to send now, if one is due.
-    pub fn echo_due(&mut self, now: Instant) -> Option<u32> {
+    /// The sequence number and payload of an echo to send now, if one is due.
+    pub fn echo_due(&mut self, now: Instant) -> Option<(u32, Vec<u8>)> {
         let iv = Duration::from_micros(u64::from(self.echo_interval_us()));
         let e = self.echo.as_mut()?;
         if now < e.next_tx {
@@ -218,16 +272,37 @@ impl Core {
         }
         e.sent = e.sent.wrapping_add(1);
         e.next_tx = now + iv;
-        Some(e.sent)
+        let seq = e.sent;
+        let payload = if self.unaffiliated() {
+            self.packet(false).encode().to_vec()
+        } else {
+            crate::echo::payload(self.local_disc, seq).to_vec()
+        };
+        Some((seq, payload))
     }
 
-    /// A returned echo with sequence `seq` (any not-yet-seen one we sent).
-    pub fn on_echo(&mut self, now: Instant, seq: u32) {
-        if let Some(e) = self.echo.as_mut() {
-            if seq > e.acked && seq <= e.sent {
+    /// Something came back: a not-yet-seen echo sequence we sent, or (RFC
+    /// 9747) our own Control packet, whose state drives the §6.2 machine as
+    /// if the peer had sent it.
+    pub fn on_echo(&mut self, now: Instant, looped: Looped) {
+        let Some(e) = self.echo.as_mut() else { return };
+        match looped {
+            Looped::Seq(seq) if seq > e.acked && seq <= e.sent => {
                 e.acked = seq;
                 e.last_ok = now;
             }
+            Looped::Control(s) if self.profile.echo_mode == EchoMode::Unaffiliated => {
+                e.last_ok = now;
+                self.remote_disc = self.local_disc;
+                if self.apply(Event::RxState(s)) && self.state == BfdState::Up {
+                    // The 1 s pace of the climb ends; the provisioned one starts.
+                    let iv = Duration::from_micros(u64::from(self.echo_interval_us()));
+                    if let Some(e) = self.echo.as_mut() {
+                        e.next_tx = now + iv;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -236,15 +311,21 @@ impl Core {
         let detect = Duration::from_micros(
             u64::from(self.echo_interval_us()) * u64::from(self.profile.detect_multiplier),
         );
-        Some(e.next_tx.min(e.last_ok + detect))
+        Some(if self.watching() {
+            e.next_tx.min(e.last_ok + detect)
+        } else {
+            e.next_tx
+        })
     }
 
     fn echo_expired(&self, now: Instant) -> bool {
         self.echo.as_ref().is_some_and(|e| {
-            now.saturating_duration_since(e.last_ok)
-                >= Duration::from_micros(
-                    u64::from(self.echo_interval_us()) * u64::from(self.profile.detect_multiplier),
-                )
+            self.watching()
+                && now.saturating_duration_since(e.last_ok)
+                    >= Duration::from_micros(
+                        u64::from(self.echo_interval_us())
+                            * u64::from(self.profile.detect_multiplier),
+                    )
         })
     }
 
@@ -286,8 +367,16 @@ impl Core {
         changed
     }
 
+    // ponytail: RFC 9747 says SHOULD authenticate; unaffiliated Control packets
+    // go out unsigned (`sign` is only called for the Control path). Add the auth
+    // section to the Echo payload if an operator needs it.
     fn packet(&self, final_: bool) -> Packet {
-        let (desired_min_tx, required_min_rx) = self.timers.advertised(self.state);
+        // RFC 9747 §3: populated, never used by anyone; 1 s each.
+        let (desired_min_tx, required_min_rx) = if self.unaffiliated() {
+            (SLOW_US, SLOW_US)
+        } else {
+            self.timers.advertised(self.state)
+        };
         Packet {
             diag: self.diag.code(),
             state: self.state,
@@ -318,6 +407,7 @@ impl Core {
         // §6.8.6: AdminDown discards everything; a nonzero Your Discriminator
         // must be ours.
         if self.state == BfdState::AdminDown
+            || self.unaffiliated()
             || (p.your_discriminator != 0 && p.your_discriminator != self.local_disc)
         {
             return None;
@@ -347,6 +437,21 @@ impl Core {
 
     /// The clock reached `deadline()`: detection expiry and periodic transmit.
     pub fn on_timer(&mut self, now: Instant, rand_pct: u32) -> Option<Packet> {
+        if self.unaffiliated() {
+            if self.echo_expired(now) && self.apply(Event::EchoTimeout) {
+                self.remote_disc = 0;
+                // Back to at most one packet a second until Up again.
+                if let Some(e) = self.echo.as_mut() {
+                    e.next_tx = now + Duration::from_micros(u64::from(SLOW_US));
+                }
+            }
+            self.sync_echo(now);
+            // No Control packets; keep the unused Control clock from spinning.
+            if self.timers.tx_due(now) {
+                self.timers.schedule_tx(now, self.state, rand_pct);
+            }
+            return None;
+        }
         let mut due = false;
         if matches!(self.state, BfdState::Init | BfdState::Up) && self.timers.detect_expired(now) {
             due = self.apply(Event::DetectTimeout);
@@ -398,6 +503,9 @@ impl Core {
 
     /// When `on_timer` next has work.
     pub fn deadline(&self) -> Instant {
+        if self.unaffiliated() {
+            return self.echo_deadline().unwrap_or(self.timers.next_tx());
+        }
         let tx = self.timers.next_tx();
         let tx = match self.timers.detect_deadline() {
             Some(d) if matches!(self.state, BfdState::Init | BfdState::Up) => tx.min(d),
@@ -467,16 +575,16 @@ pub async fn run(
                 None => break,
             },
             () = tokio::time::sleep_until(deadline) => core.on_timer(now(), jitter_pct()),
-            seq = async {
+            looped = async {
                 match echo.as_mut() {
                     Some(e) => match e.rx.recv().await {
-                        Some(seq) => seq,
+                        Some(l) => l,
                         None => std::future::pending().await,
                     },
                     None => std::future::pending().await,
                 }
             } => {
-                core.on_echo(now(), seq);
+                core.on_echo(now(), looped);
                 None
             }
         };
@@ -485,8 +593,8 @@ pub async fn run(
                 debug!(peer = %key.peer, error = %e, "bfd send failed");
             }
         }
-        if let (Some(seq), Some(e)) = (core.echo_due(now()), echo.as_ref()) {
-            if let Err(err) = e.tx.send(last.local_discriminator, seq) {
+        if let (Some((_, payload)), Some(e)) = (core.echo_due(now()), echo.as_ref()) {
+            if let Err(err) = e.tx.send(&payload) {
                 debug!(peer = %key.peer, error = %err, "bfd echo send failed");
             }
         }
@@ -583,9 +691,9 @@ mod tests {
                 (&mut self.b, false)
             };
             let out = core.on_timer(self.now, 100);
-            if let Some(seq) = core.echo_due(self.now) {
+            if let Some((seq, _)) = core.echo_due(self.now) {
                 if self.echo_ok {
-                    core.on_echo(self.now, seq);
+                    core.on_echo(self.now, Looped::Seq(seq));
                 }
             }
             if let Some(p) = out {
@@ -750,6 +858,113 @@ mod tests {
         let pkt = pkt.expect("a Poll restores the control rate");
         assert!(pkt.poll && pkt.required_min_echo_rx == 0);
         assert_eq!(pkt.desired_min_tx, 100_000);
+    }
+
+    fn unaffiliated(echo_ms: u32) -> BfdProfile {
+        BfdProfile {
+            echo_mode: EchoMode::Unaffiliated,
+            echo_interval: echo_ms,
+            detect_multiplier: 3,
+            ..profile(100, 100)
+        }
+    }
+
+    /// An unaffiliated core whose echoes come back while `loop_ok`; returns
+    /// the sent payloads' decoded packets by time.
+    fn run_unaffiliated(
+        c: &mut Core,
+        now: &mut Instant,
+        steps: usize,
+        loop_ok: bool,
+    ) -> Vec<(Instant, Packet)> {
+        let mut sent = Vec::new();
+        for _ in 0..steps {
+            *now = c.deadline();
+            assert!(c.on_timer(*now, 100).is_none(), "no Control packets");
+            if let Some((_, pl)) = c.echo_due(*now) {
+                let p = crate::packet::decode(&pl).expect("a Control packet");
+                if loop_ok {
+                    c.on_echo(*now, Looped::Control(p.state));
+                }
+                sent.push((*now, p));
+            }
+        }
+        sent
+    }
+
+    #[test]
+    fn unaffiliated_goes_up_on_looped_packets_then_down_with_diag_2() {
+        let t0 = Instant::now();
+        let mut now = t0;
+        let mut c = Core::new(unaffiliated(50), 7, t0);
+        c.set_echo_path(true);
+        let sent = run_unaffiliated(&mut c, &mut now, 8, true);
+        assert_eq!(c.state, BfdState::Up, "Down -> Init -> Up on its own state");
+        assert_eq!(c.remote_disc, 7, "Your Discriminator is the looped value");
+        // The first packets: Down with Your Discriminator 0, then 1 s apart.
+        let first = &sent[0].1;
+        assert_eq!((first.state, first.your_discriminator), (BfdState::Down, 0));
+        assert_eq!(sent[1].0 - sent[0].0, Duration::from_secs(1));
+        assert_eq!(sent[2].0 - sent[1].0, Duration::from_millis(50), "Up now");
+        // Mandatory fields are populated (RFC 9747 §3), echo RX is zero.
+        let p = &sent[2].1;
+        assert_eq!(p.my_discriminator, 7);
+        assert_eq!(
+            (p.desired_min_tx, p.required_min_rx),
+            (1_000_000, 1_000_000)
+        );
+        assert_eq!(p.required_min_echo_rx, 0);
+        assert_eq!(p.detect_mult, 3);
+        // Once Up the provisioned interval applies.
+        let up = sent
+            .iter()
+            .position(|(_, p)| p.state == BfdState::Up)
+            .unwrap();
+        assert_eq!(sent[up + 1].0 - sent[up].0, Duration::from_millis(50));
+        let s = c.status();
+        assert!(s.echo_only && s.echo_active);
+        assert_eq!((s.tx_interval_us, s.detection_time_us), (50_000, 150_000));
+
+        // Loop broken: Down after 3 x 50 ms, diag Echo Function Failed.
+        run_unaffiliated(&mut c, &mut now, 20, false);
+        assert_eq!(c.state, BfdState::Down);
+        assert_eq!(c.diag, BfdDiag::EchoFunctionFailed);
+        assert_eq!(c.remote_disc, 0);
+        assert_eq!(c.status().tx_interval_us, 1_000_000, "back to 1 s");
+        // And it recovers when packets return.
+        run_unaffiliated(&mut c, &mut now, 8, true);
+        assert_eq!(c.state, BfdState::Up);
+    }
+
+    #[test]
+    fn unaffiliated_detects_within_interval_times_multiplier() {
+        let mut now = Instant::now();
+        let mut c = Core::new(unaffiliated(50), 7, now);
+        c.set_echo_path(true);
+        run_unaffiliated(&mut c, &mut now, 8, true);
+        assert_eq!(c.state, BfdState::Up);
+        let t = now;
+        while c.state == BfdState::Up {
+            run_unaffiliated(&mut c, &mut now, 1, false);
+        }
+        assert!(now - t <= Duration::from_millis(200), "{:?}", now - t);
+        assert!(now - t >= Duration::from_millis(100), "{:?}", now - t);
+    }
+
+    #[test]
+    fn unaffiliated_ignores_control_and_needs_a_path() {
+        let now = Instant::now();
+        let mut c = Core::new(unaffiliated(50), 7, now);
+        let theirs = Core::new(profile(100, 100), 9, now).packet(false);
+        assert!(c.on_packet(now, &theirs, 100).is_none());
+        assert_eq!(c.remote_disc, 0, "a peer's Control packet teaches nothing");
+        // No transport: nothing is sent, nothing spins.
+        c.on_timer(now, 100);
+        assert!(c.echo.is_none() && c.echo_due(now).is_none());
+        assert!(c.deadline() > now);
+        // A looped state from nowhere moves nothing without Echo running.
+        c.on_echo(now, Looped::Control(BfdState::Init));
+        assert_eq!(c.state, BfdState::Down);
     }
 
     fn authed(key: &str, id: u8) -> BfdProfile {

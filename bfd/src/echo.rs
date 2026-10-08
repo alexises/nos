@@ -96,6 +96,16 @@ pub fn build(local: IpAddr, sport: u16, payload: &[u8]) -> Vec<u8> {
 /// equal destination must equal `local`), a TTL below 254 (it crossed more
 /// than the one hop), a bad checksum or a payload that is not ours.
 pub fn parse(packet: &[u8], local: IpAddr) -> Option<(u32, u32)> {
+    let (p, _) = parse_udp(packet, local)?;
+    (p.len() == 8).then_some((
+        u32::from_be_bytes(p.get(..4)?.try_into().ok()?),
+        u32::from_be_bytes(p.get(4..8)?.try_into().ok()?),
+    ))
+}
+
+/// The UDP payload and TTL of a packet that passes every `parse` check
+/// except the payload's shape (RFC 9747 loops a whole Control packet).
+pub fn parse_udp(packet: &[u8], local: IpAddr) -> Option<(&[u8], u8)> {
     let (udp, ttl) = match local {
         IpAddr::V4(a) => {
             let ihl = usize::from(*packet.first()? & 0xf) * 4;
@@ -130,17 +140,14 @@ pub fn parse(packet: &[u8], local: IpAddr) -> Option<(u32, u32)> {
         }
     };
     if ttl < MIN_RX_TTL
-        || udp.len() != UDP_LEN + 8
+        || udp.len() < UDP_LEN
         || u16::from_be_bytes([udp[2], udp[3]]) != ECHO_PORT
         || usize::from(u16::from_be_bytes([udp[4], udp[5]])) != udp.len()
         || fold(sum(udp, pseudo(local, udp.len()))) != 0
     {
         return None;
     }
-    Some((
-        u32::from_be_bytes(udp[8..12].try_into().ok()?),
-        u32::from_be_bytes(udp[12..16].try_into().ok()?),
-    ))
+    Some((&udp[UDP_LEN..], ttl))
 }
 
 /// The pseudo-header sum of a `local`-to-`local` UDP datagram.
@@ -198,6 +205,14 @@ mod tests {
         let c = fold(sum(&p[..20], 0));
         p[10..12].copy_from_slice(&c.to_be_bytes());
         assert_eq!(parse(&p, v4()), Some((3, 4)));
+    }
+
+    #[test]
+    fn control_sized_payloads_pass_parse_udp_only() {
+        let p = build(v4(), 50000, &[7u8; 24]);
+        let (pl, ttl) = parse_udp(&p, v4()).unwrap();
+        assert_eq!((pl, ttl), (&[7u8; 24][..], 255));
+        assert_eq!(parse(&p, v4()), None, "not an 8-byte echo payload");
     }
 
     #[test]

@@ -154,6 +154,8 @@ pub struct BfdSessionView {
     pub echo_active: bool,
     /// Negotiated Echo transmit interval, microseconds; 0 while inactive.
     pub echo_interval_us: u32,
+    /// RFC 9747 unaffiliated Echo: no Control traffic at all.
+    pub echo_only: bool,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

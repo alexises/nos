@@ -102,7 +102,7 @@ set echo-mode affiliated
 set echo-interval 50
 ```
 
-- `echo-mode` is `disabled` (default) or `affiliated`: Echo runs next to the Control session. `echo-interval` is in milliseconds (10 to 4294967, default 50).
+- `echo-mode` is `disabled` (default), `affiliated` (Echo runs next to the Control session) or `unaffiliated` (next section). `echo-interval` is in milliseconds (10 to 4294967, default 50).
 - Every Control packet advertises `echo-interval` as Required Min Echo RX; `disabled` advertises 0, so the peer never loops echoes through you.
 - Echo starts when the session is `up`, the profile asks for it and the peer advertises a nonzero Required Min Echo RX. The interval used is the larger of the two. `nos-bfdd` logs `bfd echo active peer=... interval_us=...`, and `bfd echo inactive` when it stops (session not `up`, `echo-mode` removed, peer advertises 0).
 - While Echo runs, Control packets slow to one per second or less (a Poll sequence raises Desired Min TX to 1 s, and restores it when Echo stops).
@@ -111,6 +111,26 @@ set echo-interval 50
 - The neighbour must forward IP between the two addresses of the link (`net.ipv4.ip_forward=1` / `net.ipv6.conf.all.forwarding=1`). It may send ICMP redirects for the looped packet; it still forwards, but set `send_redirects=0` on that interface to avoid the noise.
 - The neighbour's MAC comes from the kernel neighbour table, read only: the Control session's ARP/ND creates the entry. Without one, echoes are not sent and the session goes `down` after the echo detection time.
 - Echo packets carry no authentication (RFC 5880 has none for Echo); `auth` covers Control only.
+
+## Monitor a gateway that runs no BFD
+
+RFC 9747 unaffiliated Echo: the session is made only of your own Control packets, looped back through the neighbour's forwarding. Use it to guard a static route whose gateway has no BFD.
+
+```
+edit bfd-profile gw
+set echo-mode unaffiliated
+set echo-interval 50
+```
+
+- Reference the profile from the route as usual (`bfd gw` on the static route). The route is installed once the session is `up` and withdrawn when it goes `down`.
+- The packet is a BFD Control packet to UDP 3785, addressed from and to one of your own addresses, sent with TTL 255 to the gateway's MAC. It is accepted only when it returns with TTL exactly 254, so the loop must cross exactly one routed hop; a pure L2 reflector is rejected.
+- The state machine of RFC 5880 section 6.2 runs on your own looped state: `down` to `init` to `up`. Until `up` at most one packet a second goes out; once `up`, one per `echo-interval`.
+- No packet back for `echo-interval x detect-multiplier` while `up` takes the session `down` with `diag echo-function-failed`. It stays `down` and retries at one packet a second until packets return.
+- Desired Min TX, Required Min RX (both 1 s) and Required Min Echo RX (0) are populated but never used. `min-rx-interval`, `min-tx-interval`, `passive` and `auth` are ignored (no authentication on unaffiliated sessions yet).
+- The gateway must forward IP back out of the same interface (`ip_forward=1`, no strict uRPF `rp_filter=1` on it) and the loop must not be dropped by a firewall. It does not need to run BFD.
+- Nothing is sent on UDP 3784. Because no Control exchange resolves the neighbour, `nos-bfdd` sends an empty datagram to the gateway's UDP 3785 until the kernel has an ARP/ND entry, and then reads the MAC from it.
+- Single-hop only: a multihop key logs `bfd unaffiliated echo needs a single-hop session` and stays `down`.
+- Changing `echo-mode` between `unaffiliated` and another value restarts the session.
 
 ## Check sessions
 
@@ -122,9 +142,9 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 
 - `tx` is the negotiated transmit interval, `detect` the detection time, `discriminators` local/remote.
 - With `auth` set the line ends with `auth <method> key <id> (<n> failures)`; the key is never shown.
-- While Echo runs the line ends with `echo active <n>ms`.
+- While Echo runs the line ends with `echo active <n>ms`, followed by `(echo-only)` for an unaffiliated session, where `tx` is the echo interval and `detect` is `echo-interval x detect-multiplier`.
 - A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
-- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id`, `auth_failures`, `echo_active` and `echo_interval_us` (0 while Echo is off).
+- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id`, `auth_failures`, `echo_active`, `echo_interval_us` (0 while Echo is off) and `echo_only` (unaffiliated).
 - "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
 
 ## Multi-hop sessions

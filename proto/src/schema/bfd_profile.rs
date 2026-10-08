@@ -92,13 +92,15 @@ pub struct BfdProfile {
 
 /// Whether this system loops its own Echo packets through the peer (RFC 5880
 /// §6.4). `Affiliated`: the Echo function runs alongside the Control session,
-/// which then slows to one packet a second.
+/// which then slows to one packet a second. `Unaffiliated` (RFC 9747): Echo
+/// is the whole session, for a peer that runs no BFD at all.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EchoMode {
     #[default]
     Disabled,
     Affiliated,
+    Unaffiliated,
 }
 
 fn echo_interval_default() -> u32 {
