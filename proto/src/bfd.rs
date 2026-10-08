@@ -9,7 +9,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::BfdProfile;
+use crate::schema::{BfdAuthMethod, BfdProfile};
 
 /// What identifies one BFD session: a routing table, the remote system and
 /// the path to it (RFC 5881 single-hop is bound to an interface, RFC 5883
@@ -145,6 +145,11 @@ pub struct BfdSessionView {
     pub tx_interval_us: u32,
     /// Detection time, microseconds.
     pub detection_time_us: u32,
+    /// The configured authentication (never the key), `None` when off.
+    pub auth_method: Option<BfdAuthMethod>,
+    pub auth_key_id: Option<u8>,
+    /// Packets dropped by RFC 5880 §6.7 authentication since the session started.
+    pub auth_failures: u64,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

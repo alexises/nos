@@ -4,13 +4,24 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 
 ## Modules
 
-- `packet`: RFC 5880 §4.1 mandatory section (24 bytes) codec.
-    - `decode` applies the stateless §6.8.6 checks; `check_session` is the stateful pair (session lookup, A-bit mismatch) the session code calls.
-    - The A bit decodes to `DecodeError::AuthUnsupported` until #289.
+- `packet`: RFC 5880 §4.1 control packet codec.
+    - `decode` applies the stateless §6.8.6 checks; with the A bit it also parses the authentication section into `Packet.auth` (`DecodeError::BadAuthSection` when malformed). `encode` writes the mandatory section only.
+- `auth`: RFC 5880 §4.2-4.4/§6.7. `sign` appends the section, `AuthState` holds a session's key, old key, `RcvAuthSeq`/`AuthSeqKnown` and `XmitAuthSeq`.
 - `fsm`: `step(state, event) -> (state, Option<diag>)`, the §6.8.6 table; `may_transmit` covers `passive` (§6.1) and Remote Min RX 0.
 - `timers`: `Timers`, `now` and the jitter draw passed in.
 - `authz`: `allowed(role, &BfdRequest)`, no wildcard arm.
 - Wire types live in `nos_proto::bfd`.
+
+## Authentication
+
+- `Core::authenticate(now, &Packet)` runs before `on_packet` and `Core::sign` wraps every outgoing packet; a failed packet never reaches the FSM or the timers.
+- The digest is MD5/SHA1 over the packet with the digest field replaced by the key zero-padded to 16/20 bytes; digests and passwords compare in constant time.
+- Replay window: keyed accepts `[RcvAuthSeq, RcvAuthSeq + 3 x DetectMult]`, meticulous `(RcvAuthSeq, ...]`, wrap-aware; unknown (`AuthSeqKnown` false) accepts any, and silence of 2 detection times forgets it.
+- `XmitAuthSeq` starts random; meticulous bumps it per packet, keyed once per detection time.
+- A profile edit goes through `AuthState::set`: the new key signs at once, the previous one stays acceptable for 4 detection times; a method change resets `AuthSeqKnown`.
+- `session::run` logs `bfd auth failed` (rate limited to one per 10 s per session); `Status` and `BfdSessionView` carry `auth_method`, `auth_key_id`, `auth_failures`.
+- Unit tests check digests against an independent re-implementation of the RFC recipe in `auth.rs` tests. `ponytail:` no FRR positive proof: FRR `bfdd` has no §6.7 support, so `nos-e2e`'s `bfd-auth` only proves the negative case against it.
+- #294 (S-BFD) will add reflector authentication on top of this module.
 
 ## FSM
 
@@ -62,5 +73,6 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 ## Check it by hand
 
 - `nos show bfd sessions` or `GET /v1/bfd/sessions` lists what the daemon holds.
+- `cargo run -p nos-e2e -- bfd-auth` proves matching and wrong keys, a live key and method change without a flap, and the unauthenticated FRR staying down.
 - `cargo run -p nos-e2e -- bfd` proves both ways Up (also read back over `GET /v1/bfd/sessions`), the route withdrawn and restored around a dropped UDP 3784, and interop with FRR `bfdd`.
 - `docker exec router-a ...` has no `ip`/`tcpdump`: use the netns helper images from `tools/e2e` to sniff.

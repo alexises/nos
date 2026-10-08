@@ -3,13 +3,14 @@
 
 use std::io;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use nos_proto::schema::BfdProfile;
+use nos_proto::schema::{BfdAuthMethod, BfdProfile};
 use nos_proto::{BfdDiag, BfdState, SessionKey};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use crate::auth::{AuthError, AuthState};
 use crate::fsm::{self, Event};
 use crate::packet::Packet;
 use crate::timers::{Remote, Timers, SLOW_US};
@@ -31,6 +32,11 @@ pub struct Status {
     pub detection_time_us: u32,
     /// C bit at both ends (see `BfdEvent::State`).
     pub control_plane_independent: bool,
+    /// The configured authentication (never the key).
+    pub auth_method: Option<BfdAuthMethod>,
+    pub auth_key_id: Option<u8>,
+    /// Packets dropped by §6.7 authentication so far.
+    pub auth_failures: u64,
 }
 
 /// RFC 5880 §4.1 C bit: `nos-bfdd` is its own process, so a `nos-bgpd`
@@ -50,6 +56,8 @@ pub struct Core {
     /// The C bit of the last packet received.
     remote_cpi: bool,
     timers: Timers,
+    auth: AuthState,
+    auth_failures: u64,
 }
 
 const MS: u32 = 1000;
@@ -62,6 +70,7 @@ impl Core {
             profile.detect_multiplier,
             now,
         );
+        let auth = AuthState::new(profile.auth.clone(), rand_u32(), now);
         let mut core = Core {
             profile,
             state: BfdState::Down,
@@ -71,6 +80,8 @@ impl Core {
             remote_rx: 1,
             remote_cpi: false,
             timers,
+            auth,
+            auth_failures: 0,
         };
         if core.profile.shutdown {
             core.apply(Event::AdminDown);
@@ -90,7 +101,33 @@ impl Core {
                 .detection_time_us()
                 .map_or(0, |us| u32::try_from(us).unwrap_or(u32::MAX)),
             control_plane_independent: LOCAL_CPI && self.remote_cpi,
+            auth_method: self.auth.cfg().map(|a| a.method),
+            auth_key_id: self.auth.cfg().map(|a| a.key_id),
+            auth_failures: self.auth_failures,
         }
+    }
+
+    fn detection_time(&self) -> Option<Duration> {
+        self.timers.detection_time_us().map(Duration::from_micros)
+    }
+
+    /// RFC 5880 §6.7.2 for a decoded packet; call before `on_packet`. An
+    /// `Err` packet must be dropped: it neither refreshes the detection timer
+    /// nor moves the state.
+    pub fn authenticate(&mut self, now: Instant, p: &Packet) -> Result<(), AuthError> {
+        let r = self
+            .auth
+            .check(now, p.detect_mult, p.auth.as_ref(), self.detection_time());
+        if r.is_err() {
+            self.auth_failures += 1;
+        }
+        r
+    }
+
+    /// The wire bytes of an outgoing packet, signed when auth is configured.
+    pub fn sign(&mut self, now: Instant, p: &Packet) -> Vec<u8> {
+        let d = self.detection_time();
+        self.auth.sign(now, &p.encode(), d)
     }
 
     /// Applies one FSM event; whether the state changed.
@@ -124,6 +161,7 @@ impl Core {
             desired_min_tx,
             required_min_rx,
             required_min_echo_rx: 0,
+            auth: None,
         }
     }
 
@@ -187,6 +225,8 @@ impl Core {
         self.timers.set_detect_mult(profile.detect_multiplier);
         self.timers
             .change(profile.min_tx_interval * MS, profile.min_rx_interval * MS);
+        let hold = self.detection_time().unwrap_or(Duration::from_secs(3));
+        self.auth.set(profile.auth.clone(), now, hold);
         let shutdown = profile.shutdown;
         self.profile = profile;
         let moved = was_down
@@ -216,14 +256,18 @@ impl Core {
 /// `RandomState` is seeded from the OS per instance.
 pub fn rand_u32() -> u32 {
     use std::hash::{BuildHasher, Hasher};
-    // ponytail: SipHash of nothing, not a CSPRNG; discriminators are
-    // unauthenticated anyway (auth is #289). Swap for `getrandom` then.
+    // ponytail: SipHash of nothing, not a CSPRNG; it seeds discriminators and
+    // the auth XmitAuthSeq start, neither of which is a secret (the key is).
+    // Swap for `getrandom` if they must be unguessable.
     #[allow(clippy::cast_possible_truncation, reason = "low half is enough")]
     let v = std::collections::hash_map::RandomState::new()
         .build_hasher()
         .finish() as u32;
     v
 }
+
+/// Minimum gap between two `bfd auth failed` warnings of one session.
+const AUTH_WARN_EVERY: Duration = Duration::from_secs(10);
 
 fn jitter_pct() -> u32 {
     75 + rand_u32() % 26
@@ -243,11 +287,22 @@ pub async fn run(
     status: watch::Sender<Status>,
 ) {
     let mut last = core.status();
+    let mut last_warn: Option<Instant> = None;
     loop {
         let deadline = tokio::time::Instant::from_std(core.deadline());
         let out = tokio::select! {
             p = pkts.recv() => match p {
-                Some(p) => core.on_packet(now(), &p, jitter_pct()),
+                Some(p) => match core.authenticate(now(), &p) {
+                    Ok(()) => core.on_packet(now(), &p, jitter_pct()),
+                    Err(e) => {
+                        // Rate-limited: a wrong key is a packet every interval.
+                        if last_warn.is_none_or(|t| now() - t >= AUTH_WARN_EVERY) {
+                            last_warn = Some(now());
+                            warn!(peer = %key.peer, table = %key.table, reason = %e, "bfd auth failed");
+                        }
+                        None
+                    }
+                },
                 None => break,
             },
             c = cmds.recv() => match c {
@@ -257,7 +312,7 @@ pub async fn run(
             () = tokio::time::sleep_until(deadline) => core.on_timer(now(), jitter_pct()),
         };
         if let Some(p) = out {
-            if let Err(e) = tx.send(&p.encode()) {
+            if let Err(e) = tx.send(&core.sign(now(), &p)) {
                 debug!(peer = %key.peer, error = %e, "bfd send failed");
             }
         }
@@ -317,13 +372,19 @@ mod tests {
         fn deliver(now: Instant, from_a: bool, a: &mut Core, b: &mut Core, p: Packet) {
             let mut next = Some((from_a, p));
             while let Some((from_a, p)) = next.take() {
-                let (rx, other) = if from_a {
-                    (&mut *b, true)
+                let (tx, rx) = if from_a {
+                    (&mut *a, &mut *b)
                 } else {
-                    (&mut *a, false)
+                    (&mut *b, &mut *a)
                 };
+                // Over the wire, auth section included.
+                let wire = tx.sign(now, &p);
+                let p = crate::packet::decode(&wire).expect("our own packet decodes");
+                if rx.authenticate(now, &p).is_err() {
+                    continue;
+                }
                 if let Some(reply) = rx.on_packet(now, &p, 100) {
-                    next = Some((!other, reply));
+                    next = Some((!from_a, reply));
                 }
             }
         }
@@ -410,6 +471,61 @@ mod tests {
         assert_eq!(p.a.status().tx_interval_us, 100_000);
         assert_eq!(p.a.state, BfdState::Up);
         assert_eq!(p.b.state, BfdState::Up);
+    }
+
+    fn authed(key: &str, id: u8) -> BfdProfile {
+        use nos_proto::schema::BfdAuth;
+        BfdProfile {
+            auth: Some(BfdAuth {
+                key_id: id,
+                method: BfdAuthMethod::MeticulousSha1,
+                key: key.into(),
+            }),
+            ..profile(100, 100)
+        }
+    }
+
+    #[test]
+    fn matching_keys_reach_up_and_a_key_change_does_not_flap() {
+        let mut p = Pair::new(authed("a", 1), authed("a", 1));
+        p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
+        assert_eq!(p.a.status().auth_failures, 0);
+        assert_eq!(p.a.status().auth_key_id, Some(1));
+        // Both ends switch at once (new id and secret); the old key covers
+        // whatever crosses on the wire meanwhile.
+        let pa = p.a.update_profile(authed("b", 2), p.now, 100);
+        let pb = p.b.update_profile(authed("b", 2), p.now, 100);
+        for (from_a, pkt) in [(true, pa), (false, pb)] {
+            if let Some(pkt) = pkt {
+                Pair::deliver(p.now, from_a, &mut p.a, &mut p.b, pkt);
+            }
+        }
+        for _ in 0..30 {
+            p.step();
+            assert_eq!((p.a.state, p.b.state), (BfdState::Up, BfdState::Up));
+        }
+        assert_eq!(p.a.status().auth_key_id, Some(2));
+    }
+
+    #[test]
+    fn mismatched_keys_never_come_up_and_are_counted() {
+        let mut p = Pair::new(authed("a", 1), authed("b", 1));
+        for _ in 0..50 {
+            p.step();
+        }
+        assert_eq!((p.a.state, p.b.state), (BfdState::Down, BfdState::Down));
+        assert!(p.a.status().auth_failures > 0);
+        assert_eq!(p.a.remote_disc, 0, "a dropped packet teaches nothing");
+    }
+
+    #[test]
+    fn auth_on_one_side_only_stays_down() {
+        let mut p = Pair::new(authed("a", 1), profile(100, 100));
+        for _ in 0..50 {
+            p.step();
+        }
+        assert_eq!((p.a.state, p.b.state), (BfdState::Down, BfdState::Down));
+        assert!(p.a.status().auth_failures > 0 && p.b.status().auth_failures > 0);
     }
 
     #[test]

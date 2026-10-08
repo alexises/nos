@@ -275,6 +275,17 @@ pub fn render_lldp_neighbors_detail(neighbors: &[nos_proto::LldpNeighbor]) -> St
         .join("\n")
 }
 
+fn bfd_method_name(m: nos_proto::schema::BfdAuthMethod) -> &'static str {
+    use nos_proto::schema::BfdAuthMethod as M;
+    match m {
+        M::SimplePassword => "simple-password",
+        M::KeyedMd5 => "keyed-md5",
+        M::MeticulousMd5 => "meticulous-md5",
+        M::KeyedSha1 => "keyed-sha1",
+        M::MeticulousSha1 => "meticulous-sha1",
+    }
+}
+
 /// Render `nos-bfdd`'s sessions, for `show bfd sessions`: one line each,
 /// ordered as the daemon sent them (table, then peer). `local` and
 /// `interface` are shown only when the key carries them.
@@ -292,9 +303,17 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
                 .as_deref()
                 .map_or_else(String::new, |i| format!(" on {i}"));
             let multihop = if k.multihop { " multihop" } else { "" };
+            let auth = match (s.auth_method, s.auth_key_id) {
+                (Some(m), Some(id)) => format!(
+                    ", auth {} key {id} ({} failures)",
+                    bfd_method_name(m),
+                    s.auth_failures
+                ),
+                _ => String::new(),
+            };
             format!(
                 "{}: peer {}{local}{interface}{multihop}, {}, diag {}, tx {}ms, detect {}ms, \
-                 discriminators {}/{}",
+                 discriminators {}/{}{auth}",
                 k.table,
                 k.peer,
                 s.state,
@@ -1737,6 +1756,9 @@ mod tests {
             remote_discriminator: 2,
             tx_interval_us: 100_000,
             detection_time_us: 300_000,
+            auth_method: None,
+            auth_key_id: None,
+            auth_failures: 0,
         };
         let up = view("192.0.2.1", BfdState::Up, BfdDiag::NoDiagnostic, None);
         let down = view(
@@ -1745,6 +1767,14 @@ mod tests {
             BfdDiag::ControlDetectionTimeExpired,
             Some("eth1"),
         );
+        let authed = BfdSessionView {
+            auth_method: Some(nos_proto::schema::BfdAuthMethod::KeyedSha1),
+            auth_key_id: Some(2),
+            auth_failures: 5,
+            ..up.clone()
+        };
+        assert!(render_bfd_sessions(&[authed])
+            .ends_with("discriminators 1/2, auth keyed-sha1 key 2 (5 failures)"));
         assert_eq!(
             render_bfd_sessions(&[up, down]),
             "rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminators 1/2\n\
