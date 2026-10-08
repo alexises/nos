@@ -7,6 +7,7 @@ pub mod config_client;
 pub mod exchange;
 pub mod interface_client;
 pub mod link;
+pub mod link_client;
 pub mod lsa;
 pub mod lsdb;
 pub mod packet;

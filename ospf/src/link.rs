@@ -175,6 +175,10 @@ pub struct LinkConfig {
     pub mtu: u16,
     /// `mtu-ignore`: skip the RFC 2328 §10.6 DBD Interface MTU check.
     pub mtu_ignore: bool,
+    /// The kernel device's ifindex from the `nos-interfaced` link stream (0 for
+    /// a virtual link or before the stream's first snapshot). A recreated
+    /// device gets a new one, which restarts the link (fresh raw socket).
+    pub ifindex: u32,
     /// RFC 2328 Appendix D auth, resolved once per reconcile from
     /// `OspfProfile.auth` (see `reconcile.rs`). Fits this struct's existing
     /// "any field change restarts the link" rule with no special-casing —
@@ -249,6 +253,7 @@ fn resolve_virtual_link(
         // DBDs; we send the transit link's and skip the check instead.
         mtu: transit.mtu,
         mtu_ignore: true,
+        ifindex: 0,
         auth: v.auth.clone(),
         stub: false,
         nssa: false,
@@ -3012,6 +3017,7 @@ impl LinkManager {
 
         for key in &to_stop {
             if let Some(entry) = links.remove(key) {
+                info!(link = %key, "ospf link stopped");
                 entry.task.abort();
             }
         }
@@ -3059,6 +3065,14 @@ impl LinkManager {
                 },
             );
         }
+    }
+
+    /// The config a running link was started with (`None` once stopped), so
+    /// `reconcile` can keep a link whose VRF/address lookup fails this pass.
+    pub async fn running_config(&self, attach_point: &str) -> Option<LinkConfig> {
+        let links = self.links.lock().await;
+        let entry = links.get(attach_point)?;
+        (!entry.task.is_finished()).then(|| entry.config.clone())
     }
 
     /// Every currently-configured link's current neighbor summaries, for
@@ -3829,11 +3843,40 @@ mod tests {
             priority: 1,
             mtu: 1500,
             mtu_ignore: false,
+            ifindex: 0,
             auth: LinkAuthConfig::None,
             stub: false,
             nssa: false,
             virtual_link: None,
         }
+    }
+
+    #[test]
+    fn ifindex_change_restarts_but_cost_does_not() {
+        let current = HashMap::from([("eth0.0".to_string(), link("eth0.0", 10))]);
+        let mut cheaper = link("eth0.0", 10);
+        cheaper.cost = 9;
+        let (stop, spawn) = diff_links(&current, &HashMap::from([("eth0.0".to_string(), cheaper)]));
+        assert!(stop.is_empty() && spawn.is_empty());
+        let mut recreated = link("eth0.0", 10);
+        recreated.ifindex = 7;
+        let (stop, spawn) = diff_links(
+            &current,
+            &HashMap::from([("eth0.0".to_string(), recreated)]),
+        );
+        assert_eq!((stop.len(), spawn.len()), (1, 1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn running_config_follows_the_task() {
+        let wire = Arc::new(wire::Wire::default());
+        let a = router(&wire);
+        let cfg = wired_link([10, 0, 0, 1], 24, NetworkType::PointToPoint);
+        assert!(a.running_config(&cfg.attach_point).await.is_none());
+        a.reconcile(vec![cfg.clone()], HashMap::new(), id(1)).await;
+        assert_eq!(a.running_config(&cfg.attach_point).await, Some(cfg.clone()));
+        a.reconcile(vec![], HashMap::new(), id(1)).await;
+        assert!(a.running_config(&cfg.attach_point).await.is_none());
     }
 
     #[test]
