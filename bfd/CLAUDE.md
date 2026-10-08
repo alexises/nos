@@ -1,6 +1,6 @@
 # nos-bfd — BFD (RFC 5880/5881) library and `nos-bfdd`
 
-The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fixed process like `nos-lldpd`. Single-hop only; its first client is `nos-ribd`'s `bfd_client.rs` (static routes with `bfd <profile>`).
+The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fixed process like `nos-lldpd`. Single-hop only; its clients are `nos-ribd`'s `bfd_client.rs` (static routes) and `nos-bgpd`'s (peer-groups, #286).
 
 | Module | Purpose |
 |--------|---------|
@@ -29,6 +29,7 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 - A client's connection drop releases its sessions; the last client drops the session. Request-side EOF ends the connection (`ponytail:` in `server.rs`).
 - A TX socket must bind an explicit source address (`socket::local_for`): bound to a VRF with a wildcard source the kernel sends from 0.0.0.0.
 - RX: UDP 3784 per (table, family) bound to the VRF; TTL must be exactly 255. Demux is by Your Discriminator, else (table, source address): no interface in the key (`ponytail:` in `manager.rs`).
+- `BfdEvent::State.control_plane_independent` is the C bit at both ends (`nos-bfdd` always sets its own; the remote's is from the last received packet): BGP flushes routes on Down only when it is set (RFC 5882 §4.3).
 - Log anchors the e2e relies on: `bfd session up peer=`, `bfd session down peer= diag=`.
 
 Details: [docs/internals/bfd.md](../docs/internals/bfd.md).

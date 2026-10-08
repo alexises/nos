@@ -448,8 +448,8 @@ pub struct BgpPeerGroup {
     #[cli(topic = BgpPeerGroupAuth, render = sugar::render_bgp_auth, sugar(word = "md5-password", with = sugar::md5_password, topic = BgpPeerGroupMd5Password), sugar(word = "ao-key", with = sugar::ao_key, topic = BgpPeerGroupAoKey))]
     pub auth: Option<BgpAuth>,
 
-    /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD.
-    /// Inert until `nos-bfdd` exists.
+    /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD. Not part
+    /// of the session identity: adding or removing it never resets a session.
     #[serde(default)]
     #[garde(custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)))]
     #[cli(topic = BfdReference)]

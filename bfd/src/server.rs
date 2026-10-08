@@ -56,12 +56,14 @@ async fn forward(key: SessionKey, mut rx: watch::Receiver<Status>, out: mpsc::Se
     let mut last = None;
     loop {
         let s = *rx.borrow_and_update();
-        if last != Some((s.state, s.diag)) {
-            last = Some((s.state, s.diag));
+        let now = (s.state, s.diag, s.control_plane_independent);
+        if last != Some(now) {
+            last = Some(now);
             let ev = BfdEvent::State {
                 key: key.clone(),
                 state: s.state,
                 diag: s.diag,
+                control_plane_independent: s.control_plane_independent,
             };
             if out.send(ev).await.is_err() || rx.changed().await.is_err() {
                 return;

@@ -3,7 +3,7 @@
 A BFD profile (RFC 5880) is a named set of session parameters that BGP, OSPF, OSPFv3 and static routes can reference by name.
 
 - `nos-bfdd` runs the sessions (RFC 5880, single-hop RFC 5881 over UDP 3784 inside the routing table's VRF).
-- **Only static routes use it today.** A `bfd` reference on a BGP peer-group, OSPF profile or OSPFv3 profile is accepted, validated and stored, but starts no session and nothing reacts to it until their own sub-issues land.
+- **Static routes and BGP peer-groups use it today** (see [BGP](bgp.md#bfd-rfc-5882-rfc-9384)). A `bfd` reference on an OSPF or OSPFv3 profile is accepted, validated and stored, but starts no session until their own sub-issues land.
 - Profiles are checked at commit time; the shell and REST accept any edit in a transaction.
 
 ## Define a profile

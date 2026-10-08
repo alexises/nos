@@ -177,6 +177,10 @@ pub enum BfdEvent {
         key: SessionKey,
         state: BfdState,
         diag: BfdDiag,
+        /// The C bit (RFC 5880 §4.1) set at both ends: the local session and
+        /// the last packet received. RFC 5882 §4.3: only then is a BFD Down a
+        /// forwarding failure a graceful restart must not outlive.
+        control_plane_independent: bool,
     },
     Sessions(Vec<BfdSessionView>),
 }
@@ -222,6 +226,7 @@ mod tests {
             key: key(),
             state: BfdState::Up,
             diag: BfdDiag::NoDiagnostic,
+            control_plane_independent: true,
         };
         let mut b = BytesMut::new();
         c.encode(e.clone(), &mut b).unwrap();
