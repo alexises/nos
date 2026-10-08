@@ -1,3 +1,4 @@
+pub mod bfd_client;
 pub mod bgp_client;
 pub mod config_client;
 pub mod driver;

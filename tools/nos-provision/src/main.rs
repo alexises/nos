@@ -18,7 +18,7 @@ use nos_proto::{
     Event, IpcCodec, Request, Role, TransactionBase, WatchdogEvent, WatchdogRequest,
     DEFAULT_PKI_CA, DEFAULT_WATCHDOG_SOCKET,
 };
-use nos_provision::{build_ops, Args};
+use nos_provision::{bfd_paths, build_ops, Args};
 use std::path::PathBuf;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -151,6 +151,20 @@ async fn main() -> anyhow::Result<()> {
             Request::ApplyOp {
                 name: txn.clone(),
                 op,
+            },
+        )
+        .await?;
+    }
+
+    for (path, value) in bfd_paths(args) {
+        send(
+            &mut writer,
+            &mut reader,
+            Request::SetTransactionPath {
+                name: txn.clone(),
+                path,
+                value: Some(value),
+                if_match: None,
             },
         )
         .await?;

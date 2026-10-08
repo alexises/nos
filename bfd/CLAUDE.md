@@ -1,25 +1,34 @@
-# nos-bfd — BFD (RFC 5880) core
+# nos-bfd — BFD (RFC 5880/5881) library and `nos-bfdd`
 
-Pure library for now (#296): no sockets, no tokio, no daemon. `nos-bfdd` (#297) builds on it. Depends only on `nos-proto`.
+The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fixed process like `nos-lldpd`. Single-hop only; its first client is `nos-ribd`'s `bfd_client.rs` (static routes with `bfd <profile>`).
 
 | Module | Purpose |
 |--------|---------|
 | `packet` | 24-byte control packet codec, §6.8.6 reception checks |
 | `fsm` | `step(state, event)` state machine, `may_transmit` (passive) |
 | `timers` | Interval negotiation, jitter, Poll/Final, detection time |
-| `authz` | `allowed(role, &BfdRequest)` for the future server |
+| `authz` | `allowed(role, &BfdRequest)` |
+| `session` | `Core` (pure: packets and clock in, packets out) and `run`, one tokio task per session |
+| `manager` | Session table, refcount per client, `Demux` (rx packet to session), `Net` trait |
+| `server` | `--listen-socket`: `Register` streams `BfdEvent::State`, `GetSessions` replies once |
+| `socket` | UDP 3784 sockets (`UdpNet`); excluded from coverage, `nos-e2e`'s `bfd` phase is its test |
+| `watchdog_client` | Broker lookups, the table's VRF device via `nos-ribd` `GetVrfName` |
 
-Wire types (`BfdRequest`, `BfdEvent`, `SessionKey`, `BfdState`, `BfdDiag`) are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`.
+Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`.
 
 ## Rules that bite
 
 - `decode` never panics: use `get`/`try_into`, never index untrusted bytes.
 - The A bit is rejected until #289; a session needing auth rejects every packet via `check_session`.
-- `timers` takes `now` and the jitter percentage as arguments; never call `Instant::now()` or an RNG in the lib.
-- Discriminators are allocated by the daemon, never 0.
-- `BfdRequest`/`BfdEvent` variants are appended, never reordered (postcard).
-- A new `BfdRequest` variant must be classified in `authz::allowed` (no wildcard arm).
-- No Echo (Required Min Echo RX sent 0, until #290), no demand mode.
-- Desired Min TX is advertised as at least 1 s while not Up; the caller calls `Timers::change` with the configured value on reaching Up.
+- `timers` and `Core` take `now` and the jitter percentage as arguments; only `session::run` reads the clock.
+- Discriminators come from the manager's counter (random start), never 0.
+- `BfdRequest`/`BfdEvent` variants are appended, never reordered (postcard). A new `BfdRequest` must be classified in `authz::allowed`.
+- No Echo (until #290), no demand mode, no multihop yet (`Register` with `multihop` is ignored with a warning).
+- Desired Min TX is floored at 1 s while not Up by `Timers` itself; reaching Up needs no `change`.
+- The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` subscribes to no config.
+- A client's connection drop releases its sessions; the last client drops the session. Request-side EOF ends the connection (`ponytail:` in `server.rs`).
+- A TX socket must bind an explicit source address (`socket::local_for`): bound to a VRF with a wildcard source the kernel sends from 0.0.0.0.
+- RX: UDP 3784 per (table, family) bound to the VRF; TTL must be exactly 255. Demux is by Your Discriminator, else (table, source address): no interface in the key (`ponytail:` in `manager.rs`).
+- Log anchors the e2e relies on: `bfd session up peer=`, `bfd session down peer= diag=`.
 
 Details: [docs/internals/bfd.md](../docs/internals/bfd.md).

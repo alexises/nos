@@ -12,6 +12,7 @@ use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::bfd_client;
 use crate::bgp_client;
 use crate::config_client;
 use crate::driver::RibDriver;
@@ -67,8 +68,13 @@ pub async fn run(
     redistribute_tx: watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: Vec<OspfFeed>,
     evpn_tx: watch::Sender<EvpnTarget>,
+    bfd_target_tx: watch::Sender<bfd_client::Target>,
+    bfd_up: watch::Receiver<bfd_client::UpSet>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    // A change of which BFD gateways are up is a reason to resync: the
+    // routes through them come or go.
+    let mut bfd_changed = bfd_up.clone();
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(
             &config_socket,
@@ -93,7 +99,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx).await;
+                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &bfd_target_tx, &bfd_up).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -105,8 +111,13 @@ pub async fn run(
                                 break;
                             }
                         },
+                        r = bfd_changed.changed() => {
+                            if r.is_ok() {
+                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &bfd_target_tx, &bfd_up).await;
+                            }
+                        }
                         _ = reapply.tick() => {
-                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx).await;
+                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &bfd_target_tx, &bfd_up).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -145,10 +156,21 @@ async fn resync(
     redistribute_tx: &watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: &[OspfFeed],
     evpn_tx: &watch::Sender<EvpnTarget>,
+    bfd_target_tx: &watch::Sender<bfd_client::Target>,
+    bfd_up: &watch::Receiver<bfd_client::UpSet>,
 ) {
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
-            let static_entries = if let Some(new_rib) = build_from_config(&cfg, table) {
+            let _ = bfd_target_tx.send_if_modified(|t| {
+                let want = crate::rib::bfd_target(&cfg, table);
+                let changed = *t != want;
+                if changed {
+                    *t = want;
+                }
+                changed
+            });
+            let up = bfd_up.borrow().clone();
+            let static_entries = if let Some(new_rib) = build_from_config(&cfg, table, &up) {
                 new_rib
                     .all_routes()
                     .into_iter()

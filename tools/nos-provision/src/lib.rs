@@ -18,10 +18,10 @@ use clap::Parser;
 
 use ipnet::{IpNet, Ipv4Net};
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
-    BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp,
-    LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey,
-    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
+    AddressFamily, BfdProfileOp, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp,
+    BgpPeerOp, BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination,
+    LldpOp, LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm,
+    OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp,
     Redistribute, RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp,
     SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
@@ -501,6 +501,14 @@ pub struct Args {
     /// (`StaticRouteOp::Delete`).
     #[arg(long)]
     pub remove_static_route: Vec<IpNet>,
+
+    /// Runs BFD on every `--static-route` (single-hop, `bfd-profile fast`
+    /// with `--bfd-interval-ms` intervals, multiplier 3): the routes stay
+    /// out of the RIB until the session to `--static-gateway` is Up.
+    #[arg(long)]
+    pub bfd_static: bool,
+    #[arg(long, default_value_t = 100)]
+    pub bfd_interval_ms: u32,
 
     #[arg(long)]
     pub save: bool,
@@ -1384,6 +1392,72 @@ fn virtual_link_spec(flag: &str, spec: &str) -> anyhow::Result<(Ipv4Addr, Ipv4Ad
     Ok((area_id, router_id))
 }
 
+/// The profile `--bfd-static` creates and references.
+pub const BFD_PROFILE: &str = "fast";
+
+/// `SetTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
+/// for a profile's intervals or a route's `bfd` reference, so these go in
+/// through the generic path edit after the ops.
+pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, String)> {
+    if !args.bfd_static {
+        return Vec::new();
+    }
+    let profile = |field: &str| {
+        vec![
+            "bfd-profile".to_string(),
+            BFD_PROFILE.to_string(),
+            field.to_string(),
+        ]
+    };
+    let ms = args.bfd_interval_ms.to_string();
+    let mut v = vec![
+        (profile("min-tx-interval"), ms.clone()),
+        (profile("min-rx-interval"), ms),
+    ];
+    for subnet in &args.static_route {
+        v.push((
+            vec![
+                "static-routing-instance".to_string(),
+                args.static_routing_instance.clone(),
+                "route".to_string(),
+                subnet.to_string(),
+                "bfd".to_string(),
+            ],
+            format!("\"{BFD_PROFILE}\""),
+        ));
+    }
+    v
+}
+
+/// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
+/// one in place instead of sending path edits).
+pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
+    if !args.bfd_static {
+        return;
+    }
+    for p in config
+        .bfd_profiles
+        .iter_mut()
+        .filter(|p| p.name == BFD_PROFILE)
+    {
+        p.min_tx_interval = args.bfd_interval_ms;
+        p.min_rx_interval = args.bfd_interval_ms;
+    }
+    for i in config
+        .static_routing_instances
+        .iter_mut()
+        .filter(|i| i.name == args.static_routing_instance)
+    {
+        for r in i
+            .routes
+            .iter_mut()
+            .filter(|r| args.static_route.contains(&r.subnet))
+        {
+            r.bfd = Some(BFD_PROFILE.to_string());
+        }
+    }
+}
+
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     let link = args.link_interface.as_ref().unwrap_or(&args.interface);
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
@@ -1487,6 +1561,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             peer_group: args.peer_group.clone(),
         }),
     ]);
+
+    if args.bfd_static {
+        ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
+            name: BFD_PROFILE.to_string(),
+        }));
+    }
 
     if !args.static_route.is_empty() {
         let gateway = args

@@ -1719,8 +1719,22 @@ dependencies = [
 name = "nos-bfd"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures",
+ "libc",
+ "nix 0.29.0",
+ "nos-log-client",
+ "nos-pki",
  "nos-proto",
+ "socket2 0.5.10",
+ "tempfile",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

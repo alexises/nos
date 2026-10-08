@@ -7,8 +7,8 @@ use nos_log_client::ForwardingLayer;
 use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_rib::{
-    bgp_client, evpn_client, ospf_client, reconcile, server, watchdog_client, LinuxRibDriver,
-    NoopRibDriver, Rib, RibDriver,
+    bfd_client, bgp_client, evpn_client, ospf_client, reconcile, server, watchdog_client,
+    LinuxRibDriver, NoopRibDriver, Rib, RibDriver,
 };
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
@@ -159,6 +159,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
 
+    let (bfd_target_tx, bfd_up) = bfd_client::spawn(
+        args.watchdog_socket.clone(),
+        args.table.clone(),
+        shutdown_rx.clone(),
+    );
+
     let rib = Arc::new(RwLock::new(Rib::new()));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
@@ -169,6 +175,8 @@ async fn main() -> anyhow::Result<()> {
         redistribute_tx,
         ospf_redistribute_tx,
         evpn_tx,
+        bfd_target_tx,
+        bfd_up,
         shutdown_rx,
     ));
     let server_task = server::start(&listen_socket, args.table.clone(), rib, driver, &identity)
