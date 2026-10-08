@@ -167,3 +167,72 @@ async fn get_interface_missing_returns_not_found() {
 
     assert!(matches!(event, InterfaceEvent::NotFound));
 }
+
+#[tokio::test]
+async fn push_bfd_members_enslaves_the_up_member_immediately() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("interface.sock");
+    let cfg = nos_proto::Config {
+        interfaces: vec![nos_proto::Interface {
+            name: "eth0".to_string(),
+            port_aggregate: Some("bond1".to_string()),
+            ..Default::default()
+        }],
+        port_aggregates: vec![nos_proto::PortAggregate {
+            name: "bond1".to_string(),
+            bfd: Some("fast".to_string()),
+            bfd_peer: Some("10.0.0.2".parse().unwrap()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let interfaces = Arc::new(RwLock::new(
+        nos_interface::state::build_from_config(&cfg, &NoopInterfaceDriver, &Interfaces::new())
+            .await,
+    ));
+    assert!(
+        !interfaces
+            .read()
+            .await
+            .get("eth0")
+            .unwrap()
+            .port_aggregate_active
+    );
+    let _server = server::start(
+        &path,
+        interfaces.clone(),
+        Arc::new(NoopInterfaceDriver),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
+
+    let stream = shared()
+        .identity("bfdd", "")
+        .connect(&path, &nos_pki::PeerId::new("interfaced", ""))
+        .await
+        .unwrap();
+    let mut writer = FramedWrite::new(stream, IpcCodec::<InterfaceRequest>::default());
+    writer
+        .send(InterfaceRequest::PushBfdMembers(
+            nos_proto::BfdAggregateMembers {
+                aggregate: "bond1".to_string(),
+                up_members: vec!["eth0".to_string()],
+            },
+        ))
+        .await
+        .unwrap();
+
+    for _ in 0..50 {
+        if interfaces
+            .read()
+            .await
+            .get("eth0")
+            .unwrap()
+            .port_aggregate_active
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("eth0 never became active");
+}

@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
@@ -84,6 +86,24 @@ pub enum PortAggregateOp {
         name: String,
         min_links: u16,
     },
+    /// Appended (postcard indexes variants by position).
+    SetBfd {
+        name: String,
+        profile: String,
+    },
+    /// Appended (postcard indexes variants by position).
+    ClearBfd {
+        name: String,
+    },
+    /// Appended (postcard indexes variants by position).
+    SetBfdPeer {
+        name: String,
+        peer: IpAddr,
+    },
+    /// Appended (postcard indexes variants by position).
+    ClearBfdPeer {
+        name: String,
+    },
 }
 
 impl PortAggregateOp {
@@ -101,6 +121,8 @@ impl PortAggregateOp {
                         lacp_system_id: None,
                         lacp_system_priority: None,
                         min_links: 1,
+                        bfd: None,
+                        bfd_peer: None,
                         switching_profile: None,
                         mtu: None,
                         subinterfaces: Vec::new(),
@@ -164,6 +186,22 @@ impl PortAggregateOp {
                 find_aggregate_mut(config, name)?.min_links = *min_links;
                 Ok(())
             }
+            PortAggregateOp::SetBfd { name, profile } => {
+                find_aggregate_mut(config, name)?.bfd = Some(profile.clone());
+                Ok(())
+            }
+            PortAggregateOp::ClearBfd { name } => {
+                find_aggregate_mut(config, name)?.bfd = None;
+                Ok(())
+            }
+            PortAggregateOp::SetBfdPeer { name, peer } => {
+                find_aggregate_mut(config, name)?.bfd_peer = Some(*peer);
+                Ok(())
+            }
+            PortAggregateOp::ClearBfdPeer { name } => {
+                find_aggregate_mut(config, name)?.bfd_peer = None;
+                Ok(())
+            }
             PortAggregateOp::SetRedundancyMode { name, mode } => {
                 find_aggregate_mut(config, name)?.redundancy_mode = *mode;
                 Ok(())
@@ -210,6 +248,8 @@ mod tests {
             lacp_system_id: None,
             lacp_system_priority: None,
             min_links: 1,
+            bfd: None,
+            bfd_peer: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

@@ -162,6 +162,14 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 - It is not checked against the number of members, which are configured on the interfaces: a value above that count keeps the bond empty for good, and `nos-lacpd` logs a warning.
 - Set with `set port-aggregate bond-lacp min-links 2`. A change takes effect at once and restarts no member. It has no effect on an `xor` aggregate.
 
+**`bfd` and `bfd-peer` (RFC 7130 micro-BFD gating).** `bfd <profile>` gates each member's enslavement on a per-member BFD session; `bfd-peer <ip>` is the remote end's address.
+
+- A member is enslaved only while it is Up in the last push from `nos-bfdd` (`PushBfdMembers`); enslavement is `lacp_ok && bfd_ok`, so it also needs the LACP rule for a `lacp` aggregate and applies to `xor` ones alike.
+- No push yet counts as not Up: a member of an aggregate with `bfd` stays out of the bond until its session is Up (fail closed, like LACP).
+- A push is applied at once and survives unrelated config changes.
+- The commit is refused when `bfd` names no `bfd-profile`, has no `bfd-peer`, or the untagged subinterface has no address of the peer's family (the session source). `bfd` on an aggregate without members is accepted.
+- Set with `set port-aggregate bond-lacp bfd fast` and `set port-aggregate bond-lacp bfd-peer 10.0.0.2`. The sessions themselves come with `nos-bfdd`'s member sessions (#299): until then a `bfd` aggregate has no member enslaved.
+
 **Individual ports.** A partner that clears the Aggregation bit of its LACPDUs declares the link Individual: it will not bundle it with any other link. NOS never selects such a member, and it does not count towards the partner groups of the others.
 
 - `show lacp` ends that member's line with `individual (partner not aggregatable)`; `GET /v1/lacp` has `"individual": true`.
@@ -190,6 +198,8 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | lacp-system-id | `set port-aggregate <pa> lacp-system-id <mac>` / `set lacp-system-id <mac>`; `delete … lacp-system-id` | `port-aggregate/<pa>/lacp-system-id` | unicast MAC, `02:00:00:00:00:01`; default derived | a unicast MAC | the LACP system ID advertised to the partner | `show lacp` (`system`) |
 | lacp-system-priority | `set port-aggregate <pa> lacp-system-priority <n>` / `set lacp-system-priority <n>`; `delete … lacp-system-priority` | `port-aggregate/<pa>/lacp-system-priority` | 0-65535; default 32768 | | the Actor System Priority advertised to the partner; a change restarts every member's LACP; `lacp` mode only | `show lacp` (`system priority`) |
 | min-links | `set port-aggregate <pa> min-links <n>` / `set min-links <n>` | `port-aggregate/<pa>/min-links` | 0-65535; default 1 | | the bond carries traffic only with at least this many `distributing` members; applies live; `lacp` mode only | `show lacp` (`min-links`) |
+| bfd | `set port-aggregate <pa> bfd <profile>` / `set bfd <profile>`; `delete … bfd` | `port-aggregate/<pa>/bfd` | a `bfd-profile` name; default unset | the profile exists; needs `bfd-peer` and a same-family address on the untagged subinterface | a member is enslaved only while its micro-BFD session is Up | `show config` |
+| bfd-peer | `set port-aggregate <pa> bfd-peer <ip>` / `set bfd-peer <ip>`; `delete … bfd-peer` | `port-aggregate/<pa>/bfd-peer` | IPv4 or IPv6 address; default unset | | the address the micro-BFD sessions are sent to; ignored without `bfd` | `show config` |
 | esi | `set port-aggregate <pa> esi <esi>` / `set esi <esi>`; `delete … esi` | `port-aggregate/<pa>/esi` | 10 hex bytes; default unset | not all zero; unique among aggregates | EVPN Ethernet Segment, see EVPN | `show bgp evpn` |
 | redundancy-mode | `set port-aggregate <pa> redundancy-mode all-active\|single-active` / `set redundancy-mode …` | `port-aggregate/<pa>/redundancy-mode`, body `"AllActive"` or `"SingleActive"` | `all-active` (default) | `single-active` needs an `esi` | EVPN multi-homing mode, see EVPN | `show config` |
 | df-algorithm | `set port-aggregate <pa> df-algorithm modulo\|hrw` / `set df-algorithm …` | `port-aggregate/<pa>/df-algorithm`, body `"Modulo"` or `"Hrw"` | `modulo` (default) | `hrw` needs an `esi` | EVPN designated forwarder election algorithm, see EVPN | `show config` |

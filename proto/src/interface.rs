@@ -118,6 +118,18 @@ pub struct LacpAggregateMembers {
     pub active_members: Vec<String>,
 }
 
+/// What `nos-bfdd` pushes to `nos-interfaced` (`InterfaceRequest::
+/// PushBfdMembers`): the member interfaces of `aggregate` whose micro-BFD
+/// session (RFC 7130) is currently Up. Always the whole set (full resend,
+/// like `LacpAggregateMembers`); a member absent from it is not enslaved.
+/// Only meaningful for an aggregate with `bfd` set.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BfdAggregateMembers {
+    pub aggregate: String,
+    pub up_members: Vec<String>,
+}
+
 /// One kernel link's observed state, streamed by `nos-interfaced`'s link
 /// watcher (`InterfaceRequest::SubscribeLinks`). Keyed by kernel device name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +188,10 @@ pub enum InterfaceRequest {
     /// (and a fresh `LinkSnapshot` after any lag) until the client closes the
     /// connection. The client never writes again after this request.
     SubscribeLinks,
+    /// Fire-and-forget, sent by `nos-bfdd`: replaces the given aggregate's
+    /// micro-BFD Up set and applies it to the kernel bond immediately. No
+    /// reply.
+    PushBfdMembers(BfdAggregateMembers),
 }
 
 /// Messages sent from `nos-interfaced` to a client.

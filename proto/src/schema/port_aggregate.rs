@@ -1,7 +1,9 @@
+use std::net::IpAddr;
+
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::{bfd_reference_valid, unique_in};
 
 use super::interface::{switching_profile_reference_valid, valid_mtu, valid_subinterface_list};
 use super::{Config, Subinterface, VlanTag};
@@ -170,6 +172,24 @@ pub struct PortAggregate {
     #[cli(topic = PortAggregateMinLinks, words = "min-links")]
     pub min_links: u16,
 
+    /// Name of a `BfdProfile`: runs one micro-BFD session (RFC 7130) per
+    /// member link, and a member is only enslaved while its session is Up.
+    /// Needs `bfd_peer`. `#[serde(default)]` so older configs still load.
+    #[serde(default)]
+    #[garde(custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)))]
+    #[cli(topic = PortAggregateBfd, words = "bfd")]
+    pub bfd: Option<String>,
+
+    /// The peer's L3 address the micro-BFD sessions are sent to (RFC 7130
+    /// uses the peer's address, not a link-local group). Must be of the
+    /// family of an address on this bond's tag-0 subinterface (the session
+    /// source). Ignored without `bfd`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = PortAggregateBfdPeer, words = "bfd-peer")]
+    pub bfd_peer: Option<IpAddr>,
+
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
@@ -206,6 +226,8 @@ impl Default for PortAggregate {
             lacp_system_id: None,
             lacp_system_priority: None,
             min_links: default_min_links(),
+            bfd: None,
+            bfd_peer: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -277,6 +299,28 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
         }
     }
     for agg in aggregates {
+        if agg.bfd.is_some() {
+            let Some(peer) = agg.bfd_peer else {
+                return Err(garde::Error::new(format!(
+                    "port aggregate {} sets bfd but has no bfd-peer",
+                    agg.name
+                )));
+            };
+            let has_source = agg
+                .subinterfaces
+                .iter()
+                .filter(|s| s.tag == 0)
+                .flat_map(|s| &s.addresses)
+                .any(|a| a.address.addr().is_ipv4() == peer.is_ipv4());
+            if !has_source {
+                return Err(garde::Error::new(format!(
+                    "port aggregate {} bfd-peer {peer} needs an address of the same family on its untagged subinterface",
+                    agg.name
+                )));
+            }
+        }
+    }
+    for agg in aggregates {
         if agg.subinterfaces.is_empty() {
             continue;
         }
@@ -322,6 +366,8 @@ mod tests {
             lacp_system_id: None,
             lacp_system_priority: None,
             min_links: 1,
+            bfd: None,
+            bfd_peer: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -437,6 +483,55 @@ mod tests {
             static_routing_instance: None,
             redistribute: Vec::new(),
         }];
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    fn bfd_aggregate(addr: Option<&str>, peer: Option<&str>) -> Config {
+        let mut a = aggregate("bond1");
+        a.bfd = Some("fast".into());
+        a.bfd_peer = peer.map(|p| p.parse().unwrap());
+        if let Some(addr) = addr {
+            a.subinterfaces = vec![crate::schema::Subinterface {
+                tag: 0,
+                addresses: vec![InterfaceAddress {
+                    address: addr.parse().unwrap(),
+                    label: None,
+                }],
+                routing_table: None,
+                ospf_profile: None,
+                ospfv3_profile: None,
+            }];
+        }
+        let mut cfg = config_with(vec![a]);
+        cfg.bfd_profiles = vec![crate::schema::BfdProfile {
+            name: "fast".into(),
+            ..Default::default()
+        }];
+        cfg
+    }
+
+    #[test]
+    fn bfd_needs_peer_source_address_and_profile() {
+        let ok = bfd_aggregate(Some("10.0.0.1/31"), Some("10.0.0.2"));
+        ok.validate_with(&ok).unwrap();
+        let v6 = bfd_aggregate(Some("2001:db8::1/64"), Some("2001:db8::2"));
+        v6.validate_with(&v6).unwrap();
+        for bad in [
+            bfd_aggregate(Some("10.0.0.1/31"), None),
+            bfd_aggregate(None, Some("10.0.0.2")),
+            bfd_aggregate(Some("10.0.0.1/31"), Some("2001:db8::2")),
+        ] {
+            assert!(bad.validate_with(&bad).is_err());
+        }
+        let mut unknown = bfd_aggregate(Some("10.0.0.1/31"), Some("10.0.0.2"));
+        unknown.bfd_profiles.clear();
+        assert!(unknown.validate_with(&unknown).is_err());
+    }
+
+    #[test]
+    fn bfd_on_an_aggregate_without_members_is_accepted() {
+        // Members live on the `Interface`s; the aggregate itself never checks them.
+        let cfg = bfd_aggregate(Some("10.0.0.1/31"), Some("10.0.0.2"));
         cfg.validate_with(&cfg).unwrap();
     }
 }
