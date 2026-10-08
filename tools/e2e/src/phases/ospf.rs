@@ -2546,7 +2546,128 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&flushed(OSPFV3_ROUTER_ID_B), a_flushed, 30)
         .await?;
     assert_no_legacy_lsas(b, OSPFV3_ROUTER_ID).await?;
-    assert_no_legacy_lsas(a, OSPFV3_ROUTER_ID_B).await
+    assert_no_legacy_lsas(a, OSPFV3_ROUTER_ID_B).await?;
+    ospfv3_link_state(w).await
+}
+
+/// `ip link set <dev> <state>` in `router`'s netns.
+async fn set_link(w: &World, router: &str, dev: &str, state: &str) -> anyhow::Result<()> {
+    w.dock
+        .ip(
+            NETNS_HELPER_IMAGE,
+            Some(router),
+            false,
+            &["link", "set", dev, state],
+        )
+        .await
+        .map(drop)
+}
+
+/// #276: `nos-ospfv3d` follows `nos-interfaced`'s link stream on a second
+/// OSPFv3 link, `eth1.0` over a direct veth pair (`eth0.0` carries the REST
+/// API, so it cannot be cut). A `nos-interfaced` kill plus a config change
+/// tears nothing down; carrier loss and admin-down are seen within 5s with no
+/// dead timer; a deleted device is `absent`. Leaves eth1 deleted.
+async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
+    w.link_veths().await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let eth1 = |id: crate::router::Id, address: &str, router_id: &str| {
+        let mut f = strings(&[
+            "--interface",
+            "eth1",
+            "--address6",
+            address,
+            "--asn",
+            &id.asn.to_string(),
+            "--router-id",
+            id.rid,
+            "--remote-as",
+            &id.remote_as.to_string(),
+            "--peer",
+            id.peer_ip,
+        ]);
+        f.extend(ospfv3_instance_only(router_id));
+        f.extend(strings(&["--ospfv3-interface-profile", OSPFV3_PROFILE]));
+        f
+    };
+    let full = |peer: &str| format!("ospfv3 neighbor reached full link=eth1.0 neighbor={peer}");
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    a.provision_flags(&eth1(A, OSPFV3_ETH1_ADDRESS_A, OSPFV3_ROUTER_ID))
+        .await?;
+    b.provision_flags(&eth1(B, OSPFV3_ETH1_ADDRESS_B, OSPFV3_ROUTER_ID_B))
+        .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 90).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 90).await?;
+
+    // A nos-interfaced kill followed at once by a config change: a resync runs
+    // while its answers are refused, and the running links keep their values.
+    let down = "ospfv3 neighbor state changed to down";
+    let stopped = "ospfv3 link stopped";
+    let (stop0, down0) = (
+        (a.count(stopped), b.count(stopped)),
+        (a.count(down), b.count(down)),
+    );
+    let (fallback0, stream0) = (
+        a.count("ospfv3 link resolution failed, keeping running link"),
+        a.count("ospfv3 link stream connected"),
+    );
+    log("killing router-a's nos-interfaced");
+    w.dock.kill_process("router-a", "nos-interfaced").await?;
+    a.provision_flags(&with_base(
+        A,
+        [
+            ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+            strings(&["--ospfv3-graceful-restart-grace-period", "30"]),
+        ]
+        .concat(),
+    ))
+    .await?;
+    a.wait_new(
+        "ospfv3 link resolution failed, keeping running link",
+        fallback0,
+        10,
+    )
+    .await?;
+    a.wait_new("ospfv3 link stream connected", stream0, 20)
+        .await?;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    for (r, n_stop, n_down) in [(a, stop0.0, down0.0), (b, stop0.1, down0.1)] {
+        for (pat, n) in [(stopped, n_stop), (down, n_down)] {
+            if r.count(pat) > n {
+                bail!("{}: '{pat}' moved after a nos-interfaced kill", r.name());
+            }
+        }
+    }
+
+    // Carrier loss: router-b's end goes admin-down, router-a's loses carrier;
+    // neither waits for a dead timer.
+    let reason = |r: &str| format!("ospfv3 link kernel interface down link=eth1.0 .*reason={r}");
+    let (nc0, ad0, down1) = (
+        a.count(&reason("no-carrier")),
+        b.count(&reason("admin-down")),
+        (a.count(down), b.count(down)),
+    );
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    set_link(w, "router-b", "eth1", "down").await?;
+    a.wait_new(&reason("no-carrier"), nc0, 5).await?;
+    b.wait_new(&reason("admin-down"), ad0, 5).await?;
+    if a.count(down) > down1.0 || b.count(down) > down1.1 {
+        bail!("a dead timer expired: link-down detection did not come from the stream");
+    }
+    set_link(w, "router-b", "eth1", "up").await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
+
+    // A deleted device is absent.
+    let absent0 = a.count(&reason("absent"));
+    w.unlink_veths().await;
+    a.wait_new(&reason("absent"), absent0, 5).await
 }
 
 /// Polls `router`'s `GET /v1/ospfv3/database` (up to 15s: the Link- and

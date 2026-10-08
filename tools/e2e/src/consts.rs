@@ -395,6 +395,9 @@ pub const OSPFV3_AREA: &str = "0.0.0.0";
 pub const OSPFV3_PROFILE: &str = "ospfv3-profile1";
 pub const OSPFV3_ADDRESS_A: &str = "2001:db8:1::1/64";
 pub const OSPFV3_ADDRESS_B: &str = "2001:db8:1::2/64";
+/// The second OSPFv3 link of `ospfv3` (#276): `eth1`, a direct veth pair.
+pub const OSPFV3_ETH1_ADDRESS_A: &str = "2001:db8:5::1/64";
+pub const OSPFV3_ETH1_ADDRESS_B: &str = "2001:db8:5::2/64";
 pub const OSPFV3_LOOPBACK_ADDRESS: &str = "2001:db8:2::1/128";
 /// router-b's loopback for `ospfv3-lfa` (`OSPFV3_LOOPBACK_ADDRESS` is router-a's).
 pub const OSPFV3_LFA_LOOPBACK_ADDRESS: &str = "2001:db8:4::1/128";
