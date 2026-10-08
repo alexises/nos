@@ -30,6 +30,7 @@ pub struct Sockets {
     pub log: PathBuf,
     pub lacp: PathBuf,
     pub lldp: PathBuf,
+    pub bfd: PathBuf,
 }
 
 /// Everything one broker connection needs.
@@ -148,7 +149,15 @@ async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) ->
             let s = &ctx.sockets;
             let resolved = ctx
                 .registry
-                .resolve(&service, &s.config, &s.interfaces, &s.log, &s.lacp, &s.lldp)
+                .resolve(
+                    &service,
+                    &s.config,
+                    &s.interfaces,
+                    &s.log,
+                    &s.lacp,
+                    &s.lldp,
+                    &s.bfd,
+                )
                 .await;
             if let Some(path) = resolved {
                 trace!(?service, "resolved endpoint");

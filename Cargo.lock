@@ -1716,6 +1716,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-bfd"
+version = "0.1.0"
+dependencies = [
+ "nos-proto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "nos-bgp"
 version = "0.1.0"
 dependencies = [

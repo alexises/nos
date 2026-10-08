@@ -158,6 +158,12 @@ struct Args {
     #[arg(long, default_value = "/run/nos/lldp.sock")]
     lldpd_listen_socket: PathBuf,
 
+    /// Unix socket nos-bfdd will listen on. Served out as the resolved
+    /// address for `ServiceRef::Bfd` broker queries; the daemon itself is
+    /// spawned by a later change (#297).
+    #[arg(long, default_value = "/run/nos/bfd.sock")]
+    bfdd_listen_socket: PathBuf,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -495,6 +501,7 @@ async fn main() -> anyhow::Result<()> {
             log: args.log_socket,
             lacp: args.lacpd_listen_socket,
             lldp: args.lldpd_listen_socket,
+            bfd: args.bfdd_listen_socket,
         },
         pki.clone(),
     )

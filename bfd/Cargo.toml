@@ -1,0 +1,13 @@
+[package]
+name    = "nos-bfd"
+publish = false
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-proto = { workspace = true }
+thiserror = { workspace = true }
