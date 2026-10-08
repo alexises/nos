@@ -9,6 +9,9 @@ pub enum Event {
     RxState(BfdState),
     /// The detection time elapsed without a packet.
     DetectTimeout,
+    /// The Echo function is active and no echo returned within its
+    /// detection time (RFC 5880 §6.8.5).
+    EchoTimeout,
     /// Administratively disabled (profile `shutdown`).
     AdminDown,
     /// Administratively enabled again.
@@ -19,13 +22,14 @@ pub enum Event {
 /// diagnostic (`None`: keep the current `bfd.LocalDiag`).
 pub fn step(state: BfdState, ev: Event) -> (BfdState, Option<BfdDiag>) {
     use BfdState::{AdminDown, Down, Init, Up};
-    use Event::{AdminDown as Disable, AdminUp, DetectTimeout, RxState};
+    use Event::{AdminDown as Disable, AdminUp, DetectTimeout, EchoTimeout, RxState};
     match (state, ev) {
         (AdminDown, AdminUp) => (Down, Some(BfdDiag::NoDiagnostic)),
         // §6.8.6: a session in AdminDown discards everything.
         (AdminDown, _) => (AdminDown, None),
         (_, Disable) => (AdminDown, Some(BfdDiag::AdministrativelyDown)),
-        (_, AdminUp) => (state, None),
+        (Up, EchoTimeout) => (Down, Some(BfdDiag::EchoFunctionFailed)),
+        (_, AdminUp | EchoTimeout) => (state, None),
 
         (Init | Up, DetectTimeout) => (Down, Some(BfdDiag::ControlDetectionTimeExpired)),
         (Init, RxState(AdminDown)) | (Up, RxState(AdminDown | Down)) => {
@@ -48,12 +52,12 @@ pub fn may_transmit(passive: bool, remote_discriminator: u32, remote_required_mi
 mod tests {
     use super::*;
     use BfdState::{AdminDown, Down, Init, Up};
-    use Event::{AdminDown as Disable, AdminUp, DetectTimeout, RxState};
+    use Event::{AdminDown as Disable, AdminUp, DetectTimeout, EchoTimeout, RxState};
 
     const NSD: Option<BfdDiag> = Some(BfdDiag::NeighborSignaledSessionDown);
     const EXP: Option<BfdDiag> = Some(BfdDiag::ControlDetectionTimeExpired);
 
-    /// The whole table: 4 states x 7 events.
+    /// The whole table: 4 states x 8 events.
     #[test]
     fn full_transition_table() {
         let rx = RxState;
@@ -66,6 +70,7 @@ mod tests {
             (AdminDown, DetectTimeout, AdminDown, None),
             (AdminDown, Disable,       AdminDown, None),
             (AdminDown, AdminUp,       Down,      Some(BfdDiag::NoDiagnostic)),
+            (AdminDown, EchoTimeout, AdminDown, None),
 
             (Down, rx(AdminDown), Down, None),
             (Down, rx(Down),      Init, None),
@@ -74,6 +79,7 @@ mod tests {
             (Down, DetectTimeout, Down, None),
             (Down, Disable,       AdminDown, Some(BfdDiag::AdministrativelyDown)),
             (Down, AdminUp,       Down, None),
+            (Down, EchoTimeout, Down, None),
 
             (Init, rx(AdminDown), Down, NSD),
             (Init, rx(Down),      Init, None),
@@ -82,6 +88,7 @@ mod tests {
             (Init, DetectTimeout, Down, EXP),
             (Init, Disable,       AdminDown, Some(BfdDiag::AdministrativelyDown)),
             (Init, AdminUp,       Init, None),
+            (Init, EchoTimeout, Init, None),
 
             (Up, rx(AdminDown), Down, NSD),
             (Up, rx(Down),      Down, NSD),
@@ -90,6 +97,7 @@ mod tests {
             (Up, DetectTimeout, Down, EXP),
             (Up, Disable,       AdminDown, Some(BfdDiag::AdministrativelyDown)),
             (Up, AdminUp,       Up,   None),
+            (Up, EchoTimeout, Down, Some(BfdDiag::EchoFunctionFailed)),
         ];
         for (from, ev, to, diag) in table {
             assert_eq!(step(from, ev), (to, diag), "{from} + {ev:?}");

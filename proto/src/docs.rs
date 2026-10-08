@@ -395,6 +395,10 @@ topics! {
     BfdProfileShutdown,
     /// `BfdProfile.auth`
     BfdProfileAuth,
+    /// `BfdProfile.echo_mode`
+    BfdProfileEchoMode,
+    /// `BfdProfile.echo_interval`
+    BfdProfileEchoInterval,
     /// The `bfd` reference on a peer-group, OSPF/OSPFv3 profile or static route
     BfdReference,
 }

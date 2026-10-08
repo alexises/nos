@@ -5,7 +5,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nos_proto::schema::{BfdAuthMethod, BfdProfile};
+use nos_proto::schema::{BfdAuthMethod, BfdProfile, EchoMode};
 use nos_proto::{BfdDiag, BfdState, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
@@ -19,6 +19,22 @@ use crate::timers::{Remote, Timers, SLOW_US};
 /// recorder in tests.
 pub trait Tx: Send + Sync {
     fn send(&self, bytes: &[u8]) -> io::Result<()>;
+}
+
+/// The Echo transport of one session: where packets leave, the channel
+/// returned sequence numbers arrive on, and the helper tasks to stop with it.
+pub struct EchoPath {
+    pub tx: Arc<dyn EchoTx>,
+    pub rx: mpsc::Receiver<u32>,
+    pub tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl Drop for EchoPath {
+    fn drop(&mut self) {
+        for t in &self.tasks {
+            t.abort();
+        }
+    }
 }
 
 /// What the rest of the daemon (and `show bfd sessions`) sees of a session.
@@ -37,6 +53,27 @@ pub struct Status {
     pub auth_key_id: Option<u8>,
     /// Packets dropped by §6.7 authentication so far.
     pub auth_failures: u64,
+    /// The Echo function is running (RFC 5880 §6.4).
+    pub echo_active: bool,
+    /// Negotiated Echo transmit interval, microseconds; 0 while inactive.
+    pub echo_interval_us: u32,
+}
+
+/// Where a session's Echo packets leave: the IP packet looped through the
+/// neighbour (`socket::L2Echo` for real, a recorder in tests).
+pub trait EchoTx: Send + Sync {
+    /// Sends the echo `seq` of the session with local discriminator `disc`.
+    fn send(&self, disc: u32, seq: u32) -> io::Result<()>;
+}
+
+/// The Echo function's running state.
+#[derive(Debug)]
+struct EchoRun {
+    next_tx: Instant,
+    /// The last time a returned echo (or the activation) was seen.
+    last_ok: Instant,
+    sent: u32,
+    acked: u32,
 }
 
 /// RFC 5880 §4.1 C bit: `nos-bfdd` is its own process, so a `nos-bgpd`
@@ -55,6 +92,11 @@ pub struct Core {
     remote_rx: u32,
     /// The C bit of the last packet received.
     remote_cpi: bool,
+    /// The remote's Required Min Echo RX Interval; 0: it cannot loop echo.
+    remote_echo_rx: u32,
+    /// There is a transport for our own Echo packets (`run` sets it).
+    echo_path: bool,
+    echo: Option<EchoRun>,
     timers: Timers,
     auth: AuthState,
     auth_failures: u64,
@@ -79,6 +121,9 @@ impl Core {
             remote_disc: 0,
             remote_rx: 1,
             remote_cpi: false,
+            remote_echo_rx: 0,
+            echo_path: false,
+            echo: None,
             timers,
             auth,
             auth_failures: 0,
@@ -104,7 +149,103 @@ impl Core {
             auth_method: self.auth.cfg().map(|a| a.method),
             auth_key_id: self.auth.cfg().map(|a| a.key_id),
             auth_failures: self.auth_failures,
+            echo_active: self.echo.is_some(),
+            echo_interval_us: if self.echo.is_some() {
+                self.echo_interval_us()
+            } else {
+                0
+            },
         }
+    }
+
+    /// Whether Echo packets can be sent at all (single-hop with a usable
+    /// interface); without it the session never starts Echo.
+    pub fn set_echo_path(&mut self, available: bool) {
+        self.echo_path = available;
+    }
+
+    /// Echo runs while the Control session is Up, the profile asks for it
+    /// and the remote advertised a nonzero Required Min Echo RX (§6.4).
+    fn echo_wanted(&self) -> bool {
+        self.echo_path
+            && self.profile.echo_mode == EchoMode::Affiliated
+            && !self.profile.shutdown
+            && self.state == BfdState::Up
+            && self.remote_echo_rx > 0
+    }
+
+    /// max(our echo interval, the remote's Required Min Echo RX), microseconds.
+    fn echo_interval_us(&self) -> u32 {
+        (self.profile.echo_interval * MS).max(self.remote_echo_rx)
+    }
+
+    /// What we advertise as Desired Min TX: §6.8.3 keeps Control at one
+    /// packet a second or slower while Echo runs.
+    fn effective_tx(&self) -> u32 {
+        let tx = self.profile.min_tx_interval * MS;
+        if self.echo.is_some() {
+            tx.max(SLOW_US)
+        } else {
+            tx
+        }
+    }
+
+    /// Starts or stops Echo to match `echo_wanted`, moving the Control
+    /// interval through a Poll sequence. Whether that opened one.
+    fn sync_echo(&mut self, now: Instant) -> bool {
+        let want = self.echo_wanted();
+        if want == self.echo.is_some() {
+            return false;
+        }
+        let was_polling = self.timers.poll();
+        self.echo = want.then_some(EchoRun {
+            next_tx: now,
+            last_ok: now,
+            sent: 0,
+            acked: 0,
+        });
+        self.timers
+            .change(self.effective_tx(), self.profile.min_rx_interval * MS);
+        !was_polling && self.timers.poll()
+    }
+
+    /// The sequence number of an echo to send now, if one is due.
+    pub fn echo_due(&mut self, now: Instant) -> Option<u32> {
+        let iv = Duration::from_micros(u64::from(self.echo_interval_us()));
+        let e = self.echo.as_mut()?;
+        if now < e.next_tx {
+            return None;
+        }
+        e.sent = e.sent.wrapping_add(1);
+        e.next_tx = now + iv;
+        Some(e.sent)
+    }
+
+    /// A returned echo with sequence `seq` (any not-yet-seen one we sent).
+    pub fn on_echo(&mut self, now: Instant, seq: u32) {
+        if let Some(e) = self.echo.as_mut() {
+            if seq > e.acked && seq <= e.sent {
+                e.acked = seq;
+                e.last_ok = now;
+            }
+        }
+    }
+
+    fn echo_deadline(&self) -> Option<Instant> {
+        let e = self.echo.as_ref()?;
+        let detect = Duration::from_micros(
+            u64::from(self.echo_interval_us()) * u64::from(self.profile.detect_multiplier),
+        );
+        Some(e.next_tx.min(e.last_ok + detect))
+    }
+
+    fn echo_expired(&self, now: Instant) -> bool {
+        self.echo.as_ref().is_some_and(|e| {
+            now.saturating_duration_since(e.last_ok)
+                >= Duration::from_micros(
+                    u64::from(self.echo_interval_us()) * u64::from(self.profile.detect_multiplier),
+                )
+        })
     }
 
     fn detection_time(&self) -> Option<Duration> {
@@ -160,7 +301,13 @@ impl Core {
             your_discriminator: self.remote_disc,
             desired_min_tx,
             required_min_rx,
-            required_min_echo_rx: 0,
+            required_min_echo_rx: if self.profile.echo_mode == EchoMode::Affiliated
+                && !self.profile.shutdown
+            {
+                self.profile.echo_interval * MS
+            } else {
+                0
+            },
             auth: None,
         }
     }
@@ -178,6 +325,7 @@ impl Core {
         self.remote_disc = p.my_discriminator;
         self.remote_rx = p.required_min_rx;
         self.remote_cpi = p.control_plane_independent;
+        self.remote_echo_rx = p.required_min_echo_rx;
         let out = self.timers.on_rx(
             now,
             Remote {
@@ -189,7 +337,8 @@ impl Core {
             p.final_,
         );
         let changed = self.apply(Event::RxState(p.state));
-        if out.reply_final || changed {
+        let polled = self.sync_echo(now);
+        if out.reply_final || changed || polled {
             self.timers.schedule_tx(now, self.state, rand_pct);
             return Some(self.packet(out.reply_final));
         }
@@ -202,7 +351,11 @@ impl Core {
         if matches!(self.state, BfdState::Init | BfdState::Up) && self.timers.detect_expired(now) {
             due = self.apply(Event::DetectTimeout);
         }
-        if due || self.timers.tx_due(now) {
+        if self.echo_expired(now) {
+            due |= self.apply(Event::EchoTimeout);
+        }
+        let polled = self.sync_echo(now);
+        if due || polled || self.timers.tx_due(now) {
             self.timers.schedule_tx(now, self.state, rand_pct);
             if fsm::may_transmit(self.profile.passive, self.remote_disc, self.remote_rx) {
                 return Some(self.packet(false));
@@ -223,8 +376,6 @@ impl Core {
         let was_polling = self.timers.poll();
         let was_down = profile.shutdown != self.profile.shutdown;
         self.timers.set_detect_mult(profile.detect_multiplier);
-        self.timers
-            .change(profile.min_tx_interval * MS, profile.min_rx_interval * MS);
         let hold = self.detection_time().unwrap_or(Duration::from_secs(3));
         self.auth.set(profile.auth.clone(), now, hold);
         let shutdown = profile.shutdown;
@@ -235,6 +386,9 @@ impl Core {
             } else {
                 Event::AdminUp
             });
+        self.sync_echo(now);
+        self.timers
+            .change(self.effective_tx(), self.profile.min_rx_interval * MS);
         if moved || (!was_polling && self.timers.poll()) {
             self.timers.schedule_tx(now, self.state, rand_pct);
             return Some(self.packet(false));
@@ -245,10 +399,11 @@ impl Core {
     /// When `on_timer` next has work.
     pub fn deadline(&self) -> Instant {
         let tx = self.timers.next_tx();
-        match self.timers.detect_deadline() {
+        let tx = match self.timers.detect_deadline() {
             Some(d) if matches!(self.state, BfdState::Init | BfdState::Up) => tx.min(d),
             _ => tx,
-        }
+        };
+        self.echo_deadline().map_or(tx, |e| tx.min(e))
     }
 }
 
@@ -282,10 +437,12 @@ pub async fn run(
     key: SessionKey,
     mut core: Core,
     tx: Arc<dyn Tx>,
+    mut echo: Option<EchoPath>,
     mut pkts: mpsc::Receiver<Packet>,
     mut cmds: mpsc::Receiver<BfdProfile>,
     status: watch::Sender<Status>,
 ) {
+    core.set_echo_path(echo.is_some());
     let mut last = core.status();
     let mut last_warn: Option<Instant> = None;
     loop {
@@ -310,16 +467,40 @@ pub async fn run(
                 None => break,
             },
             () = tokio::time::sleep_until(deadline) => core.on_timer(now(), jitter_pct()),
+            seq = async {
+                match echo.as_mut() {
+                    Some(e) => match e.rx.recv().await {
+                        Some(seq) => seq,
+                        None => std::future::pending().await,
+                    },
+                    None => std::future::pending().await,
+                }
+            } => {
+                core.on_echo(now(), seq);
+                None
+            }
         };
         if let Some(p) = out {
             if let Err(e) = tx.send(&core.sign(now(), &p)) {
                 debug!(peer = %key.peer, error = %e, "bfd send failed");
             }
         }
+        if let (Some(seq), Some(e)) = (core.echo_due(now()), echo.as_ref()) {
+            if let Err(err) = e.tx.send(last.local_discriminator, seq) {
+                debug!(peer = %key.peer, error = %err, "bfd echo send failed");
+            }
+        }
         let s = core.status();
         if s != last {
             if s.state != last.state {
                 log_transition(&key, &s);
+            }
+            if s.echo_active != last.echo_active {
+                if s.echo_active {
+                    info!(peer = %key.peer, table = %key.table, interval_us = s.echo_interval_us, "bfd echo active");
+                } else {
+                    info!(peer = %key.peer, table = %key.table, "bfd echo inactive");
+                }
             }
             last = s;
             status.send_replace(s);
@@ -356,6 +537,8 @@ mod tests {
         a: Core,
         b: Core,
         now: Instant,
+        /// Whether echo packets come back.
+        echo_ok: bool,
     }
 
     impl Pair {
@@ -365,6 +548,7 @@ mod tests {
                 a: Core::new(pa, 1, now),
                 b: Core::new(pb, 2, now),
                 now,
+                echo_ok: true,
             }
         }
 
@@ -398,7 +582,13 @@ mod tests {
             } else {
                 (&mut self.b, false)
             };
-            if let Some(p) = core.on_timer(self.now, 100) {
+            let out = core.on_timer(self.now, 100);
+            if let Some(seq) = core.echo_due(self.now) {
+                if self.echo_ok {
+                    core.on_echo(self.now, seq);
+                }
+            }
+            if let Some(p) = out {
                 Self::deliver(self.now, from_a, &mut self.a, &mut self.b, p);
             }
         }
@@ -471,6 +661,95 @@ mod tests {
         assert_eq!(p.a.status().tx_interval_us, 100_000);
         assert_eq!(p.a.state, BfdState::Up);
         assert_eq!(p.b.state, BfdState::Up);
+    }
+
+    fn echoing(tx: u32, rx: u32, echo_ms: u32) -> BfdProfile {
+        BfdProfile {
+            echo_mode: EchoMode::Affiliated,
+            echo_interval: echo_ms,
+            ..profile(tx, rx)
+        }
+    }
+
+    fn echo_pair(pa: BfdProfile, pb: BfdProfile) -> Pair {
+        let mut p = Pair::new(pa, pb);
+        p.a.set_echo_path(true);
+        p.b.set_echo_path(true);
+        p
+    }
+
+    #[test]
+    fn echo_starts_when_up_and_slows_control_to_one_second() {
+        let mut p = echo_pair(echoing(100, 100, 50), echoing(100, 100, 80));
+        p.run_until(|p| p.a.echo.is_some() && p.b.echo.is_some());
+        p.run_until(|p| !p.a.timers.poll() && !p.b.timers.poll());
+        let s = p.a.status();
+        assert!(s.echo_active);
+        // max(our 50 ms, their advertised 80 ms)
+        assert_eq!(s.echo_interval_us, 80_000);
+        assert_eq!(
+            s.tx_interval_us, 1_000_000,
+            "control >= 1 s while echo runs"
+        );
+        assert_eq!(p.a.state, BfdState::Up);
+        // The packets advertise the same: Required Min Echo RX is ours.
+        assert_eq!(p.a.packet(false).required_min_echo_rx, 50_000);
+        // Echo keeps the session alive far past the control detection time.
+        for _ in 0..100 {
+            p.step();
+        }
+        assert_eq!((p.a.state, p.b.state), (BfdState::Up, BfdState::Up));
+    }
+
+    #[test]
+    fn echo_needs_both_ends_and_the_path() {
+        // The peer advertises 0: nothing to loop through it.
+        let mut p = echo_pair(echoing(100, 100, 50), profile(100, 100));
+        p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
+        for _ in 0..20 {
+            p.step();
+        }
+        assert!(p.a.echo.is_none());
+        assert_eq!(p.b.packet(false).required_min_echo_rx, 0);
+        // No transport: never starts, even with both asking.
+        let mut p = Pair::new(echoing(100, 100, 50), echoing(100, 100, 50));
+        p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
+        for _ in 0..20 {
+            p.step();
+        }
+        assert!(p.a.echo.is_none() && p.b.echo.is_none());
+    }
+
+    #[test]
+    fn lost_echoes_take_the_session_down_with_diag_2_and_control_returns() {
+        let mut p = echo_pair(echoing(100, 100, 50), echoing(100, 100, 50));
+        p.run_until(|p| p.a.echo.is_some() && p.b.echo.is_some());
+        p.run_until(|p| !p.a.timers.poll() && !p.b.timers.poll());
+        p.echo_ok = false;
+        let t0 = p.now;
+        // (The test wire has no latency, so the handshake may re-Up inside the step.)
+        p.run_until(|p| p.a.diag == BfdDiag::EchoFunctionFailed);
+        // 3 x 50 ms plus one step of slack.
+        assert!(p.now - t0 <= Duration::from_millis(250), "{:?}", p.now - t0);
+        // Echo works again: the session settles Up and echoes again.
+        p.echo_ok = true;
+        p.run_until(|p| p.a.state == BfdState::Up && p.a.echo.is_some() && p.b.echo.is_some());
+        for _ in 0..50 {
+            p.step();
+        }
+        assert_eq!((p.a.state, p.b.state), (BfdState::Up, BfdState::Up));
+    }
+
+    #[test]
+    fn echo_is_stopped_by_disabling_it_in_the_profile() {
+        let mut p = echo_pair(echoing(100, 100, 50), echoing(100, 100, 50));
+        p.run_until(|p| p.a.echo.is_some() && p.b.echo.is_some());
+        p.run_until(|p| !p.a.timers.poll() && !p.b.timers.poll());
+        let pkt = p.a.update_profile(profile(100, 100), p.now, 100);
+        assert!(p.a.echo.is_none());
+        let pkt = pkt.expect("a Poll restores the control rate");
+        assert!(pkt.poll && pkt.required_min_echo_rx == 0);
+        assert_eq!(pkt.desired_min_tx, 100_000);
     }
 
     fn authed(key: &str, id: u8) -> BfdProfile {

@@ -92,6 +92,26 @@ set auth key-id 1 method meticulous-sha1 key s3cret
 - The router that changes second is the one at risk: until it applies the change it rejects the first router's packets, so keep the gap below the detection time (use longer intervals for a planned rollover).
 - Multiple concurrent keys and key lifetimes are not supported.
 
+## Use the Echo function
+
+RFC 5880 section 6.4 and RFC 5881 section 4: each end sends packets addressed to itself through the neighbour, which only forwards them back. A broken forwarding path is found in `echo-interval x detect-multiplier` instead of the control detection time.
+
+```
+edit bfd-profile fast
+set echo-mode affiliated
+set echo-interval 50
+```
+
+- `echo-mode` is `disabled` (default) or `affiliated`: Echo runs next to the Control session. `echo-interval` is in milliseconds (10 to 4294967, default 50).
+- Every Control packet advertises `echo-interval` as Required Min Echo RX; `disabled` advertises 0, so the peer never loops echoes through you.
+- Echo starts when the session is `up`, the profile asks for it and the peer advertises a nonzero Required Min Echo RX. The interval used is the larger of the two. `nos-bfdd` logs `bfd echo active peer=... interval_us=...`, and `bfd echo inactive` when it stops (session not `up`, `echo-mode` removed, peer advertises 0).
+- While Echo runs, Control packets slow to one per second or less (a Poll sequence raises Desired Min TX to 1 s, and restores it when Echo stops).
+- No echo returning for `echo-interval x detect-multiplier` takes the session `down` with `diag echo-function-failed` (diagnostic 2). Control keeps flowing, so the session comes back `up` and Echo restarts; a persistent fault shows as a flapping session.
+- Single-hop sessions only. A session that cannot open its Echo transport (no interface or address towards the peer) logs `bfd echo unavailable` once and stays Control-only.
+- The neighbour must forward IP between the two addresses of the link (`net.ipv4.ip_forward=1` / `net.ipv6.conf.all.forwarding=1`). It may send ICMP redirects for the looped packet; it still forwards, but set `send_redirects=0` on that interface to avoid the noise.
+- The neighbour's MAC comes from the kernel neighbour table, read only: the Control session's ARP/ND creates the entry. Without one, echoes are not sent and the session goes `down` after the echo detection time.
+- Echo packets carry no authentication (RFC 5880 has none for Echo); `auth` covers Control only.
+
 ## Check sessions
 
 - `show bfd sessions` lists every session, `show bfd sessions <peer>` those to one address. Sample:
@@ -102,8 +122,9 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 
 - `tx` is the negotiated transmit interval, `detect` the detection time, `discriminators` local/remote.
 - With `auth` set the line ends with `auth <method> key <id> (<n> failures)`; the key is never shown.
+- While Echo runs the line ends with `echo active <n>ms`.
 - A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
-- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id` and `auth_failures`.
+- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id`, `auth_failures`, `echo_active` and `echo_interval_us` (0 while Echo is off).
 - "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
 
 ## Multi-hop sessions

@@ -150,6 +150,10 @@ pub struct BfdSessionView {
     pub auth_key_id: Option<u8>,
     /// Packets dropped by RFC 5880 §6.7 authentication since the session started.
     pub auth_failures: u64,
+    /// The Echo function is running (RFC 5880 §6.4).
+    pub echo_active: bool,
+    /// Negotiated Echo transmit interval, microseconds; 0 while inactive.
+    pub echo_interval_us: u32,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

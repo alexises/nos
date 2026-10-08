@@ -16,6 +16,8 @@ pub const MINIMUM_TTL_DEFAULT: u8 = 254;
 /// cannot overflow.
 pub const INTERVAL_MAX_MS: u32 = 4_294_967;
 pub const INTERVAL_MIN_MS: u32 = 10;
+/// Default `echo-interval`, milliseconds.
+pub const ECHO_INTERVAL_DEFAULT: u32 = 50;
 
 /// A named set of BFD (RFC 5880) session parameters, referenced by bare name
 /// from a BGP peer-group, an OSPF/OSPFv3 profile or a static route
@@ -73,6 +75,34 @@ pub struct BfdProfile {
     #[garde(custom(|a: &Option<BfdAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
     #[cli(topic = BfdProfileAuth)]
     pub auth: Option<BfdAuth>,
+
+    /// RFC 5880 §6.4 Echo function (single-hop sessions only).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BfdProfileEchoMode)]
+    pub echo_mode: EchoMode,
+
+    /// Echo transmit interval, and the Required Min Echo RX Interval this
+    /// system advertises, milliseconds.
+    #[serde(default = "echo_interval_default")]
+    #[garde(range(min = INTERVAL_MIN_MS, max = INTERVAL_MAX_MS))]
+    #[cli(topic = BfdProfileEchoInterval)]
+    pub echo_interval: u32,
+}
+
+/// Whether this system loops its own Echo packets through the peer (RFC 5880
+/// §6.4). `Affiliated`: the Echo function runs alongside the Control session,
+/// which then slows to one packet a second.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum EchoMode {
+    #[default]
+    Disabled,
+    Affiliated,
+}
+
+fn echo_interval_default() -> u32 {
+    ECHO_INTERVAL_DEFAULT
 }
 
 fn min_interval_default() -> u32 {
@@ -97,6 +127,8 @@ impl Default for BfdProfile {
             minimum_ttl: MINIMUM_TTL_DEFAULT,
             shutdown: false,
             auth: None,
+            echo_mode: EchoMode::Disabled,
+            echo_interval: ECHO_INTERVAL_DEFAULT,
         }
     }
 }

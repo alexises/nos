@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 use crate::packet::{self, Packet};
-use crate::session::{self, Core, Status, Tx};
+use crate::session::{self, Core, EchoPath, Status, Tx};
 
 /// How long a session waits before retrying a failed `Net::open` (the VRF
 /// not known to `nos-ribd` yet, no route to the peer, ...).
@@ -28,6 +28,13 @@ const OPEN_RETRY: Duration = Duration::from_secs(1);
 #[async_trait]
 pub trait Net: Send + Sync {
     async fn open(&self, key: &SessionKey) -> io::Result<Arc<dyn Tx>>;
+
+    /// The Echo transport of a single-hop session with local discriminator
+    /// `disc`; `None` when it cannot be had (the session then never runs
+    /// Echo).
+    async fn open_echo(&self, _key: &SessionKey, _disc: u32) -> Option<EchoPath> {
+        None
+    }
 }
 
 /// A session as the receive path sees it.
@@ -221,7 +228,12 @@ impl Manager {
                     }
                 }
             };
-            session::run(k, core, tx, pkt_rx, cmd_rx, status_tx).await;
+            let echo = if k.multihop {
+                None
+            } else {
+                net.open_echo(&k, disc).await
+            };
+            session::run(k, core, tx, echo, pkt_rx, cmd_rx, status_tx).await;
         });
         sessions.insert(
             key.clone(),
@@ -287,6 +299,8 @@ impl Manager {
                     auth_method: s.auth_method,
                     auth_key_id: s.auth_key_id,
                     auth_failures: s.auth_failures,
+                    echo_active: s.echo_active,
+                    echo_interval_us: s.echo_interval_us,
                 }
             })
             .collect();
