@@ -289,7 +289,7 @@ async fn resync(
     // After the restart decision: `routing_table` is cleared until then.
     sessions.set_bfd_targets(match (&vrf, &routing_table) {
         (VrfRequirement::Resolved(_), Some(table)) => {
-            bfd_target(own, &cfg.bfd_profiles, table.clone())
+            bfd_target(&cfg, own, table.clone(), &source_addrs)
         }
         _ => bfd_client::Target::default(),
     });
@@ -317,13 +317,17 @@ async fn resync(
 /// The BFD sessions `own`'s peers want: a non-shut peer whose peer-group
 /// names a `bfd` profile. The profile is not part of `ResolvedPeer`, so
 /// adding or removing `bfd` never resets a session.
-// ponytail: single-hop only (a `max-hops` above 1 is skipped); multihop
-// BFD (RFC 5883) is #287. Off-link peers are not detected: their session
-// just never comes Up and so never reports a failure.
+///
+/// A peer is multihop (RFC 5883) when its peer-group has `max-hops` > 1 or
+/// the address is on no connected subnet of the table in the config
+/// (`Config::is_connected`); `local` is the peer-group's `source-address`
+/// when it resolved. ponytail: a peer reached over a connected subnet that is
+/// not in the config (DHCP) is registered multihop, which still works.
 fn bfd_target(
+    cfg: &nos_proto::Config,
     own: &nos_proto::BgpInstance,
-    profiles: &[nos_proto::schema::BfdProfile],
     table: String,
+    source_addrs: &HashMap<&str, Vec<IpAddr>>,
 ) -> bfd_client::Target {
     let mut peers = HashMap::new();
     for peer in &own.peers {
@@ -334,12 +338,21 @@ fn bfd_target(
         if peer.shutdown.is_some() || group.shutdown.is_some() {
             continue;
         }
-        if group.max_hops.is_some_and(|h| h > 1) {
-            warn!(peer = %peer.remote_address, "bfd on a multihop peer is not supported yet, skipping");
-            continue;
-        }
-        if let Some(profile) = profiles.iter().find(|p| &p.name == name) {
-            peers.insert(peer.remote_address, profile.clone());
+        if let Some(profile) = cfg.bfd_profiles.iter().find(|p| &p.name == name) {
+            let local = source_addrs.get(group.name.as_str()).and_then(|a| {
+                a.iter()
+                    .find(|a| a.is_ipv4() == peer.remote_address.is_ipv4())
+                    .copied()
+            });
+            peers.insert(
+                peer.remote_address,
+                bfd_client::Want {
+                    profile: profile.clone(),
+                    multihop: group.max_hops.is_some_and(|h| h > 1)
+                        || !cfg.is_connected(&table, peer.remote_address),
+                    local,
+                },
+            );
         }
     }
     bfd_client::Target { table, peers }
@@ -486,16 +499,17 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 mod tests {
     use super::*;
 
-    /// Only a non-shut peer in a peer-group naming a known profile, with no
-    /// multihop, is registered.
+    /// Only a non-shut peer in a peer-group naming a known profile is
+    /// registered; multihop when `max-hops` > 1 or off every connected subnet.
     #[test]
-    fn bfd_target_picks_guarded_single_hop_peers() {
+    fn bfd_target_picks_guarded_peers_and_their_hop_mode() {
         let own: nos_proto::BgpInstance = serde_json::from_value(serde_json::json!({
             "name": "r1", "asn": 65001, "router_id": "1.1.1.1",
             "peers": [
                 {"remote_address": "10.0.0.1", "peer_group": "g"},
                 {"remote_address": "10.0.0.2", "peer_group": "plain"},
                 {"remote_address": "10.0.0.3", "peer_group": "far"},
+                {"remote_address": "2.2.2.2", "peer_group": "g"},
             ],
             "peer_groups": [
                 {"name": "g", "remote_as": 65002, "address_families": [], "route_reflector_client": false, "route_server_client": false, "bfd": "fast"},
@@ -504,17 +518,38 @@ mod tests {
             ],
         }))
         .unwrap();
-        let fast = nos_proto::schema::BfdProfile {
-            name: "fast".into(),
+        let cfg = nos_proto::Config {
+            bfd_profiles: vec![nos_proto::schema::BfdProfile {
+                name: "fast".into(),
+                ..Default::default()
+            }],
+            interfaces: vec![nos_proto::Interface {
+                name: "eth1".into(),
+                subinterfaces: vec![nos_proto::schema::interface::Subinterface {
+                    routing_table: Some("rt1".into()),
+                    addresses: vec![nos_proto::schema::interface::InterfaceAddress {
+                        address: "10.0.0.254/24".parse().unwrap(),
+                        label: None,
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
             ..Default::default()
         };
-        let t = bfd_target(&own, std::slice::from_ref(&fast), "rt1".into());
-        assert_eq!(t.table, "rt1");
-        assert_eq!(
-            t.peers.keys().collect::<Vec<_>>(),
-            [&"10.0.0.1".parse::<IpAddr>().unwrap()]
-        );
-        assert!(bfd_target(&own, &[], "rt1".into()).peers.is_empty());
+        let src: HashMap<&str, Vec<IpAddr>> =
+            HashMap::from([("g", vec!["1.1.1.1".parse().unwrap()])]);
+        let t = bfd_target(&cfg, &own, "rt1".into(), &src);
+        let hop = |p: &str| {
+            let w = &t.peers[&p.parse::<IpAddr>().unwrap()];
+            (w.multihop, w.local)
+        };
+        assert_eq!(t.peers.len(), 3, "the unguarded peer-group is left out");
+        assert_eq!(hop("10.0.0.1"), (false, Some("1.1.1.1".parse().unwrap())));
+        assert_eq!(hop("10.0.0.3"), (true, None), "max-hops 5");
+        assert_eq!(hop("2.2.2.2"), (true, Some("1.1.1.1".parse().unwrap())));
+        let none = nos_proto::Config::default();
+        assert!(bfd_target(&none, &own, "rt1".into(), &src).peers.is_empty());
     }
 
     #[test]

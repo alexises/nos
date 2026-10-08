@@ -30,16 +30,35 @@ pub trait Net: Send + Sync {
     async fn open(&self, key: &SessionKey) -> io::Result<Arc<dyn Tx>>;
 }
 
-type Table = HashMap<(String, IpAddr), mpsc::Sender<Packet>>;
+/// A session as the receive path sees it.
+#[derive(Clone)]
+struct Slot {
+    tx: mpsc::Sender<Packet>,
+    multihop: bool,
+    /// RFC 5883 §5 / GTSM floor from the profile (multihop only).
+    min_ttl: u8,
+}
+
+/// RFC 5881 §5: single-hop packets must arrive with TTL 255; RFC 5883 §5:
+/// multihop ones with at least the profile's `minimum-ttl`.
+pub fn ttl_ok(multihop: bool, ttl: Option<u8>, min_ttl: u8) -> bool {
+    match ttl {
+        Some(t) if multihop => t >= min_ttl,
+        Some(t) => t == 255,
+        None => false,
+    }
+}
 
 #[derive(Default)]
 struct Tables {
-    by_disc: HashMap<u32, mpsc::Sender<Packet>>,
+    by_disc: HashMap<u32, Slot>,
     /// Packets with Your Discriminator 0 (§6.8.6: found by source address
-    /// and, here, table). ponytail: no interface in the key (RFC 5881 §4
-    /// mentions it), so two sessions to one peer address in one table would
-    /// collide; add the arrival interface from `IP_PKTINFO` if that matters.
-    by_peer: Table,
+    /// and table, plus the port the packet came in on). ponytail: no
+    /// interface in the single-hop key (RFC 5881 §4 mentions it) and no
+    /// local address in the multihop one (RFC 5883 §4 wants the pair), so two
+    /// sessions to one peer address in one table collide; add the arrival
+    /// interface / destination from `IP_PKTINFO` if that matters.
+    by_peer: HashMap<(String, IpAddr, bool), Slot>,
 }
 
 /// Maps received datagrams to session tasks. Cloned into every socket task.
@@ -47,21 +66,49 @@ struct Tables {
 pub struct Demux(Arc<Mutex<Tables>>);
 
 impl Demux {
-    fn add(&self, disc: u32, key: &SessionKey, tx: &mpsc::Sender<Packet>) {
+    fn add(&self, disc: u32, key: &SessionKey, tx: &mpsc::Sender<Packet>, min_ttl: u8) {
         let mut t = self.0.lock().unwrap();
-        t.by_disc.insert(disc, tx.clone());
-        t.by_peer.insert((key.table.clone(), key.peer), tx.clone());
+        let slot = Slot {
+            tx: tx.clone(),
+            multihop: key.multihop,
+            min_ttl,
+        };
+        t.by_disc.insert(disc, slot.clone());
+        t.by_peer
+            .insert((key.table.clone(), key.peer, key.multihop), slot);
+    }
+
+    fn set_min_ttl(&self, disc: u32, key: &SessionKey, min_ttl: u8) {
+        let mut t = self.0.lock().unwrap();
+        if let Some(s) = t.by_disc.get_mut(&disc) {
+            s.min_ttl = min_ttl;
+        }
+        if let Some(s) = t
+            .by_peer
+            .get_mut(&(key.table.clone(), key.peer, key.multihop))
+        {
+            s.min_ttl = min_ttl;
+        }
     }
 
     fn remove(&self, disc: u32, key: &SessionKey) {
         let mut t = self.0.lock().unwrap();
         t.by_disc.remove(&disc);
-        t.by_peer.remove(&(key.table.clone(), key.peer));
+        t.by_peer
+            .remove(&(key.table.clone(), key.peer, key.multihop));
     }
 
-    /// Decodes `data` (received on `table`'s socket from `src`) and hands it
-    /// to its session. Whether a session took it.
-    pub fn route(&self, table: &str, src: IpAddr, data: &[u8]) -> bool {
+    /// Decodes `data` (received on `table`'s single-hop or `multihop` socket
+    /// from `src` with `ttl`) and hands it to its session. Whether a session
+    /// took it.
+    pub fn route(
+        &self,
+        table: &str,
+        src: IpAddr,
+        multihop: bool,
+        ttl: Option<u8>,
+        data: &[u8],
+    ) -> bool {
         let p = match packet::decode(data) {
             Ok(p) => p,
             Err(e) => {
@@ -71,12 +118,19 @@ impl Demux {
         };
         let t = self.0.lock().unwrap();
         let session = if p.your_discriminator == 0 {
-            t.by_peer.get(&(table.to_string(), src))
+            t.by_peer.get(&(table.to_string(), src, multihop))
         } else {
-            t.by_disc.get(&p.your_discriminator)
+            t.by_disc
+                .get(&p.your_discriminator)
+                .filter(|s| s.multihop == multihop)
         };
+        let Some(s) = session else { return false };
+        if !ttl_ok(multihop, ttl, s.min_ttl) {
+            debug!(peer = %src, ttl = ?ttl, multihop, "bfd packet discarded: ttl");
+            return false;
+        }
         // A full queue drops the packet: BFD tolerates loss by design.
-        session.is_some_and(|tx| tx.try_send(p).is_ok())
+        s.tx.try_send(p).is_ok()
     }
 }
 
@@ -139,6 +193,7 @@ impl Manager {
             e.clients.insert(client);
             if e.profile != *profile {
                 e.profile = profile.clone();
+                self.demux.set_min_ttl(e.disc, key, profile.minimum_ttl);
                 let _ = e.cmd.try_send(profile.clone());
             }
             return e.status.clone();
@@ -152,8 +207,8 @@ impl Manager {
         let (status_tx, status_rx) = watch::channel(core.status());
         let (pkt_tx, pkt_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
-        self.demux.add(disc, key, &pkt_tx);
-        info!(peer = %key.peer, table = %key.table, "bfd session registered");
+        self.demux.add(disc, key, &pkt_tx, profile.minimum_ttl);
+        info!(peer = %key.peer, table = %key.table, multihop = key.multihop, "bfd session registered");
         let net = self.net.clone();
         let k = key.clone();
         let task = tokio::spawn(async move {
@@ -348,12 +403,83 @@ pub(crate) mod tests {
             your_discriminator: 0,
             ..first
         };
-        assert!(demux.route("rt1", k.peer, &reply.encode()));
-        assert!(!demux.route("rt2", k.peer, &reply.encode()), "wrong table");
+        assert!(demux.route("rt1", k.peer, false, Some(255), &reply.encode()));
+        assert!(
+            !demux.route("rt2", k.peer, false, Some(255), &reply.encode()),
+            "wrong table"
+        );
         reply.state = BfdState::Init;
         reply.your_discriminator = rx.borrow().local_discriminator;
-        assert!(demux.route("rt1", "192.0.2.77".parse().unwrap(), &reply.encode()));
-        assert!(!demux.route("rt1", k.peer, &[0u8; 3]), "garbage");
+        assert!(demux.route(
+            "rt1",
+            "192.0.2.77".parse().unwrap(),
+            false,
+            Some(255),
+            &reply.encode()
+        ));
+        assert!(
+            !demux.route("rt1", k.peer, false, Some(255), &[0u8; 3]),
+            "garbage"
+        );
+        assert!(
+            !demux.route("rt1", k.peer, false, Some(254), &reply.encode()),
+            "single-hop wants 255"
+        );
+        assert!(
+            !demux.route("rt1", k.peer, true, Some(255), &reply.encode()),
+            "wrong port"
+        );
+    }
+
+    #[test]
+    fn ttl_rule_single_and_multihop() {
+        assert!(ttl_ok(false, Some(255), 254));
+        assert!(!ttl_ok(false, Some(254), 254), "single-hop is exactly 255");
+        assert!(ttl_ok(true, Some(254), 254));
+        assert!(ttl_ok(true, Some(255), 254));
+        assert!(!ttl_ok(true, Some(253), 254));
+        assert!(!ttl_ok(true, None, 0), "no TTL from the kernel: drop");
+    }
+
+    /// RFC 5883: a multihop session shares no state with a single-hop one to
+    /// the same address and is demuxed by port and TTL.
+    #[tokio::test]
+    async fn multihop_sessions_are_separate_and_demuxed_by_port_and_ttl() {
+        let (m, _, demux) = mgr(false);
+        let c = m.new_client();
+        let single = key("192.0.2.1");
+        let multi = SessionKey {
+            multihop: true,
+            local: Some("192.0.2.9".parse().unwrap()),
+            ..single.clone()
+        };
+        m.register(c, &single, &BfdProfile::default());
+        m.register(c, &multi, &BfdProfile::default());
+        assert_eq!(m.sessions(None).len(), 2);
+        let p = Packet {
+            diag: 0,
+            state: BfdState::Down,
+            poll: false,
+            final_: false,
+            control_plane_independent: false,
+            demand: false,
+            detect_mult: 3,
+            my_discriminator: 5,
+            your_discriminator: 0,
+            desired_min_tx: 1_000_000,
+            required_min_rx: 1_000_000,
+            required_min_echo_rx: 0,
+        };
+        assert!(demux.route("rt1", multi.peer, true, Some(254), &p.encode()));
+        assert!(!demux.route("rt1", multi.peer, true, Some(253), &p.encode()));
+        let raised = BfdProfile {
+            minimum_ttl: 255,
+            ..BfdProfile::default()
+        };
+        m.register(c, &multi, &raised);
+        assert!(!demux.route("rt1", multi.peer, true, Some(254), &p.encode()));
+        m.drop_client(c);
+        assert!(demux.0.lock().unwrap().by_peer.is_empty());
     }
 
     #[tokio::test]

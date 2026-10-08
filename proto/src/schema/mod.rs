@@ -188,6 +188,26 @@ pub struct Config {
     pub bfd_profiles: Vec<BfdProfile>,
 }
 
+impl Config {
+    /// Whether `ip` lies on a subnet configured on an interface (or
+    /// subinterface, or port-aggregate subinterface) in routing table
+    /// `table`: the config-only "directly connected" test BFD clients use to
+    /// choose single-hop (RFC 5881) over multihop (RFC 5883) sessions.
+    /// ponytail: addresses learned outside the config (DHCP) are not seen.
+    pub fn is_connected(&self, table: &str, ip: std::net::IpAddr) -> bool {
+        let on = |rt: &Option<String>, addrs: &[interface::InterfaceAddress]| {
+            rt.as_deref() == Some(table) && addrs.iter().any(|a| a.address.trunc().contains(&ip))
+        };
+        let subs = |subs: &[interface::Subinterface]| {
+            subs.iter().any(|s| on(&s.routing_table, &s.addresses))
+        };
+        self.interfaces
+            .iter()
+            .any(|i| on(&i.routing_table, &i.addresses) || subs(&i.subinterfaces))
+            || self.port_aggregates.iter().any(|a| subs(&a.subinterfaces))
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -221,6 +241,40 @@ fn default_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connected_means_inside_a_configured_subnet_of_the_table() {
+        use interface::{Interface, InterfaceAddress, Subinterface};
+        let addr = |a: &str| InterfaceAddress {
+            address: a.parse().unwrap(),
+            label: None,
+        };
+        let cfg = Config {
+            interfaces: vec![
+                Interface {
+                    name: "eth1".into(),
+                    subinterfaces: vec![Subinterface {
+                        routing_table: Some("rt1".into()),
+                        addresses: vec![addr("10.0.0.1/24")],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Interface {
+                    name: "loopback-rt1".into(),
+                    routing_table: Some("rt1".into()),
+                    addresses: vec![addr("1.1.1.1/32")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let ip = |s: &str| s.parse().unwrap();
+        assert!(cfg.is_connected("rt1", ip("10.0.0.2")));
+        assert!(!cfg.is_connected("rt2", ip("10.0.0.2")), "other table");
+        assert!(!cfg.is_connected("rt1", ip("10.0.1.2")));
+        assert!(!cfg.is_connected("rt1", ip("1.1.1.2")), "loopback /32");
+    }
 
     #[test]
     fn default_hostname_is_nos() {

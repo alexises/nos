@@ -1,4 +1,4 @@
-//! The UDP side of RFC 5881 single-hop BFD (excluded from coverage: it only
+//! The UDP side of RFC 5881 single-hop (3784) and RFC 5883 multihop (4784) BFD (excluded from coverage: it only
 //! runs against a real kernel, `nos-e2e`'s `bfd` phase is its test).
 //!
 //! - One receive socket per (table, address family): UDP 3784 wildcard,
@@ -33,6 +33,16 @@ use crate::session::{rand_u32, Tx};
 use crate::watchdog_client;
 
 pub const BFD_PORT: u16 = 3784;
+/// RFC 5883 §2: multihop control packets.
+pub const BFD_MULTIHOP_PORT: u16 = 4784;
+
+const fn port(multihop: bool) -> u16 {
+    if multihop {
+        BFD_MULTIHOP_PORT
+    } else {
+        BFD_PORT
+    }
+}
 const TTL: u32 = 255;
 
 fn ifindex(name: &str) -> u32 {
@@ -67,17 +77,17 @@ fn domain(v6: bool) -> Domain {
     }
 }
 
-fn rx_socket(vrf: &str, v6: bool) -> io::Result<AsyncFd<Socket>> {
+fn rx_socket(vrf: &str, v6: bool, port: u16) -> io::Result<AsyncFd<Socket>> {
     let s = Socket::new(domain(v6), Type::DGRAM, Some(Protocol::UDP))?;
     s.bind_device(Some(vrf.as_bytes()))?;
     let fd = s.as_raw_fd();
     let bind: SocketAddr = if v6 {
         s.set_only_v6(true)?;
         set_int(fd, libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT, 1)?;
-        (Ipv6Addr::UNSPECIFIED, BFD_PORT).into()
+        (Ipv6Addr::UNSPECIFIED, port).into()
     } else {
         set_int(fd, libc::IPPROTO_IP, libc::IP_RECVTTL, 1)?;
-        (Ipv4Addr::UNSPECIFIED, BFD_PORT).into()
+        (Ipv4Addr::UNSPECIFIED, port).into()
     };
     s.bind(&bind.into())?;
     s.set_nonblocking(true)?;
@@ -137,7 +147,7 @@ fn recv_one(fd: RawFd, buf: &mut [u8]) -> io::Result<Datagram> {
     }
 }
 
-async fn rx_loop(sock: AsyncFd<Socket>, table: String, demux: Demux) {
+async fn rx_loop(sock: AsyncFd<Socket>, table: String, multihop: bool, demux: Demux) {
     let mut buf = [0u8; 128];
     loop {
         let mut guard = match sock.readable().await {
@@ -149,13 +159,9 @@ async fn rx_loop(sock: AsyncFd<Socket>, table: String, demux: Demux) {
         };
         match guard.try_io(|s| recv_one(s.get_ref().as_raw_fd(), &mut buf)) {
             Ok(Ok(d)) => {
-                // RFC 5881 §5: single-hop packets must arrive with TTL 255.
-                if d.ttl == Some(255) {
-                    let ok = demux.route(&table, d.src, &buf[..d.len.min(buf.len())]);
-                    debug!(peer = %d.src, delivered = ok, "bfd packet received");
-                } else {
-                    debug!(peer = %d.src, ttl = ?d.ttl, "bfd packet discarded: ttl is not 255");
-                }
+                // TTL check (RFC 5881 §5 / RFC 5883 §5) is per session, in `route`.
+                let ok = demux.route(&table, d.src, multihop, d.ttl, &buf[..d.len.min(buf.len())]);
+                debug!(peer = %d.src, ttl = ?d.ttl, delivered = ok, "bfd packet received");
             }
             Ok(Err(e)) if e.kind() != io::ErrorKind::Interrupted => {
                 warn!(table = %table, error = %e, "bfd receive failed");
@@ -207,6 +213,20 @@ fn local_for(peer: IpAddr, vrf: &str, interface: Option<&str>) -> Option<IpAddr>
     })
 }
 
+/// The source address the kernel would use towards `peer` in `vrf`: a
+/// connected UDP socket's local address is a route lookup, nothing is sent.
+/// RFC 5883 §4 wants the multihop local address fixed; a client that does
+/// not name one gets this one. ponytail: not refreshed if the route's source
+/// changes while the session lives.
+fn kernel_source(peer: IpAddr, vrf: &str) -> Option<IpAddr> {
+    let s = Socket::new(domain(peer.is_ipv6()), Type::DGRAM, Some(Protocol::UDP)).ok()?;
+    s.bind_device(Some(vrf.as_bytes())).ok()?;
+    s.connect(&SocketAddr::new(peer, BFD_MULTIHOP_PORT).into())
+        .ok()?;
+    let ip = s.local_addr().ok()?.as_socket()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
+}
+
 fn tx_socket(device: &str, vrf: &str, key: &SessionKey) -> io::Result<UdpTx> {
     let v6 = key.peer.is_ipv6();
     let s = Socket::new(domain(v6), Type::DGRAM, Some(Protocol::UDP))?;
@@ -220,7 +240,13 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey) -> io::Result<UdpTx> {
     // bound to a VRF, so the source is picked here.
     let local = key
         .local
-        .or_else(|| local_for(key.peer, vrf, key.interface.as_deref()))
+        .or_else(|| {
+            if key.multihop {
+                kernel_source(key.peer, vrf)
+            } else {
+                local_for(key.peer, vrf, key.interface.as_deref())
+            }
+        })
         .ok_or_else(|| io::Error::other("no local address towards the peer yet"))?;
     let mut bound = false;
     let mut err = io::Error::other("no free source port");
@@ -239,22 +265,23 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey) -> io::Result<UdpTx> {
         return Err(err);
     }
     let scope = key.interface.as_deref().map_or(0, ifindex);
+    let dport = port(key.multihop);
     let peer: SockAddr = match key.peer {
-        IpAddr::V6(a) => SocketAddrV6::new(a, BFD_PORT, 0, scope).into(),
-        IpAddr::V4(a) => SocketAddr::new(a.into(), BFD_PORT).into(),
+        IpAddr::V6(a) => SocketAddrV6::new(a, dport, 0, scope).into(),
+        IpAddr::V4(a) => SocketAddr::new(a.into(), dport).into(),
     };
     s.connect(&peer)?;
     s.set_nonblocking(true)?;
     Ok(UdpTx(s))
 }
 
-type RxTasks = HashMap<(String, bool), (u32, JoinHandle<()>)>;
+type RxTasks = HashMap<(String, bool, bool), (u32, JoinHandle<()>)>;
 
 /// The real transport. Owns the receive sockets and feeds the `Demux`.
 pub struct UdpNet {
     watchdog_socket: PathBuf,
     demux: Demux,
-    /// (table, v6) -> (VRF ifindex it was opened for, its receive task).
+    /// (table, v6, multihop) -> (VRF ifindex it was opened for, its receive task).
     rx: Mutex<RxTasks>,
 }
 
@@ -270,18 +297,23 @@ impl UdpNet {
     /// Starts the table's receive socket, or restarts it when the VRF device
     /// behind it was recreated (a `nos-ribd` restart): the old socket is
     /// bound to the deleted device's index.
-    fn ensure_rx(&self, table: &str, vrf: &str, v6: bool) -> io::Result<()> {
+    fn ensure_rx(&self, table: &str, vrf: &str, v6: bool, multihop: bool) -> io::Result<()> {
         let idx = ifindex(vrf);
         let mut rx = self.rx.lock().unwrap();
-        if let Some((have, task)) = rx.get(&(table.to_string(), v6)) {
+        if let Some((have, task)) = rx.get(&(table.to_string(), v6, multihop)) {
             if *have == idx && !task.is_finished() {
                 return Ok(());
             }
             task.abort();
         }
-        let sock = rx_socket(vrf, v6)?;
-        let task = tokio::spawn(rx_loop(sock, table.to_string(), self.demux.clone()));
-        rx.insert((table.to_string(), v6), (idx, task));
+        let sock = rx_socket(vrf, v6, port(multihop))?;
+        let task = tokio::spawn(rx_loop(
+            sock,
+            table.to_string(),
+            multihop,
+            self.demux.clone(),
+        ));
+        rx.insert((table.to_string(), v6, multihop), (idx, task));
         Ok(())
     }
 }
@@ -292,8 +324,12 @@ impl Net for UdpNet {
         let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
             .await
             .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
-        self.ensure_rx(&key.table, &vrf, key.peer.is_ipv6())?;
-        let device = key.interface.as_deref().unwrap_or(&vrf);
+        self.ensure_rx(&key.table, &vrf, key.peer.is_ipv6(), key.multihop)?;
+        let device = key
+            .interface
+            .as_deref()
+            .filter(|_| !key.multihop)
+            .unwrap_or(&vrf);
         Ok(Arc::new(tx_socket(device, &vrf, key)?))
     }
 }

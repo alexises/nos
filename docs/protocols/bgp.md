@@ -492,7 +492,7 @@ The algorithm values are `HmacSha1_96` and `AesCmac96`. `exclude_options: true` 
   - Either clear: BFD fails along with a restart, so stale routes are kept and the Cease/10 is graceful.
   - `nos-bfdd` always sets C.
 - Without `nos-bfdd` BGP works as before; sessions are registered again after it comes back.
-- Single-hop only: a peer-group with `max-hops` above 1 is skipped with a warning. A session `nos-bfdd` cannot bring `up` (an off-link peer) never closes anything.
+- A peer with `max-hops` above 1, or off every connected subnet of the instance's routing table, gets a [multi-hop session](bfd.md#multi-hop-sessions) (RFC 5883, UDP 4784); other peers get a single-hop one. A session `nos-bfdd` cannot bring `up` never closes anything.
 - A shut-down peer gets no session.
 
 ### Administrative shutdown (RFC 4486, RFC 9003)

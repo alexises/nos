@@ -157,33 +157,12 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `bgp-bfd`, on the base lab (run after `established`). Both peer-groups get
-/// `bfd fast` (100 ms x 3) without resetting the session; dropping UDP 3784
-/// on router-a's ingress takes the BFD session Down by detection time and
-/// both routers close the BGP session at once (Cease/10 wrapped in a Hard
-/// Reset, RFC 9384 + RFC 5882 §4.3.1: N is exchanged and both ends set the C
-/// bit) while the 90 s hold time is nowhere near expiring; lifting the drop
-/// re-establishes; removing `bfd` again resets nothing.
-pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
+/// Drops UDP `port` on router-a's ingress and waits for both routers to close
+/// their BGP session on the resulting BFD Down (Cease/10 wrapped in a Hard
+/// Reset), then lifts the filter and waits for both to re-establish.
+async fn drop_udp_and_recover(w: &World, port: &str) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    let cease = "sent cease notification";
     let est = "bgp session established";
-
-    a.established().await?;
-    b.established().await?;
-    log("adding bfd to the peer-group must not reset the session");
-    let (cease_a, cease_b, est_a, est_b) =
-        (a.count(cease), b.count(cease), a.count(est), b.count(est));
-    a.provision(&["--bfd-bgp"]).await?;
-    b.provision(&["--bfd-bgp"]).await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
-    session_is(b, IP_A, "Up", None, 30).await?;
-    a.assert_quiet(cease, cease_a, 3).await?;
-    b.assert_quiet(cease, cease_b, 0).await?;
-    a.assert_quiet(est, est_a, 0).await?;
-    b.assert_quiet(est, est_b, 0).await?;
-
-    log("dropping UDP 3784 on router-a: BFD Down closes the BGP session within seconds");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     let closing = format!("bgp: bfd session down, closing peer={IP_B}");
     let sent = format!("sent cease notification peer={IP_B} .*subcode=10 hard_reset=true");
@@ -204,7 +183,7 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
         &w.dock,
         &[
             "filter", "add", "dev", "eth0", "ingress", "protocol", "ip", "u32", "match", "ip",
-            "protocol", "17", "0xff", "match", "ip", "dport", "3784", "0xffff", "action", "drop",
+            "protocol", "17", "0xff", "match", "ip", "dport", port, "0xffff", "action", "drop",
         ],
     )
     .await;
@@ -220,9 +199,77 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
     result?;
     lifted?;
 
-    log("filter lifted: both sessions come back");
     a.wait_new(est, est_a, 60).await?;
     b.wait_new(est, est_b, 60).await?;
+    Ok(())
+}
+
+/// `bgp-bfd`, on the base lab (run after `established`). Both peer-groups get
+/// `bfd fast` (100 ms x 3) without resetting the session; dropping UDP 3784
+/// on router-a's ingress takes the BFD session Down by detection time and
+/// both routers close the BGP session at once (Cease/10 wrapped in a Hard
+/// Reset, RFC 9384 + RFC 5882 §4.3.1: N is exchanged and both ends set the C
+/// bit) while the 90 s hold time is nowhere near expiring; lifting the drop
+/// re-establishes; `max-hops 2` turns both into multihop sessions (UDP 4784,
+/// #287) with the same behaviour; removing `bfd` again resets nothing.
+pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let cease = "sent cease notification";
+    let est = "bgp session established";
+
+    a.established().await?;
+    b.established().await?;
+    log("adding bfd to the peer-group must not reset the session");
+    let (cease_a, cease_b, est_a, est_b) =
+        (a.count(cease), b.count(cease), a.count(est), b.count(est));
+    a.provision(&["--bfd-bgp"]).await?;
+    b.provision(&["--bfd-bgp"]).await?;
+    session_is(a, IP_B, "Up", None, 30).await?;
+    session_is(b, IP_A, "Up", None, 30).await?;
+    a.assert_quiet(cease, cease_a, 3).await?;
+    b.assert_quiet(cease, cease_b, 0).await?;
+    a.assert_quiet(est, est_a, 0).await?;
+    b.assert_quiet(est, est_b, 0).await?;
+
+    log("dropping UDP 3784 on router-a: BFD Down closes the BGP session within seconds");
+    drop_udp_and_recover(w, "3784").await?;
+    session_is(a, IP_B, "Up", None, 30).await?;
+
+    log("max-hops 2 makes both sessions multihop (RFC 5883, UDP 4784, TTL >= 254)");
+    let registered =
+        |peer: &str, hop: bool| format!("bfd session registered peer={peer} .*multihop={hop}");
+    let (reg_a, reg_b) = (
+        a.count(&registered(IP_B, true)),
+        b.count(&registered(IP_A, true)),
+    );
+    a.provision(&["--max-hops", "2"]).await?;
+    b.provision(&["--max-hops", "2"]).await?;
+    a.wait_new(&registered(IP_B, true), reg_a, 30).await?;
+    b.wait_new(&registered(IP_A, true), reg_b, 30).await?;
+    a.established().await?;
+    session_is(a, IP_B, "Up", None, 30).await?;
+    session_is(b, IP_A, "Up", None, 30).await?;
+    let path = format!("/v1/bfd/sessions?peer={IP_B}");
+    let sessions = a.rest_expect(Method::GET, &path, None, 200).await?;
+    let v: serde_json::Value = serde_json::from_str(&sessions)?;
+    anyhow::ensure!(
+        v[0]["key"]["multihop"] == true && v[0]["key"]["interface"].is_null(),
+        "expected one multihop session without an interface: {sessions}"
+    );
+    log("dropping UDP 4784 on router-a: the multihop session closes BGP too");
+    drop_udp_and_recover(w, "4784").await?;
+    session_is(a, IP_B, "Up", None, 30).await?;
+
+    log("max-hops 1 again: back to single-hop sessions");
+    let (reg_a, reg_b) = (
+        a.count(&registered(IP_B, false)),
+        b.count(&registered(IP_A, false)),
+    );
+    a.provision(&["--max-hops", "1"]).await?;
+    b.provision(&["--max-hops", "1"]).await?;
+    a.wait_new(&registered(IP_B, false), reg_a, 30).await?;
+    b.wait_new(&registered(IP_A, false), reg_b, 30).await?;
+    a.established().await?;
     session_is(a, IP_B, "Up", None, 30).await?;
 
     log("removing bfd from the peer-group resets nothing");

@@ -25,30 +25,41 @@ use crate::watchdog_client::resolve_once;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// One wanted session: its profile and path (RFC 5883 multihop when the
+/// peer is not on a connected subnet or `max-hops` > 1; `local` is the
+/// peer-group's `source-address` if it has one, else `nos-bfdd` picks the
+/// kernel's source towards the peer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Want {
+    pub profile: BfdProfile,
+    pub multihop: bool,
+    pub local: Option<IpAddr>,
+}
+
 /// The sessions this instance wants, in its routing table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Target {
     pub table: String,
-    pub peers: HashMap<IpAddr, BfdProfile>,
+    pub peers: HashMap<IpAddr, Want>,
 }
 
 /// Pure bookkeeping of what is registered and what each session last did.
 #[derive(Debug, Default)]
 pub struct Book {
     table: String,
-    registered: HashMap<IpAddr, BfdProfile>,
+    registered: HashMap<IpAddr, Want>,
     /// Peers whose session has been `Up` since they were registered.
     was_up: HashSet<IpAddr>,
 }
 
 impl Book {
-    fn key(&self, peer: IpAddr) -> SessionKey {
+    fn key(&self, peer: IpAddr, want: &Want) -> SessionKey {
         SessionKey {
             table: self.table.clone(),
             peer,
-            local: None,
+            local: want.local,
             interface: None,
-            multihop: false,
+            multihop: want.multihop,
         }
     }
 
@@ -57,27 +68,37 @@ impl Book {
     pub fn sync(&mut self, target: &Target) -> Vec<BfdRequest> {
         let mut reqs = Vec::new();
         if self.table != target.table {
-            for peer in self.registered.keys().copied().collect::<Vec<_>>() {
+            for (peer, want) in &self.registered {
                 reqs.push(BfdRequest::Deregister {
-                    key: self.key(peer),
+                    key: self.key(*peer, want),
                 });
             }
             self.registered.clear();
             self.was_up.clear();
             self.table.clone_from(&target.table);
         }
-        for (peer, profile) in &target.peers {
-            if self.registered.get(peer) != Some(profile) {
-                reqs.push(BfdRequest::Register {
-                    table: self.table.clone(),
-                    peer: *peer,
-                    local: None,
-                    interface: None,
-                    profile: profile.clone(),
-                    multihop: false,
-                });
-                self.registered.insert(*peer, profile.clone());
+        for (peer, want) in &target.peers {
+            let old = self.registered.get(peer);
+            if old == Some(want) {
+                continue;
             }
+            // A different path is a different session: the old one goes.
+            if let Some(old) = old.filter(|o| (o.multihop, o.local) != (want.multihop, want.local))
+            {
+                reqs.push(BfdRequest::Deregister {
+                    key: self.key(*peer, old),
+                });
+                self.was_up.remove(peer);
+            }
+            reqs.push(BfdRequest::Register {
+                table: self.table.clone(),
+                peer: *peer,
+                local: want.local,
+                interface: None,
+                profile: want.profile.clone(),
+                multihop: want.multihop,
+            });
+            self.registered.insert(*peer, want.clone());
         }
         let gone: Vec<IpAddr> = self
             .registered
@@ -86,10 +107,10 @@ impl Book {
             .copied()
             .collect();
         for peer in gone {
-            self.registered.remove(&peer);
+            let want = self.registered.remove(&peer).expect("just listed");
             self.was_up.remove(&peer);
             reqs.push(BfdRequest::Deregister {
-                key: self.key(peer),
+                key: self.key(peer, &want),
             });
         }
         reqs
@@ -233,13 +254,18 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn want(multihop: bool, local: Option<IpAddr>) -> Want {
+        Want {
+            profile: BfdProfile::default(),
+            multihop,
+            local,
+        }
+    }
+
     fn target(table: &str, peers: &[&str]) -> Target {
         Target {
             table: table.into(),
-            peers: peers
-                .iter()
-                .map(|p| (ip(p), BfdProfile::default()))
-                .collect(),
+            peers: peers.iter().map(|p| (ip(p), want(false, None))).collect(),
         }
     }
 
@@ -277,6 +303,49 @@ mod tests {
                 key: key("rt2", "192.0.2.1")
             }]
         );
+    }
+
+    #[test]
+    fn multihop_peers_register_multihop_and_a_path_change_replaces_the_session() {
+        let mut b = Book::default();
+        let mut t = target("rt1", &[]);
+        t.peers
+            .insert(ip("2.2.2.2"), want(true, Some(ip("1.1.1.1"))));
+        assert!(matches!(
+            b.sync(&t).as_slice(),
+            [BfdRequest::Register { multihop: true, local: Some(l), interface: None, .. }]
+                if *l == ip("1.1.1.1")
+        ));
+        // Connected after all (an address appeared): single-hop replaces it.
+        t.peers.insert(ip("2.2.2.2"), want(false, None));
+        let reqs = b.sync(&t);
+        assert!(matches!(
+            reqs.as_slice(),
+            [
+                BfdRequest::Deregister {
+                    key: SessionKey {
+                        multihop: true,
+                        local: Some(_),
+                        ..
+                    }
+                },
+                BfdRequest::Register {
+                    multihop: false,
+                    local: None,
+                    ..
+                },
+            ]
+        ));
+        t.peers.clear();
+        assert!(matches!(
+            b.sync(&t).as_slice(),
+            [BfdRequest::Deregister {
+                key: SessionKey {
+                    multihop: false,
+                    ..
+                }
+            }]
+        ));
     }
 
     #[test]
