@@ -1,4 +1,5 @@
 pub mod as_path_list;
+pub mod bfd_profile;
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
@@ -25,6 +26,7 @@ pub mod switching_profile;
 pub mod user;
 
 pub use as_path_list::AsPathList;
+pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdProfile};
 pub use bgp_instance::{
     BgpAggregate, BgpConfederation, BgpGracefulRestart, BgpInstance, RpkiCache,
     GR_RESTART_TIME_DEFAULT, GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT,
@@ -176,6 +178,14 @@ pub struct Config {
     #[garde(dive)]
     #[cli(topic = User)]
     pub users: Vec<User>,
+
+    /// Named BFD parameter sets, referenced by `bfd <name>` from BGP
+    /// peer-groups, OSPF/OSPFv3 profiles and static routes. `serde(default)`
+    /// so on-disk config saved before this field existed still loads.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = BfdProfile)]
+    pub bfd_profiles: Vec<BfdProfile>,
 }
 
 impl Default for Config {
@@ -199,6 +209,7 @@ impl Default for Config {
             lldp: LldpSettings::default(),
             logging: LoggingSettings::default(),
             users: Vec::new(),
+            bfd_profiles: Vec::new(),
         }
     }
 }

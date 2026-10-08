@@ -48,6 +48,7 @@ mod tests {
 
     fn route(subnet: &str, gateway: &str) -> StaticRoute {
         StaticRoute {
+            bfd: None,
             subnet: subnet.parse().unwrap(),
             gateway: gateway.parse().unwrap(),
         }

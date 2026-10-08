@@ -78,6 +78,7 @@ pub struct ConfigDiff {
     pub users: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.logging` is one singleton section.
     pub logging: Vec<FieldDiff>,
+    pub bfd_profiles: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -100,6 +101,7 @@ impl ConfigDiff {
             && self.lldp.is_empty()
             && self.users.is_empty()
             && self.logging.is_empty()
+            && self.bfd_profiles.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -198,6 +200,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            bfd_profiles: if scopes.contains(&DiffScope::BfdProfiles) {
+                self.bfd_profiles.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -225,6 +232,7 @@ pub enum DiffScope {
     Lldp,
     Users,
     Logging,
+    BfdProfiles,
 }
 
 /// The `FieldDiff` label `nos-watchdogd` keys on to decide whether a routing

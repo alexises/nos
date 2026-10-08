@@ -160,6 +160,7 @@ impl OspfProfileOp {
                 let area = find_area_mut(config, instance, *area_id)?;
                 if !area.profiles.iter().any(|p| &p.name == name) {
                     area.profiles.push(OspfProfile {
+                        bfd: None,
                         name: name.clone(),
                         hello_interval: None,
                         dead_interval: None,
@@ -473,6 +474,7 @@ mod tests {
 
     fn profile(name: &str) -> OspfProfile {
         OspfProfile {
+            bfd: None,
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,

@@ -2,6 +2,7 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
+use crate::validators::bfd_reference_valid;
 use nos_proto_derive::Cli;
 
 use super::sugar;
@@ -447,6 +448,13 @@ pub struct BgpPeerGroup {
     #[cli(topic = BgpPeerGroupAuth, render = sugar::render_bgp_auth, sugar(word = "md5-password", with = sugar::md5_password, topic = BgpPeerGroupMd5Password), sugar(word = "ao-key", with = sugar::ao_key, topic = BgpPeerGroupAoKey))]
     pub auth: Option<BgpAuth>,
 
+    /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD.
+    /// Inert until `nos-bfdd` exists.
+    #[serde(default)]
+    #[garde(custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)))]
+    #[cli(topic = BfdReference)]
+    pub bfd: Option<String>,
+
     /// `None` defaults to `SelfAddress` for an eBGP peer-group and
     /// `Unchanged` for an iBGP or `route_server_client` one (RFC 7947
     /// §2.2.1) — see `NextHopMode`.
@@ -827,6 +835,7 @@ mod tests {
 
     fn group(name: &str, remote_as: u32, afs: Vec<AddressFamily>) -> BgpPeerGroup {
         BgpPeerGroup {
+            bfd: None,
             name: name.to_string(),
             remote_as,
             source_address: None,

@@ -1489,6 +1489,42 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Stop exchanging RPKI validation state with the peer-group's peers.",
             ),
         ),
+        Topic::BfdProfile => (
+            "Create or delete a BFD profile.",
+            "A named set of BFD (RFC 5880) session parameters. BGP peer-groups, OSPF and OSPFv3 profiles and static routes reference it with `bfd <name>`. `edit` creates it with defaults (300 ms intervals, multiplier 3, minimum TTL 254) if missing; `delete` removes it, and the commit is refused while anything still references it. No BFD daemon exists yet, so a reference has no effect.",
+        ),
+        Topic::BfdProfileMinTx => (
+            "Set the desired minimum transmit interval.",
+            "Milliseconds between BFD control packets, 10 to 4294967. The interval actually used is the larger of this and the peer's required minimum receive interval.",
+        ),
+        Topic::BfdProfileMinRx => (
+            "Set the required minimum receive interval.",
+            "The fastest rate, in milliseconds (10 to 4294967), at which this system accepts BFD control packets from the peer.",
+        ),
+        Topic::BfdProfileDetectMultiplier => (
+            "Set the detection multiplier.",
+            "How many consecutive control packets may be missed before the session is declared down, at least 1.",
+        ),
+        Topic::BfdProfilePassive => (
+            "Make the BFD role passive.",
+            "A passive system waits for the peer's first control packet instead of starting the session itself (RFC 5880 section 6.1). `delete passive` returns to active.",
+        ),
+        Topic::BfdProfileMinimumTtl => (
+            "Set the minimum accepted TTL.",
+            "Received BFD packets with an IP TTL or hop limit below this value are dropped. Single-hop BFD sends 255 (RFC 5881 section 5); the default of 254 tolerates one routed hop.",
+        ),
+        Topic::BfdProfileShutdown => (
+            "Administratively shut down the profile's sessions.",
+            "Sessions using this profile stay in AdminDown. `delete shutdown` re-enables them.",
+        ),
+        Topic::BfdProfileAuth => (
+            "Set BFD authentication.",
+            "Key id, method (simple-password, keyed-md5, meticulous-md5, keyed-sha1, meticulous-sha1) and key. Key length limits follow RFC 5880: 1 to 16 bytes for a password or an MD5 key, 1 to 20 for a SHA1 key. The key is stored in clear text. Unset means no authentication.",
+        ),
+        Topic::BfdReference => (
+            "Run BFD with a BFD profile.",
+            "The name of a `bfd-profile` whose parameters apply to the sessions of this peer-group, OSPF or OSPFv3 profile, or static route. The commit is refused when the profile does not exist. Unset runs no BFD.",
+        ),
     };
     CommandDoc {
         topic,

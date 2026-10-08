@@ -283,6 +283,7 @@ impl BgpPeerGroupOp {
                 let inst = find_instance_mut(config, instance)?;
                 if !inst.peer_groups.iter().any(|g| &g.name == name) {
                     inst.peer_groups.push(BgpPeerGroup {
+                        bfd: None,
                         name: name.clone(),
                         remote_as: 0,
                         source_address: None,
@@ -735,6 +736,7 @@ mod tests {
 
     fn group(name: &str, remote_as: u32) -> BgpPeerGroup {
         BgpPeerGroup {
+            bfd: None,
             name: name.to_string(),
             remote_as,
             source_address: None,

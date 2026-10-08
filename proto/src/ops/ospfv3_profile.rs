@@ -144,6 +144,7 @@ impl Ospfv3ProfileOp {
                 let area = find_area_mut(config, instance, *area_id)?;
                 if !area.profiles.iter().any(|p| &p.name == name) {
                     area.profiles.push(Ospfv3Profile {
+                        bfd: None,
                         name: name.clone(),
                         hello_interval: None,
                         dead_interval: None,
@@ -407,6 +408,7 @@ mod tests {
 
     fn profile(name: &str) -> Ospfv3Profile {
         Ospfv3Profile {
+            bfd: None,
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,

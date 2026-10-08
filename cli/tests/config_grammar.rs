@@ -73,6 +73,7 @@ fn populated() -> Config {
         static_routing_instances: vec![StaticRoutingInstance {
             name: "sri1".into(),
             routes: vec![StaticRoute {
+                bfd: None,
                 subnet: "10.0.0.0/24".parse().unwrap(),
                 gateway: "10.0.0.254".parse().unwrap(),
             }],

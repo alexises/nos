@@ -379,6 +379,24 @@ topics! {
     InterfaceLacpPortPriority,
     /// `Interface.lacp_mode`
     InterfaceLacpMode,
+    /// `Config.bfd_profiles`
+    BfdProfile,
+    /// `BfdProfile.min_tx_interval`
+    BfdProfileMinTx,
+    /// `BfdProfile.min_rx_interval`
+    BfdProfileMinRx,
+    /// `BfdProfile.detect_multiplier`
+    BfdProfileDetectMultiplier,
+    /// `BfdProfile.passive`
+    BfdProfilePassive,
+    /// `BfdProfile.minimum_ttl`
+    BfdProfileMinimumTtl,
+    /// `BfdProfile.shutdown`
+    BfdProfileShutdown,
+    /// `BfdProfile.auth`
+    BfdProfileAuth,
+    /// The `bfd` reference on a peer-group, OSPF/OSPFv3 profile or static route
+    BfdReference,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
