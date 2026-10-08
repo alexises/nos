@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nos_proto::schema::BfdProfile;
+use nos_proto::schema::{BfdProfile, EchoMode};
 use nos_proto::{BfdSessionView, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::packet::{self, Packet};
 use crate::session::{self, Core, EchoPath, Status, Tx};
@@ -32,7 +32,14 @@ pub trait Net: Send + Sync {
     /// The Echo transport of a single-hop session with local discriminator
     /// `disc`; `None` when it cannot be had (the session then never runs
     /// Echo).
-    async fn open_echo(&self, _key: &SessionKey, _disc: u32) -> Option<EchoPath> {
+    /// `unaffiliated`: RFC 9747, Echo is the whole session (no Control
+    /// traffic ever resolves the neighbour, so the transport must).
+    async fn open_echo(
+        &self,
+        _key: &SessionKey,
+        _disc: u32,
+        _unaffiliated: bool,
+    ) -> Option<EchoPath> {
         None
     }
 }
@@ -196,6 +203,16 @@ impl Manager {
         profile: &BfdProfile,
     ) -> watch::Receiver<Status> {
         let mut sessions = self.sessions.lock().unwrap();
+        // The mode decides what the session is made of (a Control socket and
+        // demux slot, or Echo alone): switching it starts a fresh session.
+        // ponytail: the old one's clients are not carried over, they re-register.
+        let echo_only = profile.echo_mode == EchoMode::Unaffiliated;
+        if sessions
+            .get(key)
+            .is_some_and(|e| (e.profile.echo_mode == EchoMode::Unaffiliated) != echo_only)
+        {
+            self.release_all(&mut sessions, key);
+        }
         if let Some(e) = sessions.get_mut(key) {
             e.clients.insert(client);
             if e.profile != *profile {
@@ -214,11 +231,41 @@ impl Manager {
         let (status_tx, status_rx) = watch::channel(core.status());
         let (pkt_tx, pkt_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
-        self.demux.add(disc, key, &pkt_tx, profile.minimum_ttl);
+        if !echo_only {
+            self.demux.add(disc, key, &pkt_tx, profile.minimum_ttl);
+        }
         info!(peer = %key.peer, table = %key.table, multihop = key.multihop, "bfd session registered");
         let net = self.net.clone();
         let k = key.clone();
         let task = tokio::spawn(async move {
+            // An unaffiliated session has no Demux slot holding the sender: keep
+            // it, or `run` sees the closed channel and ends at once.
+            let _pkt_tx = pkt_tx;
+            if echo_only {
+                // RFC 9747: no Control socket. The Echo transport is retried
+                // until the interface has an address towards the peer.
+                if k.multihop {
+                    warn!(peer = %k.peer, table = %k.table, "bfd unaffiliated echo needs a single-hop session");
+                    return;
+                }
+                let path = loop {
+                    if let Some(p) = net.open_echo(&k, disc, true).await {
+                        break p;
+                    }
+                    tokio::time::sleep(OPEN_RETRY).await;
+                };
+                session::run(
+                    k,
+                    core,
+                    Arc::new(session::NoTx),
+                    Some(path),
+                    pkt_rx,
+                    cmd_rx,
+                    status_tx,
+                )
+                .await;
+                return;
+            }
             let tx = loop {
                 match net.open(&k).await {
                     Ok(tx) => break tx,
@@ -231,7 +278,7 @@ impl Manager {
             let echo = if k.multihop {
                 None
             } else {
-                net.open_echo(&k, disc).await
+                net.open_echo(&k, disc, false).await
             };
             session::run(k, core, tx, echo, pkt_rx, cmd_rx, status_tx).await;
         });
@@ -247,6 +294,15 @@ impl Manager {
             },
         );
         status_rx
+    }
+
+    /// Drops the session `key` whatever clients hold it.
+    fn release_all(&self, sessions: &mut HashMap<SessionKey, Entry>, key: &SessionKey) {
+        if let Some(e) = sessions.remove(key) {
+            e.task.abort();
+            self.demux.remove(e.disc, key);
+            info!(peer = %key.peer, table = %key.table, "bfd session removed");
+        }
     }
 
     fn release(&self, sessions: &mut HashMap<SessionKey, Entry>, client: u64, key: &SessionKey) {
@@ -301,6 +357,7 @@ impl Manager {
                     auth_failures: s.auth_failures,
                     echo_active: s.echo_active,
                     echo_interval_us: s.echo_interval_us,
+                    echo_only: s.echo_only,
                 }
             })
             .collect();
@@ -325,6 +382,15 @@ pub(crate) mod tests {
     pub struct MockNet {
         pub sent: Arc<Sent>,
         pub fail: bool,
+        /// Echo payloads sent, when set the transport exists.
+        pub echo: Option<Arc<Sent>>,
+    }
+
+    impl session::EchoTx for Sent {
+        fn send(&self, payload: &[u8]) -> io::Result<()> {
+            self.0.lock().unwrap().push(payload.to_vec());
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -334,6 +400,17 @@ pub(crate) mod tests {
                 return Err(io::Error::other("no vrf yet"));
             }
             Ok(self.sent.clone())
+        }
+
+        async fn open_echo(&self, _: &SessionKey, _: u32, _: bool) -> Option<EchoPath> {
+            let tx = self.echo.clone()?;
+            let (_keep, rx) = mpsc::channel(1);
+            std::mem::forget(_keep); // the test wire never returns anything
+            Some(EchoPath {
+                tx,
+                rx,
+                tasks: vec![],
+            })
         }
     }
 
@@ -353,6 +430,7 @@ pub(crate) mod tests {
         let net = Arc::new(MockNet {
             sent: sent.clone(),
             fail,
+            echo: None,
         });
         (Manager::new(net, demux.clone()), sent, demux)
     }
@@ -498,6 +576,47 @@ pub(crate) mod tests {
         assert!(!demux.route("rt1", multi.peer, true, Some(254), &p.encode()));
         m.drop_client(c);
         assert!(demux.0.lock().unwrap().by_peer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unaffiliated_session_has_no_control_slot_and_a_mode_switch_restarts_it() {
+        let sent = Arc::new(Sent(Mutex::default()));
+        let echoed = Arc::new(Sent(Mutex::default()));
+        let demux = Demux::default();
+        let m = Manager::new(
+            Arc::new(MockNet {
+                sent: sent.clone(),
+                fail: false,
+                echo: Some(echoed.clone()),
+            }),
+            demux.clone(),
+        );
+        let (c, k) = (m.new_client(), key("192.0.2.1"));
+        let un = BfdProfile {
+            echo_mode: EchoMode::Unaffiliated,
+            ..BfdProfile::default()
+        };
+        m.register(c, &k, &un);
+        assert!(
+            demux.0.lock().unwrap().by_disc.is_empty(),
+            "no Control demux"
+        );
+        assert!(demux.0.lock().unwrap().by_peer.is_empty());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(sent.0.lock().unwrap().is_empty(), "no Control traffic");
+        let first = echoed.0.lock().unwrap().first().cloned();
+        let p = packet::decode(&first.expect("the session runs and echoes")).unwrap();
+        assert_eq!(p.state, BfdState::Down);
+        let d1 = m.sessions(None)[0].local_discriminator;
+        assert_eq!(p.my_discriminator, d1);
+        assert!(m.sessions(None)[0].echo_only);
+
+        m.register(c, &k, &BfdProfile::default());
+        let all = m.sessions(None);
+        assert_eq!(all.len(), 1);
+        assert!(!all[0].echo_only);
+        assert_ne!(all[0].local_discriminator, d1, "a fresh session");
+        assert_eq!(demux.0.lock().unwrap().by_disc.len(), 1);
     }
 
     #[tokio::test]

@@ -312,7 +312,8 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
                 _ => String::new(),
             };
             let echo = if s.echo_active {
-                format!(", echo active {}ms", s.echo_interval_us / 1000)
+                let only = if s.echo_only { " (echo-only)" } else { "" };
+                format!(", echo active {}ms{only}", s.echo_interval_us / 1000)
             } else {
                 String::new()
             };
@@ -1766,6 +1767,7 @@ mod tests {
             auth_failures: 0,
             echo_active: false,
             echo_interval_us: 0,
+            echo_only: false,
         };
         let up = view("192.0.2.1", BfdState::Up, BfdDiag::NoDiagnostic, None);
         let down = view(
@@ -1785,7 +1787,13 @@ mod tests {
             echo_interval_us: 50_000,
             ..up.clone()
         };
-        assert!(render_bfd_sessions(&[echoing]).ends_with("discriminators 1/2, echo active 50ms"));
+        assert!(render_bfd_sessions(std::slice::from_ref(&echoing))
+            .ends_with("discriminators 1/2, echo active 50ms"));
+        let only = BfdSessionView {
+            echo_only: true,
+            ..echoing
+        };
+        assert!(render_bfd_sessions(&[only]).ends_with("echo active 50ms (echo-only)"));
         assert!(render_bfd_sessions(&[authed])
             .ends_with("discriminators 1/2, auth keyed-sha1 key 2 (5 failures)"));
         assert_eq!(

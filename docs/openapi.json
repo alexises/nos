@@ -186,6 +186,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "echo_only": {
+            "description": "RFC 9747 unaffiliated Echo: no Control traffic at all.",
+            "type": "boolean"
+          },
           "key": {
             "$ref": "#/components/schemas/SessionKey"
           },
@@ -219,7 +223,8 @@
           "detection_time_us",
           "auth_failures",
           "echo_active",
-          "echo_interval_us"
+          "echo_interval_us",
+          "echo_only"
         ],
         "type": "object"
       },
@@ -1376,10 +1381,11 @@
         "type": "string"
       },
       "EchoMode": {
-        "description": "Whether this system loops its own Echo packets through the peer (RFC 5880\n§6.4). `Affiliated`: the Echo function runs alongside the Control session,\nwhich then slows to one packet a second.",
+        "description": "Whether this system loops its own Echo packets through the peer (RFC 5880\n§6.4). `Affiliated`: the Echo function runs alongside the Control session,\nwhich then slows to one packet a second. `Unaffiliated` (RFC 9747): Echo\nis the whole session, for a peer that runs no BFD at all.",
         "enum": [
           "Disabled",
-          "Affiliated"
+          "Affiliated",
+          "Unaffiliated"
         ],
         "type": "string"
       },

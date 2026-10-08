@@ -1523,7 +1523,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::BfdProfileEchoMode => (
             "Set the BFD Echo function mode.",
-            "`affiliated` runs the Echo function (RFC 5880 section 6.4) next to the Control session once both ends are Up and the peer accepts echo: this system sends packets addressed to itself, the peer forwards them back, and the session goes down (diagnostic echo-function-failed) when they stop returning. Control packets then slow to one per second. Single-hop sessions only; the peer must forward IP. `disabled` (default) advertises that echo cannot be looped.",
+            "`affiliated` runs the Echo function (RFC 5880 section 6.4) next to the Control session once both ends are Up and the peer accepts echo: this system sends packets addressed to itself, the peer forwards them back, and the session goes down (diagnostic echo-function-failed) when they stop returning. Control packets then slow to one per second. Single-hop sessions only; the peer must forward IP. `unaffiliated` (RFC 9747) is the whole session for a peer that runs no BFD: Control packets are looped back through the peer's forwarding (TTL 255 out, 254 back), the session reaches up when they return and goes down (echo-function-failed) after echo-interval times the detect multiplier without one; min-rx-interval, passive and auth are ignored, and the peer must forward IP without strict uRPF. `disabled` (default) advertises that echo cannot be looped.",
         ),
         Topic::BfdProfileEchoInterval => (
             "Set the BFD Echo interval.",

@@ -535,7 +535,7 @@ pub struct Args {
     /// Removes the profile's authentication again.
     #[arg(long)]
     pub no_bfd_auth: bool,
-    /// `echo-mode` of `bfd-profile fast` (`affiliated` or `disabled`); needs
+    /// `echo-mode` of `bfd-profile fast` (`affiliated`, `unaffiliated` or `disabled`); needs
     /// one of the `--bfd-*`/`--*-bfd` flags that create the profile.
     #[arg(long, value_parser = parse_echo_mode)]
     pub bfd_echo_mode: Option<nos_proto::schema::EchoMode>,
@@ -1447,13 +1447,16 @@ fn parse_bfd_auth(s: &str) -> Result<nos_proto::schema::BfdAuth, String> {
     })
 }
 
-/// `--bfd-echo-mode <affiliated|disabled>`.
+/// `--bfd-echo-mode <affiliated|unaffiliated|disabled>`.
 fn parse_echo_mode(s: &str) -> Result<nos_proto::schema::EchoMode, String> {
     use nos_proto::schema::EchoMode;
     match s {
         "affiliated" => Ok(EchoMode::Affiliated),
+        "unaffiliated" => Ok(EchoMode::Unaffiliated),
         "disabled" => Ok(EchoMode::Disabled),
-        _ => Err(format!("expected affiliated or disabled, got {s:?}")),
+        _ => Err(format!(
+            "expected affiliated, unaffiliated or disabled, got {s:?}"
+        )),
     }
 }
 
@@ -4233,6 +4236,10 @@ mod tests {
         };
         assert_eq!(get("echo-mode").as_deref(), Some("\"Affiliated\""));
         assert_eq!(get("echo-interval").as_deref(), Some("70"));
-        assert!(parse_echo_mode("unaffiliated").is_err());
+        assert_eq!(
+            parse_echo_mode("unaffiliated"),
+            Ok(nos_proto::schema::EchoMode::Unaffiliated)
+        );
+        assert!(parse_echo_mode("bogus").is_err());
     }
 }

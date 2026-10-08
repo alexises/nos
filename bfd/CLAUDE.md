@@ -27,6 +27,7 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 - Discriminators come from the manager's counter (random start), never 0.
 - `BfdRequest`/`BfdEvent` variants are appended, never reordered (postcard). A new `BfdRequest` must be classified in `authz::allowed`.
 - Echo (#290, single-hop, affiliated only): `Core::sync_echo` toggles it and Desired Min TX goes to 1 s through `Timers::change`; never write the neighbour table; echoes are received at the packet layer (the IP stack drops our own source). No demand mode. Multihop (#287): UDP 4784, TTL checked per session in `Demux::route`; no destination address in the zero-discriminator demux (`ponytail:` in `manager.rs`).
+- Unaffiliated echo (#291, RFC 9747): `echo-mode unaffiliated` makes Echo the whole session. `Core` ignores Control, sends encoded Control packets as the Echo payload and feeds the FSM its own looped state; no 3784 socket, no `Demux` slot (`NoTx`); only TTL 254 accepted. The neighbour is resolved by an empty UDP datagram (`neigh_loop`). `auth` ignored (`ponytail:`).
 - Desired Min TX is floored at 1 s while not Up by `Timers` itself; reaching Up needs no `change`.
 - The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` subscribes to no config.
 - A client's connection drop releases its sessions; the last client drops the session. Request-side EOF ends the connection (`ponytail:` in `server.rs`).

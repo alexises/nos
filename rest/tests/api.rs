@@ -670,6 +670,7 @@ async fn show_bfd_sessions_filters_by_peer_and_rejects_a_bad_one() {
                     auth_failures: 0,
                     echo_active: false,
                     echo_interval_us: 0,
+                    echo_only: false,
                 })
                 .collect(),
         ),

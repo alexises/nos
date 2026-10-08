@@ -37,7 +37,8 @@ use tracing::{debug, warn};
 use crate::echo;
 use crate::manager::{Demux, Net};
 use crate::neigh;
-use crate::session::{rand_u32, EchoPath, EchoTx, Tx};
+use crate::packet;
+use crate::session::{rand_u32, EchoPath, EchoTx, Looped, Tx};
 use crate::watchdog_client;
 use nos_l2_socket::L2Unicast;
 
@@ -236,7 +237,7 @@ fn kernel_source(peer: IpAddr, vrf: &str) -> Option<IpAddr> {
     (!ip.is_unspecified()).then_some(ip)
 }
 
-fn tx_socket(device: &str, vrf: &str, key: &SessionKey) -> io::Result<UdpTx> {
+fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Result<UdpTx> {
     let v6 = key.peer.is_ipv6();
     let s = Socket::new(domain(v6), Type::DGRAM, Some(Protocol::UDP))?;
     s.bind_device(Some(device.as_bytes()))?;
@@ -274,7 +275,6 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey) -> io::Result<UdpTx> {
         return Err(err);
     }
     let scope = key.interface.as_deref().map_or(0, ifindex);
-    let dport = port(key.multihop);
     let peer: SockAddr = match key.peer {
         IpAddr::V6(a) => SocketAddrV6::new(a, dport, 0, scope).into(),
         IpAddr::V4(a) => SocketAddr::new(a.into(), dport).into(),
@@ -293,10 +293,10 @@ struct L2Echo {
 }
 
 impl EchoTx for L2Echo {
-    fn send(&self, disc: u32, seq: u32) -> io::Result<()> {
+    fn send(&self, payload: &[u8]) -> io::Result<()> {
         let mac = (*self.mac.lock().unwrap())
             .ok_or_else(|| io::Error::other("no neighbour entry for the peer yet"))?;
-        let ip = echo::build(self.local, self.sport, &echo::payload(disc, seq));
+        let ip = echo::build(self.local, self.sport, payload);
         self.sock.send(mac, &ip)
     }
 }
@@ -308,6 +308,7 @@ async fn neigh_loop(
     peer: IpAddr,
     ifindex: u32,
     mac: Arc<Mutex<Option<[u8; 6]>>>,
+    kick: Option<UdpTx>,
 ) {
     loop {
         let found = neigh::lookup(&nl, peer, ifindex).await;
@@ -317,6 +318,11 @@ async fn neigh_loop(
                 if m.is_some() {
                     Duration::from_secs(1)
                 } else {
+                    // An unaffiliated session has no Control traffic to make
+                    // the kernel resolve the peer: an empty datagram does.
+                    if let Some(k) = &kick {
+                        let _ = k.send(&[]);
+                    }
                     Duration::from_millis(200)
                 }
             }
@@ -333,15 +339,26 @@ async fn echo_rx_loop(
     sock: Arc<L2Unicast>,
     local: IpAddr,
     disc: u32,
-    out: tokio::sync::mpsc::Sender<u32>,
+    unaffiliated: bool,
+    out: tokio::sync::mpsc::Sender<Looped>,
 ) {
     loop {
         match sock.recv().await {
             Ok(p) => {
-                if let Some((d, seq)) = echo::parse(&p, local) {
-                    if d == disc {
-                        let _ = out.try_send(seq);
-                    }
+                let looped = if unaffiliated {
+                    // RFC 9747 §3: our own Control packet, TTL exactly 254.
+                    echo::parse_udp(&p, local)
+                        .filter(|(_, ttl)| *ttl == 254)
+                        .and_then(|(pl, _)| packet::decode(pl).ok())
+                        .filter(|c| c.my_discriminator == disc)
+                        .map(|c| Looped::Control(c.state))
+                } else {
+                    echo::parse(&p, local)
+                        .filter(|(d, _)| *d == disc)
+                        .map(|(_, seq)| Looped::Seq(seq))
+                };
+                if let Some(l) = looped {
+                    let _ = out.try_send(l);
                 }
             }
             Err(e) => {
@@ -385,7 +402,12 @@ impl UdpNet {
         Ok(handle)
     }
 
-    async fn try_open_echo(&self, key: &SessionKey, disc: u32) -> io::Result<EchoPath> {
+    async fn try_open_echo(
+        &self,
+        key: &SessionKey,
+        disc: u32,
+        unaffiliated: bool,
+    ) -> io::Result<EchoPath> {
         let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
             .await
             .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
@@ -397,8 +419,26 @@ impl UdpNet {
         let ifindex = u32::try_from(nos_l2_socket::if_index(&iface)?).unwrap_or(0);
         let mac = Arc::new(Mutex::new(None));
         let (seq_tx, seq_rx) = tokio::sync::mpsc::channel(64);
-        let rx = tokio::spawn(echo_rx_loop(sock.clone(), local, disc, seq_tx));
-        let neigh = tokio::spawn(neigh_loop(self.netlink()?, key.peer, ifindex, mac.clone()));
+        let rx = tokio::spawn(echo_rx_loop(
+            sock.clone(),
+            local,
+            disc,
+            unaffiliated,
+            seq_tx,
+        ));
+        let kick = if unaffiliated {
+            let device = key.interface.as_deref().unwrap_or(&vrf);
+            Some(tx_socket(device, &vrf, key, echo::ECHO_PORT)?)
+        } else {
+            None
+        };
+        let neigh = tokio::spawn(neigh_loop(
+            self.netlink()?,
+            key.peer,
+            ifindex,
+            mac.clone(),
+            kick,
+        ));
         let sport = 49152 + u16::try_from(rand_u32() % 16384).unwrap_or(0);
         Ok(EchoPath {
             tx: Arc::new(L2Echo {
@@ -448,13 +488,13 @@ impl Net for UdpNet {
             .as_deref()
             .filter(|_| !key.multihop)
             .unwrap_or(&vrf);
-        Ok(Arc::new(tx_socket(device, &vrf, key)?))
+        Ok(Arc::new(tx_socket(device, &vrf, key, port(key.multihop))?))
     }
 
-    async fn open_echo(&self, key: &SessionKey, disc: u32) -> Option<EchoPath> {
+    async fn open_echo(&self, key: &SessionKey, disc: u32, unaffiliated: bool) -> Option<EchoPath> {
         // ponytail: tried once, at session start. A session whose interface
         // has no address yet never runs Echo until it is re-registered.
-        match self.try_open_echo(key, disc).await {
+        match self.try_open_echo(key, disc, unaffiliated).await {
             Ok(p) => Some(p),
             Err(e) => {
                 warn!(peer = %key.peer, table = %key.table, error = %e, "bfd echo unavailable");

@@ -134,3 +134,85 @@ pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
     w.dock.container_remove("router-f").await;
     Ok(())
 }
+
+/// `bfd-echo-unaffiliated`, self-contained (RFC 9747, #291). Router-a runs
+/// `bfd-profile fast` with `echo-mode unaffiliated` (50 ms) under a static
+/// route via router-b, which runs no BFD session at all and only forwards
+/// (the gateway needs `ip_forward`, set here). Router-a's own Control
+/// packets, looped back through router-b, bring the session Up (`bfd session
+/// up`, REST `echo_only`) and the guarded route in; a `tc` filter dropping UDP
+/// 3785 on router-a's ingress takes it Down by `echo-function-failed` within
+/// about `echo-interval x multiplier` and ribd removes the route; lifting it
+/// brings both back.
+pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
+    let mut fa = A.base_flags();
+    fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
+    fa.extend(strings(&[
+        "--bfd-echo-mode",
+        "unaffiliated",
+        "--bfd-echo-interval",
+        "50",
+    ]));
+    w.start(A, Some(fa), &[]).await?;
+    w.start(B, Some(B.base_flags()), &[]).await?;
+    let a = w.a()?;
+
+    log("router-b only forwards: ip_forward on, no BFD session on it");
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    w.dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-b",
+            &["sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"],
+        )
+        .await?;
+
+    let up = format!("bfd session up peer={IP_B}");
+    let failed = format!("bfd session down peer={IP_B} diag=echo-function-failed");
+    let added = format!("added route prefix={BFD_PREFIX_B} gateway={IP_B}");
+    let removed = format!("removed route prefix={BFD_PREFIX_B}");
+
+    log("looped Control packets bring the session Up and the route in");
+    a.wait(&up).await?;
+    a.wait(&added).await?;
+    let path = format!("/v1/bfd/sessions?peer={IP_B}");
+    let body = a.rest_expect(Method::GET, &path, None, 200).await?;
+    anyhow::ensure!(
+        body.contains("\"echo_only\":true") && body.contains("\"echo_active\":true"),
+        "expected an echo-only session: {body}"
+    );
+    session_is(a, IP_B, "Up", None, 5).await?;
+
+    log("dropping UDP 3785 on router-a: Down by echo-function-failed, route withdrawn");
+    let (n_failed, n_removed, n_up, n_added) = (
+        a.count(&failed),
+        a.count(&removed),
+        a.count(&up),
+        a.count(&added),
+    );
+    tc(&w.dock, &["qdisc", "add", "dev", "eth0", "clsact"]).await?;
+    let dropped = tc(
+        &w.dock,
+        &[
+            "filter", "add", "dev", "eth0", "ingress", "protocol", "ip", "u32", "match", "ip",
+            "protocol", "17", "0xff", "match", "ip", "dport", "3785", "0xffff", "action", "drop",
+        ],
+    )
+    .await;
+    let result = async {
+        dropped?;
+        a.wait_new(&failed, n_failed, 5).await?;
+        a.wait_new(&removed, n_removed, 5).await?;
+        session_is(a, IP_B, "Down", Some("EchoFunctionFailed"), 5).await
+    }
+    .await;
+    let lifted = tc(&w.dock, &["qdisc", "del", "dev", "eth0", "clsact"]).await;
+    result?;
+    lifted?;
+
+    log("filter lifted: Up again and the route is back");
+    a.wait_new(&up, n_up, 30).await?;
+    a.wait_new(&added, n_added, 30).await?;
+    session_is(a, IP_B, "Up", None, 5).await?;
+    Ok(())
+}
