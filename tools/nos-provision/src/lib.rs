@@ -516,6 +516,17 @@ pub struct Args {
     /// Removes the peer-group's `bfd` again (the profile stays).
     #[arg(long)]
     pub no_bfd_bgp: bool,
+    /// Sets `bfd fast` (same profile) on `--ospf-profile` of `--ospf-area`.
+    #[arg(long)]
+    pub ospf_bfd: bool,
+    /// Removes that profile's `bfd` again.
+    #[arg(long)]
+    pub no_ospf_bfd: bool,
+    /// `--ospf-bfd` for `--ospfv3-profile` of `--ospfv3-area`.
+    #[arg(long)]
+    pub ospfv3_bfd: bool,
+    #[arg(long)]
+    pub no_ospfv3_bfd: bool,
 
     #[arg(long)]
     pub save: bool,
@@ -1419,7 +1430,42 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             args.bfd_bgp.then(|| format!("\"{BFD_PROFILE}\"")),
         ));
     }
-    if !(args.bfd_static || args.bfd_bgp) {
+    for (version, instance, area, profile, on, off) in [
+        (
+            "ospf",
+            &args.ospf_instance,
+            args.ospf_area,
+            &args.ospf_profile,
+            args.ospf_bfd,
+            args.no_ospf_bfd,
+        ),
+        (
+            "ospfv3",
+            &args.ospfv3_instance,
+            args.ospfv3_area,
+            &args.ospfv3_profile,
+            args.ospfv3_bfd,
+            args.no_ospfv3_bfd,
+        ),
+    ] {
+        if let (true, Some(instance), Some(area), Some(profile)) =
+            (on || off, instance, area, profile)
+        {
+            v.push((
+                vec![
+                    format!("{version}-instance"),
+                    instance.clone(),
+                    "area".to_string(),
+                    area.to_string(),
+                    "profile".to_string(),
+                    profile.clone(),
+                    "bfd".to_string(),
+                ],
+                on.then(|| format!("\"{BFD_PROFILE}\"")),
+            ));
+        }
+    }
+    if !(args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd) {
         return v;
     }
     let profile = |field: &str| {
@@ -1469,7 +1515,53 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             }
         }
     }
-    if !(args.bfd_static || args.bfd_bgp) {
+    for i in config
+        .ospf_instances
+        .iter_mut()
+        .filter(|i| args.ospf_instance.as_ref() == Some(&i.name))
+    {
+        for a in i
+            .areas
+            .iter_mut()
+            .filter(|a| args.ospf_area == Some(a.area_id))
+        {
+            for p in a
+                .profiles
+                .iter_mut()
+                .filter(|p| args.ospf_profile.as_ref() == Some(&p.name))
+            {
+                if args.ospf_bfd {
+                    p.bfd = Some(BFD_PROFILE.to_string());
+                } else if args.no_ospf_bfd {
+                    p.bfd = None;
+                }
+            }
+        }
+    }
+    for i in config
+        .ospfv3_instances
+        .iter_mut()
+        .filter(|i| args.ospfv3_instance.as_ref() == Some(&i.name))
+    {
+        for a in i
+            .areas
+            .iter_mut()
+            .filter(|a| args.ospfv3_area == Some(a.area_id))
+        {
+            for p in a
+                .profiles
+                .iter_mut()
+                .filter(|p| args.ospfv3_profile.as_ref() == Some(&p.name))
+            {
+                if args.ospfv3_bfd {
+                    p.bfd = Some(BFD_PROFILE.to_string());
+                } else if args.no_ospfv3_bfd {
+                    p.bfd = None;
+                }
+            }
+        }
+    }
+    if !(args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd) {
         return;
     }
     for p in config
@@ -1599,7 +1691,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }),
     ]);
 
-    if args.bfd_static || args.bfd_bgp {
+    if args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd {
         ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
             name: BFD_PROFILE.to_string(),
         }));

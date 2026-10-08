@@ -28,6 +28,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - Origination runs on its own 2s tick and aging on a 1s tick (`--lsa-age-multiplier`, test-only), both independent of the 10s config re-apply tick. LSAs leave with `INF_TRANS_DELAY` added to the wire age only.
 - `run()`'s select is `biased;` (Hello first, RFC 4222); `note_alive` runs after `accept_crypto_sequence`; any packet proves liveness only for a neighbor at `ExStart` or later.
 
+- BFD (#288): `bfd_client.rs` is shared with `nos-ospfv3d` (`#[path]` include, generic over `Host`, implemented by `LinkManager`); the wanted set is polled every 250 ms from the links' neighbor tables, the `bfd` profile per attach point comes from `LinkManager::set_bfd` (never from `LinkConfig`, so it cannot restart a link). BFD only kills (`LinkCommand::BfdDown`, `neighbor::on_bfd_down`), never gates adjacency; AdminDown and connection loss kill nothing.
 - Link state (#277): gating happens only in `reconcile::resync`, never in `link::run`; a down kernel device (`link_client::gate`) is left out of `desired_links` and `apply_links` aborts it. Ungated when never connected or `observed = false`. An unresolved VRF/address/bridge keeps the running link's value (`merge_running`) while the config still gives the attach point an address, so only the stream or a config removal tears a link down. `LinkConfig.ifindex` restarts a link on a recreated device.
 
 ## Authentication

@@ -7,14 +7,15 @@
 //! (`crate::exchange`).
 
 use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ipnet::{IpNet, Ipv4Net};
+use nos_proto::schema::BfdProfile;
 use nos_proto::{
-    LinkInterfaceState, LsaSummary, NeighborSummary, NetworkType, OspfNeighborState,
+    BfdDiag, LinkInterfaceState, LsaSummary, NeighborSummary, NetworkType, OspfNeighborState,
     RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
@@ -23,6 +24,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
+use crate::bfd;
+use crate::bfd_client::{Host, Target, Want};
 use crate::election::{self, Candidate};
 use crate::exchange::{self, AdjacencyData};
 use crate::lsa::{
@@ -657,6 +660,7 @@ pub async fn run(
                 LinkCommand::FloodNow => {
                     flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq).await;
                 }
+                LinkCommand::BfdDown(address) => kill_bfd_neighbor(&cfg, &status, address),
             },
             _ = rxmt_sweep.tick() => {
                 flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
@@ -1555,6 +1559,21 @@ fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
     });
 }
 
+/// RFC 2328 §10.2 `KillNbr` for the neighbor at `address`, because BFD found
+/// its path down. The next Hello brings it back through Init; nothing waits
+/// on BFD to form an adjacency.
+fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address: Ipv4Addr) {
+    status.send_modify(|s| {
+        for (id, info) in &mut s.neighbors {
+            if info.address == address && info.state != NeighborState::Down {
+                warn!(link = %cfg.attach_point, neighbor = %id, "bfd session down, killing ospf neighbor");
+                info.state = bfd::on_bfd_down(info.state);
+                info.adjacency = None;
+            }
+        }
+    });
+}
+
 /// RFC 4222 §2 recommendation 2: an authenticated non-Hello packet from a
 /// neighbor we have an adjacency with (`ExStart` or later) proves it alive,
 /// so it restarts the inactivity timer like a Hello would. Hellos keep their
@@ -1869,6 +1888,9 @@ pub enum LinkCommand {
     /// Resend the LSDB to every `Full` neighbor now, not on the next
     /// `RXMT_INTERVAL` — the shutdown path only (`LinkManager::flood_now`).
     FloodNow,
+    /// `nos-bfdd` reports the path to this neighbor address down (RFC 2328
+    /// §10.2 `KillNbr`).
+    BfdDown(Ipv4Addr),
 }
 
 struct LinkEntry {
@@ -1980,6 +2002,9 @@ pub struct LinkManager {
     /// Each NSSA's last translator election result (RFC 3101 §3.1), only to
     /// log a change.
     nssa_translating: Mutex<HashMap<Ipv4Addr, bool>>,
+    /// Each attach point's `bfd` profile (`set_bfd`, every resync); a link
+    /// missing here has no BFD.
+    bfd: std::sync::Mutex<HashMap<String, BfdProfile>>,
     opener: Opener,
 }
 
@@ -2083,6 +2108,7 @@ impl LinkManager {
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
             nssa_translating: Mutex::new(HashMap::new()),
+            bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
         });
         let background = Arc::clone(&manager);
@@ -2115,6 +2141,12 @@ impl LinkManager {
             }
         });
         manager
+    }
+
+    /// The `bfd` profile of each attach point that has one, replaced on every
+    /// resync. Registrations follow; a link never restarts for it.
+    pub fn set_bfd(&self, wanted: HashMap<String, BfdProfile>) {
+        *self.bfd.lock().unwrap() = wanted;
     }
 
     pub fn set_graceful_restart(&self, grace_period: Option<u16>) {
@@ -3822,6 +3854,45 @@ fn diff_links(
     }
 
     (to_stop, to_spawn)
+}
+
+/// `nos-ospfd`'s side of `crate::bfd_client`: one session per neighbor at
+/// 2-Way or later on a link with a `bfd` profile (on a broadcast link too,
+/// not one per link).
+impl Host for LinkManager {
+    async fn target(&self) -> Target {
+        let wanted = self.bfd.lock().unwrap().clone();
+        let mut target = Target::new();
+        if wanted.is_empty() {
+            return target;
+        }
+        for entry in self.links.lock().await.values() {
+            let Some(profile) = wanted.get(&entry.config.attach_point) else {
+                continue;
+            };
+            for n in entry.status.borrow().neighbors.values() {
+                if bfd::bfd_wanted(n.state) {
+                    target.insert(
+                        IpAddr::V4(n.address),
+                        Want {
+                            profile: profile.clone(),
+                            local: Some(IpAddr::V4(entry.config.local_addr)),
+                            interface: None,
+                        },
+                    );
+                }
+            }
+        }
+        target
+    }
+
+    async fn down(&self, peer: IpAddr, diag: BfdDiag) {
+        let IpAddr::V4(peer) = peer else { return };
+        info!(peer = %peer, diag = %diag, "ospf: bfd session down");
+        for entry in self.links.lock().await.values() {
+            let _ = entry.commands.send(LinkCommand::BfdDown(peer));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6333,6 +6404,53 @@ mod tests {
         assert_eq!(
             held(c.database_summaries().await, lsa::LSA_TYPE_NSSA_EXTERNAL),
             vec![]
+        );
+    }
+
+    /// #288: a Full neighbor on a link with a `bfd` profile gets a session
+    /// (and a link without one doesn't); BFD reporting the path down kills it
+    /// at once, ahead of the 40s dead interval, and the next Hello restores it.
+    #[tokio::test(start_paused = true)]
+    async fn bfd_down_kills_a_full_neighbor_at_once() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        let la = wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint);
+        a.reconcile(vec![la.clone()], HashMap::new(), id(1)).await;
+        b.reconcile(
+            vec![wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        settle(60).await;
+        let state = |m: &Arc<LinkManager>| {
+            let m = Arc::clone(m);
+            async move { m.neighbor_summaries().await[0].state }
+        };
+        assert_eq!(state(&a).await, OspfNeighborState::Full);
+        assert!(a.target().await.is_empty(), "no profile, no session");
+
+        a.set_bfd(HashMap::from([(
+            la.attach_point.clone(),
+            BfdProfile::default(),
+        )]));
+        let want = a.target().await;
+        assert_eq!(want.len(), 1);
+        let peer = IpAddr::from([10, 0, 0, 2]);
+        assert_eq!(want[&peer].local, Some(IpAddr::from([10, 0, 0, 1])));
+
+        a.down(IpAddr::from([10, 0, 0, 9]), BfdDiag::PathDown).await;
+        settle(1).await;
+        assert_eq!(state(&a).await, OspfNeighborState::Full, "stranger");
+        a.down(peer, BfdDiag::ControlDetectionTimeExpired).await;
+        settle(1).await;
+        assert_eq!(state(&a).await, OspfNeighborState::Down);
+        assert!(a.target().await.is_empty(), "deregistered below 2-Way");
+        settle(60).await;
+        assert_eq!(
+            state(&a).await,
+            OspfNeighborState::Full,
+            "Hello restores it"
         );
     }
 

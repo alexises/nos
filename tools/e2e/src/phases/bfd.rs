@@ -18,7 +18,7 @@ fn bfd_route(prefix: &str, gateway: &str) -> Vec<String> {
 }
 
 /// `tc <args>` in router-a's network namespace (the runtime image has no iproute2).
-async fn tc(dock: &crate::docker::Dock, args: &[&str]) -> anyhow::Result<String> {
+pub(super) async fn tc(dock: &crate::docker::Dock, args: &[&str]) -> anyhow::Result<String> {
     let mut cmd = vec!["tc"];
     cmd.extend_from_slice(args);
     dock.in_netns(NETNS_HELPER_IMAGE, "router-a", &cmd).await

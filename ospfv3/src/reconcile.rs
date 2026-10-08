@@ -185,6 +185,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_graceful_restart(own.graceful_restart_grace_period);
 
     let mut desired_links = Vec::new();
+    let mut bfd_wants: HashMap<String, nos_proto::schema::BfdProfile> = HashMap::new();
     let mut desired_loopback_prefixes: HashMap<std::net::Ipv4Addr, Vec<(Ipv6Net, u16)>> =
         HashMap::new();
 
@@ -255,6 +256,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                     continue;
                 };
                 note_fallback(state, &mut next_degraded, &link_name, &fell_back);
+                if let Some(p) = bfd_profile(&cfg, profile.bfd.as_deref()) {
+                    bfd_wants.insert(link_name.clone(), p);
+                }
                 desired_links.push(LinkConfig {
                     attach_point: link_name,
                     area_id: area.area_id,
@@ -337,6 +341,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                     continue;
                 };
                 note_fallback(state, &mut next_degraded, &link_name, &fell_back);
+                if let Some(p) = bfd_profile(&cfg, profile.bfd.as_deref()) {
+                    bfd_wants.insert(link_name.clone(), p);
+                }
                 desired_links.push(LinkConfig {
                     attach_point: link_name,
                     area_id: area.area_id,
@@ -365,6 +372,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
             own.redistribute_policy.as_deref(),
         ))
         .await;
+    links.set_bfd(bfd_wants);
     links
         .reconcile(desired_links, desired_loopback_prefixes, own.router_id)
         .await;
@@ -372,6 +380,15 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     state.watched = watched;
     state.down = next_down;
     state.degraded = next_degraded;
+}
+
+/// The named BFD profile (validation guarantees it exists).
+fn bfd_profile(
+    cfg: &nos_proto::Config,
+    name: Option<&str>,
+) -> Option<nos_proto::schema::BfdProfile> {
+    let name = name?;
+    cfg.bfd_profiles.iter().find(|p| p.name == name).cloned()
 }
 
 /// What a resync resolved for one attach point, each `None` when the lookup

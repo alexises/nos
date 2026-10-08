@@ -130,6 +130,12 @@ async fn main() -> anyhow::Result<()> {
         link_rx,
         shutdown_rx.clone(),
     ));
+    let bfd_task = nos_ospf::bfd_client::spawn(
+        args.watchdog_socket.clone(),
+        links.clone(),
+        routing_table_rx.clone(),
+        shutdown_rx.clone(),
+    );
     let rib_push_task = rib_push_client::spawn(
         args.watchdog_socket.clone(),
         links.clone(),
@@ -174,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
     }
     link_task.abort();
     rib_push_task.abort();
+    bfd_task.abort();
     server_task.abort();
 
     info!(instance = %args.instance, "shutting down");
