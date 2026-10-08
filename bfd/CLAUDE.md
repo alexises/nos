@@ -4,7 +4,8 @@ The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fix
 
 | Module | Purpose |
 |--------|---------|
-| `packet` | 24-byte control packet codec, §6.8.6 reception checks |
+| `packet` | control packet codec (parses the auth section), §6.8.6 reception checks |
+| `auth` | RFC 5880 §6.7: auth section sign/parse, digests, `AuthState` (key, old key, sequence window) |
 | `fsm` | `step(state, event)` state machine, `may_transmit` (passive) |
 | `timers` | Interval negotiation, jitter, Poll/Final, detection time |
 | `authz` | `allowed(role, &BfdRequest)` |
@@ -19,7 +20,7 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 ## Rules that bite
 
 - `decode` never panics: use `get`/`try_into`, never index untrusted bytes.
-- The A bit is rejected until #289; a session needing auth rejects every packet via `check_session`.
+- Auth (#289): `Core::authenticate` before `on_packet`, `Core::sign` on every send; a failed packet must not reach the FSM or timers. A profile edit keeps the old key valid for 4 detection times. #294 adds reflector auth on top.
 - `timers` and `Core` take `now` and the jitter percentage as arguments; only `session::run` reads the clock.
 - Discriminators come from the manager's counter (random start), never 0.
 - `BfdRequest`/`BfdEvent` variants are appended, never reordered (postcard). A new `BfdRequest` must be classified in `authz::allowed`.

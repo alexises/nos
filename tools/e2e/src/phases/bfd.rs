@@ -7,7 +7,7 @@ use crate::router::{log, strings, A, B};
 use crate::world::World;
 
 /// `--static-route` flags: a BFD-guarded static route to `prefix` via `gateway`.
-fn bfd_route(prefix: &str, gateway: &str) -> Vec<String> {
+pub(super) fn bfd_route(prefix: &str, gateway: &str) -> Vec<String> {
     strings(&[
         "--static-route",
         prefix,
@@ -26,7 +26,7 @@ pub(super) async fn tc(dock: &crate::docker::Dock, args: &[&str]) -> anyhow::Res
 
 /// Polls `GET /v1/bfd/sessions?peer=<peer>` on `r` until its one session has
 /// `state` (and `diag`, if given) — REST is a snapshot, not a log.
-async fn session_is(
+pub(super) async fn session_is(
     r: &crate::router::Router,
     peer: &str,
     state: &str,

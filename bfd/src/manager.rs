@@ -284,6 +284,9 @@ impl Manager {
                     remote_discriminator: s.remote_discriminator,
                     tx_interval_us: s.tx_interval_us,
                     detection_time_us: s.detection_time_us,
+                    auth_method: s.auth_method,
+                    auth_key_id: s.auth_key_id,
+                    auth_failures: s.auth_failures,
                 }
             })
             .collect();
@@ -469,6 +472,7 @@ pub(crate) mod tests {
             desired_min_tx: 1_000_000,
             required_min_rx: 1_000_000,
             required_min_echo_rx: 0,
+            auth: None,
         };
         assert!(demux.route("rt1", multi.peer, true, Some(254), &p.encode()));
         assert!(!demux.route("rt1", multi.peer, true, Some(253), &p.encode()));

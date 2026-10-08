@@ -1,6 +1,7 @@
 //! Every phase, by its command-line name, and the CI groups that chain them.
 
 mod bfd;
+mod bfd_auth;
 mod bgp;
 mod drivers;
 mod ospf;
@@ -24,6 +25,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "bgp-gr-frr" => bgp::bgp_gr_frr(w).await,
         "bfd" => bfd::bfd(w).await,
         "bgp-bfd" => bfd::bgp_bfd(w).await,
+        "bfd-auth" => bfd_auth::bfd_auth(w).await,
         "auth" => bgp::auth(w).await,
         "ao" => bgp::ao(w).await,
         "gtsm" => bgp::gtsm(w).await,
@@ -211,6 +213,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "bgp-gr-frr",
             "bfd",
             "bgp-bfd",
+            "bfd-auth",
         ],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
@@ -261,6 +264,7 @@ pub const ALL: &[&str] = &[
     "bgp-gr-frr",
     "bfd",
     "bgp-bfd",
+    "bfd-auth",
     "as4",
     "malformed-update",
     "maximum-prefix",

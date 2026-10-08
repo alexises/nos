@@ -65,6 +65,33 @@ set ospfv3 instance o1 area 0.0.0.0 profile p1 bfd fast
 - Log anchors: `bfd session down, killing ospf neighbor link=... neighbor=...` (`ospfv3` for OSPFv3), preceded by `ospf: bfd session down peer=... diag=...`.
 - `show bfd sessions` lists the sessions; they are keyed by (table, peer), so two links to one peer address in one table share a session.
 
+## Authenticate sessions
+
+RFC 5880 section 6.7: every packet of a session carries a password or a digest, and packets that fail are dropped.
+
+```
+edit bfd-profile fast
+set auth key-id 1 method meticulous-sha1 key s3cret
+```
+
+- Set the same `auth` on both ends. `delete auth` turns it off.
+- Methods: `simple-password` (clear text on the wire), `keyed-md5`, `keyed-sha1`, and the `meticulous-` variants, which sign every packet with a fresh sequence number (strongest replay protection, a little more work per packet). Prefer `meticulous-sha1`.
+- Key length: 1 to 16 bytes (`simple-password`, MD5), 1 to 20 bytes (SHA1); `key-id` is 0 to 255 and must match on both ends.
+- A packet is dropped, and does not refresh the detection timer, when:
+  - the A bit is set but no auth is configured, or the reverse;
+  - the method or key id differs;
+  - the password or digest is wrong;
+  - the sequence number is outside the window (3 x the packet's detect multiplier ahead; for `meticulous-` it must also be new).
+- A wrong key therefore leaves the session `down`. The drop is logged as `bfd auth failed peer=... reason=...`, at most once per 10 s per session, and counted in `auth_failures`.
+- Enabling or disabling auth on one side only drops the session after the detection time, as the RFC allows.
+
+### Change the key without a flap
+
+- Edit the profile on both routers. The new key signs from that moment, and the previous key is still accepted for 4 detection times.
+- Apply the change on the second router within that time. A change of key id, secret or method keeps the session `up` (a method change resets the sequence tracking, as the spaces differ).
+- The router that changes second is the one at risk: until it applies the change it rejects the first router's packets, so keep the gap below the detection time (use longer intervals for a planned rollover).
+- Multiple concurrent keys and key lifetimes are not supported.
+
 ## Check sessions
 
 - `show bfd sessions` lists every session, `show bfd sessions <peer>` those to one address. Sample:
@@ -74,8 +101,9 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 ```
 
 - `tx` is the negotiated transmit interval, `detect` the detection time, `discriminators` local/remote.
+- With `auth` set the line ends with `auth <method> key <id> (<n> failures)`; the key is never shown.
 - A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
-- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`).
+- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id` and `auth_failures`.
 - "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
 
 ## Multi-hop sessions

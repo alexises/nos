@@ -132,6 +132,31 @@
       "BfdSessionView": {
         "description": "One session, for `show bfd sessions`.",
         "properties": {
+          "auth_failures": {
+            "description": "Packets dropped by RFC 5880 §6.7 authentication since the session started.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "auth_key_id": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "auth_method": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BfdAuthMethod",
+                "description": "The configured authentication (never the key), `None` when off."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "detection_time_us": {
             "description": "Detection time, microseconds.",
             "format": "int32",
@@ -171,7 +196,8 @@
           "local_discriminator",
           "remote_discriminator",
           "tx_interval_us",
-          "detection_time_us"
+          "detection_time_us",
+          "auth_failures"
         ],
         "type": "object"
       },

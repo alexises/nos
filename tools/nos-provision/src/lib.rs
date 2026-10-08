@@ -527,6 +527,14 @@ pub struct Args {
     pub ospfv3_bfd: bool,
     #[arg(long)]
     pub no_ospfv3_bfd: bool,
+    /// Authentication on `bfd-profile fast`, `<method>:<key-id>:<secret>`
+    /// (method: simple-password, keyed-md5, meticulous-md5, keyed-sha1,
+    /// meticulous-sha1).
+    #[arg(long, value_parser = parse_bfd_auth)]
+    pub bfd_auth: Option<nos_proto::schema::BfdAuth>,
+    /// Removes the profile's authentication again.
+    #[arg(long)]
+    pub no_bfd_auth: bool,
 
     #[arg(long)]
     pub save: bool,
@@ -1410,6 +1418,28 @@ fn virtual_link_spec(flag: &str, spec: &str) -> anyhow::Result<(Ipv4Addr, Ipv4Ad
     Ok((area_id, router_id))
 }
 
+/// `--bfd-auth <method>:<key-id>:<secret>`.
+fn parse_bfd_auth(s: &str) -> Result<nos_proto::schema::BfdAuth, String> {
+    use nos_proto::schema::{BfdAuth, BfdAuthMethod as M};
+    let mut it = s.splitn(3, ':');
+    let (Some(m), Some(id), Some(key)) = (it.next(), it.next(), it.next()) else {
+        return Err("expected <method>:<key-id>:<secret>".into());
+    };
+    let method = match m {
+        "simple-password" => M::SimplePassword,
+        "keyed-md5" => M::KeyedMd5,
+        "meticulous-md5" => M::MeticulousMd5,
+        "keyed-sha1" => M::KeyedSha1,
+        "meticulous-sha1" => M::MeticulousSha1,
+        _ => return Err(format!("unknown method {m:?}")),
+    };
+    Ok(BfdAuth {
+        key_id: id.parse().map_err(|e| format!("key id: {e}"))?,
+        method,
+        key: key.into(),
+    })
+}
+
 /// The profile `--bfd-static` creates and references.
 pub const BFD_PROFILE: &str = "fast";
 
@@ -1464,6 +1494,18 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
                 on.then(|| format!("\"{BFD_PROFILE}\"")),
             ));
         }
+    }
+    if args.bfd_auth.is_some() || args.no_bfd_auth {
+        v.push((
+            vec![
+                "bfd-profile".to_string(),
+                BFD_PROFILE.to_string(),
+                "auth".to_string(),
+            ],
+            args.bfd_auth
+                .as_ref()
+                .map(|a| serde_json::to_string(a).expect("BfdAuth serializes")),
+        ));
     }
     if !(args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd) {
         return v;
@@ -1559,6 +1601,15 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
                     p.bfd = None;
                 }
             }
+        }
+    }
+    if args.bfd_auth.is_some() || args.no_bfd_auth {
+        for p in config
+            .bfd_profiles
+            .iter_mut()
+            .filter(|p| p.name == BFD_PROFILE)
+        {
+            p.auth.clone_from(&args.bfd_auth);
         }
     }
     if !(args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd) {
@@ -4088,5 +4139,35 @@ mod tests {
             assert!(parse_ospf_crypto_key(bad).is_err(), "{bad}");
         }
         assert!(parse_user("nopassword").is_err());
+    }
+
+    #[test]
+    fn bfd_auth_flag_becomes_a_json_path_edit() {
+        let a = parse_bfd_auth("meticulous-sha1:2:s3:cret").unwrap();
+        assert_eq!((a.key_id, a.key.as_str()), (2, "s3:cret"));
+        assert!(parse_bfd_auth("nope:1:k").is_err());
+        assert!(parse_bfd_auth("keyed-md5:300:k").is_err());
+        let args = Args::try_parse_from([
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "1",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "2",
+            "--peer",
+            "10.0.0.2",
+            "--bfd-auth",
+            "keyed-md5:1:k",
+        ])
+        .unwrap();
+        let (path, value) = bfd_paths(&args).pop().unwrap();
+        assert_eq!(path, ["bfd-profile", "fast", "auth"]);
+        assert_eq!(
+            value.as_deref(),
+            Some(r#"{"key_id":1,"method":"KeyedMd5","key":"k"}"#)
+        );
     }
 }

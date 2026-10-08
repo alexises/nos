@@ -2,6 +2,7 @@
 // timers, authz) plus the `nos-bfdd` daemon built on it: sessions, the
 // client-facing IPC server and the UDP sockets.
 
+pub mod auth;
 pub mod authz;
 pub mod fsm;
 pub mod manager;

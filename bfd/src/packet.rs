@@ -1,7 +1,9 @@
-//! RFC 5880 §4.1 control packet codec (mandatory section only: the A bit is
-//! rejected until authentication lands, #289).
+//! RFC 5880 §4.1 control packet codec. The optional authentication section is
+//! only parsed here (`auth`); checking and signing it is `auth::AuthState`.
 
 use nos_proto::BfdState;
+
+use crate::auth::{self, AuthSection};
 use thiserror::Error;
 
 /// Length of the mandatory section, bytes.
@@ -25,6 +27,9 @@ pub struct Packet {
     pub desired_min_tx: u32,
     pub required_min_rx: u32,
     pub required_min_echo_rx: u32,
+    /// The authentication section of a received packet (A bit set). Ignored
+    /// by `encode`: `AuthState::sign` appends it.
+    pub auth: Option<AuthSection>,
 }
 
 /// Why a packet fails the RFC 5880 §6.8.6 checks that need no session.
@@ -46,23 +51,14 @@ pub enum DecodeError {
     ZeroMyDiscriminator,
     #[error("your discriminator is zero while the sender is not Down/AdminDown")]
     ZeroYourDiscriminator,
-    #[error("authentication bit set (authentication is not supported yet)")]
-    AuthUnsupported,
-}
-
-/// The §6.8.6 checks that need the session table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum RxError {
-    #[error("no session matches the packet")]
-    NoSession,
-    #[error("authentication bit does not match the session's configuration")]
-    AuthMismatch,
+    #[error("authentication bit set but the section is malformed or of an unknown type")]
+    BadAuthSection,
 }
 
 const FLAG_POLL: u8 = 0x20;
 const FLAG_FINAL: u8 = 0x10;
 const FLAG_CPI: u8 = 0x08;
-const FLAG_AUTH: u8 = 0x04;
+use auth::FLAG_AUTH;
 const FLAG_DEMAND: u8 = 0x02;
 const FLAG_MULTIPOINT: u8 = 0x01;
 
@@ -92,9 +88,15 @@ pub fn decode(b: &[u8]) -> Result<Packet, DecodeError> {
     if b1 & FLAG_MULTIPOINT != 0 {
         return Err(DecodeError::Multipoint);
     }
-    if b1 & FLAG_AUTH != 0 {
-        return Err(DecodeError::AuthUnsupported);
-    }
+    let auth = if b1 & FLAG_AUTH != 0 {
+        Some(
+            b.get(..usize::from(len))
+                .and_then(auth::parse)
+                .ok_or(DecodeError::BadAuthSection)?,
+        )
+    } else {
+        None
+    };
     let (Some(my), Some(your), Some(tx), Some(rx), Some(echo)) = (
         u32_at(b, 4),
         u32_at(b, 8),
@@ -125,19 +127,8 @@ pub fn decode(b: &[u8]) -> Result<Packet, DecodeError> {
         desired_min_tx: tx,
         required_min_rx: rx,
         required_min_echo_rx: echo,
+        auth,
     })
-}
-
-/// The stateful §6.8.6 checks, for the session code to call once it has
-/// looked the packet's session up (`session_uses_auth: None` = not found).
-/// `Packet` never carries the A bit yet, so a session that requires
-/// authentication rejects every packet.
-pub fn check_session(session_uses_auth: Option<bool>) -> Result<(), RxError> {
-    match session_uses_auth {
-        None => Err(RxError::NoSession),
-        Some(true) => Err(RxError::AuthMismatch),
-        Some(false) => Ok(()),
-    }
 }
 
 impl Packet {
@@ -185,6 +176,7 @@ mod tests {
             desired_min_tx: 300_000,
             required_min_rx: 300_000,
             required_min_echo_rx: 0,
+            auth: None,
         }
     }
 
@@ -283,17 +275,26 @@ mod tests {
     }
 
     #[test]
-    fn rx_auth_bit_rejected_until_289() {
+    fn rx_auth_section_is_parsed_or_rejected() {
+        use nos_proto::schema::{BfdAuth, BfdAuthMethod};
+        let cfg = BfdAuth {
+            key_id: 4,
+            method: BfdAuthMethod::KeyedSha1,
+            key: "k".into(),
+        };
+        let w = auth::sign(&pkt().encode(), &cfg, 77);
+        let p = decode(&w).unwrap();
+        let s = p.auth.as_ref().unwrap();
+        assert_eq!((s.kind, s.key_id, s.seq), (4, 4, 77));
+        assert_eq!(Packet { auth: None, ..p }, pkt());
+        // A bit set without a section, or with a cut one
         let mut b = pkt().encode();
         b[1] |= FLAG_AUTH;
-        assert_eq!(decode(&b), Err(DecodeError::AuthUnsupported));
-    }
-
-    #[test]
-    fn rx_session_lookup_and_auth_mismatch() {
-        assert_eq!(check_session(None), Err(RxError::NoSession));
-        assert_eq!(check_session(Some(true)), Err(RxError::AuthMismatch));
-        assert_eq!(check_session(Some(false)), Ok(()));
+        assert_eq!(decode(&b), Err(DecodeError::BadAuthSection));
+        let mut cut = w.clone();
+        cut[3] -= 4;
+        cut.truncate(cut.len() - 4);
+        assert_eq!(decode(&cut), Err(DecodeError::BadAuthSection));
     }
 
     #[test]

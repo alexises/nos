@@ -665,6 +665,9 @@ async fn show_bfd_sessions_filters_by_peer_and_rejects_a_bad_one() {
                     remote_discriminator: 9,
                     tx_interval_us: 100_000,
                     detection_time_us: 300_000,
+                    auth_method: None,
+                    auth_key_id: None,
+                    auth_failures: 0,
                 })
                 .collect(),
         ),
