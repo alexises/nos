@@ -10,12 +10,12 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::Json;
 use futures::{Stream, StreamExt};
 use nos_proto::{
-    BgpEvent, BgpRequest, Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, InterfaceEvent,
-    InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpLinkStats,
-    LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary,
-    OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request,
-    PeerSummary, PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest,
-    ServiceRef,
+    BfdEvent, BfdRequest, BfdSessionView, BgpEvent, BgpRequest, Config, EvpnRouteSummary, FdbEvent,
+    FdbRequest, FdbTable, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpEvent,
+    LacpRequest, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent,
+    LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
+    Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
+    PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest, ServiceRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -177,6 +177,32 @@ pub async fn lldp_statistics(State(d): State<Daemons>) -> ApiResult<Json<Vec<Lld
     {
         LldpEvent::Statistics(v) => Ok(Json(v)),
         other @ LldpEvent::Neighbors(_) => Err(unexpected("nos-lldpd", &other)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BfdQuery {
+    peer: Option<String>,
+}
+
+#[utoipa::path(get, path = "/v1/bfd/sessions", tag = "show", summary = "Every BFD session, or those to one peer", params(("peer" = Option<String>, Query, description = "only sessions to this peer address")), responses((status = 200, body = Vec<BfdSessionView>), (status = 400, body = ErrorBody, description = "peer is not an IP address"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bfd_sessions(
+    State(d): State<Daemons>,
+    Query(q): Query<BfdQuery>,
+) -> ApiResult<Json<Vec<BfdSessionView>>> {
+    let peer = q
+        .peer
+        .map(|p| {
+            p.parse::<IpAddr>()
+                .map_err(|_| ApiError::BadRequest(format!("peer '{p}' is not an IP address")))
+        })
+        .transpose()?;
+    match d
+        .service(ServiceRef::Bfd, BfdRequest::GetSessions { peer })
+        .await?
+    {
+        BfdEvent::Sessions(v) => Ok(Json(v)),
+        other @ BfdEvent::State { .. } => Err(unexpected("nos-bfdd", &other)),
     }
 }
 

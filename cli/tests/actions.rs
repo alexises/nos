@@ -14,10 +14,11 @@ use nos_cli::command::Command;
 use nos_cli::session::{self, Mode};
 use nos_pki::testing::shared;
 use nos_proto::{
-    BgpEvent, BgpInstance, BgpRequest, CommandDoc, Config, ConfigDiff, Event, FdbEvent, FdbRequest,
-    InterfaceEvent, InterfaceRequest, IpcCodec, LacpEvent, LacpRequest, LldpEvent, LldpRequest,
-    LogEvent, LogRequest, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3Request, Request, RibEvent,
-    RibRequest, ServiceRef, Topic, TransactionSnapshot, WatchdogEvent, WatchdogRequest,
+    BfdEvent, BfdRequest, BgpEvent, BgpInstance, BgpRequest, CommandDoc, Config, ConfigDiff, Event,
+    FdbEvent, FdbRequest, InterfaceEvent, InterfaceRequest, IpcCodec, LacpEvent, LacpRequest,
+    LldpEvent, LldpRequest, LogEvent, LogRequest, OspfEvent, OspfRequest, Ospfv3Event,
+    Ospfv3Request, Request, RibEvent, RibRequest, ServiceRef, Topic, TransactionSnapshot,
+    WatchdogEvent, WatchdogRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -208,6 +209,7 @@ fn lab() -> Lab {
         ("interfaces", "interfaced", ""),
         ("lacp", "lacpd", ""),
         ("lldp", "lldpd", ""),
+        ("bfd", "bfdd", ""),
         ("log", "logd", ""),
         ("bgp", "bgpd", "b1"),
         ("ospf", "ospfd", "o1"),
@@ -249,6 +251,9 @@ fn lab() -> Lab {
             }),
             "lldp" => serve(role, name, &path, |_: LldpRequest| {
                 vec![LldpEvent::Neighbors(Vec::new())]
+            }),
+            "bfd" => serve(role, name, &path, |_: BfdRequest| {
+                vec![BfdEvent::Sessions(Vec::new())]
             }),
             // A tail replies once, then the fake closes the stream.
             "log" => serve_with(role, name, &path, true, |_: LogRequest| {
@@ -360,6 +365,8 @@ async fn every_show_command_runs_against_its_daemon() {
             "show lacp",
             "show lacp bond9",
             "show lldp neighbors",
+            "show bfd sessions",
+            "show bfd sessions 192.0.2.1",
             "show log",
             "show log configd --follow",
             "show bgp brief",

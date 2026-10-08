@@ -61,6 +61,21 @@
         ],
         "type": "string"
       },
+      "BfdDiag": {
+        "description": "RFC 5880 §4.1 diagnostic codes 0-8.",
+        "enum": [
+          "NoDiagnostic",
+          "ControlDetectionTimeExpired",
+          "EchoFunctionFailed",
+          "NeighborSignaledSessionDown",
+          "ForwardingPlaneReset",
+          "PathDown",
+          "ConcatenatedPathDown",
+          "AdministrativelyDown",
+          "ReverseConcatenatedPathDown"
+        ],
+        "type": "string"
+      },
       "BfdProfile": {
         "description": "A named set of BFD (RFC 5880) session parameters, referenced by bare name\nfrom a BGP peer-group, an OSPF/OSPFv3 profile or a static route\n(`bfd <name>`). Declaration only for now: no daemon consumes it yet, so\nattaching one is inert.",
         "properties": {
@@ -113,6 +128,62 @@
           "name"
         ],
         "type": "object"
+      },
+      "BfdSessionView": {
+        "description": "One session, for `show bfd sessions`.",
+        "properties": {
+          "detection_time_us": {
+            "description": "Detection time, microseconds.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "diag": {
+            "$ref": "#/components/schemas/BfdDiag"
+          },
+          "key": {
+            "$ref": "#/components/schemas/SessionKey"
+          },
+          "local_discriminator": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remote_discriminator": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/BfdState"
+          },
+          "tx_interval_us": {
+            "description": "Negotiated transmit interval, microseconds.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "state",
+          "diag",
+          "local_discriminator",
+          "remote_discriminator",
+          "tx_interval_us",
+          "detection_time_us"
+        ],
+        "type": "object"
+      },
+      "BfdState": {
+        "description": "RFC 5880 §4.1 `Sta` values.",
+        "enum": [
+          "AdminDown",
+          "Down",
+          "Init",
+          "Up"
+        ],
+        "type": "string"
       },
       "BgpAddPath": {
         "description": "RFC 7911 ADD-PATH direction for a peer-group's unicast families: whether\nthis side offers to receive several paths per prefix, send them, or both.\nWhat is actually used per family is negotiated against the peer's own\ncapability (RFC 7911 §5).",
@@ -3504,6 +3575,38 @@
         ],
         "type": "object"
       },
+      "SessionKey": {
+        "description": "What identifies one BFD session: a routing table, the remote system and\nthe path to it (RFC 5881 single-hop is bound to an interface, RFC 5883\nmultihop is not).",
+        "properties": {
+          "interface": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "local": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "multihop": {
+            "type": "boolean"
+          },
+          "peer": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "table",
+          "peer",
+          "multihop"
+        ],
+        "type": "object"
+      },
       "SoftInResult": {
         "properties": {
           "instance": {
@@ -3976,6 +4079,61 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/bfd/sessions": {
+      "get": {
+        "operationId": "bfd_sessions",
+        "parameters": [
+          {
+            "description": "only sessions to this peer address",
+            "in": "query",
+            "name": "peer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BfdSessionView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "peer is not an IP address"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Every BFD session, or those to one peer",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/bgp/evpn": {
       "get": {
         "operationId": "bgp_evpn",

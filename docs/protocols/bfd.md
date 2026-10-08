@@ -2,7 +2,8 @@
 
 A BFD profile (RFC 5880) is a named set of session parameters that BGP, OSPF, OSPFv3 and static routes can reference by name.
 
-- **Status: declaration only.** No BFD daemon exists yet, so a `bfd` reference is accepted, validated and stored, but no BFD session is started and nothing reacts to it.
+- `nos-bfdd` runs the sessions (RFC 5880, single-hop RFC 5881 over UDP 3784 inside the routing table's VRF).
+- **Only static routes use it today.** A `bfd` reference on a BGP peer-group, OSPF profile or OSPFv3 profile is accepted, validated and stored, but starts no session and nothing reacts to it until their own sub-issues land.
 - Profiles are checked at commit time; the shell and REST accept any edit in a transaction.
 
 ## Define a profile
@@ -29,6 +30,36 @@ Set `bfd <profile>` on the object that should run BFD:
 | Static route | `set static-routing-instance <i> route <cidr> bfd <profile>` |
 
 `delete bfd` (relative) removes the reference.
+
+## Protect a static route
+
+```
+edit bfd-profile fast
+set min-tx-interval 100
+set min-rx-interval 100
+edit static-routing-instance s1
+set route 198.51.100.0/24 gateway 192.0.2.1
+set route 198.51.100.0/24 bfd fast
+```
+
+- `nos-ribd` registers one session per route gateway, in the route's routing table; the peer must also run BFD (or be a BFD-capable system such as FRR `bfdd`).
+- The route stays out of the RIB until the session is `up`. It fails closed: while `nos-bfdd` is unreachable nothing is up.
+- The route is removed when the session goes `down` or `init`, and when the peer signals `admin-down` (a peer that is administratively down gives no data-plane assurance).
+- Editing the profile applies through Poll/Final without a flap; `shutdown enable` puts the session in `admin-down`.
+- One session is shared by every route with the same gateway in the same table; it is identified by (table, peer address), not by interface.
+
+## Check sessions
+
+- `show bfd sessions` lists every session, `show bfd sessions <peer>` those to one address. Sample:
+
+```
+rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminators 1/7
+```
+
+- `tx` is the negotiated transmit interval, `detect` the detection time, `discriminators` local/remote.
+- A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
+- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`).
+- "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
 
 ## Commit-time errors
 

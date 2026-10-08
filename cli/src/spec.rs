@@ -445,6 +445,26 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowLldpStatistics),
+    cmd!(["show" "bfd" "sessions"],
+        Doc::Local {
+            summary: "Show every BFD session.",
+            detail: "Queries nos-bfdd (resolved via nos-watchdogd) for every BFD session (RFC \
+                     5880) it holds, one line each: routing table, peer, state and diagnostic, \
+                     the negotiated transmit interval and the detection time. A session is \
+                     identified by its routing table and peer address.",
+        },
+        Always,
+        Command::ShowBfdSessions { peer: None }),
+    cmd!(["show" "bfd" "sessions" (peer: IpAddr)],
+        Doc::Local {
+            summary: "Show the BFD sessions to one peer address.",
+            detail: "Like show bfd sessions, restricted by nos-bfdd to the sessions whose remote \
+                     address is the given one (one per routing table).",
+        },
+        Always,
+        |peer| Command::ShowBfdSessions {
+            peer: Some(peer.parse().ok()?),
+        }),
     cmd!(["show" "lacp"],
         Doc::Local {
             summary: "Show every LACP port aggregate's negotiation state.",

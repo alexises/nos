@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod bfd_client;
 pub mod bgp_client;
 pub mod client;
 pub mod command;

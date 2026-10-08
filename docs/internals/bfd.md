@@ -51,7 +51,15 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - A route is left out of the RIB until its gateway's session is `Up`; `Down`, `Init` and `AdminDown` all take it out. While `nos-bfdd` is unreachable nothing is up (fail closed); after a reconnect everything is registered again.
 - `reconcile::resync` reads the up set and re-runs when it changes.
 
+## Querying sessions
+
+- `BfdRequest::GetSessions { peer }` is a one-shot request answered with `BfdEvent::Sessions(Vec<BfdSessionView>)`, ordered by (table, peer); `peer: Some(ip)` filters in the daemon.
+- `BfdSessionView` carries the `SessionKey` (table, peer, optional local/interface, multihop), `state`, `diag`, both discriminators, the negotiated `tx_interval_us` and `detection_time_us`. There is no uptime or receive interval in it.
+- A session is keyed by (table, peer address) only: `nos-ribd` registers with `local: None, interface: None`, so `show` prints no local address or interface.
+- Only `Role::User` (`nos-cli`) and `Role::Restd` may ask (`authz::allowed`); `cli/src/bfd_client.rs` and `rest/src/show.rs::bfd_sessions` are the two clients.
+
 ## Check it by hand
 
-- `cargo run -p nos-e2e -- bfd` proves both ways Up, the route withdrawn and restored around a dropped UDP 3784, and interop with FRR `bfdd`.
+- `nos show bfd sessions` or `GET /v1/bfd/sessions` lists what the daemon holds.
+- `cargo run -p nos-e2e -- bfd` proves both ways Up (also read back over `GET /v1/bfd/sessions`), the route withdrawn and restored around a dropped UDP 3784, and interop with FRR `bfdd`.
 - `docker exec router-a ...` has no `ip`/`tcpdump`: use the netns helper images from `tools/e2e` to sniff.

@@ -18,8 +18,8 @@ use nos_proto::{
 use crate::session::{self, Mode, Resolved};
 use crate::spec::{self, Doc};
 use crate::{
-    bgp_client, client, fdb_client, format, interface_client, lacp_client, lldp_client, log_client,
-    ospf_client, ospfv3_client, rib_client, watchdog_client,
+    bfd_client, bgp_client, client, fdb_client, format, interface_client, lacp_client, lldp_client,
+    log_client, ospf_client, ospfv3_client, rib_client, watchdog_client,
 };
 
 /// Per-session cache of operation documentation fetched from `nos-configd`,
@@ -212,6 +212,10 @@ pub async fn handle_action(
         }
         Resolved::ShowLldpStatistics => {
             show_lldp_statistics(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowBfdSessions { peer } => {
+            show_bfd_sessions(watchdog_socket, peer).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowLog { source, follow } => {
@@ -542,6 +546,31 @@ async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool) {
             println!("{}", format::render_lldp_neighbors_detail(&neighbors));
         }
         Ok(neighbors) => println!("{}", format::render_lldp_neighbors(&neighbors)),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+/// `nos-bfdd`'s socket via the broker, or `None` after printing why not.
+async fn resolve_bfd(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
+    match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Bfd).await {
+        Ok(Some(path)) => Some(path),
+        Ok(None) => {
+            eprintln!("nos-bfdd is not running");
+            None
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            None
+        }
+    }
+}
+
+async fn show_bfd_sessions(watchdog_socket: &Path, peer: Option<std::net::IpAddr>) {
+    let Some(bfd_socket) = resolve_bfd(watchdog_socket).await else {
+        return;
+    };
+    match bfd_client::get_sessions(&bfd_socket, peer).await {
+        Ok(sessions) => println!("{}", format::render_bfd_sessions(&sessions)),
         Err(e) => eprintln!("error: {e}"),
     }
 }

@@ -275,6 +275,40 @@ pub fn render_lldp_neighbors_detail(neighbors: &[nos_proto::LldpNeighbor]) -> St
         .join("\n")
 }
 
+/// Render `nos-bfdd`'s sessions, for `show bfd sessions`: one line each,
+/// ordered as the daemon sent them (table, then peer). `local` and
+/// `interface` are shown only when the key carries them.
+pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
+    if sessions.is_empty() {
+        return "no bfd sessions".to_string();
+    }
+    sessions
+        .iter()
+        .map(|s| {
+            let k = &s.key;
+            let local = k.local.map_or_else(String::new, |l| format!(" from {l}"));
+            let interface = k
+                .interface
+                .as_deref()
+                .map_or_else(String::new, |i| format!(" on {i}"));
+            let multihop = if k.multihop { " multihop" } else { "" };
+            format!(
+                "{}: peer {}{local}{interface}{multihop}, {}, diag {}, tx {}ms, detect {}ms, \
+                 discriminators {}/{}",
+                k.table,
+                k.peer,
+                s.state,
+                s.diag,
+                s.tx_interval_us / 1000,
+                s.detection_time_us / 1000,
+                s.local_discriminator,
+                s.remote_discriminator,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Render `nos-lldpd`'s per-interface counters, for `show lldp statistics`.
 pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
     if stats.is_empty() {
@@ -1683,6 +1717,39 @@ mod tests {
                 "{line:?} missing from:\n{out}"
             );
         }
+    }
+
+    #[test]
+    fn render_bfd_sessions_empty_and_populated() {
+        use nos_proto::{BfdDiag, BfdSessionView, BfdState, SessionKey};
+        assert_eq!(render_bfd_sessions(&[]), "no bfd sessions");
+        let view = |peer: &str, state, diag, interface: Option<&str>| BfdSessionView {
+            key: SessionKey {
+                table: "rt1".into(),
+                peer: peer.parse().unwrap(),
+                local: None,
+                interface: interface.map(String::from),
+                multihop: false,
+            },
+            state,
+            diag,
+            local_discriminator: 1,
+            remote_discriminator: 2,
+            tx_interval_us: 100_000,
+            detection_time_us: 300_000,
+        };
+        let up = view("192.0.2.1", BfdState::Up, BfdDiag::NoDiagnostic, None);
+        let down = view(
+            "192.0.2.2",
+            BfdState::Down,
+            BfdDiag::ControlDetectionTimeExpired,
+            Some("eth1"),
+        );
+        assert_eq!(
+            render_bfd_sessions(&[up, down]),
+            "rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminators 1/2\n\
+             rt1: peer 192.0.2.2 on eth1, down, diag control-detection-time-expired, tx 100ms, detect 300ms, discriminators 1/2"
+        );
     }
 
     #[test]

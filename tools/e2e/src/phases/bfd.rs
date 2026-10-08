@@ -1,5 +1,7 @@
 //! BFD (RFC 5880/5881) phases.
 
+use reqwest::Method;
+
 use crate::consts::*;
 use crate::router::{log, strings, A, B};
 use crate::world::World;
@@ -20,6 +22,36 @@ async fn tc(dock: &crate::docker::Dock, args: &[&str]) -> anyhow::Result<String>
     let mut cmd = vec!["tc"];
     cmd.extend_from_slice(args);
     dock.in_netns(NETNS_HELPER_IMAGE, "router-a", &cmd).await
+}
+
+/// Polls `GET /v1/bfd/sessions?peer=<peer>` on `r` until its one session has
+/// `state` (and `diag`, if given) — REST is a snapshot, not a log.
+async fn session_is(
+    r: &crate::router::Router,
+    peer: &str,
+    state: &str,
+    diag: Option<&str>,
+    secs: u64,
+) -> anyhow::Result<()> {
+    let path = format!("/v1/bfd/sessions?peer={peer}");
+    let mut last = String::new();
+    for _ in 0..secs * 5 {
+        last = r.rest_expect(Method::GET, &path, None, 200).await?;
+        let v: serde_json::Value = serde_json::from_str(&last)?;
+        if let Some(s) = v.as_array().and_then(|a| a.first()) {
+            if s["state"] == state
+                && diag.is_none_or(|d| s["diag"] == d)
+                && s["key"]["peer"] == peer
+            {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    anyhow::bail!(
+        "{}: bfd session to {peer} never reached {state} {diag:?}: {last}",
+        r.name()
+    )
 }
 
 /// `bfd`, self-contained. Each router has a static route to a test prefix via
@@ -48,6 +80,12 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     b.wait(&up_b).await?;
     a.wait(&added).await?;
 
+    log("GET /v1/bfd/sessions: Up; a bad ?peer= is 400");
+    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(b, IP_A, "Up", None, 5).await?;
+    a.rest_expect(Method::GET, "/v1/bfd/sessions?peer=nope", None, 400)
+        .await?;
+
     log("dropping UDP 3784 on router-a: Down by detection time, route withdrawn");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     let (n_down, n_removed, n_up, n_added) = (
@@ -68,7 +106,8 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     let result = async {
         dropped?;
         a.wait_new(&down_a, n_down, 10).await?;
-        a.wait_new(&removed, n_removed, 10).await
+        a.wait_new(&removed, n_removed, 10).await?;
+        session_is(a, IP_B, "Down", Some("ControlDetectionTimeExpired"), 5).await
     }
     .await;
     // Lift it whatever happened, so a failure does not leave the lab broken.
@@ -79,6 +118,9 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     log("filter lifted: Up again and the route is re-added");
     a.wait_new(&up_a, n_up, 30).await?;
     a.wait_new(&added, n_added, 30).await?;
+    // The diag is whatever last took the session down: it sticks while Up,
+    // so Up is only asserted without one.
+    session_is(a, IP_B, "Up", None, 5).await?;
 
     log("interop: FRR bfdd reaches Up with router-a");
     let conf = format!(
