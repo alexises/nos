@@ -1004,6 +1004,7 @@ mod tests {
         let instances = vec![StaticRoutingInstance {
             name: "sri1".into(),
             routes: vec![StaticRoute {
+                bfd: None,
                 subnet: "10.0.0.0/24".parse().unwrap(),
                 gateway: "10.0.0.1".parse().unwrap(),
             }],

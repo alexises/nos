@@ -2,6 +2,7 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
+use crate::validators::bfd_reference_valid;
 use nos_proto_derive::Cli;
 
 use super::sugar;
@@ -232,6 +233,13 @@ pub struct OspfProfile {
     #[cli(topic = OspfProfileAuth, render = sugar::render_ospf_auth, sugar(word = "simple-password", with = sugar::simple_password, topic = OspfProfileSimplePassword), sugar(word = "crypto-key", with = sugar::ospf_crypto_key, topic = OspfProfileCryptoKey))]
     pub auth: Option<OspfAuth>,
 
+    /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD.
+    /// Inert until `nos-bfdd` exists.
+    #[serde(default)]
+    #[garde(custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)))]
+    #[cli(topic = BfdReference)]
+    pub bfd: Option<String>,
+
     /// RFC 7474: sign with `AuType` 3 — a 64-bit (persisted boot count :
     /// counter) sequence number and a digest bound to the IP source address —
     /// closing the replay window across router restarts. Only valid with
@@ -315,6 +323,7 @@ mod tests {
 
     fn profile(name: &str) -> OspfProfile {
         OspfProfile {
+            bfd: None,
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,
@@ -443,6 +452,7 @@ mod tests {
         dead_interval: Option<u16>,
     ) -> OspfProfile {
         OspfProfile {
+            bfd: None,
             name: name.to_string(),
             hello_interval,
             dead_interval,

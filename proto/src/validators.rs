@@ -45,6 +45,19 @@ pub fn routing_table_reference_valid(
     Ok(())
 }
 
+/// If set, `bfd` must name an existing `BfdProfile`. Deleting a profile that
+/// is still referenced makes every user fail this at commit, each under its
+/// own path.
+pub fn bfd_reference_valid(bfd: Option<&String>, ctx: &crate::schema::Config) -> garde::Result {
+    let Some(name) = bfd else { return Ok(()) };
+    if !ctx.bfd_profiles.iter().any(|p| &p.name == name) {
+        return Err(garde::Error::new(format!(
+            "bfd profile '{name}' does not exist"
+        )));
+    }
+    Ok(())
+}
+
 /// If set, `ospf_profile` must name an existing `OspfProfile`, flattened
 /// across every instance's areas — mirrors `routing_table_reference_valid`
 /// from the reference side, and `ospf_profile::unique_name` from the

@@ -5,6 +5,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
+use crate::validators::bfd_reference_valid;
 use nos_proto_derive::Cli;
 
 /// A single static route within a `StaticRoutingInstance`.
@@ -16,7 +17,7 @@ use nos_proto_derive::Cli;
 /// `StaticRoute` in isolation has no notion of which instance owns it under
 /// garde's whole-`Config` validation context.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Validate, Cli)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct StaticRoute {
     // Structurally valid by construction; per-instance uniqueness lives on
@@ -30,6 +31,13 @@ pub struct StaticRoute {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(topic = StaticRoute)]
     pub gateway: IpAddr,
+
+    /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD.
+    /// Inert until `nos-bfdd` exists.
+    #[serde(default)]
+    #[garde(custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)))]
+    #[cli(topic = BfdReference)]
+    pub bfd: Option<String>,
 }
 
 /// The placeholder a new `StaticRoute` starts from (`edit` on a missing one).
@@ -38,6 +46,7 @@ impl Default for StaticRoute {
         StaticRoute {
             subnet: IpNet::default(),
             gateway: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            bfd: None,
         }
     }
 }
@@ -75,6 +84,7 @@ mod tests {
     #[test]
     fn valid_ipv4_route_passes() {
         let route = StaticRoute {
+            bfd: None,
             subnet: "10.0.0.0/24".parse().unwrap(),
             gateway: "10.0.0.1".parse().unwrap(),
         };
@@ -85,6 +95,7 @@ mod tests {
     #[test]
     fn valid_ipv6_route_passes() {
         let route = StaticRoute {
+            bfd: None,
             subnet: "2001:db8::/32".parse().unwrap(),
             gateway: "2001:db8::1".parse().unwrap(),
         };
@@ -95,6 +106,7 @@ mod tests {
     #[test]
     fn mismatched_address_family_fails() {
         let route = StaticRoute {
+            bfd: None,
             subnet: "10.0.0.0/24".parse().unwrap(),
             gateway: "2001:db8::1".parse().unwrap(),
         };

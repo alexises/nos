@@ -241,6 +241,7 @@ mod tests {
                 vec![OspfArea {
                     area_id: area_id("0.0.0.0"),
                     profiles: vec![crate::schema::OspfProfile {
+                        bfd: None,
                         name: "p1".to_string(),
                         hello_interval: None,
                         dead_interval: None,

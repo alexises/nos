@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ospf_profile::valid_crypto_keys;
 use super::{Config, NetworkType, OspfCryptoAlgorithm, OspfCryptoKey};
+use crate::validators::bfd_reference_valid;
 use nos_proto_derive::Cli;
 
 use super::sugar;
@@ -78,6 +79,13 @@ pub struct Ospfv3Profile {
     #[serde(default)]
     #[cli(topic = Ospfv3ProfileAuth, render = sugar::render_ospfv3_auth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
     pub auth: Option<Vec<OspfCryptoKey>>,
+
+    /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD.
+    /// Inert until `nos-bfdd` exists.
+    #[serde(default)]
+    #[garde(custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)))]
+    #[cli(topic = BfdReference)]
+    pub bfd: Option<String>,
 
     /// RFC 5340 §A.3.1 Instance ID (header byte 14) this profile's links send
     /// and accept: a received packet carrying any other value is dropped.
@@ -162,6 +170,7 @@ mod tests {
 
     fn profile(name: &str) -> Ospfv3Profile {
         Ospfv3Profile {
+            bfd: None,
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,
@@ -283,6 +292,7 @@ mod tests {
         dead_interval: Option<u16>,
     ) -> Ospfv3Profile {
         Ospfv3Profile {
+            bfd: None,
             name: name.to_string(),
             hello_interval,
             dead_interval,

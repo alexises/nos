@@ -39,6 +39,7 @@ impl StaticRouteOp {
                 match inst.routes.iter_mut().find(|r| &r.subnet == subnet) {
                     Some(route) => route.gateway = *gateway,
                     None => inst.routes.push(StaticRoute {
+                        bfd: None,
                         subnet: *subnet,
                         gateway: *gateway,
                     }),
@@ -111,6 +112,7 @@ mod tests {
         let mut cfg = config_with(vec![instance(
             "sri1",
             vec![StaticRoute {
+                bfd: None,
                 subnet: subnet("10.0.0.0/24"),
                 gateway: addr("10.0.0.1"),
             }],
@@ -147,6 +149,7 @@ mod tests {
         let mut cfg = config_with(vec![instance(
             "sri1",
             vec![StaticRoute {
+                bfd: None,
                 subnet: subnet("10.0.0.0/24"),
                 gateway: addr("10.0.0.1"),
             }],

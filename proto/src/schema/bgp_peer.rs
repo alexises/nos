@@ -100,6 +100,7 @@ mod tests {
 
     fn group(name: &str) -> BgpPeerGroup {
         BgpPeerGroup {
+            bfd: None,
             name: name.to_string(),
             remote_as: 65001,
             source_address: None,

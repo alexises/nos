@@ -1,4 +1,5 @@
 pub mod as_path_list;
+pub mod bfd_profile;
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
@@ -26,6 +27,7 @@ pub mod switching_profile;
 pub mod user;
 
 pub use as_path_list::AsPathListOp;
+pub use bfd_profile::BfdProfileOp;
 pub use bgp_instance::BgpInstanceOp;
 pub use bgp_peer::BgpPeerOp;
 pub use bgp_peer_group::BgpPeerGroupOp;
@@ -97,6 +99,7 @@ pub enum ConfigOp {
     Lldp(LldpOp),
     User(UserOp),
     Logging(LoggingOp),
+    BfdProfile(BfdProfileOp),
 }
 
 impl ConfigOp {
@@ -135,6 +138,7 @@ impl ConfigOp {
             ConfigOp::Lldp(op) => op.apply(config),
             ConfigOp::User(op) => op.apply(config),
             ConfigOp::Logging(op) => op.apply(config),
+            ConfigOp::BfdProfile(op) => op.apply(config),
         }
     }
 }
@@ -172,6 +176,8 @@ pub enum OpError {
     SyslogServerNotFound(String),
     #[error("user '{0}' not found")]
     UserNotFound(String),
+    #[error("bfd profile '{0}' not found")]
+    BfdProfileNotFound(String),
     #[error("community alias '{0}' not found")]
     CommunityAliasNotFound(String),
     #[error("community group '{0}' not found")]

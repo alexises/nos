@@ -917,6 +917,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         lldp,
         users,
         logging,
+        bfd_profiles,
     } = diff;
     let mut lines = Vec::new();
 
@@ -943,6 +944,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         community_groups,
         as_path_lists,
         prefix_lists,
+        bfd_profiles,
     ] {
         for section in sections {
             render_section(&mut lines, section, 0, color);

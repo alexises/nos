@@ -617,6 +617,7 @@ mod tests {
         let mut inst = instance("r1", 65000);
         inst.peer_groups = vec![
             BgpPeerGroup {
+                bfd: None,
                 name: "valid".to_string(),
                 remote_as: 65001,
                 source_address: None,
@@ -644,6 +645,7 @@ mod tests {
                 strict_mode: false,
             },
             BgpPeerGroup {
+                bfd: None,
                 name: "invalid".to_string(),
                 remote_as: 65002,
                 source_address: None,
@@ -683,6 +685,7 @@ mod tests {
     ) -> crate::schema::BgpPeerGroup {
         use crate::schema::AddressFamily;
         crate::schema::BgpPeerGroup {
+            bfd: None,
             name: name.to_string(),
             remote_as,
             source_address: None,
