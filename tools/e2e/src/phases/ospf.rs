@@ -2572,9 +2572,17 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
     w.link_veths().await?;
     let (a, b) = (w.a()?, w.b()?);
     let eth1 = |id: crate::router::Id, address: &str, router_id: &str| {
+        // `--address` is required; eth1's IPv4 address is incidental.
+        let v4 = if address == OSPFV3_ETH1_ADDRESS_A {
+            "10.77.0.1/24"
+        } else {
+            "10.77.0.2/24"
+        };
         let mut f = strings(&[
             "--interface",
             "eth1",
+            "--address",
+            v4,
             "--address6",
             address,
             "--asn",
