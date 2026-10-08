@@ -108,6 +108,9 @@ pub struct PortAggregateState {
     /// see `SubinterfaceState.link_local_address`'s doc comment. `None`
     /// until `bond_name` itself is known.
     pub link_local_address: Option<Ipv6Addr>,
+    /// `PortAggregate.bfd` is set: a member is only enslaved while
+    /// `nos-bfdd` reports its micro-BFD session Up (`bfd_up_members`).
+    pub bfd: bool,
 }
 
 /// Every configured interface's desired state, rebuilt wholesale on every
@@ -142,6 +145,11 @@ pub struct Interfaces {
     /// which is the deliberate fail-safe default: nothing is enslaved into
     /// a `Lacp`-mode bond until the first real push arrives.
     lacp_active_members: HashMap<String, Vec<String>>,
+    /// The most recently pushed micro-BFD Up set (`InterfaceRequest::
+    /// PushBfdMembers`) per aggregate with `bfd`; carried forward by
+    /// `build_from_config` like `lacp_active_members`. No push = no member
+    /// Up (fail closed).
+    bfd_up_members: HashMap<String, Vec<String>>,
 }
 
 impl Interfaces {
@@ -194,16 +202,44 @@ impl Interfaces {
         aggregate: &str,
         active_members: Vec<String>,
     ) -> Vec<InterfaceState> {
-        let active: HashSet<&str> = active_members.iter().map(String::as_str).collect();
+        self.lacp_active_members
+            .insert(aggregate.to_string(), active_members);
+        self.recompute_members(aggregate)
+    }
+
+    /// Applies a fresh `nos-bfdd` push (`InterfaceRequest::PushBfdMembers`):
+    /// same shape as `set_lacp_active_members`, over the micro-BFD Up set.
+    pub fn set_bfd_up_members(
+        &mut self,
+        aggregate: &str,
+        up_members: Vec<String>,
+    ) -> Vec<InterfaceState> {
+        self.bfd_up_members
+            .insert(aggregate.to_string(), up_members);
+        self.recompute_members(aggregate)
+    }
+
+    /// Recomputes `port_aggregate_active` of every member of `aggregate`
+    /// from both pushed sets (never from one half alone).
+    fn recompute_members(&mut self, aggregate: &str) -> Vec<InterfaceState> {
+        let (mode, bfd) = self
+            .by_port_aggregate
+            .get(aggregate)
+            .map_or((PortAggregateMode::Xor, false), |a| (a.mode, a.bfd));
         let mut updated = Vec::new();
         for state in self.by_name.values_mut() {
             if state.port_aggregate.as_deref() == Some(aggregate) {
-                state.port_aggregate_active = active.contains(state.name.as_str());
+                state.port_aggregate_active = member_active(
+                    mode,
+                    bfd,
+                    &self.lacp_active_members,
+                    &self.bfd_up_members,
+                    aggregate,
+                    &state.name,
+                );
                 updated.push(state.clone());
             }
         }
-        self.lacp_active_members
-            .insert(aggregate.to_string(), active_members);
         updated
     }
 }
@@ -271,6 +307,7 @@ pub async fn build_from_config(
             subinterfaces,
             bond_name: None,
             link_local_address: None,
+            bfd: agg.bfd.is_some(),
         };
         match driver.ensure_port_aggregate(&state).await {
             Ok(bond_name) => {
@@ -306,6 +343,7 @@ pub async fn build_from_config(
             iface.port_aggregate.as_deref(),
             &iface.name,
             &previous.lacp_active_members,
+            &previous.bfd_up_members,
         );
         let state = InterfaceState {
             name: iface.name.clone(),
@@ -359,34 +397,54 @@ pub async fn build_from_config(
         by_port_aggregate,
         port_aggregates,
         lacp_active_members: previous.lacp_active_members.clone(),
+        bfd_up_members: previous.bfd_up_members.clone(),
     }
 }
 
 /// Whether `iface_name` should actually be enslaved into `port_aggregate`
-/// right now — unconditional for a `Xor`-mode aggregate (or one not found
-/// in `cfg`, which commit-time validation should already prevent), gated on
-/// `lacp_active_members` for a `Lacp`-mode one. See
+/// right now: `lacp_ok && bfd_ok`. Unconditional for a `Xor`-mode aggregate
+/// (or one not found in `cfg`, which commit-time validation should already
+/// prevent) without `bfd`. See `member_active` and
 /// `InterfaceState.port_aggregate_active`.
 fn resolve_port_aggregate_active(
     cfg: &Config,
     port_aggregate: Option<&str>,
     iface_name: &str,
     lacp_active_members: &HashMap<String, Vec<String>>,
+    bfd_up_members: &HashMap<String, Vec<String>>,
 ) -> bool {
     let Some(name) = port_aggregate else {
         return false;
     };
-    let mode = cfg
-        .port_aggregates
-        .iter()
-        .find(|a| a.name == name)
-        .map(|a| a.mode);
-    match mode {
-        Some(PortAggregateMode::Lacp) => lacp_active_members
-            .get(name)
-            .is_some_and(|members| members.iter().any(|m| m == iface_name)),
-        _ => true,
-    }
+    let agg = cfg.port_aggregates.iter().find(|a| a.name == name);
+    member_active(
+        agg.map_or(PortAggregateMode::Xor, |a| a.mode),
+        agg.is_some_and(|a| a.bfd.is_some()),
+        lacp_active_members,
+        bfd_up_members,
+        name,
+        iface_name,
+    )
+}
+
+/// `lacp_ok && bfd_ok`: `lacp_ok` is true for `Xor`, else the member is in
+/// the last `nos-lacpd` set; `bfd_ok` is true without `bfd`, else the member
+/// is in the last `nos-bfdd` Up set (no push yet = not Up).
+fn member_active(
+    mode: PortAggregateMode,
+    bfd: bool,
+    lacp_active_members: &HashMap<String, Vec<String>>,
+    bfd_up_members: &HashMap<String, Vec<String>>,
+    aggregate: &str,
+    member: &str,
+) -> bool {
+    let listed = |m: &HashMap<String, Vec<String>>| {
+        m.get(aggregate)
+            .is_some_and(|members| members.iter().any(|x| x == member))
+    };
+    let lacp_ok = mode != PortAggregateMode::Lacp || listed(lacp_active_members);
+    let bfd_ok = !bfd || listed(bfd_up_members);
+    lacp_ok && bfd_ok
 }
 
 /// Resolves a `switching_profile` name (if set) to its `SwitchingProfile`'s
@@ -874,6 +932,8 @@ mod tests {
             lacp_system_id: None,
             lacp_system_priority: None,
             min_links: 1,
+            bfd: None,
+            bfd_peer: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -938,6 +998,8 @@ mod tests {
             lacp_system_id: None,
             lacp_system_priority: None,
             min_links: 1,
+            bfd: None,
+            bfd_peer: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -998,5 +1060,64 @@ mod tests {
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &previous).await;
 
         assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
+    }
+
+    fn bfd_config(mode: PortAggregateMode) -> Config {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let mut config = cfg_with_aggregate(mode, iface);
+        config.port_aggregates[0].bfd = Some("fast".to_string());
+        config
+    }
+
+    #[test]
+    fn member_active_truth_table() {
+        let set = |v: &[&str]| {
+            HashMap::from([("b".to_string(), v.iter().map(ToString::to_string).collect())])
+        };
+        let none = HashMap::new();
+        let (xor, lacp) = (PortAggregateMode::Xor, PortAggregateMode::Lacp);
+        let m = |mode, bfd, l: &HashMap<_, _>, b: &HashMap<_, _>| {
+            member_active(mode, bfd, l, b, "b", "e")
+        };
+        // no bfd: today's rule
+        assert!(m(xor, false, &none, &none));
+        assert!(!m(lacp, false, &none, &none));
+        assert!(m(lacp, false, &set(&["e"]), &none));
+        // bfd up / down / no push
+        assert!(m(xor, true, &none, &set(&["e"])));
+        assert!(!m(xor, true, &none, &set(&["x"])));
+        assert!(!m(xor, true, &none, &none));
+        // both must hold
+        assert!(m(lacp, true, &set(&["e"]), &set(&["e"])));
+        assert!(!m(lacp, true, &set(&["e"]), &none));
+        assert!(!m(lacp, true, &none, &set(&["e"])));
+    }
+
+    #[tokio::test]
+    async fn bfd_member_waits_for_push_and_survives_resync() {
+        let config = bfd_config(PortAggregateMode::Xor);
+        let mut interfaces =
+            build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        assert!(!interfaces.get("eth0").unwrap().port_aggregate_active);
+
+        let updated = interfaces.set_bfd_up_members("bond1", vec!["eth0".to_string()]);
+        assert!(updated[0].port_aggregate_active);
+
+        let interfaces = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
+        assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
+    }
+
+    #[tokio::test]
+    async fn setters_recompute_from_both_sets() {
+        let config = bfd_config(PortAggregateMode::Lacp);
+        let mut interfaces =
+            build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        interfaces.set_bfd_up_members("bond1", vec!["eth0".to_string()]);
+        assert!(!interfaces.get("eth0").unwrap().port_aggregate_active);
+        interfaces.set_lacp_active_members("bond1", vec!["eth0".to_string()]);
+        assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
+        interfaces.set_bfd_up_members("bond1", Vec::new());
+        assert!(!interfaces.get("eth0").unwrap().port_aggregate_active);
     }
 }

@@ -373,6 +373,10 @@ topics! {
     BgpPeerGroupStrictMode,
     /// `PortAggregate.min_links`
     PortAggregateMinLinks,
+    /// `PortAggregate.bfd`
+    PortAggregateBfd,
+    /// `PortAggregate.bfd_peer`
+    PortAggregateBfdPeer,
     /// `PortAggregate.lacp_system_priority`
     PortAggregateLacpSystemPriority,
     /// `Interface.lacp_port_priority`

@@ -972,6 +972,8 @@ mod tests {
             lacp_system_id: None,
             lacp_system_priority: None,
             min_links: 1,
+            bfd: None,
+            bfd_peer: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

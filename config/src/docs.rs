@@ -965,6 +965,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              as enough members are back. A value above the number of members keeps the bond \
              empty for good (nos-lacpd logs a warning).",
         ),
+        Topic::PortAggregateBfd => (
+            "Run micro-BFD on every member of a port aggregate.",
+            "The name of a `bfd-profile` whose timers apply to one micro-BFD session (RFC 7130) per member link. A member is only enslaved into the bond while its session is Up, so a link that still has carrier but no forwarding is released. Needs `bfd-peer` and an address of the peer's family on the aggregate's untagged subinterface; the commit is refused otherwise. With no push from nos-bfdd yet no member is enslaved.",
+        ),
+        Topic::PortAggregateBfdPeer => (
+            "Set the peer address of an aggregate's micro-BFD sessions.",
+            "The L3 address of the remote end, to which the micro-BFD session of every member link is sent; the source is an address of the same family on the aggregate's untagged subinterface. Ignored without `bfd`.",
+        ),
         Topic::InterfaceLacpPortPriority => (
             "Set an interface's LACP Actor Port Priority.",
             "Sets the priority nos-lacpd advertises as the Actor Port Priority for this interface \

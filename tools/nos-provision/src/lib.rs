@@ -829,6 +829,17 @@ pub struct Args {
     #[arg(long)]
     pub min_links: Option<u16>,
 
+    /// If set (requires `--port-aggregate`), runs micro-BFD with this
+    /// `bfd-profile` on the aggregate's members (`PortAggregateOp::SetBfd`);
+    /// needs `--port-aggregate-bfd-peer` and a bond address at commit time.
+    #[arg(long)]
+    pub port_aggregate_bfd: Option<String>,
+
+    /// If set (requires `--port-aggregate`), the peer address of the
+    /// aggregate's micro-BFD sessions (`PortAggregateOp::SetBfdPeer`).
+    #[arg(long)]
+    pub port_aggregate_bfd_peer: Option<std::net::IpAddr>,
+
     /// If set (requires `--port-aggregate`), sets the LACP Actor Port Priority
     /// of every `--enslave-interface-into-port-aggregate` member
     /// (`InterfaceOp::SetLacpPortPriority`).
@@ -2505,6 +2516,18 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 min_links,
             }));
         }
+        if let Some(profile) = args.port_aggregate_bfd.clone() {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetBfd {
+                name: name.clone(),
+                profile,
+            }));
+        }
+        if let Some(peer) = args.port_aggregate_bfd_peer {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetBfdPeer {
+                name: name.clone(),
+                peer,
+            }));
+        }
         if let Some(domain) = args.port_aggregate_untagged_domain.clone() {
             let profile = format!("{name}-sp");
             ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
@@ -2555,6 +2578,8 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.lacp_system_id.is_some()
         || args.lacp_system_priority.is_some()
         || args.min_links.is_some()
+        || args.port_aggregate_bfd.is_some()
+        || args.port_aggregate_bfd_peer.is_some()
         || args.lacp_port_priority.is_some()
         || args.lacp_mode.is_some()
         || args.port_aggregate_untagged_domain.is_some()
@@ -2562,7 +2587,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--min-links/--lacp-port-priority/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--min-links/--port-aggregate-bfd/--port-aggregate-bfd-peer/--lacp-port-priority/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 
@@ -3583,6 +3608,10 @@ mod tests {
             "100",
             "--min-links",
             "2",
+            "--port-aggregate-bfd",
+            "fast",
+            "--port-aggregate-bfd-peer",
+            "10.0.0.2",
             "--lacp-port-priority",
             "200",
             "--lacp-mode",
@@ -3665,6 +3694,20 @@ mod tests {
             &ConfigOp::PortAggregate(PortAggregateOp::SetMinLinks {
                 name: "bond0".into(),
                 min_links: 2,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::PortAggregate(PortAggregateOp::SetBfd {
+                name: "bond0".into(),
+                profile: "fast".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::PortAggregate(PortAggregateOp::SetBfdPeer {
+                name: "bond0".into(),
+                peer: "10.0.0.2".parse().unwrap(),
             }),
         );
         has(

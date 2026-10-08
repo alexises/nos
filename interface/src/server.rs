@@ -46,7 +46,8 @@ pub fn start(
 /// the OSPF daemons' link addressing, `nos-fdbd`'s VTEP address and bridge,
 /// `nos-ribd`'s connected prefixes from every applied address — `GetInterfaces`
 /// plus `GetBroadcastDomain` per SVI). The LACP member push rewrites kernel
-/// bond membership, so it is `nos-lacpd`'s alone. No wildcard arm: a new
+/// bond membership, so it is `nos-lacpd`'s alone (and the micro-BFD Up set
+/// push `nos-bfdd`'s alone). No wildcard arm: a new
 /// request must be classified.
 fn allowed(role: Role, req: &InterfaceRequest) -> bool {
     match req {
@@ -67,6 +68,7 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
             )
         }
         InterfaceRequest::PushLacpMembers(_) => role == Role::Lacpd,
+        InterfaceRequest::PushBfdMembers(_) => role == Role::Bfdd,
         InterfaceRequest::SubscribeLinks => matches!(role, Role::Ospfd | Role::Ospfv3d),
     }
 }
@@ -169,6 +171,15 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             apply_lacp_push(ctx, msg).await;
             None
         }
+        InterfaceRequest::PushBfdMembers(msg) => {
+            let updated = ctx
+                .interfaces
+                .write()
+                .await
+                .set_bfd_up_members(&msg.aggregate, msg.up_members);
+            apply_pushed(ctx, updated).await;
+            None
+        }
         // Streaming: `handle_connection` owns the connection for it.
         InterfaceRequest::SubscribeLinks => None,
     }
@@ -234,9 +245,13 @@ async fn apply_lacp_push(ctx: &Context, msg: nos_proto::LacpAggregateMembers) {
         .write()
         .await
         .set_lacp_active_members(&msg.aggregate, msg.active_members);
+    apply_pushed(ctx, updated).await;
+}
+
+async fn apply_pushed(ctx: &Context, updated: Vec<InterfaceState>) {
     for iface in updated {
         if let Err(e) = ctx.driver.apply(&iface).await {
-            warn!(interface = %iface.name, error = %e, "failed to apply lacp-pushed enslavement");
+            warn!(interface = %iface.name, error = %e, "failed to apply pushed enslavement");
         }
     }
 }
@@ -338,6 +353,17 @@ mod authz_tests {
         // nos-ribd derives connected prefixes from both, and nothing else.
         assert!(allowed(Role::Ribd, &InterfaceRequest::GetInterfaces));
         assert!(!allowed(Role::Ribd, &push));
+    }
+
+    #[test]
+    fn only_bfdd_may_push_bfd_members() {
+        let push = InterfaceRequest::PushBfdMembers(nos_proto::BfdAggregateMembers {
+            aggregate: String::new(),
+            up_members: Vec::new(),
+        });
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &push), role == Role::Bfdd, "{role:?}");
+        }
     }
 
     #[test]

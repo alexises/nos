@@ -40,8 +40,8 @@ pub use fdb::{
     NeighEntry,
 };
 pub use interface::{
-    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpAggregateMembers,
-    LinkState, PortAggregateStatus, SubinterfaceStatus,
+    BfdAggregateMembers, BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus,
+    LacpAggregateMembers, LinkState, PortAggregateStatus, SubinterfaceStatus,
 };
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
