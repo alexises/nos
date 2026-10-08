@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 
 ## Layout
 
-`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`. DR/BDR election and the neighbor FSM come from `nos-ospf-common`. The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s, and signs RFC 7166 trailers like the real socket.
+`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client`. DR/BDR election and the neighbor FSM come from `nos-ospf-common`. The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s, and signs RFC 7166 trailers like the real socket.
 
 ## Rules
 
@@ -19,6 +19,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Instance ID** is header byte 14, after the kernel-filled checksum at 12 (stamping 12 corrupts it). The socket (`OspfSocket::signed`) stamps it with `packet::set_instance_id` before signing, and `link::run` drops a mismatch **before** `verify_trailer`, so another instance's packets never count as auth failures.
 - **Checksum**: the kernel does it (`IPV6_CHECKSUM` offset 12, set in `socket::open`); an authenticated socket does not set it (RFC 7166 §2.2/§4.2). Linux IPv6 raw sockets deliver no IP header. Hop limit is 1 on every send.
 - **Authentication** (RFC 7166, `packet.rs` `TrailerAuth::sign`/`verify_trailer`): `Ks = key || 0x0001`, `Apad` ends with the 16-byte IPv6 source, the AT-bit is set by `link::link_options` when the link has keys, the trailer lies outside the packet's `Length` (`decode_header` bounds every body by it), compare in constant time. The sequence counter lives in the socket (wall-clock floor); replay state is `NeighborInfo.last_crypto_seq` in `link::run`. `Md5` is rejected at commit.
+- **Link state** (#276): same as `ospf/CLAUDE.md`'s; gating only in `reconcile::resync` (`link_client::gate`, a down device is left out of `desired_links`), ungated when never connected or `observed = false`. An unresolved VRF/address/bridge keeps the running link's value (`merge_running`, `LinkManager::running_config`) while the config still gives the attach point an IPv6 address. `LinkConfig.interface_id` is the stream's ifindex (`pick_interface_id`: stream, else `if_nametoindex`, else running), so a recreated device restarts the link. Log: `ospfv3 link resolution failed, keeping running link`.
 - **Graceful restart** (RFC 5187): same shape as v2 minus the IP-address TLV (`lsa::LSA_TYPE_GRACE` `0x000B`); only SIGTERM announces; nothing is aged on shutdown, the restarter resyncs cold.
 - **DBD pagination**: `exchange::mtu_based_max_headers(LinkConfig.mtu)` (IPv6 40 + OSPFv3 16 + DBD 12 header bytes); `Ospfv3Profile.mtu` overrides the interface MTU (`reconcile::resolve_effective_mtu`); `--dbd-max-headers` is test-only.
 - **Redistribution**: `Ospfv3Request::RedistributeRoutes` is `ribd`'s only (`server::allowed`); `reconcile::resolve_redistribute_policy` is a `ponytail:` copy of v2's.

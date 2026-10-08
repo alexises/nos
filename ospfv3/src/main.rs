@@ -91,12 +91,19 @@ async fn main() -> anyhow::Result<()> {
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
+    let (link_tx, link_rx) = watch::channel(nos_ospfv3::link_client::LinkTable::default());
+    let link_task = tokio::spawn(nos_ospfv3::link_client::run(
+        args.watchdog_socket.clone(),
+        link_tx,
+        shutdown_rx.clone(),
+    ));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
         args.instance.clone(),
         links.clone(),
         routing_table_tx,
+        link_rx,
         shutdown_rx.clone(),
     ));
     let rib_push_task = rib_push_client::spawn(
@@ -130,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = reconcile_task.await {
         tracing::warn!(instance = %args.instance, error = %e, "reconcile task ended abnormally");
     }
+    link_task.abort();
     rib_push_task.abort();
     server_task.abort();
 

@@ -2107,6 +2107,14 @@ impl LinkManager {
         );
     }
 
+    /// The config a running link was started with (`None` once stopped), so
+    /// `reconcile` can keep a link whose lookups fail this pass.
+    pub async fn running_config(&self, attach_point: &str) -> Option<LinkConfig> {
+        let links = self.links.lock().await;
+        let entry = links.get(attach_point)?;
+        (!entry.task.is_finished()).then(|| entry.config.clone())
+    }
+
     /// Diffs `desired` against currently-running links — mirrors
     /// `ospf::link::LinkManager::reconcile` exactly.
     pub async fn reconcile(
@@ -2133,6 +2141,7 @@ impl LinkManager {
 
         for key in &to_stop {
             if let Some(entry) = links.remove(key) {
+                info!(link = %key, "ospfv3 link stopped");
                 entry.task.abort();
             }
         }
@@ -2591,6 +2600,32 @@ mod tests {
             auth: None,
             instance_id: 0,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn running_config_follows_the_task() {
+        let wire = Arc::new(wire::Wire::default());
+        let a = router(&wire);
+        let cfg = wired_link(1, NetworkType::PointToPoint);
+        assert!(a.running_config(&cfg.attach_point).await.is_none());
+        a.reconcile(vec![cfg.clone()], HashMap::new(), id(1)).await;
+        assert_eq!(a.running_config(&cfg.attach_point).await, Some(cfg.clone()));
+        a.reconcile(vec![], HashMap::new(), id(1)).await;
+        assert!(a.running_config(&cfg.attach_point).await.is_none());
+    }
+
+    #[test]
+    fn interface_id_change_restarts() {
+        let current = HashMap::from([("eth0.0".to_string(), link("eth0.0", 10))]);
+        let (stop, spawn) = diff_links(&current, &current.clone());
+        assert!(stop.is_empty() && spawn.is_empty());
+        let mut recreated = link("eth0.0", 10);
+        recreated.interface_id = 7;
+        let (stop, spawn) = diff_links(
+            &current,
+            &HashMap::from([("eth0.0".to_string(), recreated)]),
+        );
+        assert_eq!((stop.len(), spawn.len()), (1, 1));
     }
 
     #[test]

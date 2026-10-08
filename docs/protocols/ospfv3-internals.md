@@ -48,6 +48,14 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - **Helper side**, always on: `handle_lsu` acts on a newly installed Grace-LSA from a `Full` neighbor (`on_grace_lsa` sets `NeighborInfo.grace_deadline`) and removes it from the link store at once — held, it would be offered back to the restarted router and flooded to us again. While in grace: `apply_dead_timer`/`sweep_dead_neighbors` skip the neighbor, a Hello that doesn't list us keeps its state, and `Lsdb::age_and_evict` holds its LSAs below `MaxAge`. The restarted neighbor's Init DBD while we still hold it `Full` resynchronizes it through the general RFC 2328 §10.6 rule (see [OSPF internals](ospf-internals.md)'s "DBDs in `Loading`/`Full`", shared by both daemons). Grace ends on reaching `Full` again, on a `MaxAge` Grace-LSA, or at the deadline (`expire_grace`, 1s tick).
 - Routes need nothing: `nos-ribd` keeps OSPF routes of a disconnected push client, and the helper's SPF still sees the held LSAs.
 
+## Link state from `nos-interfaced` (#276)
+
+- A copy of `nos-ospfd`'s ([OSPF internals](ospf-internals.md), "Link state from `nos-interfaced`"): `link_client` (stream, `LinkTable`, `apply`, `gate`), the gate and the keep-running-link rule in `reconcile::resync`, the debounced watch arm in `run()` (200ms, resync only when a watched device's gate changed; the 10s tick stays).
+- **Gate**: `Down(absent | admin-down | no-carrier)` leaves the link out of `desired_links`, so `LinkManager::reconcile` aborts it (`ospfv3 link stopped`). `Ungated` falls back to `if_nametoindex`. Logs on transitions only.
+- **Interface ID**: `LinkConfig.interface_id` is the stream's ifindex, so a device recreated with another ifindex restarts the link; `reconcile::pick_interface_id` falls back to `if_nametoindex`, then to the running link's.
+- **Keep the running link**: a failed VRF, address or bridge lookup falls back to the running value (`merge_running`, `LinkManager::running_config`, log once per link). An attach point whose config has no IPv6 address (`has_address`) or no routing table gets no fallback. `ponytail:` an address removed by hand while the config still carries it is noticed on the next config change, not by the 10s tick.
+- Tests: `link_client::tests`, `reconcile::tests::{merge_running_table,interface_id_prefers_stream_then_running,gate_link_logs_state_and_skips_down,signature_only_covers_watched_devices}`, `link::tests::{running_config_follows_the_task,interface_id_change_restarts}`; `nos-e2e ospfv3`.
+
 ## Layout
 `socket` (raw socket) · `packet` (wire codec) · `lsa`/`lsdb` (LSAs, per-area database, aging) · `exchange` (DBD/LSR/LSU state, pure) · `link` (per-link driver task + `LinkManager`) · `reconcile` (config → `LinkConfig`, redistribute policy) · `server` (IPC queries + `nos-ribd`'s redistribution feed) · `rib_push_client`.
 

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use tracing::{info, warn};
 use crate::config_client;
 use crate::interface_client;
 use crate::link::{LinkConfig, LinkManager};
+use crate::link_client::{self, Gate, LinkTable};
 use crate::packet;
 use crate::watchdog_client;
 
@@ -26,6 +28,42 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// no config commit signals.
 const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Coalesces a burst of link events (a veth delete/create pair) into one resync.
+const LINK_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// What `resync` remembers between passes (owned by `run`, single task).
+#[derive(Default)]
+struct State {
+    /// Kernel devices of every attach point resolved by the last resync, before
+    /// gating: an absent device that returns must still be watched.
+    watched: HashSet<String>,
+    /// Gate of each watched device as of the last resync.
+    signature: Vec<(String, Gate)>,
+    /// Links skipped for a down kernel device, with the reason (log on change).
+    down: HashMap<String, &'static str>,
+    /// Links kept on their running values despite a failed lookup.
+    degraded: HashSet<String>,
+}
+
+/// Gates of `watched` in `table`, sorted: the resync trigger compares these.
+fn signature(table: &LinkTable, watched: &HashSet<String>) -> Vec<(String, Gate)> {
+    let mut sig: Vec<_> = watched
+        .iter()
+        .map(|n| (n.clone(), link_client::gate(table, n)))
+        .collect();
+    sig.sort_by(|a, b| a.0.cmp(&b.0));
+    sig
+}
+
+struct Ctx {
+    config_socket: PathBuf,
+    watchdog_socket: PathBuf,
+    instance: String,
+    links: Arc<LinkManager>,
+    routing_table_tx: watch::Sender<Option<String>>,
+    link_rx: watch::Receiver<LinkTable>,
+}
+
 /// Runs until `shutdown` fires — mirrors `ospf::reconcile::run` exactly,
 /// subscribed to `Ospfv3Instances` instead of `OspfInstances`.
 pub async fn run(
@@ -34,30 +72,33 @@ pub async fn run(
     instance: String,
     links: Arc<LinkManager>,
     routing_table_tx: watch::Sender<Option<String>>,
+    link_rx: watch::Receiver<LinkTable>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let mut ctx = Ctx {
+        config_socket,
+        watchdog_socket,
+        instance,
+        links,
+        routing_table_tx,
+        link_rx,
+    };
+    let mut state = State::default();
+    let mut link_open = true;
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&config_socket, vec![DiffScope::Ospfv3Instances]).await
+        match config_client::subscribe_diff(&ctx.config_socket, vec![DiffScope::Ospfv3Instances])
+            .await
         {
             Ok(mut reader) => {
-                info!(instance = %instance, "connected to nos-configd diff stream");
+                info!(instance = %ctx.instance, "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
                 reapply.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 reapply.tick().await;
-                resync(
-                    &config_socket,
-                    &watchdog_socket,
-                    &instance,
-                    &links,
-                    &routing_table_tx,
-                )
-                .await;
+                resync(&mut ctx, &mut state).await;
                 loop {
                     tokio::select! {
                         event = reader.next() => match event {
-                            Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &watchdog_socket, &instance, &links, &routing_table_tx).await;
-                            }
+                            Some(Ok(Event::Diff(_))) => resync(&mut ctx, &mut state).await,
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
                                 warn!(error = %e, "error reading diff stream, reconnecting");
@@ -68,8 +109,17 @@ pub async fn run(
                                 break;
                             }
                         },
-                        _ = reapply.tick() => {
-                            resync(&config_socket, &watchdog_socket, &instance, &links, &routing_table_tx).await;
+                        _ = reapply.tick() => resync(&mut ctx, &mut state).await,
+                        changed = ctx.link_rx.changed(), if link_open => {
+                            if changed.is_err() {
+                                link_open = false;
+                                continue;
+                            }
+                            tokio::time::sleep(LINK_DEBOUNCE).await;
+                            let table = ctx.link_rx.borrow_and_update().clone();
+                            if signature(&table, &state.watched) != state.signature {
+                                resync(&mut ctx, &mut state).await;
+                            }
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -77,7 +127,7 @@ pub async fn run(
             }
             Err(e) => warn!(
                 error = %e,
-                socket = %config_socket.display(),
+                socket = %ctx.config_socket.display(),
                 "failed to connect to nos-configd"
             ),
         }
@@ -90,17 +140,23 @@ pub async fn run(
         }
     }
 
-    links.shutdown().await;
-    info!(instance = %instance, "reconciliation loop stopped");
+    ctx.links.shutdown().await;
+    info!(instance = %ctx.instance, "reconciliation loop stopped");
 }
 
-async fn resync(
-    config_socket: &Path,
-    watchdog_socket: &Path,
-    instance: &str,
-    links: &Arc<LinkManager>,
-    routing_table_tx: &watch::Sender<Option<String>>,
-) {
+async fn resync(ctx: &mut Ctx, state: &mut State) {
+    let Ctx {
+        config_socket,
+        watchdog_socket,
+        instance,
+        links,
+        routing_table_tx,
+        link_rx,
+    } = &*ctx;
+    let table = link_rx.borrow().clone();
+    let mut watched = HashSet::new();
+    let mut next_down: HashMap<String, &'static str> = HashMap::new();
+    let mut next_degraded = HashSet::new();
     let cfg = match config_client::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -109,7 +165,7 @@ async fn resync(
         }
     };
 
-    let Some(own) = cfg.ospfv3_instances.iter().find(|i| i.name == instance) else {
+    let Some(own) = cfg.ospfv3_instances.iter().find(|i| i.name == *instance) else {
         warn!(instance = %instance, "own ospfv3 instance missing from running config");
         let _ = routing_table_tx.send(None);
         return;
@@ -129,10 +185,8 @@ async fn resync(
     links.set_graceful_restart(own.graceful_restart_grace_period);
 
     let mut desired_links = Vec::new();
-    let mut desired_loopback_prefixes: std::collections::HashMap<
-        std::net::Ipv4Addr,
-        Vec<(Ipv6Net, u16)>,
-    > = std::collections::HashMap::new();
+    let mut desired_loopback_prefixes: HashMap<std::net::Ipv4Addr, Vec<(Ipv6Net, u16)>> =
+        HashMap::new();
 
     for area in &own.areas {
         info!(
@@ -170,35 +224,51 @@ async fn resync(
                     );
                     continue;
                 };
-                let Some(vrf) = resolve_vrf(watchdog_socket, routing_table).await else {
-                    warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf not resolvable yet");
-                    continue;
-                };
                 let kernel_interface = subinterface_kernel_interface(&attach.interface, attach.tag);
-                let Some(resolved) =
-                    resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await
+                watched.insert(kernel_interface.clone());
+                let Some(ifindex) =
+                    gate_link(state, &mut next_down, &table, &link_name, &kernel_interface)
                 else {
-                    warn!(instance = %instance, link = %link_name, "ospfv3 link's local address not resolvable yet");
                     continue;
                 };
-                let Some(interface_id) = kernel_ifindex(&kernel_interface) else {
-                    warn!(instance = %instance, link = %link_name, kernel_interface = %kernel_interface, "ospfv3 link's kernel interface not present yet");
+                let vrf = resolve_vrf(watchdog_socket, routing_table).await;
+                let link =
+                    resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await;
+                let running = if attach.has_address {
+                    links.running_config(&link_name).await
+                } else {
+                    None
+                };
+                let resolved = Resolved {
+                    vrf,
+                    link,
+                    kernel_interface: Some(kernel_interface),
+                };
+                let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
+                    warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf/local address not resolvable yet");
                     continue;
                 };
+                let Some(interface_id) =
+                    pick_interface_id(ifindex, &m.kernel_interface, running.as_ref())
+                else {
+                    warn!(instance = %instance, link = %link_name, kernel_interface = %m.kernel_interface, "ospfv3 link's kernel interface not present yet");
+                    continue;
+                };
+                note_fallback(state, &mut next_degraded, &link_name, &fell_back);
                 desired_links.push(LinkConfig {
                     attach_point: link_name,
                     area_id: area.area_id,
                     hello_interval,
                     dead_interval,
-                    vrf,
-                    kernel_interface,
+                    vrf: m.vrf,
+                    kernel_interface: m.kernel_interface,
                     interface_id,
-                    link_local_address: resolved.link_local_address,
-                    prefix: resolved.prefix,
+                    link_local_address: m.link_local_address,
+                    prefix: m.prefix,
                     cost,
                     network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
                     priority,
-                    mtu: resolve_effective_mtu(profile, Some(resolved.mtu)),
+                    mtu: resolve_effective_mtu(profile, m.mtu),
                     mtu_ignore: profile.mtu_ignore,
                     auth: resolve_auth(profile),
                     instance_id: profile.instance_id.unwrap_or(0),
@@ -230,30 +300,53 @@ async fn resync(
                     );
                     continue;
                 };
-                let Some(vrf) = resolve_vrf(watchdog_socket, routing_table).await else {
-                    warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf not resolvable yet");
+                let vrf = resolve_vrf(watchdog_socket, routing_table).await;
+                let bridge = resolve_broadcast_domain(watchdog_socket, &attach.name).await;
+                let running = if attach.has_address {
+                    links.running_config(&link_name).await
+                } else {
+                    None
+                };
+                let (link, bridge_name) = match bridge {
+                    Some((l, b)) => (Some(l), Some(b)),
+                    None => (None, None),
+                };
+                let resolved = Resolved {
+                    vrf,
+                    link,
+                    kernel_interface: bridge_name,
+                };
+                let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
+                    warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf/local address/bridge not resolvable yet");
                     continue;
                 };
-                let Some((resolved, kernel_interface)) =
-                    resolve_broadcast_domain(watchdog_socket, &attach.name).await
+                watched.insert(m.kernel_interface.clone());
+                let Some(ifindex) = gate_link(
+                    state,
+                    &mut next_down,
+                    &table,
+                    &link_name,
+                    &m.kernel_interface,
+                ) else {
+                    continue;
+                };
+                let Some(interface_id) =
+                    pick_interface_id(ifindex, &m.kernel_interface, running.as_ref())
                 else {
-                    warn!(instance = %instance, link = %link_name, "ospfv3 link's local address/bridge not resolvable yet");
+                    warn!(instance = %instance, link = %link_name, kernel_interface = %m.kernel_interface, "ospfv3 link's kernel bridge not present yet");
                     continue;
                 };
-                let Some(interface_id) = kernel_ifindex(&kernel_interface) else {
-                    warn!(instance = %instance, link = %link_name, kernel_interface = %kernel_interface, "ospfv3 link's kernel bridge not present yet");
-                    continue;
-                };
+                note_fallback(state, &mut next_degraded, &link_name, &fell_back);
                 desired_links.push(LinkConfig {
                     attach_point: link_name,
                     area_id: area.area_id,
                     hello_interval,
                     dead_interval,
-                    vrf,
-                    kernel_interface,
+                    vrf: m.vrf,
+                    kernel_interface: m.kernel_interface,
                     interface_id,
-                    link_local_address: resolved.link_local_address,
-                    prefix: resolved.prefix,
+                    link_local_address: m.link_local_address,
+                    prefix: m.prefix,
                     cost,
                     network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
                     priority,
@@ -275,6 +368,122 @@ async fn resync(
     links
         .reconcile(desired_links, desired_loopback_prefixes, own.router_id)
         .await;
+    state.signature = signature(&table, &watched);
+    state.watched = watched;
+    state.down = next_down;
+    state.degraded = next_degraded;
+}
+
+/// What a resync resolved for one attach point, each `None` when the lookup
+/// failed this pass.
+struct Resolved {
+    vrf: Option<String>,
+    link: Option<ResolvedLink>,
+    kernel_interface: Option<String>,
+}
+
+struct Merged {
+    vrf: String,
+    link_local_address: Ipv6Addr,
+    prefix: Ipv6Net,
+    mtu: Option<u32>,
+    kernel_interface: String,
+}
+
+/// Fills every unresolved value from the running link (a lookup against a
+/// restarting `nos-interfaced`/`nos-ribd` must not tear a link down). The
+/// names of what fell back are returned; `None` when something is still
+/// missing (no running link to fall back on).
+fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, Vec<&'static str>)> {
+    let mut fell_back = Vec::new();
+    let vrf = if let Some(v) = r.vrf {
+        v
+    } else {
+        fell_back.push("vrf");
+        running?.vrf.clone()
+    };
+    let (link_local_address, prefix, mtu) = if let Some(l) = r.link {
+        (l.link_local_address, l.prefix, Some(l.mtu))
+    } else {
+        fell_back.push("address");
+        let c = running?;
+        // The running effective MTU stands in for an unresolved parent MTU
+        // (a profile override still wins in `resolve_effective_mtu`).
+        (c.link_local_address, c.prefix, Some(u32::from(c.mtu)))
+    };
+    let kernel_interface = if let Some(k) = r.kernel_interface {
+        k
+    } else {
+        fell_back.push("bridge");
+        running?.kernel_interface.clone()
+    };
+    Some((
+        Merged {
+            vrf,
+            link_local_address,
+            prefix,
+            mtu,
+            kernel_interface,
+        },
+        fell_back,
+    ))
+}
+
+/// The RFC 5340 Interface ID: the stream's ifindex, else (ungated, 0) a local
+/// `if_nametoindex`, else the running link's.
+fn pick_interface_id(
+    ifindex: u32,
+    kernel_interface: &str,
+    running: Option<&LinkConfig>,
+) -> Option<u32> {
+    if ifindex != 0 {
+        return Some(ifindex);
+    }
+    kernel_ifindex(kernel_interface).or_else(|| running.map(|c| c.interface_id))
+}
+
+/// Applies the link stream's verdict on `kernel_interface` to `link`: `None`
+/// (skip, so `reconcile` aborts it) when it is down, else its ifindex (0
+/// ungated). Logs on transitions only.
+fn gate_link(
+    state: &State,
+    next_down: &mut HashMap<String, &'static str>,
+    table: &LinkTable,
+    link: &str,
+    kernel_interface: &str,
+) -> Option<u32> {
+    match link_client::gate(table, kernel_interface) {
+        Gate::Down(reason) => {
+            if state.down.get(link) != Some(&reason) {
+                warn!(link = %link, reason = %reason, "ospfv3 link kernel interface down");
+            }
+            next_down.insert(link.to_string(), reason);
+            None
+        }
+        Gate::Up(ifindex) => {
+            if state.down.contains_key(link) {
+                info!(link = %link, ifindex, "ospfv3 link kernel interface up");
+            }
+            Some(ifindex)
+        }
+        Gate::Ungated => Some(0),
+    }
+}
+
+/// Warns once per transition into "kept on the running link's values".
+fn note_fallback(
+    state: &State,
+    next: &mut HashSet<String>,
+    link: &str,
+    fell_back: &[&'static str],
+) {
+    if fell_back.is_empty() {
+        return;
+    }
+    if !state.degraded.contains(link) {
+        warn!(link = %link, missing = %fell_back.join("|"), "ospfv3 link resolution failed, keeping running link");
+    }
+    next.insert(link.to_string());
 }
 
 /// Compiles the mirrored `Ospfv3Instance.redistribute_policy` (`None` =
@@ -416,6 +625,9 @@ struct SubinterfaceAttachPoint {
     interface: String,
     tag: u16,
     routing_table: Option<String>,
+    /// The config still gives it an IPv6 address: a failed lookup then keeps
+    /// the running link, else the attach point is gone as far as we know.
+    has_address: bool,
 }
 
 impl SubinterfaceAttachPoint {
@@ -436,6 +648,7 @@ fn subinterface_attach_points(
                     interface: iface.name.clone(),
                     tag: sub.tag,
                     routing_table: sub.routing_table.clone(),
+                    has_address: sub.addresses.iter().any(|a| a.address.addr().is_ipv6()),
                 });
             }
         }
@@ -446,6 +659,8 @@ fn subinterface_attach_points(
 struct BroadcastDomainAttachPoint {
     name: String,
     routing_table: Option<String>,
+    /// As `SubinterfaceAttachPoint::has_address`.
+    has_address: bool,
 }
 
 impl BroadcastDomainAttachPoint {
@@ -464,6 +679,7 @@ fn broadcast_domain_attach_points(
         .map(|d| BroadcastDomainAttachPoint {
             name: d.name.clone(),
             routing_table: d.routing_table.clone(),
+            has_address: d.addresses.iter().any(|a| a.address.addr().is_ipv6()),
         })
         .collect()
 }
@@ -641,10 +857,14 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 mod tests {
     use nos_proto::{BroadcastDomain, Config, Interface, Subinterface};
 
+    use std::collections::{HashMap, HashSet};
+
     use super::attach_points_for;
     use super::broadcast_domain_attach_points;
     use super::loopback_attach_points;
     use super::subinterface_attach_points;
+    use super::*;
+    use crate::link_client::apply;
 
     fn interface(name: &str, ospfv3_profile: Option<&str>) -> Interface {
         Interface {
@@ -780,5 +1000,164 @@ mod tests {
         let points = loopback_attach_points(&cfg, "p1");
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].interface, "loopback-rt1");
+    }
+
+    fn running() -> LinkConfig {
+        LinkConfig {
+            attach_point: "eth0.0".into(),
+            area_id: std::net::Ipv4Addr::UNSPECIFIED,
+            hello_interval: 10,
+            dead_interval: 40,
+            vrf: "vrf-run".into(),
+            kernel_interface: "br-run".into(),
+            interface_id: 3,
+            link_local_address: "fe80::1".parse().unwrap(),
+            prefix: "2001:db8::1/64".parse().unwrap(),
+            cost: 1,
+            network_type: nos_proto::NetworkType::Broadcast,
+            priority: 1,
+            mtu: 9000,
+            mtu_ignore: false,
+            auth: None,
+            instance_id: 0,
+        }
+    }
+
+    fn resolved() -> Resolved {
+        Resolved {
+            vrf: Some("vrf-new".into()),
+            link: Some(ResolvedLink {
+                link_local_address: "fe80::2".parse().unwrap(),
+                prefix: "2001:db8::2/64".parse().unwrap(),
+                mtu: 1500,
+            }),
+            kernel_interface: Some("br-new".into()),
+        }
+    }
+
+    #[test]
+    fn merge_running_table() {
+        let run = running();
+        let (m, fb) = merge_running(resolved(), Some(&run)).unwrap();
+        assert_eq!(fb, [] as [&str; 0]);
+        assert_eq!((m.vrf.as_str(), m.mtu), ("vrf-new", Some(1500)));
+        let none = Resolved {
+            vrf: None,
+            link: None,
+            kernel_interface: None,
+        };
+        let (m, fb) = merge_running(none, Some(&run)).unwrap();
+        assert_eq!(fb, ["vrf", "address", "bridge"]);
+        assert_eq!(
+            (
+                m.vrf.as_str(),
+                m.link_local_address,
+                m.kernel_interface.as_str(),
+                m.mtu
+            ),
+            ("vrf-run", run.link_local_address, "br-run", Some(9000))
+        );
+        let only_vrf = || Resolved {
+            vrf: None,
+            ..resolved()
+        };
+        assert_eq!(
+            merge_running(only_vrf(), Some(&run)).unwrap().0.vrf,
+            "vrf-run"
+        );
+        assert!(merge_running(only_vrf(), None).is_none());
+    }
+
+    #[test]
+    fn interface_id_prefers_stream_then_running() {
+        let run = running();
+        assert_eq!(pick_interface_id(7, "nope0", Some(&run)), Some(7));
+        assert_eq!(pick_interface_id(0, "nope0", Some(&run)), Some(3));
+        assert_eq!(pick_interface_id(0, "nope0", None), None);
+    }
+
+    #[test]
+    fn gate_link_logs_state_and_skips_down() {
+        let mut t = LinkTable::default();
+        let st = State::default();
+        let mut down = HashMap::new();
+        assert_eq!(gate_link(&st, &mut down, &t, "l", "a"), Some(0));
+        let ev = |up: bool| nos_proto::LinkState {
+            name: "a".into(),
+            ifindex: 5,
+            admin_up: true,
+            carrier: up,
+        };
+        apply(
+            &mut t,
+            nos_proto::InterfaceEvent::LinkSnapshot {
+                observed: true,
+                links: vec![ev(true)],
+            },
+        );
+        assert_eq!(gate_link(&st, &mut down, &t, "l", "a"), Some(5));
+        apply(&mut t, nos_proto::InterfaceEvent::LinkChanged(ev(false)));
+        assert_eq!(gate_link(&st, &mut down, &t, "l", "a"), None);
+        assert_eq!(down.get("l"), Some(&"no-carrier"));
+    }
+
+    #[test]
+    fn attach_points_know_whether_the_config_has_an_address() {
+        let addr = nos_proto::InterfaceAddress {
+            address: "2001:db8::1/64".parse().unwrap(),
+            label: None,
+        };
+        let v4 = nos_proto::InterfaceAddress {
+            address: "10.0.0.1/24".parse().unwrap(),
+            label: None,
+        };
+        let sub = |tag, addresses| Subinterface {
+            tag,
+            addresses,
+            routing_table: Some("rt1".into()),
+            ospf_profile: None,
+            ospfv3_profile: Some("p1".into()),
+        };
+        let mut iface = interface("eth0", None);
+        iface.subinterfaces = vec![sub(0, vec![addr]), sub(1, vec![v4])];
+        let cfg = Config {
+            interfaces: vec![iface],
+            ..Default::default()
+        };
+        let pts = subinterface_attach_points(&cfg, "p1");
+        assert_eq!((pts[0].has_address, pts[1].has_address), (true, false));
+    }
+
+    #[test]
+    fn signature_only_covers_watched_devices() {
+        let mut t = LinkTable::default();
+        let ev = |n: &str, up: bool| nos_proto::LinkState {
+            name: n.into(),
+            ifindex: 1,
+            admin_up: up,
+            carrier: up,
+        };
+        apply(
+            &mut t,
+            nos_proto::InterfaceEvent::LinkSnapshot {
+                observed: true,
+                links: vec![ev("a", true), ev("x", true)],
+            },
+        );
+        let watched = HashSet::from(["a".to_string()]);
+        let before = signature(&t, &watched);
+        apply(
+            &mut t,
+            nos_proto::InterfaceEvent::LinkChanged(ev("x", false)),
+        );
+        assert_eq!(signature(&t, &watched), before);
+        apply(
+            &mut t,
+            nos_proto::InterfaceEvent::LinkChanged(ev("a", false)),
+        );
+        assert_eq!(
+            signature(&t, &watched),
+            [("a".to_string(), Gate::Down("admin-down"))]
+        );
     }
 }
