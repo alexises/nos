@@ -3497,3 +3497,181 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
     w.remove(E).await;
     Ok(())
 }
+
+/// What differs between `ospf-bfd` and `ospfv3-bfd`.
+struct BfdScenario {
+    /// Daemon name in log lines: `ospf` or `ospfv3`.
+    daemon: &'static str,
+    /// `--ospf-bfd` / `--ospfv3-bfd` and their removal.
+    on: &'static str,
+    off: &'static str,
+    /// The neighbor's BFD peer address as a log pattern (`fe80::` for v3).
+    peer: String,
+    /// router-b's loopback flags and prefix: the route that must vanish.
+    loopback: Vec<String>,
+    prefix: &'static str,
+    /// The v3 UDP filter matches `ipv6`.
+    v6: bool,
+    full_a: String,
+    base_a: Vec<String>,
+    base_b: Vec<String>,
+}
+
+/// Drops (or lifts) UDP 3784 on router-a's ingress; `tc` knows only IPv4 or
+/// IPv6 per filter.
+async fn bfd_filter(w: &World, v6: bool, drop: bool) -> anyhow::Result<()> {
+    use super::bfd::tc;
+    if !drop {
+        return tc(&w.dock, &["qdisc", "del", "dev", "eth0", "clsact"])
+            .await
+            .map(|_| ());
+    }
+    tc(&w.dock, &["qdisc", "add", "dev", "eth0", "clsact"]).await?;
+    let (proto, sel) = if v6 { ("ipv6", "ip6") } else { ("ip", "ip") };
+    tc(
+        &w.dock,
+        &[
+            "filter", "add", "dev", "eth0", "ingress", "protocol", proto, "u32", "match", sel,
+            "protocol", "17", "0xff", "match", sel, "dport", "3784", "0xffff", "action", "drop",
+        ],
+    )
+    .await
+    .map(|_| ())
+}
+
+/// #288, RFC 5882 §4.1: OSPF over BFD. Both routers get `bfd fast` (100 ms x
+/// 3) on the shared profile without resetting the adjacency; a silent UDP 3784
+/// drop on router-a takes the session Down and `nos-ospf*d` kills the neighbor
+/// within a second (the dead interval is 40 s) and withdraws the route;
+/// lifting the drop restores Full and the route; a local `shutdown` on the BFD
+/// profile (`AdminDown`) kills nothing.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let daemon = s.daemon;
+    let down = format!(
+        "bfd session down peer={} diag=control-detection-time-expired",
+        s.peer
+    );
+    let up = format!("bfd session up peer={}", s.peer);
+    let killing = format!("bfd session down, killing {daemon} neighbor link=eth0.0");
+    let add = format!("added route prefix={} .*source=Some(Ospf)", s.prefix);
+    let removed = format!("removed route prefix={}", s.prefix);
+
+    log("bfd on the shared profile must not reset the adjacency");
+    let torn =
+        format!("{daemon} neighbor adjacency torn down\\|{daemon} neighbor state changed to down");
+    let (torn_a, torn_b, full_a) = (a.count(&torn), b.count(&torn), a.count(&s.full_a));
+    let with = |base: &[String], extra: &[String]| {
+        let mut f = base.to_vec();
+        f.extend(extra.iter().cloned());
+        f
+    };
+    let (on, off) = (vec![s.on.to_string()], vec![s.off.to_string()]);
+    a.provision_flags(&with(&s.base_a, &on)).await?;
+    b.provision_flags(&with(&s.base_b, &[on.clone(), s.loopback.clone()].concat()))
+        .await?;
+    a.wait_new(&up, 0, 30).await?;
+    b.wait("bfd session up peer=").await?;
+    a.wait_new(&add, 0, 60).await?;
+    a.assert_quiet(&torn, torn_a, 3).await?;
+    b.assert_quiet(&torn, torn_b, 0).await?;
+    a.assert_quiet(&s.full_a, full_a, 0).await?;
+
+    log("UDP 3784 dropped on router-a: BFD Down kills the neighbor in under a second");
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    let (n_down, n_kill, n_removed) = (a.count(&down), a.count(&killing), a.count(&removed));
+    let full_base = a.count(&s.full_a);
+    let n_add = a.count(&add);
+    bfd_filter(w, s.v6, true).await?;
+    let result = async {
+        a.wait_new(&down, n_down, 10).await?;
+        a.wait_new(&killing, n_kill, 5).await?;
+        a.assert_delay_under(&down, &killing, n_kill, 1000)?;
+        a.wait_new(&removed, n_removed, 15).await
+    }
+    .await;
+    let lifted = bfd_filter(w, s.v6, false).await;
+    result?;
+    lifted?;
+
+    log("drop lifted: Full and the route come back");
+    a.wait_new(&s.full_a, full_base, 90).await?;
+    a.wait_new(&add, n_add, 60).await?;
+
+    log("local shutdown on the BFD profile is AdminDown: no neighbor is killed");
+    let n_kill = a.count(&killing);
+    a.edit(|c| {
+        c.bfd_profiles.iter_mut().for_each(|p| p.shutdown = true);
+        Ok(())
+    })
+    .await?;
+    a.assert_quiet(&killing, n_kill, 5).await?;
+    a.edit(|c| {
+        c.bfd_profiles.iter_mut().for_each(|p| p.shutdown = false);
+        Ok(())
+    })
+    .await?;
+
+    log("removing bfd resets nothing");
+    a.wait_new(&s.full_a, 0, 90).await?;
+    let (torn_a, full_a) = (a.count(&torn), a.count(&s.full_a));
+    a.provision_flags(&with(&s.base_a, &off)).await?;
+    b.provision_flags(&with(&s.base_b, &[off, s.loopback.clone()].concat()))
+        .await?;
+    a.assert_quiet(&torn, torn_a, 3).await?;
+    a.assert_quiet(&s.full_a, full_a, 0).await
+}
+
+/// `ospf-bfd` (#288), on the `ospf` lab.
+pub async fn ospf_bfd(w: &mut World) -> anyhow::Result<()> {
+    bfd_scenario(
+        w,
+        BfdScenario {
+            daemon: "ospf",
+            on: "--ospf-bfd",
+            off: "--no-ospf-bfd",
+            peer: IP_B.to_string(),
+            loopback: strings(&[
+                "--loopback-address",
+                OSPF_SPF_LOOPBACK_ADDRESS,
+                "--ospf-loopback-profile",
+                OSPF_PROFILE,
+            ]),
+            prefix: OSPF_SPF_LOOPBACK_ADDRESS,
+            v6: false,
+            full_a: full_p2p(OSPF_ROUTER_ID_B),
+            base_a: with_base(A, ospf(OSPF_ROUTER_ID)),
+            base_b: with_base(B, ospf(OSPF_ROUTER_ID_B)),
+        },
+    )
+    .await
+}
+
+/// `ospfv3-bfd` (#288), on the `ospfv3` lab: sessions between link-local
+/// addresses, scoped by `eth0.0`.
+pub async fn ospfv3_bfd(w: &mut World) -> anyhow::Result<()> {
+    bfd_scenario(
+        w,
+        BfdScenario {
+            daemon: "ospfv3",
+            on: "--ospfv3-bfd",
+            off: "--no-ospfv3-bfd",
+            peer: "fe80::.*".to_string(),
+            loopback: strings(&[
+                "--ospfv3-loopback-address",
+                OSPFV3_LFA_LOOPBACK_ADDRESS,
+                "--ospfv3-loopback-profile",
+                OSPFV3_PROFILE,
+            ]),
+            prefix: OSPFV3_LFA_LOOPBACK_ADDRESS,
+            v6: true,
+            full_a: format!(
+                "ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"
+            ),
+            base_a: with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)),
+            base_b: with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)),
+        },
+    )
+    .await
+}

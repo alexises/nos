@@ -11,15 +11,16 @@
 //! sequence (`accept_crypto_sequence`), like `ospf::link`.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ipnet::{IpNet, Ipv6Net};
+use nos_proto::schema::BfdProfile;
 use nos_proto::{
-    LinkInterfaceState, NetworkType, OspfNeighborState, Ospfv3LsaSummary, Ospfv3NeighborSummary,
-    RedistributeUpdate,
+    BfdDiag, LinkInterfaceState, NetworkType, OspfNeighborState, Ospfv3LsaSummary,
+    Ospfv3NeighborSummary, RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -27,6 +28,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::bfd;
+use crate::bfd_client::{Host, Target, Want};
 use crate::election;
 use crate::exchange::{self, AdjacencyData};
 use crate::lsa::{
@@ -313,6 +316,7 @@ pub async fn run(
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
     mut grace_rx: mpsc::UnboundedReceiver<u32>,
+    mut bfd_rx: mpsc::UnboundedReceiver<Ipv6Addr>,
 ) {
     let stores = Stores {
         area: &lsdb,
@@ -460,6 +464,7 @@ pub async fn run(
             Some(grace_period) = grace_rx.recv() => {
                 send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period);
             }
+            Some(address) = bfd_rx.recv() => kill_bfd_neighbor(&cfg, &status, address),
             _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status);
                 flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status).await;
@@ -1047,6 +1052,20 @@ async fn flood_full_neighbors(
     }
 }
 
+/// RFC 2328 §10.2 `KillNbr` for the neighbor at link-local `address`, because
+/// BFD found its path down (mirrors `ospf::link::kill_bfd_neighbor`).
+fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address: Ipv6Addr) {
+    status.send_modify(|s| {
+        for (id, info) in &mut s.neighbors {
+            if info.address == address && info.state != NeighborState::Down {
+                warn!(link = %cfg.attach_point, neighbor = %id, "bfd session down, killing ospfv3 neighbor");
+                info.state = bfd::on_bfd_down(info.state);
+                info.adjacency = None;
+            }
+        }
+    });
+}
+
 fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
     let Some((old_state, grace)) = status
         .borrow()
@@ -1345,6 +1364,8 @@ struct LinkEntry {
     status: watch::Receiver<LinkStatus>,
     /// Asks the link task to send Grace-LSAs (the grace period, seconds).
     grace_tx: mpsc::UnboundedSender<u32>,
+    /// BFD found the path to this neighbor link-local address down.
+    bfd_tx: mpsc::UnboundedSender<Ipv6Addr>,
 }
 
 /// Owns every `OSPFv3` link's driver task for one `nos-ospfv3d` process, plus
@@ -1399,6 +1420,9 @@ pub struct LinkManager {
     /// RFC 5187 grace period (seconds) to announce on a planned restart;
     /// `0` = graceful restart off.
     grace_period: AtomicU16,
+    /// Each attach point's `bfd` profile (`set_bfd`, every resync); a link
+    /// missing here has no BFD.
+    bfd: std::sync::Mutex<HashMap<String, BfdProfile>>,
     opener: Opener,
 }
 
@@ -1473,6 +1497,12 @@ impl LinkManager {
         self.extended_lsa.store(extended, Ordering::Relaxed);
     }
 
+    /// The `bfd` profile of each attach point that has one, replaced on every
+    /// resync. Registrations follow; a link never restarts for it.
+    pub fn set_bfd(&self, wanted: HashMap<String, BfdProfile>) {
+        *self.bfd.lock().unwrap() = wanted;
+    }
+
     pub fn set_graceful_restart(&self, grace_period: Option<u16>) {
         self.grace_period
             .store(grace_period.unwrap_or(0), Ordering::Relaxed);
@@ -1523,6 +1553,7 @@ impl LinkManager {
             dbd_max_headers,
             extended_lsa: AtomicBool::new(false),
             grace_period: AtomicU16::new(0),
+            bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
         });
         let background = Arc::clone(&manager);
@@ -2151,6 +2182,7 @@ impl LinkManager {
             let link_local_lsdb = self.link_local_lsdb_for(&cfg.attach_point).await;
             let (status_tx, status_rx) = watch::channel(LinkStatus::new(cfg.network_type));
             let (grace_tx, grace_rx) = mpsc::unbounded_channel();
+            let (bfd_tx, bfd_rx) = mpsc::unbounded_channel();
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),
@@ -2161,6 +2193,7 @@ impl LinkManager {
                 status_tx,
                 self.dbd_max_headers,
                 grace_rx,
+                bfd_rx,
             ));
             links.insert(
                 key,
@@ -2169,6 +2202,7 @@ impl LinkManager {
                     task,
                     status: status_rx,
                     grace_tx,
+                    bfd_tx,
                 },
             );
         }
@@ -2575,6 +2609,45 @@ fn diff_links(
     }
 
     (to_stop, to_spawn)
+}
+
+/// `nos-ospfv3d`'s side of `crate::bfd_client`: one session per neighbor at
+/// 2-Way or later on a link with a `bfd` profile, between link-local
+/// addresses (RFC 5882 §3.1) so the interface scopes the session.
+impl Host for LinkManager {
+    async fn target(&self) -> Target {
+        let wanted = self.bfd.lock().unwrap().clone();
+        let mut target = Target::new();
+        if wanted.is_empty() {
+            return target;
+        }
+        for entry in self.links.lock().await.values() {
+            let Some(profile) = wanted.get(&entry.config.attach_point) else {
+                continue;
+            };
+            for n in entry.status.borrow().neighbors.values() {
+                if bfd::bfd_wanted(n.state) {
+                    target.insert(
+                        IpAddr::V6(n.address),
+                        Want {
+                            profile: profile.clone(),
+                            local: Some(IpAddr::V6(entry.config.link_local_address)),
+                            interface: Some(entry.config.kernel_interface.clone()),
+                        },
+                    );
+                }
+            }
+        }
+        target
+    }
+
+    async fn down(&self, peer: IpAddr, diag: BfdDiag) {
+        let IpAddr::V6(peer) = peer else { return };
+        info!(peer = %peer, diag = %diag, "ospfv3: bfd session down");
+        for entry in self.links.lock().await.values() {
+            let _ = entry.bfd_tx.send(peer);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3581,6 +3654,38 @@ mod tests {
             assert_eq!(deadline > past, refreshed, "{state:?}");
             assert_eq!(n.last_hello_received, past, "{state:?}");
         }
+    }
+
+    /// #288: a Full neighbor on a link with a `bfd` profile gets a session
+    /// between link-local addresses on the link's interface; BFD reporting
+    /// the path down kills the neighbor at once and the next Hello restores it.
+    #[tokio::test(start_paused = true)]
+    async fn bfd_down_kills_a_full_neighbor_at_once() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, _b) = pair(&wire, None, None).await;
+        let state = || async { a.neighbor_summaries().await[0].state };
+        assert_eq!(state().await, OspfNeighborState::Full);
+        assert!(a.target().await.is_empty(), "no profile, no session");
+
+        a.set_bfd(HashMap::from([(
+            "link-1".to_string(),
+            BfdProfile::default(),
+        )]));
+        let want = a.target().await;
+        let peer: IpAddr = "fe80::2".parse().unwrap();
+        assert_eq!(want.len(), 1);
+        assert_eq!(want[&peer].local, Some("fe80::1".parse().unwrap()));
+        assert!(want[&peer].interface.is_some());
+
+        a.down("fe80::9".parse().unwrap(), BfdDiag::PathDown).await;
+        settle(1).await;
+        assert_eq!(state().await, OspfNeighborState::Full, "stranger");
+        a.down(peer, BfdDiag::ControlDetectionTimeExpired).await;
+        settle(1).await;
+        assert_eq!(state().await, OspfNeighborState::Down);
+        assert!(a.target().await.is_empty(), "deregistered below 2-Way");
+        settle(60).await;
+        assert_eq!(state().await, OspfNeighborState::Full, "Hello restores it");
     }
 
     #[tokio::test(start_paused = true)]

@@ -1,6 +1,6 @@
 # nos-bfd — BFD (RFC 5880/5881) library and `nos-bfdd`
 
-The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fixed process like `nos-lldpd`. Single-hop and multihop; its clients are `nos-ribd`'s `bfd_client.rs` (static routes) and `nos-bgpd`'s (peer-groups, #286).
+The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fixed process like `nos-lldpd`. Single-hop and multihop; its clients are `nos-ribd`'s `bfd_client.rs` (static routes), `nos-bgpd`'s (peer-groups, #286) and `nos-ospfd`/`nos-ospfv3d`'s (#288).
 
 | Module | Purpose |
 |--------|---------|

@@ -7,5 +7,6 @@
 //! daemons can depend on it without gaining any daemon-to-daemon coupling —
 //! see root `CLAUDE.md`'s dependency-graph section.
 
+pub mod bfd;
 pub mod election;
 pub mod neighbor;

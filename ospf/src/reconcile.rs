@@ -205,6 +205,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_area_settings(area_settings(&own.areas)).await;
 
     let mut desired_links = Vec::new();
+    let mut bfd_wants: HashMap<String, nos_proto::schema::BfdProfile> = HashMap::new();
     let mut desired_stubs: HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>> = HashMap::new();
     for area in &own.areas {
         info!(
@@ -273,6 +274,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                     continue;
                 };
                 note_fallback(state, &mut next_degraded, &link_name, &fell_back);
+                if let Some(p) = bfd_profile(&cfg, profile.bfd.as_deref()) {
+                    bfd_wants.insert(link_name.clone(), p);
+                }
                 desired_links.push(LinkConfig {
                     attach_point: link_name,
                     area_id: area.area_id,
@@ -355,6 +359,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                     continue;
                 };
                 note_fallback(state, &mut next_degraded, &link_name, &fell_back);
+                if let Some(p) = bfd_profile(&cfg, profile.bfd.as_deref()) {
+                    bfd_wants.insert(link_name.clone(), p);
+                }
                 desired_links.push(LinkConfig {
                     attach_point: link_name,
                     area_id: area.area_id,
@@ -385,6 +392,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         .set_redistribute_metric(own.redistribute_metric, own.redistribute_metric_type)
         .await;
 
+    links.set_bfd(bfd_wants);
     links
         .reconcile(desired_links, desired_stubs, own.router_id)
         .await;
@@ -392,6 +400,15 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     state.watched = watched;
     state.down = next_down;
     state.degraded = next_degraded;
+}
+
+/// The named BFD profile (validation guarantees it exists).
+fn bfd_profile(
+    cfg: &nos_proto::Config,
+    name: Option<&str>,
+) -> Option<nos_proto::schema::BfdProfile> {
+    let name = name?;
+    cfg.bfd_profiles.iter().find(|p| p.name == name).cloned()
 }
 
 /// What a resync resolved for one attach point, each `None` when the lookup

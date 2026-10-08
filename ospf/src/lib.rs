@@ -2,6 +2,7 @@
 // point-to-point and broadcast (RFC 2328 DR/BDR election) links (see
 // ospf/CLAUDE.md)
 
+pub mod bfd_client;
 pub mod boot;
 pub mod config_client;
 pub mod exchange;
@@ -19,4 +20,4 @@ pub mod socket;
 pub mod spf;
 pub mod watchdog_client;
 
-pub use nos_ospf_common::{election, neighbor};
+pub use nos_ospf_common::{bfd, election, neighbor};
