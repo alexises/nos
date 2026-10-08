@@ -321,6 +321,33 @@ pub struct SessionManager {
     bind_vrf: bool,
     /// The RTR client (`rpki::Client`) and the task applying its VRP sets.
     rpki: Mutex<Option<(rpki::Client, JoinHandle<()>)>>,
+    /// The BFD sessions `reconcile::resync` wants; `bfd_client` registers them.
+    bfd_targets: watch::Sender<crate::bfd_client::Target>,
+}
+
+/// What a BFD Down does to `peer` (RFC 5882 §4.3, RFC 9384).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BfdAction {
+    /// Cease/10; `flush` wraps it in a Hard Reset so the peer drops our routes.
+    Close {
+        flush: bool,
+    },
+    /// Not established, routes held stale: act as if the restart timer expired.
+    AbortGr,
+    Nothing,
+}
+
+/// `cpi`: the C bit is set at both ends, so BFD is a forwarding verdict
+/// independent of the control plane. Otherwise BFD fails along with a
+/// restart and must not cancel the graceful restart (§4.3.2).
+pub fn bfd_action(established: bool, has_stale: bool, cpi: bool) -> BfdAction {
+    if established {
+        BfdAction::Close { flush: cpi }
+    } else if has_stale && cpi {
+        BfdAction::AbortGr
+    } else {
+        BfdAction::Nothing
+    }
 }
 
 impl SessionManager {
@@ -359,7 +386,43 @@ impl SessionManager {
             peer_port,
             bind_vrf,
             rpki: Mutex::new(None),
+            bfd_targets: watch::channel(crate::bfd_client::Target::default()).0,
         })
+    }
+
+    pub fn bfd_targets(&self) -> watch::Receiver<crate::bfd_client::Target> {
+        self.bfd_targets.subscribe()
+    }
+
+    pub fn set_bfd_targets(&self, target: crate::bfd_client::Target) {
+        self.bfd_targets.send_if_modified(|t| {
+            let changed = *t != target;
+            if changed {
+                *t = target;
+            }
+            changed
+        });
+    }
+
+    /// `nos-bfdd` reported `peer`'s session went `Up` -> `Down`.
+    pub async fn bfd_down(&self, peer: IpAddr, cpi: bool) {
+        let slot = self.peers.read().await.get(&peer).cloned();
+        let established = match &slot {
+            Some(s) => s.is_established().await,
+            None => false,
+        };
+        let has_stale = !established && self.bgp_rib.lock().await.stale_count(peer) > 0;
+        match bfd_action(established, has_stale, cpi) {
+            BfdAction::Close { flush } => {
+                if let Some(slot) = slot {
+                    slot.send_command(FsmCommand::BfdDown { flush });
+                }
+            }
+            BfdAction::AbortGr => {
+                self.bgp_rib.lock().await.gr_abort(peer);
+            }
+            BfdAction::Nothing => {}
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1304,6 +1367,23 @@ fn jittered(d: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 5882 §4.3: established -> Cease/10 (flushing only with C at both
+    /// ends); down with stale routes -> abort the restart only with C.
+    #[test]
+    fn bfd_down_decision_table() {
+        use BfdAction::*;
+        for (established, stale, cpi, want) in [
+            (true, false, true, Close { flush: true }),
+            (true, true, false, Close { flush: false }),
+            (false, true, true, AbortGr),
+            (false, true, false, Nothing),
+            (false, false, true, Nothing),
+            (false, false, false, Nothing),
+        ] {
+            assert_eq!(bfd_action(established, stale, cpi), want);
+        }
+    }
 
     #[test]
     fn jittered_stays_between_three_quarters_and_whole() {

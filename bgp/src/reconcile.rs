@@ -9,6 +9,7 @@ use nos_proto::{DiffScope, Event, ServiceRef, SourceAddress, LOOPBACK_PREFIX};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
+use crate::bfd_client;
 use crate::config_client;
 use crate::fsm;
 use crate::interface_client;
@@ -55,6 +56,7 @@ pub async fn run(
                 DiffScope::CommunityGroups,
                 DiffScope::PrefixLists,
                 DiffScope::AsPathLists,
+                DiffScope::BfdProfiles,
             ],
         )
         .await
@@ -284,6 +286,13 @@ async fn resync(
         evpn_tables.clear();
     }
 
+    // After the restart decision: `routing_table` is cleared until then.
+    sessions.set_bfd_targets(match (&vrf, &routing_table) {
+        (VrfRequirement::Resolved(_), Some(table)) => {
+            bfd_target(own, &cfg.bfd_profiles, table.clone())
+        }
+        _ => bfd_client::Target::default(),
+    });
     sessions.set_maximum_paths(own.maximum_paths).await;
     sessions
         .set_gr_stale_time(own.graceful_restart.stale_time())
@@ -303,6 +312,37 @@ async fn resync(
     // After `reconcile`, which sets the local ASN/router-id the AGGREGATOR
     // attribute carries.
     sessions.set_aggregates(own.aggregates.clone()).await;
+}
+
+/// The BFD sessions `own`'s peers want: a non-shut peer whose peer-group
+/// names a `bfd` profile. The profile is not part of `ResolvedPeer`, so
+/// adding or removing `bfd` never resets a session.
+// ponytail: single-hop only (a `max-hops` above 1 is skipped); multihop
+// BFD (RFC 5883) is #287. Off-link peers are not detected: their session
+// just never comes Up and so never reports a failure.
+fn bfd_target(
+    own: &nos_proto::BgpInstance,
+    profiles: &[nos_proto::schema::BfdProfile],
+    table: String,
+) -> bfd_client::Target {
+    let mut peers = HashMap::new();
+    for peer in &own.peers {
+        let Some(group) = own.peer_groups.iter().find(|g| g.name == peer.peer_group) else {
+            continue;
+        };
+        let Some(name) = &group.bfd else { continue };
+        if peer.shutdown.is_some() || group.shutdown.is_some() {
+            continue;
+        }
+        if group.max_hops.is_some_and(|h| h > 1) {
+            warn!(peer = %peer.remote_address, "bfd on a multihop peer is not supported yet, skipping");
+            continue;
+        }
+        if let Some(profile) = profiles.iter().find(|p| &p.name == name) {
+            peers.insert(peer.remote_address, profile.clone());
+        }
+    }
+    bfd_client::Target { table, peers }
 }
 
 /// RFC 4724 §4.1, once per process before any session starts: if graceful
@@ -445,6 +485,37 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a non-shut peer in a peer-group naming a known profile, with no
+    /// multihop, is registered.
+    #[test]
+    fn bfd_target_picks_guarded_single_hop_peers() {
+        let own: nos_proto::BgpInstance = serde_json::from_value(serde_json::json!({
+            "name": "r1", "asn": 65001, "router_id": "1.1.1.1",
+            "peers": [
+                {"remote_address": "10.0.0.1", "peer_group": "g"},
+                {"remote_address": "10.0.0.2", "peer_group": "plain"},
+                {"remote_address": "10.0.0.3", "peer_group": "far"},
+            ],
+            "peer_groups": [
+                {"name": "g", "remote_as": 65002, "address_families": [], "route_reflector_client": false, "route_server_client": false, "bfd": "fast"},
+                {"name": "plain", "remote_as": 65002, "address_families": [], "route_reflector_client": false, "route_server_client": false},
+                {"name": "far", "remote_as": 65002, "address_families": [], "route_reflector_client": false, "route_server_client": false, "bfd": "fast", "max_hops": 5},
+            ],
+        }))
+        .unwrap();
+        let fast = nos_proto::schema::BfdProfile {
+            name: "fast".into(),
+            ..Default::default()
+        };
+        let t = bfd_target(&own, std::slice::from_ref(&fast), "rt1".into());
+        assert_eq!(t.table, "rt1");
+        assert_eq!(
+            t.peers.keys().collect::<Vec<_>>(),
+            [&"10.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+        assert!(bfd_target(&own, &[], "rt1".into()).peers.is_empty());
+    }
 
     #[test]
     fn no_owning_table_is_invalid() {

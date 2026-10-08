@@ -156,3 +156,83 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     w.dock.container_remove("router-f").await;
     Ok(())
 }
+
+/// `bgp-bfd`, on the base lab (run after `established`). Both peer-groups get
+/// `bfd fast` (100 ms x 3) without resetting the session; dropping UDP 3784
+/// on router-a's ingress takes the BFD session Down by detection time and
+/// both routers close the BGP session at once (Cease/10 wrapped in a Hard
+/// Reset, RFC 9384 + RFC 5882 §4.3.1: N is exchanged and both ends set the C
+/// bit) while the 90 s hold time is nowhere near expiring; lifting the drop
+/// re-establishes; removing `bfd` again resets nothing.
+pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let cease = "sent cease notification";
+    let est = "bgp session established";
+
+    a.established().await?;
+    b.established().await?;
+    log("adding bfd to the peer-group must not reset the session");
+    let (cease_a, cease_b, est_a, est_b) =
+        (a.count(cease), b.count(cease), a.count(est), b.count(est));
+    a.provision(&["--bfd-bgp"]).await?;
+    b.provision(&["--bfd-bgp"]).await?;
+    session_is(a, IP_B, "Up", None, 30).await?;
+    session_is(b, IP_A, "Up", None, 30).await?;
+    a.assert_quiet(cease, cease_a, 3).await?;
+    b.assert_quiet(cease, cease_b, 0).await?;
+    a.assert_quiet(est, est_a, 0).await?;
+    b.assert_quiet(est, est_b, 0).await?;
+
+    log("dropping UDP 3784 on router-a: BFD Down closes the BGP session within seconds");
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    let closing = format!("bgp: bfd session down, closing peer={IP_B}");
+    let sent = format!("sent cease notification peer={IP_B} .*subcode=10 hard_reset=true");
+    // Router-b's own BFD goes Down a moment later (the peer signals it), so
+    // both close at once and neither reads the other's NOTIFICATION.
+    let closing_b = format!("bgp: bfd session down, closing peer={IP_A}");
+    let sent_b = format!("sent cease notification peer={IP_A} .*subcode=10 hard_reset=true");
+    let (n_closing, n_sent, n_closing_b, n_sent_b, est_a, est_b) = (
+        a.count(&closing),
+        a.count(&sent),
+        b.count(&closing_b),
+        b.count(&sent_b),
+        a.count(est),
+        b.count(est),
+    );
+    tc(&w.dock, &["qdisc", "add", "dev", "eth0", "clsact"]).await?;
+    let dropped = tc(
+        &w.dock,
+        &[
+            "filter", "add", "dev", "eth0", "ingress", "protocol", "ip", "u32", "match", "ip",
+            "protocol", "17", "0xff", "match", "ip", "dport", "3784", "0xffff", "action", "drop",
+        ],
+    )
+    .await;
+    let result = async {
+        dropped?;
+        a.wait_new(&closing, n_closing, 10).await?;
+        a.wait_new(&sent, n_sent, 10).await?;
+        b.wait_new(&closing_b, n_closing_b, 10).await?;
+        b.wait_new(&sent_b, n_sent_b, 10).await
+    }
+    .await;
+    let lifted = tc(&w.dock, &["qdisc", "del", "dev", "eth0", "clsact"]).await;
+    result?;
+    lifted?;
+
+    log("filter lifted: both sessions come back");
+    a.wait_new(est, est_a, 60).await?;
+    b.wait_new(est, est_b, 60).await?;
+    session_is(a, IP_B, "Up", None, 30).await?;
+
+    log("removing bfd from the peer-group resets nothing");
+    let (cease_a, cease_b, est_a, est_b) =
+        (a.count(cease), b.count(cease), a.count(est), b.count(est));
+    a.provision(&["--no-bfd-bgp"]).await?;
+    b.provision(&["--no-bfd-bgp"]).await?;
+    a.assert_quiet(cease, cease_a, 3).await?;
+    b.assert_quiet(cease, cease_b, 0).await?;
+    a.assert_quiet(est, est_a, 0).await?;
+    b.assert_quiet(est, est_b, 0).await?;
+    a.established().await
+}

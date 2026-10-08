@@ -509,6 +509,13 @@ pub struct Args {
     pub bfd_static: bool,
     #[arg(long, default_value_t = 100)]
     pub bfd_interval_ms: u32,
+    /// Sets `bfd fast` (same profile, `--bfd-interval-ms` intervals) on
+    /// `--peer-group` of `--bgp-instance`.
+    #[arg(long)]
+    pub bfd_bgp: bool,
+    /// Removes the peer-group's `bfd` again (the profile stays).
+    #[arg(long)]
+    pub no_bfd_bgp: bool,
 
     #[arg(long)]
     pub save: bool,
@@ -1398,9 +1405,22 @@ pub const BFD_PROFILE: &str = "fast";
 /// `SetTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
 /// for a profile's intervals or a route's `bfd` reference, so these go in
 /// through the generic path edit after the ops.
-pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, String)> {
-    if !args.bfd_static {
-        return Vec::new();
+pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    let mut v = Vec::new();
+    if args.bfd_bgp || args.no_bfd_bgp {
+        v.push((
+            vec![
+                "bgp-instance".to_string(),
+                args.bgp_instance.clone(),
+                "peer-group".to_string(),
+                args.peer_group.clone(),
+                "bfd".to_string(),
+            ],
+            args.bfd_bgp.then(|| format!("\"{BFD_PROFILE}\"")),
+        ));
+    }
+    if !(args.bfd_static || args.bfd_bgp) {
+        return v;
     }
     let profile = |field: &str| {
         vec![
@@ -1410,11 +1430,11 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, String)> {
         ]
     };
     let ms = args.bfd_interval_ms.to_string();
-    let mut v = vec![
-        (profile("min-tx-interval"), ms.clone()),
-        (profile("min-rx-interval"), ms),
-    ];
-    for subnet in &args.static_route {
+    v.extend([
+        (profile("min-tx-interval"), Some(ms.clone())),
+        (profile("min-rx-interval"), Some(ms)),
+    ]);
+    for subnet in args.static_route.iter().filter(|_| args.bfd_static) {
         v.push((
             vec![
                 "static-routing-instance".to_string(),
@@ -1423,7 +1443,7 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, String)> {
                 subnet.to_string(),
                 "bfd".to_string(),
             ],
-            format!("\"{BFD_PROFILE}\""),
+            Some(format!("\"{BFD_PROFILE}\"")),
         ));
     }
     v
@@ -1432,7 +1452,24 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, String)> {
 /// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
-    if !args.bfd_static {
+    for i in config
+        .bgp_instances
+        .iter_mut()
+        .filter(|i| i.name == args.bgp_instance)
+    {
+        for g in i
+            .peer_groups
+            .iter_mut()
+            .filter(|g| g.name == args.peer_group)
+        {
+            if args.bfd_bgp {
+                g.bfd = Some(BFD_PROFILE.to_string());
+            } else if args.no_bfd_bgp {
+                g.bfd = None;
+            }
+        }
+    }
+    if !(args.bfd_static || args.bfd_bgp) {
         return;
     }
     for p in config
@@ -1446,7 +1483,7 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     for i in config
         .static_routing_instances
         .iter_mut()
-        .filter(|i| i.name == args.static_routing_instance)
+        .filter(|i| args.bfd_static && i.name == args.static_routing_instance)
     {
         for r in i
             .routes
@@ -1562,7 +1599,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }),
     ]);
 
-    if args.bfd_static {
+    if args.bfd_static || args.bfd_bgp {
         ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
             name: BFD_PROFILE.to_string(),
         }));

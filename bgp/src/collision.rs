@@ -71,6 +71,12 @@ pub enum FsmCommand {
         subcode: crate::message::CeaseSubcode,
         data: bytes::Bytes,
     },
+    /// RFC 9384: BFD declared this peer's path down. `flush` (BFD runs
+    /// independently of the control plane at both ends, RFC 5882 §4.3.1)
+    /// sends Cease/10 wrapped in a Hard Reset, so the peer flushes our routes
+    /// instead of keeping them stale; otherwise a plain Cease/10 and the
+    /// peer's graceful restart applies as for any NOTIFICATION.
+    BfdDown { flush: bool },
     /// Apply a TCP-AO key-list change to this live session's socket (see
     /// `session::ao_delta`); on failure the session resets with Cease/Other
     /// Configuration Change and the reconnect uses `PeerSlot::auth`.

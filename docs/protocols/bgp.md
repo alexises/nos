@@ -26,7 +26,7 @@ BGP configuration has three levels:
 Three rules catch people out:
 
 - **Both policies default to `deny-all`.** A peer-group with no `import-policy` accepts no routes, and one with no `export-policy` advertises none. The session still comes up, so nothing looks wrong until you check the routes. Set both, to `accept-all` or to one of your own policies (see [Routing policy](routing-policy.md)).
-- **Changing a peer-group resets its sessions.** Any change to a peer-group, or to a policy it uses, closes its established sessions with a Cease NOTIFICATION (RFC 4486 subcode 6, Other Configuration Change) and opens them again with the new settings. Plan changes to production peer-groups accordingly.
+- **Changing a peer-group resets its sessions.** Any change to a peer-group, or to a policy it uses, except `bfd` (see [BFD](#bfd-rfc-5882-rfc-9384)), closes its established sessions with a Cease NOTIFICATION (RFC 4486 subcode 6, Other Configuration Change) and opens them again with the new settings. Plan changes to production peer-groups accordingly.
 - **Names are global.** Peer-group names and peer addresses must be unique across all BGP instances, not just within one.
 
 ## Bringing up a session
@@ -478,6 +478,22 @@ The algorithm values are `HmacSha1_96` and `AesCmac96`. `exclude_options: true` 
 ### GTSM (RFC 5082)
 
 `set max-hops <n>` turns on the Generalized TTL Security Mechanism: the router sends the session's packets with TTL (or IPv6 hop limit) 255, and the kernel drops incoming packets whose TTL is below `256 - n`. Use `1` for a directly connected peer, so that nobody further away can inject packets into the session. The range is 1 to 254; `delete max-hops` turns it off. Set it on both sides. The default TTL of 1 for directly connected eBGP is not implemented.
+
+### BFD (RFC 5882, RFC 9384)
+
+`set bgp instance r1 peer-group pg1 bfd fast` makes `nos-bgpd` register a BFD session (profile `fast`, see [BFD profiles](bfd.md)) with `nos-bfdd` for every peer of the group, so a dead path closes the BGP session in milliseconds instead of waiting for the hold time.
+
+- Adding or removing `bfd` resets nothing; editing the profile applies through Poll/Final.
+- Sessions are registered as soon as the instance's VRF is known, so BFD is usually `up` before BGP is `Established`.
+- When a session goes `up` then `down`, an `Established` peer is closed with Cease subcode 10 (BFD Down, RFC 9384). The router logs `bgp: bfd session down, closing peer=<ip>`.
+- `init` and `admin-down` do nothing: BGP has its own keepalive liveness (RFC 5882 section 3.2). A session that was never `up` does nothing either.
+- Graceful restart (RFC 5882 section 4.3): what happens depends on the C bit (BFD independent of the control plane), which must be set at both ends.
+  - Both set: BFD is a real forwarding verdict. With N exchanged the Cease/10 is wrapped in a Hard Reset so the peer flushes our routes (`sent cease notification … subcode=10 hard_reset=true`, the peer logs `hard_reset_subcode=10`), and routes already stale from a restart of the peer are purged at once.
+  - Either clear: BFD fails along with a restart, so stale routes are kept and the Cease/10 is graceful.
+  - `nos-bfdd` always sets C.
+- Without `nos-bfdd` BGP works as before; sessions are registered again after it comes back.
+- Single-hop only: a peer-group with `max-hops` above 1 is skipped with a warning. A session `nos-bfdd` cannot bring `up` (an off-link peer) never closes anything.
+- A shut-down peer gets no session.
 
 ### Administrative shutdown (RFC 4486, RFC 9003)
 

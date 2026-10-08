@@ -210,7 +210,7 @@ async fn run(
                     pending = true;
                 }
                 ev = reader.next() => match ev {
-                    Some(Ok(BfdEvent::State { key, state, diag })) => {
+                    Some(Ok(BfdEvent::State { key, state, diag, .. })) => {
                         if book.on_state(&key, state) {
                             info!(table = %table, gateway = %key.peer, state = %state, diag = %diag, "bfd gateway state changed");
                             publish(&up_tx, &book);

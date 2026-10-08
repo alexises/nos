@@ -1125,10 +1125,18 @@ pub async fn run(
                         FsmCommand::SendRouteRefresh => {
                             send_route_refresh(&mut writer, &state, &peer).await;
                         }
-                        FsmCommand::Cease { subcode, data } => {
+                        FsmCommand::Cease { .. } | FsmCommand::BfdDown { .. } => {
+                            let (subcode, data, force_hard) = match cmd {
+                                FsmCommand::Cease { subcode, data } => (subcode, data, false),
+                                FsmCommand::BfdDown { flush } => {
+                                    (CeaseSubcode::BfdDown, Bytes::new(), flush)
+                                }
+                                _ => unreachable!("matched above"),
+                            };
                             // RFC 8538 §5.1: with N, a reset meant to keep
                             // nothing goes out as a Hard Reset around it.
-                            let hard_reset = gr::sends_hard_reset(subcode, n_exchanged(&state));
+                            let hard_reset = gr::sends_hard_reset(subcode, n_exchanged(&state))
+                                || (force_hard && n_exchanged(&state));
                             let (wire_subcode, data) = if hard_reset {
                                 (
                                     CeaseSubcode::HardReset as u8,

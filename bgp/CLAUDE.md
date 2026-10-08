@@ -122,13 +122,13 @@ Well-known values get no suppression; the RFC 4360 transitive bit is enforced on
 
 `igp_client.rs` polls `nos-ribd` every 2s (`RibRequest::IgpCosts`). Infeasible candidates (`next_hop_feasible`) leave the decision and the backup pick entirely, except before the first `set_igp` (`igp_ready`) and for route-server clients. `set_igp` re-decides every Adj-RIB-In prefix, not only the Loc-RIB.
 
-## Memory profiling
+## BFD (#286)
 
-`--features dhat-heap` swaps in `dhat` (how-to: `docs/architecture/development.md`).
+`bfd` stays out of `ResolvedPeer` (no reset on add/remove). `bfd_client.rs` acts only on Up to Down; `BfdDown { flush }` flushes only with the C bit at both ends (RFC 5882 §4.3).
 
 ## Performance
 
-Known ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE, per-route `info!`) are quantified by `tools/bench-bgp.sh`: run it around RIB hot-path changes. `RibRoute::as_path`/`cluster_list` are `Arc<Vec<_>>`; `Arc::make_mut` in `build_advertisement` is the one real copy.
+Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE, per-route `info!`): run `tools/bench-bgp.sh` around RIB changes. `--features dhat-heap` profiles memory (`docs/architecture/development.md`).
 
 ## Modules
 

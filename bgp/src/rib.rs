@@ -1463,6 +1463,21 @@ impl BgpRib {
         }
     }
 
+    /// RFC 5882 §4.3.1: BFD declared `peer` down while its routes are stale
+    /// from a graceful restart: act as if the restart timer expired. `false`
+    /// if nothing was stale.
+    pub fn gr_abort(&mut self, peer: IpAddr) -> bool {
+        if !self.has_stale(peer, None) {
+            return false;
+        }
+        warn!(peer = %peer, "bgp: bfd down, aborting graceful restart and purging stale routes");
+        self.gr_deadline.remove(&peer);
+        for family in AddressFamily::ALL {
+            self.purge_stale(peer, family);
+        }
+        true
+    }
+
     /// The source peer of `route` is a route-reflector client iff it's still
     /// a registered peer with `is_rr_client` set — `false` for a `Local`
     /// route or a source peer that's since disconnected.
@@ -7127,6 +7142,20 @@ mod tests {
                 assert_eq!(gone, ["1.0.0.0/24", "2.0.0.0/24"]);
             }
         }
+    }
+
+    /// RFC 5882 §4.3.1: BFD Down aborts a graceful restart in progress.
+    #[test]
+    fn gr_abort_purges_stale_routes_now() {
+        let cap = gr(true, &[(AddressFamily::Ipv4Unicast, true)]);
+        let (mut rib, peer, mut observer) = gr_rib(Some(cap));
+        assert!(!rib.gr_abort(peer), "nothing stale yet");
+        rib.peer_disconnected(peer, Disconnect::Transport);
+        let _ = recv_all(&mut observer);
+        assert!(rib.gr_abort(peer));
+        assert_eq!(withdrawn(&mut observer), ["1.0.0.0/24", "2.0.0.0/24"]);
+        assert_eq!(rib.stale_count(peer), 0);
+        assert!(!rib.gr_abort(peer));
     }
 
     /// The restart timer while the peer is down, the stale timer once it's

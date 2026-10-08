@@ -397,5 +397,11 @@ mod tests {
         }
         assert!(!sends_hard_reset(OtherConfigurationChange, true));
         assert!(!sends_hard_reset(ConnectionCollisionResolution, true));
+        // RFC 9384: Cease/10 is graceful with N, a Hard Reset only when the
+        // caller forces it (`FsmCommand::BfdDown { flush }`).
+        assert_eq!(BfdDown as u8, 10);
+        assert!(!sends_hard_reset(BfdDown, true));
+        assert_eq!(notification_disconnect(6, 10, true), Disconnect::Graceful);
+        assert_eq!(notification_disconnect(6, 10, false), Disconnect::Hard);
     }
 }

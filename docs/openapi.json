@@ -616,7 +616,7 @@
             ]
           },
           "bfd": {
-            "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD.\nInert until `nos-bfdd` exists.",
+            "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD. Not part\nof the session identity: adding or removing it never resets a session.",
             "type": [
               "string",
               "null"
@@ -10726,7 +10726,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD.\nInert until `nos-bfdd` exists.",
+                  "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD. Not part\nof the session identity: adding or removing it never resets a session.",
                   "type": [
                     "string",
                     "null"
@@ -10787,7 +10787,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD.\nInert until `nos-bfdd` exists.",
+                "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD. Not part\nof the session identity: adding or removing it never resets a session.",
                 "type": [
                   "string",
                   "null"
@@ -10802,7 +10802,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD.\nInert until `nos-bfdd` exists.",
+                  "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD. Not part\nof the session identity: adding or removing it never resets a session.",
                   "type": [
                     "string",
                     "null"

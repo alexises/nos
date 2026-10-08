@@ -222,6 +222,8 @@ pub enum CeaseSubcode {
     /// RFC 8538 §3: the data is a whole inner NOTIFICATION `code(1)
     /// subcode(1) data…` — a reset that keeps nothing, whatever N says.
     HardReset = 9,
+    /// RFC 9384 §3: the session was closed because BFD declared the path down.
+    BfdDown = 10,
 }
 
 /// RFC 8538 §3: a Hard Reset's data, wrapping Cease/`inner_subcode`.

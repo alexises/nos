@@ -163,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
             Request::SetTransactionPath {
                 name: txn.clone(),
                 path,
-                value: Some(value),
+                value,
                 if_match: None,
             },
         )

@@ -29,7 +29,13 @@ pub struct Status {
     pub remote_discriminator: u32,
     pub tx_interval_us: u32,
     pub detection_time_us: u32,
+    /// C bit at both ends (see `BfdEvent::State`).
+    pub control_plane_independent: bool,
 }
+
+/// RFC 5880 §4.1 C bit: `nos-bfdd` is its own process, so a `nos-bgpd`
+/// restart does not stop its packets.
+const LOCAL_CPI: bool = true;
 
 #[derive(Debug)]
 pub struct Core {
@@ -41,6 +47,8 @@ pub struct Core {
     /// The remote's Required Min RX; 0 silences us (§6.8.7). Starts at 1:
     /// nothing is known yet.
     remote_rx: u32,
+    /// The C bit of the last packet received.
+    remote_cpi: bool,
     timers: Timers,
 }
 
@@ -61,6 +69,7 @@ impl Core {
             local_disc,
             remote_disc: 0,
             remote_rx: 1,
+            remote_cpi: false,
             timers,
         };
         if core.profile.shutdown {
@@ -80,6 +89,7 @@ impl Core {
                 .timers
                 .detection_time_us()
                 .map_or(0, |us| u32::try_from(us).unwrap_or(u32::MAX)),
+            control_plane_independent: LOCAL_CPI && self.remote_cpi,
         }
     }
 
@@ -106,7 +116,7 @@ impl Core {
             // P and F are never both set (§6.5).
             poll: self.timers.poll() && !final_,
             final_,
-            control_plane_independent: false,
+            control_plane_independent: LOCAL_CPI,
             demand: false,
             detect_mult: self.profile.detect_multiplier,
             my_discriminator: self.local_disc,
@@ -129,6 +139,7 @@ impl Core {
         }
         self.remote_disc = p.my_discriminator;
         self.remote_rx = p.required_min_rx;
+        self.remote_cpi = p.control_plane_independent;
         let out = self.timers.on_rx(
             now,
             Remote {
@@ -353,6 +364,16 @@ mod tests {
         assert_eq!(s.tx_interval_us, 150_000);
         // 3 x max(our rx 100 ms, their tx 200 ms)
         assert_eq!(s.detection_time_us, 600_000);
+    }
+
+    #[test]
+    fn c_bit_is_reported_only_when_both_ends_set_it() {
+        let mut p = Pair::new(profile(100, 100), profile(100, 100));
+        assert!(!p.a.status().control_plane_independent, "nothing received");
+        p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
+        assert!(p.a.status().control_plane_independent);
+        p.a.remote_cpi = false; // a peer whose BFD shares fate with its control plane
+        assert!(!p.a.status().control_plane_independent);
     }
 
     #[test]
