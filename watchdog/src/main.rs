@@ -158,9 +158,17 @@ struct Args {
     #[arg(long, default_value = "/run/nos/lldp.sock")]
     lldpd_listen_socket: PathBuf,
 
-    /// Unix socket nos-bfdd will listen on. Served out as the resolved
-    /// address for `ServiceRef::Bfd` broker queries; the daemon itself is
-    /// spawned by a later change (#297).
+    /// Path to the nos-bfdd binary to supervise. Like nos-lldpd, exactly one
+    /// instance is always supervised — see `bfd/CLAUDE.md`.
+    #[arg(long, default_value = "/usr/local/bin/nos-bfdd")]
+    bfdd_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-bfdd.
+    #[arg(long = "bfdd-arg", allow_hyphen_values = true)]
+    bfdd_flags: Vec<String>,
+
+    /// Unix socket nos-bfdd listens on. Also served out as the resolved
+    /// address for `ServiceRef::Bfd` broker queries.
     #[arg(long, default_value = "/run/nos/bfd.sock")]
     bfdd_listen_socket: PathBuf,
 
@@ -488,6 +496,27 @@ async fn main() -> anyhow::Result<()> {
     );
     tasks.push(tokio::spawn(supervise_one(
         lldpd_spec,
+        policy,
+        shutdown_rx.clone(),
+    )));
+
+    let bfdd_args = std::iter::once("--listen-socket".to_string())
+        .chain(std::iter::once(
+            args.bfdd_listen_socket.display().to_string(),
+        ))
+        .chain(std::iter::once("--watchdog-socket".to_string()))
+        .chain(std::iter::once(args.listen_socket.display().to_string()))
+        .chain(std::iter::once("--log-socket".to_string()))
+        .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(args.bfdd_flags)
+        .collect();
+    let bfdd_spec = ProcessSpec::new("nos-bfdd", args.bfdd_bin, bfdd_args).with_identity(
+        pki.clone(),
+        Role::Bfdd,
+        "",
+    );
+    tasks.push(tokio::spawn(supervise_one(
+        bfdd_spec,
         policy,
         shutdown_rx.clone(),
     )));

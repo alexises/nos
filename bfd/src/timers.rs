@@ -62,6 +62,12 @@ impl Timers {
         }
     }
 
+    /// A profile edit of the detect multiplier (advertised in every packet,
+    /// no Poll sequence needed: it only scales the remote's detection time).
+    pub fn set_detect_mult(&mut self, detect_mult: u8) {
+        self.detect_mult = detect_mult;
+    }
+
     /// P bit for the next packets: set while a sequence is open.
     pub fn poll(&self) -> bool {
         self.pending.is_some()
@@ -118,6 +124,16 @@ impl Timers {
         let max_pct = if self.detect_mult == 1 { 90 } else { 100 };
         let pct = u64::from(rand_pct.clamp(75, max_pct));
         self.next_tx = now + Duration::from_micros(u64::from(base) * pct / 100);
+        self.next_tx
+    }
+
+    /// When the detection time runs out, `None` until a packet arrived.
+    pub fn detect_deadline(&self) -> Option<Instant> {
+        Some(self.last_rx + Duration::from_micros(self.detection_time_us()?))
+    }
+
+    /// When the next transmission is due.
+    pub fn next_tx(&self) -> Instant {
         self.next_tx
     }
 
@@ -238,6 +254,19 @@ mod tests {
         let mut x = t(now);
         x.change(300_000, 400_000);
         assert!(!x.poll());
+    }
+
+    #[test]
+    fn deadlines() {
+        let now = Instant::now();
+        let mut x = t(now);
+        assert_eq!(x.detect_deadline(), None);
+        x.on_rx(now, R, false, false);
+        assert_eq!(x.detect_deadline(), Some(now + Duration::from_millis(1600)));
+        // The multiplier we advertise scales the remote's timer, not ours.
+        x.set_detect_mult(1);
+        assert_eq!(x.detect_deadline(), Some(now + Duration::from_millis(1600)));
+        assert_eq!(x.next_tx(), now);
     }
 
     #[test]

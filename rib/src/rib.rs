@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
+use nos_proto::schema::BfdProfile;
 use nos_proto::{Config, IpNet};
 use tracing::warn;
 
@@ -346,7 +347,14 @@ fn sorted_by_preference(candidates: &[RibEntry]) -> Vec<RibEntry> {
 /// intentionally not read here: `RouteSource::Bgp` entries never come from
 /// config, only from the owning `nos-bgpd` instance's own IPC push (see
 /// `crate::server::apply_bgp_route_update`).
-pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
+///
+/// A static route with a `bfd` reference is left out unless its gateway is in
+/// `bfd_up` (`crate::bfd_client`): fail closed until `nos-bfdd` says `Up`.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "the one caller owns a default-hasher set"
+)]
+pub fn build_from_config(cfg: &Config, table_name: &str, bfd_up: &HashSet<IpAddr>) -> Option<Rib> {
     let table = cfg.routing_tables.iter().find(|t| t.name == table_name)?;
     let mut rib = Rib::new();
 
@@ -357,6 +365,9 @@ pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
             .find(|i| &i.name == sri_name)
         {
             for route in &sri.routes {
+                if route.bfd.is_some() && !bfd_up.contains(&route.gateway) {
+                    continue;
+                }
                 rib.insert(RibEntry {
                     prefix: route.subnet,
                     next_hops: vec![(route.gateway, None)],
@@ -376,6 +387,30 @@ pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
     }
 
     Some(rib)
+}
+
+/// The gateways of `table_name`'s static routes that name a `BfdProfile`,
+/// with that profile (a reference to a missing profile is skipped: commit
+/// validation rejects it). Two routes through one gateway share a session.
+pub fn bfd_target(cfg: &Config, table_name: &str) -> HashMap<IpAddr, BfdProfile> {
+    let routes = cfg
+        .routing_tables
+        .iter()
+        .find(|t| t.name == table_name)
+        .and_then(|t| t.static_routing_instance.as_ref())
+        .and_then(|n| cfg.static_routing_instances.iter().find(|i| &i.name == n))
+        .map(|i| i.routes.as_slice())
+        .unwrap_or_default();
+    routes
+        .iter()
+        .filter_map(|r| {
+            let profile = cfg
+                .bfd_profiles
+                .iter()
+                .find(|p| Some(&p.name) == r.bfd.as_ref())?;
+            Some((r.gateway, profile.clone()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -683,7 +718,7 @@ mod tests {
 
     #[test]
     fn build_from_config_table_not_found_is_none() {
-        assert!(build_from_config(&cfg(vec![], vec![]), "rt1").is_none());
+        assert!(build_from_config(&cfg(vec![], vec![]), "rt1", &HashSet::new()).is_none());
     }
 
     #[test]
@@ -698,7 +733,7 @@ mod tests {
             static_routing_instance: None,
             redistribute: Vec::new(),
         }];
-        let rib = build_from_config(&cfg(tables, vec![]), "rt1").unwrap();
+        let rib = build_from_config(&cfg(tables, vec![]), "rt1", &HashSet::new()).unwrap();
         assert!(rib.is_empty());
     }
 
@@ -1009,9 +1044,50 @@ mod tests {
                 gateway: "10.0.0.1".parse().unwrap(),
             }],
         }];
-        let rib = build_from_config(&cfg(tables, instances), "rt1").unwrap();
+        let rib = build_from_config(&cfg(tables, instances), "rt1", &HashSet::new()).unwrap();
         let best = rib.best_route(&"10.0.0.0/24".parse().unwrap()).unwrap();
         assert_eq!(best.source, RouteSource::Static);
         assert_eq!(best.next_hops[0].0, "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn bfd_routes_wait_for_their_gateway_to_be_up() {
+        let mut c = cfg(
+            vec![RoutingTable {
+                name: "rt1".into(),
+                static_routing_instance: Some("sri1".into()),
+                ..RoutingTable::default()
+            }],
+            vec![StaticRoutingInstance {
+                name: "sri1".into(),
+                routes: vec![
+                    StaticRoute {
+                        subnet: "10.1.0.0/24".parse().unwrap(),
+                        gateway: "10.0.0.1".parse().unwrap(),
+                        bfd: Some("fast".into()),
+                    },
+                    StaticRoute {
+                        subnet: "10.2.0.0/24".parse().unwrap(),
+                        gateway: "10.0.0.2".parse().unwrap(),
+                        bfd: None,
+                    },
+                ],
+            }],
+        );
+        c.bfd_profiles = vec![BfdProfile {
+            name: "fast".into(),
+            ..BfdProfile::default()
+        }];
+        let gw: IpAddr = "10.0.0.1".parse().unwrap();
+        let held = build_from_config(&c, "rt1", &HashSet::new()).unwrap();
+        assert!(held.best_route(&"10.1.0.0/24".parse().unwrap()).is_none());
+        assert!(held.best_route(&"10.2.0.0/24".parse().unwrap()).is_some());
+        let up = build_from_config(&c, "rt1", &HashSet::from([gw])).unwrap();
+        assert!(up.best_route(&"10.1.0.0/24".parse().unwrap()).is_some());
+
+        let target = bfd_target(&c, "rt1");
+        assert_eq!(target.len(), 1);
+        assert_eq!(target[&gw].name, "fast");
+        assert!(bfd_target(&c, "nope").is_empty());
     }
 }

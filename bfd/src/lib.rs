@@ -1,8 +1,13 @@
-// nos-bfd: RFC 5880 BFD core, pure logic only (see bfd/CLAUDE.md): the
-// control-packet codec, the session state machine and the timer rules. No
-// sockets and no daemon yet; `nos-bfdd` arrives on top of this.
+// nos-bfd: RFC 5880 BFD (see bfd/CLAUDE.md). The pure core (codec, FSM,
+// timers, authz) plus the `nos-bfdd` daemon built on it: sessions, the
+// client-facing IPC server and the UDP sockets.
 
 pub mod authz;
 pub mod fsm;
+pub mod manager;
 pub mod packet;
+pub mod server;
+pub mod session;
+pub mod socket;
 pub mod timers;
+pub mod watchdog_client;

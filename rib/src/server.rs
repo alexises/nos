@@ -67,6 +67,7 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
                 | Role::Ospfv3d
                 | Role::Ribd
                 | Role::Fdbd
+                | Role::Bfdd
         ),
         // `BgpRouteCount`: a restarted `nos-bgpd`'s graceful-restart check.
         RibRequest::PushBgpRoutes(_)
@@ -506,6 +507,7 @@ mod authz_tests {
             Role::Ribd,
             Role::Fdbd,
             Role::Logd,
+            Role::Bfdd,
         ] {
             assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
         }

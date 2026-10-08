@@ -1,6 +1,6 @@
 # BFD internals
 
-How `nos-bfd` is built. Library only for now (#296); the daemon, sockets and sessions come with #297. Rules to respect when editing: [`bfd/CLAUDE.md`](../../bfd/CLAUDE.md). The profile that feeds it: [protocols/bfd.md](../protocols/bfd.md).
+How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Rules to respect when editing: [`bfd/CLAUDE.md`](../../bfd/CLAUDE.md). The profile that feeds it: [protocols/bfd.md](../protocols/bfd.md).
 
 ## Modules
 
@@ -36,3 +36,22 @@ How `nos-bfd` is built. Library only for now (#296); the daemon, sockets and ses
 
 - Add it to `Packet`, `encode` and `decode`, then extend `round_trip_with_every_flag` and `known_wire_bytes`.
 - A check that needs no session goes in `decode` with its own `DecodeError` variant and a named `rx_*` test.
+
+## The daemon
+
+- `nos-bfdd` is one fixed process (`/run/nos/bfd.sock`, `ServiceRef::Bfd`). Clients `Register` a session on a persistent connection and get `BfdEvent::State` (current state first, then each change).
+- `Manager` keeps one task per `SessionKey`, shared by every client that registered it; the last client leaving drops it.
+- A re-`Register` with a different profile is the profile edit: intervals go through Poll/Final, `shutdown` through AdminDown.
+- Sockets (RFC 5881): one receive socket per (table, family) on UDP 3784, bound to the table's VRF; one connected transmit socket per session with a random source port in 49152-65535 and TTL 255. Received TTL must be 255.
+- The VRF device comes from the table's `nos-ribd` (`GetVrfName`); a session whose VRF or local address is not ready retries every second.
+
+## Static routes (`nos-ribd`)
+
+- `rib/src/bfd_client.rs` registers the gateway of every static route with a `bfd` reference (one session per gateway).
+- A route is left out of the RIB until its gateway's session is `Up`; `Down`, `Init` and `AdminDown` all take it out. While `nos-bfdd` is unreachable nothing is up (fail closed); after a reconnect everything is registered again.
+- `reconcile::resync` reads the up set and re-runs when it changes.
+
+## Check it by hand
+
+- `cargo run -p nos-e2e -- bfd` proves both ways Up, the route withdrawn and restored around a dropped UDP 3784, and interop with FRR `bfdd`.
+- `docker exec router-a ...` has no `ip`/`tcpdump`: use the netns helper images from `tools/e2e` to sniff.

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::Parser;
 use nos_proto::Config;
-use nos_provision::{build_ops, Args};
+use nos_provision::{apply_bfd, build_ops, Args};
 use reqwest::Method;
 
 use crate::consts::*;
@@ -178,10 +178,12 @@ impl Router {
         ]));
         with_fast_retry(&mut flags);
         let mut config = Config::default();
-        for op in build_ops(&parse(&flags)?)? {
+        let args = parse(&flags)?;
+        for op in build_ops(&args)? {
             op.apply(&mut config)
                 .map_err(|e| anyhow::anyhow!("seeding {}: {e}", id.name))?;
         }
+        apply_bfd(&args, &mut config);
         let yaml = serde_yaml::to_string(&config)?;
 
         // A big log buffer, so the backlog re-read after a reconnect is complete.
@@ -386,11 +388,13 @@ impl Router {
         let mut flags = flags.to_vec();
         with_fast_retry(&mut flags);
         log(format!("provisioning {}: {}", self.name(), flags.join(" ")));
-        let ops = build_ops(&parse(&flags)?)?;
+        let args = parse(&flags)?;
+        let ops = build_ops(&args)?;
         self.edit(|config| {
             for op in &ops {
                 op.apply(config).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
+            apply_bfd(&args, config);
             Ok(())
         })
         .await

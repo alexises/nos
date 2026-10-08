@@ -9,5 +9,26 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-nos-proto = { workspace = true }
-thiserror = { workspace = true }
+nos-proto          = { workspace = true }
+nos-pki            = { workspace = true }
+nos-log-client     = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+futures            = { workspace = true }
+async-trait        = { workspace = true }
+socket2            = { workspace = true }
+libc               = { workspace = true }
+nix                = { workspace = true, features = ["net"] }
+
+[[bin]]
+name = "nos-bfdd"
+path = "src/main.rs"
+
+[dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }
