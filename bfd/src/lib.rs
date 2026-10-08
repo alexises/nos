@@ -4,8 +4,10 @@
 
 pub mod auth;
 pub mod authz;
+pub mod echo;
 pub mod fsm;
 pub mod manager;
+pub mod neigh;
 pub mod packet;
 pub mod server;
 pub mod session;

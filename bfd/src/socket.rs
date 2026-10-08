@@ -4,6 +4,11 @@
 //! - One receive socket per (table, address family): UDP 3784 wildcard,
 //!   `SO_BINDTODEVICE` to the table's VRF, `IP_RECVTTL`/`IPV6_RECVHOPLIMIT` so
 //!   every datagram's TTL is checked (RFC 5881 §5: must be exactly 255).
+//! - Echo (RFC 5881 §4): per single-hop session one `AF_PACKET` socket
+//!   (`nos_l2_socket::L2Unicast`, filtered to UDP 3785) on the session's
+//!   interface, sending to the neighbour's MAC read from the kernel; the
+//!   returned packet has our own address as source, which the IP stack would
+//!   drop as a martian, so it is received at the packet layer too.
 //! - One connected transmit socket per session, a fixed random source port in
 //!   49152-65535 (§4), TTL/hop limit 255, bound to the session's interface or
 //!   else the VRF.
@@ -20,6 +25,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use nos_proto::SessionKey;
@@ -28,9 +34,12 @@ use tokio::io::unix::AsyncFd;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::echo;
 use crate::manager::{Demux, Net};
-use crate::session::{rand_u32, Tx};
+use crate::neigh;
+use crate::session::{rand_u32, EchoPath, EchoTx, Tx};
 use crate::watchdog_client;
+use nos_l2_socket::L2Unicast;
 
 pub const BFD_PORT: u16 = 3784;
 /// RFC 5883 §2: multihop control packets.
@@ -193,9 +202,9 @@ fn as_bits(a: IpAddr) -> u128 {
     }
 }
 
-/// The local address on the connected network of `peer`: of `interface`, or
-/// else of any interface in `vrf`.
-fn local_for(peer: IpAddr, vrf: &str, interface: Option<&str>) -> Option<IpAddr> {
+/// The local address on the connected network of `peer` and the interface
+/// holding it: of `interface`, or else of any interface in `vrf`.
+fn local_for(peer: IpAddr, vrf: &str, interface: Option<&str>) -> Option<(IpAddr, String)> {
     let sock_ip = |a: nix::sys::socket::SockaddrStorage| -> Option<IpAddr> {
         a.as_sockaddr_in()
             .map(|s| IpAddr::V4(s.ip()))
@@ -209,7 +218,7 @@ fn local_for(peer: IpAddr, vrf: &str, interface: Option<&str>) -> Option<IpAddr>
         let (addr, mask) = (sock_ip(ifa.address?)?, sock_ip(ifa.netmask?)?);
         (ok && addr.is_ipv4() == peer.is_ipv4()
             && as_bits(addr) & as_bits(mask) == as_bits(peer) & as_bits(mask))
-        .then_some(addr)
+        .then_some((addr, ifa.interface_name))
     })
 }
 
@@ -244,7 +253,7 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey) -> io::Result<UdpTx> {
             if key.multihop {
                 kernel_source(key.peer, vrf)
             } else {
-                local_for(key.peer, vrf, key.interface.as_deref())
+                local_for(key.peer, vrf, key.interface.as_deref()).map(|(a, _)| a)
             }
         })
         .ok_or_else(|| io::Error::other("no local address towards the peer yet"))?;
@@ -275,6 +284,74 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey) -> io::Result<UdpTx> {
     Ok(UdpTx(s))
 }
 
+/// Echo packets out through the neighbour: its MAC is kept fresh by a task.
+struct L2Echo {
+    sock: Arc<L2Unicast>,
+    mac: Arc<Mutex<Option<[u8; 6]>>>,
+    local: IpAddr,
+    sport: u16,
+}
+
+impl EchoTx for L2Echo {
+    fn send(&self, disc: u32, seq: u32) -> io::Result<()> {
+        let mac = (*self.mac.lock().unwrap())
+            .ok_or_else(|| io::Error::other("no neighbour entry for the peer yet"))?;
+        let ip = echo::build(self.local, self.sport, &echo::payload(disc, seq));
+        self.sock.send(mac, &ip)
+    }
+}
+
+/// Keeps `mac` equal to the kernel's entry for `peer` on `ifindex`; asks
+/// again fast while there is none.
+async fn neigh_loop(
+    nl: rtnetlink::Handle,
+    peer: IpAddr,
+    ifindex: u32,
+    mac: Arc<Mutex<Option<[u8; 6]>>>,
+) {
+    loop {
+        let found = neigh::lookup(&nl, peer, ifindex).await;
+        let delay = match found {
+            Ok(m) => {
+                *mac.lock().unwrap() = m;
+                if m.is_some() {
+                    Duration::from_secs(1)
+                } else {
+                    Duration::from_millis(200)
+                }
+            }
+            Err(e) => {
+                debug!(peer = %peer, error = %e, "bfd neighbour lookup failed");
+                Duration::from_secs(1)
+            }
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
+
+async fn echo_rx_loop(
+    sock: Arc<L2Unicast>,
+    local: IpAddr,
+    disc: u32,
+    out: tokio::sync::mpsc::Sender<u32>,
+) {
+    loop {
+        match sock.recv().await {
+            Ok(p) => {
+                if let Some((d, seq)) = echo::parse(&p, local) {
+                    if d == disc {
+                        let _ = out.try_send(seq);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "bfd echo receive failed");
+                return;
+            }
+        }
+    }
+}
+
 type RxTasks = HashMap<(String, bool, bool), (u32, JoinHandle<()>)>;
 
 /// The real transport. Owns the receive sockets and feeds the `Demux`.
@@ -283,6 +360,8 @@ pub struct UdpNet {
     demux: Demux,
     /// (table, v6, multihop) -> (VRF ifindex it was opened for, its receive task).
     rx: Mutex<RxTasks>,
+    /// The shared rtnetlink handle for neighbour lookups, made on first use.
+    nl: Mutex<Option<rtnetlink::Handle>>,
 }
 
 impl UdpNet {
@@ -291,6 +370,45 @@ impl UdpNet {
             watchdog_socket,
             demux,
             rx: Mutex::default(),
+            nl: Mutex::default(),
+        })
+    }
+
+    fn netlink(&self) -> io::Result<rtnetlink::Handle> {
+        let mut nl = self.nl.lock().unwrap();
+        if let Some(h) = nl.as_ref() {
+            return Ok(h.clone());
+        }
+        let (conn, handle, _) = rtnetlink::new_connection()?;
+        tokio::spawn(conn);
+        *nl = Some(handle.clone());
+        Ok(handle)
+    }
+
+    async fn try_open_echo(&self, key: &SessionKey, disc: u32) -> io::Result<EchoPath> {
+        let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
+            .await
+            .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
+        let (addr, iface) = local_for(key.peer, &vrf, key.interface.as_deref())
+            .ok_or_else(|| io::Error::other("no interface towards the peer"))?;
+        let local = key.local.unwrap_or(addr);
+        let ethertype = if local.is_ipv4() { 0x0800 } else { 0x86dd };
+        let sock = Arc::new(L2Unicast::open(&iface, ethertype, echo::ECHO_PORT)?);
+        let ifindex = u32::try_from(nos_l2_socket::if_index(&iface)?).unwrap_or(0);
+        let mac = Arc::new(Mutex::new(None));
+        let (seq_tx, seq_rx) = tokio::sync::mpsc::channel(64);
+        let rx = tokio::spawn(echo_rx_loop(sock.clone(), local, disc, seq_tx));
+        let neigh = tokio::spawn(neigh_loop(self.netlink()?, key.peer, ifindex, mac.clone()));
+        let sport = 49152 + u16::try_from(rand_u32() % 16384).unwrap_or(0);
+        Ok(EchoPath {
+            tx: Arc::new(L2Echo {
+                sock,
+                mac,
+                local,
+                sport,
+            }),
+            rx: seq_rx,
+            tasks: vec![rx.abort_handle(), neigh.abort_handle()],
         })
     }
 
@@ -331,5 +449,17 @@ impl Net for UdpNet {
             .filter(|_| !key.multihop)
             .unwrap_or(&vrf);
         Ok(Arc::new(tx_socket(device, &vrf, key)?))
+    }
+
+    async fn open_echo(&self, key: &SessionKey, disc: u32) -> Option<EchoPath> {
+        // ponytail: tried once, at session start. A session whose interface
+        // has no address yet never runs Echo until it is re-registered.
+        match self.try_open_echo(key, disc).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                warn!(peer = %key.peer, table = %key.table, error = %e, "bfd echo unavailable");
+                None
+            }
+        }
     }
 }

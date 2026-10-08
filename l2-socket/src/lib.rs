@@ -4,6 +4,10 @@
 //! no NOS dependencies, like `nos-tcp-auth`, so both daemons can use it
 //! without depending on each other.
 //!
+//! `L2Unicast` is the second type: one interface, one ethertype, frames sent
+//! to an explicit neighbour MAC (BFD Echo, RFC 5881 §4: an IP packet addressed
+//! to ourselves, looped by the neighbour's forwarding).
+//!
 //! # Why the specific interface
 //! A raw socket has no port/connection concept to demultiplex by — binding
 //! wider than the one link a protocol runs on would receive every other
@@ -59,6 +63,44 @@ const PACKET_MR_MULTICAST: u16 = 0;
 
 const LINK_DOWN_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// A raw `AF_PACKET` socket bound to `ifindex`, receiving `ethertype` only.
+fn open_raw(ifindex: i32, ethertype: u16) -> io::Result<Socket> {
+    let protocol = i32::from(ethertype.to_be());
+    let socket = Socket::new(
+        Domain::from(libc::AF_PACKET),
+        Type::RAW,
+        Some(Protocol::from(protocol)),
+    )?;
+
+    // SAFETY: `addr` is a plain, fully-initialized `sockaddr_ll`; `bind`
+    // is called with its own correct size, matching the kernel's
+    // expectation for this socket family.
+    #[allow(unsafe_code)]
+    {
+        let addr = SockaddrLl {
+            sll_family: u16::try_from(libc::AF_PACKET).expect("AF_PACKET always fits u16"),
+            sll_protocol: ethertype.to_be(),
+            sll_ifindex: ifindex,
+            sll_hatype: 0,
+            sll_pkttype: 0,
+            sll_halen: 0,
+            sll_addr: [0; 8],
+        };
+        let ret = unsafe {
+            libc::bind(
+                socket.as_raw_fd(),
+                std::ptr::from_ref(&addr).cast::<libc::sockaddr>(),
+                libc::socklen_t::try_from(std::mem::size_of::<SockaddrLl>())
+                    .expect("fixed, small struct size"),
+            )
+        };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(socket)
+}
+
 /// A raw L2 socket for one ethertype and one multicast group on one interface.
 pub struct L2Socket {
     inner: AsyncFd<Socket>,
@@ -82,40 +124,7 @@ impl L2Socket {
         let own_hw_addr = read_hw_addr(interface)?;
         let ifindex = if_index(interface)?;
 
-        let protocol = i32::from(ethertype.to_be());
-        let socket = Socket::new(
-            Domain::from(libc::AF_PACKET),
-            Type::RAW,
-            Some(Protocol::from(protocol)),
-        )?;
-
-        // SAFETY: `addr` is a plain, fully-initialized `sockaddr_ll`; `bind`
-        // is called with its own correct size, matching the kernel's
-        // expectation for this socket family.
-        #[allow(unsafe_code)]
-        {
-            let addr = SockaddrLl {
-                sll_family: u16::try_from(libc::AF_PACKET).expect("AF_PACKET always fits u16"),
-                sll_protocol: ethertype.to_be(),
-                sll_ifindex: ifindex,
-                sll_hatype: 0,
-                sll_pkttype: 0,
-                sll_halen: 0,
-                sll_addr: [0; 8],
-            };
-            let ret = unsafe {
-                libc::bind(
-                    socket.as_raw_fd(),
-                    std::ptr::from_ref(&addr).cast::<libc::sockaddr>(),
-                    libc::socklen_t::try_from(std::mem::size_of::<SockaddrLl>())
-                        .expect("fixed, small struct size"),
-                )
-            };
-            if ret != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-
+        let socket = open_raw(ifindex, ethertype)?;
         join_multicast(&socket, ifindex, group)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
@@ -176,6 +185,134 @@ impl L2Socket {
             }
         }
     }
+}
+
+/// A raw L2 socket for one ethertype on one interface, sending to unicast
+/// MACs; the kernel filters received frames to UDP packets for one
+/// destination port.
+pub struct L2Unicast {
+    inner: AsyncFd<Socket>,
+    own_hw_addr: [u8; 6],
+    ethertype: u16,
+}
+
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_IPV6: u16 = 0x86dd;
+const RECV_BUF_LEN: usize = 2048;
+
+impl L2Unicast {
+    /// Opens the socket on `interface` for IPv4 or IPv6 `ethertype`, with a
+    /// kernel filter that passes only (unfragmented, for IPv4) UDP datagrams
+    /// whose destination port is `udp_dst_port`.
+    pub fn open(interface: &str, ethertype: u16, udp_dst_port: u16) -> io::Result<Self> {
+        let own_hw_addr = read_hw_addr(interface)?;
+        let socket = open_raw(if_index(interface)?, ethertype)?;
+        attach_udp_port_filter(&socket, ethertype, udp_dst_port)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            inner: AsyncFd::new(socket)?,
+            own_hw_addr,
+            ethertype,
+        })
+    }
+
+    /// Sends `ip_packet` in an Ethernet frame to `dst`.
+    pub fn send(&self, dst: [u8; 6], ip_packet: &[u8]) -> io::Result<()> {
+        let mut frame = Vec::with_capacity(ETH_HEADER_LEN + ip_packet.len());
+        frame.extend_from_slice(&dst);
+        frame.extend_from_slice(&self.own_hw_addr);
+        frame.extend_from_slice(&self.ethertype.to_be_bytes());
+        frame.extend_from_slice(ip_packet);
+        self.inner.get_ref().send(&frame)?;
+        Ok(())
+    }
+
+    /// The next received IP packet (Ethernet header stripped). Frames this
+    /// port sent itself are skipped: a packet socket also sees those.
+    pub async fn recv(&self) -> io::Result<Vec<u8>> {
+        let mut buf = vec![0u8; RECV_BUF_LEN];
+        loop {
+            let mut guard = self.inner.readable().await?;
+            match guard.try_io(|inner| inner.get_ref().read(&mut buf)) {
+                Ok(Ok(n)) => {
+                    if let Some(p) = payload_of_unicast_frame(&buf[..n], self.own_hw_addr) {
+                        return Ok(p.to_vec());
+                    }
+                }
+                Ok(Err(e)) if is_link_down(&e) => {
+                    tokio::time::sleep(LINK_DOWN_RETRY).await;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_would_block) => {}
+            }
+        }
+    }
+}
+
+/// The payload of a frame that is no runt and was not sent by `own`.
+fn payload_of_unicast_frame(frame: &[u8], own: [u8; 6]) -> Option<&[u8]> {
+    if frame.len() < ETH_HEADER_LEN || frame[6..12] == own {
+        return None;
+    }
+    Some(&frame[ETH_HEADER_LEN..])
+}
+
+/// Classic BPF (offsets include the 14-byte Ethernet header: a packet socket
+/// of type `SOCK_RAW` filters the whole frame).
+fn udp_port_program(ethertype: u16, port: u16) -> Option<Vec<libc::sock_filter>> {
+    let ins = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
+    let port = u32::from(port);
+    match ethertype {
+        // ldb [protocol]; jeq UDP; ldh [frag]; jset MF|offset; ldxb 4*ihl;
+        // ldh [x + dport]; jeq port; ret all / ret none.
+        ETH_P_IP => Some(vec![
+            ins(0x30, 0, 0, 23),
+            ins(0x15, 0, 6, 17),
+            ins(0x28, 0, 0, 20),
+            ins(0x45, 4, 0, 0x1fff),
+            ins(0xb1, 0, 0, 14),
+            ins(0x48, 0, 0, 16),
+            ins(0x15, 0, 1, port),
+            ins(0x06, 0, 0, 0xffff),
+            ins(0x06, 0, 0, 0),
+        ]),
+        // ldb [next header]; jeq UDP; ldh [dport]; jeq port; ret.
+        ETH_P_IPV6 => Some(vec![
+            ins(0x30, 0, 0, 20),
+            ins(0x15, 0, 3, 17),
+            ins(0x28, 0, 0, 56),
+            ins(0x15, 0, 1, port),
+            ins(0x06, 0, 0, 0xffff),
+            ins(0x06, 0, 0, 0),
+        ]),
+        _ => None,
+    }
+}
+
+fn attach_udp_port_filter(socket: &Socket, ethertype: u16, port: u16) -> io::Result<()> {
+    let mut prog = udp_port_program(ethertype, port)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ethertype is not IP"))?;
+    let fprog = libc::sock_fprog {
+        len: u16::try_from(prog.len()).expect("fixed, small program"),
+        filter: prog.as_mut_ptr(),
+    };
+    // SAFETY: `fprog` points at `prog`, which outlives the call; the kernel
+    // copies the program during `setsockopt`.
+    #[allow(unsafe_code)]
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ATTACH_FILTER,
+            std::ptr::from_ref(&fprog).cast::<libc::c_void>(),
+            libc::socklen_t::try_from(std::mem::size_of::<libc::sock_fprog>())
+                .expect("fixed, small struct size"),
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 impl AsRawFd for L2Socket {
@@ -358,6 +495,32 @@ mod tests {
             None
         );
         assert_eq!(payload_of_foreign_frame(&[0; 5], own, GROUP), None);
+    }
+
+    #[test]
+    fn unicast_frames_skip_runts_and_our_own() {
+        let own = [2, 0, 0, 0, 0, 1];
+        let mut f = vec![2, 0, 0, 0, 0, 9, 2, 0, 0, 0, 0, 2, 8, 0];
+        f.extend_from_slice(b"ip");
+        assert_eq!(payload_of_unicast_frame(&f, own), Some(&b"ip"[..]));
+        f[6..12].copy_from_slice(&own);
+        assert_eq!(payload_of_unicast_frame(&f, own), None);
+        assert_eq!(payload_of_unicast_frame(&f[..13], own), None);
+    }
+
+    #[test]
+    fn udp_filters_exist_for_ip_only_and_end_in_a_return() {
+        for et in [ETH_P_IP, ETH_P_IPV6] {
+            let p = udp_port_program(et, 3785).unwrap();
+            assert_eq!(p[p.len() - 1].code, 0x06);
+            // every jump lands inside the program
+            for (i, ins) in p.iter().enumerate() {
+                if ins.code & 0x07 == 0x05 {
+                    assert!(i + 1 + usize::from(ins.jt.max(ins.jf)) < p.len());
+                }
+            }
+        }
+        assert!(udp_port_program(0x88cc, 1).is_none());
     }
 
     #[test]

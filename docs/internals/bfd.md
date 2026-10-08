@@ -10,6 +10,8 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - `fsm`: `step(state, event) -> (state, Option<diag>)`, the §6.8.6 table; `may_transmit` covers `passive` (§6.1) and Remote Min RX 0.
 - `timers`: `Timers`, `now` and the jitter draw passed in.
 - `authz`: `allowed(role, &BfdRequest)`, no wildcard arm.
+- `echo`: the Echo packet, pure. `payload` (our discriminator and a sequence), `build` (IPv4/IPv6 + UDP 3785 from a port in 49152-65535, TTL 255, source = destination = our address, checksums), `parse` (accepts TTL 254..=255, checks both addresses, checksums, payload length).
+- `neigh`: the neighbour's MAC from an `rtnetlink` neighbour dump (usable states only), never written.
 - Wire types live in `nos_proto::bfd`.
 
 ## Authentication
@@ -32,8 +34,19 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 | Init | stay | Up | Up | Down (diag 3) | Down (diag 1) |
 | Up | Down (diag 3) | stay | stay | Down (diag 3) | Down (diag 1) |
 
+- An echo timeout only moves an Up session: it goes Down with diag 2.
+
 - Local `AdminDown` event: any state goes to AdminDown (diag 7); `AdminUp` brings AdminDown back to Down (diag 0).
 - Demand mode is not implemented: D is sent 0 and a received D is ignored.
+
+## Echo
+
+- `Core` owns the sub-state: `sync_echo` starts Echo when `echo_wanted` (transport present, profile `Affiliated`, state Up, remote Required Min Echo RX > 0) and stops it otherwise. Both directions go through `Timers::change`, so Desired Min TX is raised to 1 s (and restored) by an ordinary Poll sequence.
+- `echo_due(now)` hands out the next sequence number, `on_echo(now, seq)` records a returned one (`seq` must be new and sent); `echo_expired` after `echo interval x detect multiplier` without one applies `Event::EchoTimeout`, which takes an Up session to Down with diag 2.
+- `session::run` sends with `EchoTx` and receives sequences on the `EchoPath` channel; `Core::set_echo_path` tells the core whether a transport exists.
+- Transport (`socket.rs`, `nos-l2-socket`'s `L2Unicast`): an `AF_PACKET` socket on the session's interface, a kernel BPF filter for UDP port 3785, frames sent to the neighbour's MAC. The returned packet carries our own address as source, which the IP stack drops as a martian, so receiving at the packet layer is the only way. The socket is bound to the interface, so it works for a VRF-enslaved one.
+- Tapping a packet socket sits after the `tc` ingress hook, so a `tc` drop on UDP 3785 starves Echo (this is how `bfd-echo` injects the failure).
+- `ponytail:` the echo transport is opened once at session start; a later-appearing address needs a re-`Register` of a new session. Echo timing has no jitter.
 
 ## Timer rules
 
@@ -74,5 +87,6 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 
 - `nos show bfd sessions` or `GET /v1/bfd/sessions` lists what the daemon holds.
 - `cargo run -p nos-e2e -- bfd-auth` proves matching and wrong keys, a live key and method change without a flap, and the unauthenticated FRR staying down.
+- `cargo run -p nos-e2e -- bfd-echo` proves Echo active on both ends with Control slowed to 1 s, `echo-function-failed` when only UDP 3785 is dropped, recovery, and an FRR `bfdd` (`echo receive-interval 50`) with Echo running.
 - `cargo run -p nos-e2e -- bfd` proves both ways Up (also read back over `GET /v1/bfd/sessions`), the route withdrawn and restored around a dropped UDP 3784, and interop with FRR `bfdd`.
 - `docker exec router-a ...` has no `ip`/`tcpdump`: use the netns helper images from `tools/e2e` to sniff.

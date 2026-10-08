@@ -535,6 +535,13 @@ pub struct Args {
     /// Removes the profile's authentication again.
     #[arg(long)]
     pub no_bfd_auth: bool,
+    /// `echo-mode` of `bfd-profile fast` (`affiliated` or `disabled`); needs
+    /// one of the `--bfd-*`/`--*-bfd` flags that create the profile.
+    #[arg(long, value_parser = parse_echo_mode)]
+    pub bfd_echo_mode: Option<nos_proto::schema::EchoMode>,
+    /// `echo-interval` of `bfd-profile fast`, milliseconds.
+    #[arg(long)]
+    pub bfd_echo_interval: Option<u32>,
 
     #[arg(long)]
     pub save: bool,
@@ -1440,6 +1447,16 @@ fn parse_bfd_auth(s: &str) -> Result<nos_proto::schema::BfdAuth, String> {
     })
 }
 
+/// `--bfd-echo-mode <affiliated|disabled>`.
+fn parse_echo_mode(s: &str) -> Result<nos_proto::schema::EchoMode, String> {
+    use nos_proto::schema::EchoMode;
+    match s {
+        "affiliated" => Ok(EchoMode::Affiliated),
+        "disabled" => Ok(EchoMode::Disabled),
+        _ => Err(format!("expected affiliated or disabled, got {s:?}")),
+    }
+}
+
 /// The profile `--bfd-static` creates and references.
 pub const BFD_PROFILE: &str = "fast";
 
@@ -1522,6 +1539,15 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
         (profile("min-tx-interval"), Some(ms.clone())),
         (profile("min-rx-interval"), Some(ms)),
     ]);
+    if let Some(m) = args.bfd_echo_mode {
+        v.push((
+            profile("echo-mode"),
+            Some(serde_json::to_string(&m).expect("EchoMode serializes")),
+        ));
+    }
+    if let Some(ms) = args.bfd_echo_interval {
+        v.push((profile("echo-interval"), Some(ms.to_string())));
+    }
     for subnet in args.static_route.iter().filter(|_| args.bfd_static) {
         v.push((
             vec![
@@ -1622,6 +1648,12 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     {
         p.min_tx_interval = args.bfd_interval_ms;
         p.min_rx_interval = args.bfd_interval_ms;
+        if let Some(m) = args.bfd_echo_mode {
+            p.echo_mode = m;
+        }
+        if let Some(ms) = args.bfd_echo_interval {
+            p.echo_interval = ms;
+        }
     }
     for i in config
         .static_routing_instances
@@ -4169,5 +4201,38 @@ mod tests {
             value.as_deref(),
             Some(r#"{"key_id":1,"method":"KeyedMd5","key":"k"}"#)
         );
+    }
+
+    #[test]
+    fn bfd_echo_flags_become_profile_path_edits() {
+        let args = Args::try_parse_from([
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "1",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "2",
+            "--peer",
+            "10.0.0.2",
+            "--bfd-bgp",
+            "--bfd-echo-mode",
+            "affiliated",
+            "--bfd-echo-interval",
+            "70",
+        ])
+        .unwrap();
+        let edits = bfd_paths(&args);
+        let get = |f: &str| {
+            edits
+                .iter()
+                .find(|(p, _)| p == &["bfd-profile", "fast", f])
+                .and_then(|(_, v)| v.clone())
+        };
+        assert_eq!(get("echo-mode").as_deref(), Some("\"Affiliated\""));
+        assert_eq!(get("echo-interval").as_deref(), Some("70"));
+        assert!(parse_echo_mode("unaffiliated").is_err());
     }
 }

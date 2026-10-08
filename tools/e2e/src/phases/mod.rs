@@ -2,6 +2,7 @@
 
 mod bfd;
 mod bfd_auth;
+mod bfd_echo;
 mod bgp;
 mod drivers;
 mod ospf;
@@ -26,6 +27,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "bfd" => bfd::bfd(w).await,
         "bgp-bfd" => bfd::bgp_bfd(w).await,
         "bfd-auth" => bfd_auth::bfd_auth(w).await,
+        "bfd-echo" => bfd_echo::bfd_echo(w).await,
         "auth" => bgp::auth(w).await,
         "ao" => bgp::ao(w).await,
         "gtsm" => bgp::gtsm(w).await,
@@ -214,6 +216,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "bfd",
             "bgp-bfd",
             "bfd-auth",
+            "bfd-echo",
         ],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
@@ -265,6 +268,7 @@ pub const ALL: &[&str] = &[
     "bfd",
     "bgp-bfd",
     "bfd-auth",
+    "bfd-echo",
     "as4",
     "malformed-update",
     "maximum-prefix",

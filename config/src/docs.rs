@@ -1521,6 +1521,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set BFD authentication.",
             "Key id, method (simple-password, keyed-md5, meticulous-md5, keyed-sha1, meticulous-sha1) and key. Key length limits follow RFC 5880: 1 to 16 bytes for a password or an MD5 key, 1 to 20 for a SHA1 key. The key is stored in clear text. Unset means no authentication.",
         ),
+        Topic::BfdProfileEchoMode => (
+            "Set the BFD Echo function mode.",
+            "`affiliated` runs the Echo function (RFC 5880 section 6.4) next to the Control session once both ends are Up and the peer accepts echo: this system sends packets addressed to itself, the peer forwards them back, and the session goes down (diagnostic echo-function-failed) when they stop returning. Control packets then slow to one per second. Single-hop sessions only; the peer must forward IP. `disabled` (default) advertises that echo cannot be looped.",
+        ),
+        Topic::BfdProfileEchoInterval => (
+            "Set the BFD Echo interval.",
+            "Milliseconds between Echo packets, 10 to 4294967, and the Required Min Echo RX Interval advertised to the peer. The interval used is the larger of this and the peer's advertised value; the session goes down after that interval times the detect multiplier without a returned packet.",
+        ),
         Topic::BfdReference => (
             "Run BFD with a BFD profile.",
             "The name of a `bfd-profile` whose parameters apply to the sessions of this peer-group, OSPF or OSPFv3 profile, or static route. The commit is refused when the profile does not exist. Unset runs no BFD.",
