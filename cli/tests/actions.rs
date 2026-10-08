@@ -293,6 +293,7 @@ fn lab() -> Lab {
                 ServiceRef::Interfaces => "interfaces",
                 ServiceRef::Lacp => "lacp",
                 ServiceRef::Lldp => "lldp",
+                ServiceRef::Bfd => "bfd",
                 ServiceRef::Log => "log",
                 ServiceRef::BgpInstance(_) => "bgp",
                 ServiceRef::OspfInstance(_) => "ospf",

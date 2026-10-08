@@ -1,6 +1,7 @@
 // `#[derive(Cli)]` emits `::nos_proto::…` paths, which must resolve here too.
 extern crate self as nos_proto;
 
+pub mod bfd;
 pub mod bgp;
 pub mod broker;
 pub mod cli;
@@ -24,6 +25,7 @@ pub mod rib;
 pub mod schema;
 pub mod validators;
 
+pub use bfd::{BfdDiag, BfdEvent, BfdRequest, BfdSessionView, BfdState, SessionKey};
 pub use bgp::{
     BgpEvent, BgpRequest, BgpSessionState, EvpnRouteSummary, GrSummary, PeerSummary,
     RedistributeUpdate, RedistributedRoute, RpkiCacheStatus, RpkiSessionState,

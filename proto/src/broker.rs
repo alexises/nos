@@ -48,6 +48,8 @@ pub enum ServiceRef {
     /// The `nos-fdbd` instance serving one EVPN `BroadcastDomain`, named by
     /// the domain's config key — through the registry, like `RibTable`.
     FdbDomain(String),
+    /// The single `nos-bfdd` instance, resolved directly like `Lldp`.
+    Bfd,
 }
 
 impl ServiceRef {
@@ -65,6 +67,7 @@ impl ServiceRef {
             ServiceRef::Lacp => Role::Lacpd,
             ServiceRef::Lldp => Role::Lldpd,
             ServiceRef::FdbDomain(_) => Role::Fdbd,
+            ServiceRef::Bfd => Role::Bfdd,
         }
     }
 
@@ -81,7 +84,8 @@ impl ServiceRef {
             | ServiceRef::Interfaces
             | ServiceRef::Log
             | ServiceRef::Lacp
-            | ServiceRef::Lldp => "",
+            | ServiceRef::Lldp
+            | ServiceRef::Bfd => "",
         }
     }
 }
@@ -110,12 +114,13 @@ pub enum Role {
     Lldpd,
     Fdbd,
     Restd,
+    Bfdd,
     /// A person, authenticated by login; the certificate's name is the username.
     User,
 }
 
 impl Role {
-    pub const ALL: [Role; 13] = [
+    pub const ALL: [Role; 14] = [
         Role::Watchdog,
         Role::Configd,
         Role::Logd,
@@ -128,6 +133,7 @@ impl Role {
         Role::Lldpd,
         Role::Fdbd,
         Role::Restd,
+        Role::Bfdd,
         Role::User,
     ];
 
@@ -145,6 +151,7 @@ impl Role {
             Role::Lldpd => "lldpd",
             Role::Fdbd => "fdbd",
             Role::Restd => "restd",
+            Role::Bfdd => "bfdd",
             Role::User => "user",
         }
     }
@@ -285,6 +292,10 @@ mod tests {
             (Role::Configd, "")
         );
         assert_eq!(ServiceRef::Ospfv3Instance("a".into()).role(), Role::Ospfv3d);
+        assert_eq!(
+            (ServiceRef::Bfd.role(), ServiceRef::Bfd.instance()),
+            (Role::Bfdd, "")
+        );
     }
 
     #[test]
