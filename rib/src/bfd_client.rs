@@ -24,8 +24,16 @@ use crate::watchdog_client::resolve_once;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// The gateways that want a session, with the profile each runs.
-pub type Target = HashMap<IpAddr, BfdProfile>;
+/// One wanted session: the profile and whether the gateway is off every
+/// connected subnet (RFC 5883 multihop; `nos-bfdd` picks the local address).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Want {
+    pub profile: BfdProfile,
+    pub multihop: bool,
+}
+
+/// The gateways that want a session.
+pub type Target = HashMap<IpAddr, Want>;
 /// The gateways whose session is `Up`.
 pub type UpSet = HashSet<IpAddr>;
 
@@ -50,14 +58,14 @@ impl Book {
         &self.up
     }
 
-    /// Single-hop, interface resolved by the peer address alone.
-    fn key(&self, peer: IpAddr) -> SessionKey {
+    /// Interface resolved by the peer address alone.
+    fn key(&self, peer: IpAddr, multihop: bool) -> SessionKey {
         SessionKey {
             table: self.table.clone(),
             peer,
             local: None,
             interface: None,
-            multihop: false,
+            multihop,
         }
     }
 
@@ -67,18 +75,27 @@ impl Book {
     /// is no longer up.
     pub fn sync(&mut self, target: &Target) -> Vec<BfdRequest> {
         let mut reqs = Vec::new();
-        for (peer, profile) in target {
-            if self.registered.get(peer) != Some(profile) {
-                reqs.push(BfdRequest::Register {
-                    table: self.table.clone(),
-                    peer: *peer,
-                    local: None,
-                    interface: None,
-                    profile: profile.clone(),
-                    multihop: false,
-                });
-                self.registered.insert(*peer, profile.clone());
+        for (peer, want) in target {
+            let old = self.registered.get(peer);
+            if old == Some(want) {
+                continue;
             }
+            // A different path is a different session: the old one goes.
+            if let Some(old) = old.filter(|o| o.multihop != want.multihop) {
+                reqs.push(BfdRequest::Deregister {
+                    key: self.key(*peer, old.multihop),
+                });
+                self.up.remove(peer);
+            }
+            reqs.push(BfdRequest::Register {
+                table: self.table.clone(),
+                peer: *peer,
+                local: None,
+                interface: None,
+                profile: want.profile.clone(),
+                multihop: want.multihop,
+            });
+            self.registered.insert(*peer, want.clone());
         }
         let gone: Vec<IpAddr> = self
             .registered
@@ -87,10 +104,10 @@ impl Book {
             .copied()
             .collect();
         for peer in gone {
-            self.registered.remove(&peer);
+            let old = self.registered.remove(&peer).expect("just listed");
             self.up.remove(&peer);
             reqs.push(BfdRequest::Deregister {
-                key: self.key(peer),
+                key: self.key(peer, old.multihop),
             });
         }
         reqs
@@ -239,10 +256,13 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn profile(tx: u32) -> BfdProfile {
-        BfdProfile {
-            min_tx_interval: tx,
-            ..BfdProfile::default()
+    fn profile(tx: u32) -> Want {
+        Want {
+            profile: BfdProfile {
+                min_tx_interval: tx,
+                ..BfdProfile::default()
+            },
+            multihop: false,
         }
     }
 
@@ -254,6 +274,35 @@ mod tests {
             interface: None,
             multihop: false,
         }
+    }
+
+    #[test]
+    fn a_multihop_gateway_registers_multihop_and_a_path_change_replaces_it() {
+        let mut b = Book::new("rt1");
+        let mut want = profile(100);
+        want.multihop = true;
+        let t = Target::from([(ip("10.9.9.9"), want)]);
+        assert!(matches!(
+            b.sync(&t).as_slice(),
+            [BfdRequest::Register {
+                multihop: true,
+                local: None,
+                ..
+            }]
+        ));
+        let reqs = b.sync(&Target::from([(ip("10.9.9.9"), profile(100))]));
+        assert!(matches!(
+            reqs.as_slice(),
+            [
+                BfdRequest::Deregister {
+                    key: SessionKey { multihop: true, .. }
+                },
+                BfdRequest::Register {
+                    multihop: false,
+                    ..
+                },
+            ]
+        ));
     }
 
     #[test]

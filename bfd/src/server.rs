@@ -116,14 +116,8 @@ async fn handle_connection(stream: Stream, role: Role, name: &str, manager: Arc<
                     break;
                 }
                 match &req {
-                    BfdRequest::Register { profile, multihop, .. } => {
+                    BfdRequest::Register { profile, .. } => {
                         let key = key_of(&req).expect("register has a key");
-                        if *multihop {
-                            // ponytail: single-hop only (RFC 5881); multihop
-                            // (RFC 5883) comes with its first client.
-                            warn!(peer = %key.peer, "bfd multihop sessions are not supported yet");
-                            continue;
-                        }
                         let rx = manager.register(client, &key, profile);
                         if let Some(old) = forwarders.insert(key.clone(), tokio::spawn(forward(key, rx, out_tx.clone()))) {
                             old.abort();

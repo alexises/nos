@@ -175,8 +175,8 @@ Verified by `nos-e2e bgp-graceful-restart` (nos↔nos, both sides) and `bgp-gr-f
 
 ### BFD (RFC 5880, RFC 5882, #286)
 
-- `bfd` lives outside `ResolvedPeer` (which `diff_peers` compares), so changing it restarts nothing. `reconcile::bfd_target` builds the wanted sessions (non-shut peers of a group with `bfd`, `max-hops` at most 1) and `SessionManager::set_bfd_targets` publishes them on a `watch`; `DiffScope::BfdProfiles` triggers the resync.
-- `bfd_client.rs` (modelled on `nos-ribd`'s): one persistent connection to `ServiceRef::Bfd`, sessions keyed by (table, peer) with no interface, registered once the VRF is `Resolved` and the restart decision is made. Only an `Up` to `Down` transition acts (the first event after a `Register` is `Down`). `ponytail:` multihop is #287.
+- `bfd` lives outside `ResolvedPeer` (which `diff_peers` compares), so changing it restarts nothing. `reconcile::bfd_target` builds the wanted sessions (non-shut peers of a group with `bfd`; each `Want` carries `multihop` = `max-hops` above 1 or `!Config::is_connected(table, peer)`, and the peer-group's resolved `source-address` as `local`) and `SessionManager::set_bfd_targets` publishes them on a `watch`; `DiffScope::BfdProfiles` triggers the resync.
+- `bfd_client.rs` (modelled on `nos-ribd`'s): one persistent connection to `ServiceRef::Bfd`, sessions keyed by (table, peer, local, multihop) with no interface (a path change deregisters the old key first), registered once the VRF is `Resolved` and the restart decision is made. Only an `Up` to `Down` transition acts (the first event after a `Register` is `Down`). Verified for both hop modes by `nos-e2e bgp-bfd` (`max-hops 2` makes the lab's direct peers multihop; the off-link branch of `is_connected` is unit-tested only).
 - Log anchors: `bgp: bfd session down, closing peer=`, `sent cease notification … subcode=10 hard_reset=`, `bgp: bfd down, aborting graceful restart`.
 - Verified by `nos-e2e bgp-bfd`.
 

@@ -1,6 +1,6 @@
 # nos-bfd — BFD (RFC 5880/5881) library and `nos-bfdd`
 
-The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fixed process like `nos-lldpd`. Single-hop only; its clients are `nos-ribd`'s `bfd_client.rs` (static routes) and `nos-bgpd`'s (peer-groups, #286).
+The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fixed process like `nos-lldpd`. Single-hop and multihop; its clients are `nos-ribd`'s `bfd_client.rs` (static routes) and `nos-bgpd`'s (peer-groups, #286).
 
 | Module | Purpose |
 |--------|---------|
@@ -11,7 +11,7 @@ The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fix
 | `session` | `Core` (pure: packets and clock in, packets out) and `run`, one tokio task per session |
 | `manager` | Session table, refcount per client, `Demux` (rx packet to session), `Net` trait |
 | `server` | `--listen-socket`: `Register` streams `BfdEvent::State`, `GetSessions` replies once |
-| `socket` | UDP 3784 sockets (`UdpNet`); excluded from coverage, `nos-e2e`'s `bfd` phase is its test |
+| `socket` | UDP 3784/4784 sockets (`UdpNet`); excluded from coverage, `nos-e2e`'s `bfd` phase is its test |
 | `watchdog_client` | Broker lookups, the table's VRF device via `nos-ribd` `GetVrfName` |
 
 Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`.
@@ -23,7 +23,7 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 - `timers` and `Core` take `now` and the jitter percentage as arguments; only `session::run` reads the clock.
 - Discriminators come from the manager's counter (random start), never 0.
 - `BfdRequest`/`BfdEvent` variants are appended, never reordered (postcard). A new `BfdRequest` must be classified in `authz::allowed`.
-- No Echo (until #290), no demand mode, no multihop yet (`Register` with `multihop` is ignored with a warning).
+- No Echo (until #290), no demand mode. Multihop (#287): UDP 4784, TTL checked per session in `Demux::route`; no destination address in the zero-discriminator demux (`ponytail:` in `manager.rs`).
 - Desired Min TX is floored at 1 s while not Up by `Timers` itself; reaching Up needs no `change`.
 - The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` subscribes to no config.
 - A client's connection drop releases its sessions; the last client drops the session. Request-side EOF ends the connection (`ponytail:` in `server.rs`).

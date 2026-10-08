@@ -2,7 +2,7 @@
 
 A BFD profile (RFC 5880) is a named set of session parameters that BGP, OSPF, OSPFv3 and static routes can reference by name.
 
-- `nos-bfdd` runs the sessions (RFC 5880, single-hop RFC 5881 over UDP 3784 inside the routing table's VRF).
+- `nos-bfdd` runs the sessions (RFC 5880, single-hop RFC 5881 over UDP 3784, multihop RFC 5883 over UDP 4784, both inside the routing table's VRF).
 - **Static routes and BGP peer-groups use it today** (see [BGP](bgp.md#bfd-rfc-5882-rfc-9384)). A `bfd` reference on an OSPF or OSPFv3 profile is accepted, validated and stored, but starts no session until their own sub-issues land.
 - Profiles are checked at commit time; the shell and REST accept any edit in a transaction.
 
@@ -60,6 +60,17 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 - A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
 - The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`).
 - "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
+
+## Multi-hop sessions
+
+- A client picks multi-hop for a peer that is not directly connected; you configure nothing extra beyond the profile.
+  - BGP: the peer-group has `max-hops` above 1, or the peer address is on no subnet configured on an interface (or subinterface) of the instance's routing table. An iBGP session between loopbacks reached over OSPF is the typical case.
+  - Static routes: the gateway is on no such subnet.
+- A subnet that is not in the configuration (learned over DHCP) is not seen: the peer is then registered multi-hop, which still works.
+- Multi-hop sessions use UDP 4784 and are not tied to an interface; `show bfd sessions` prints `multihop` and no interface.
+- TX TTL is 255. A received packet is dropped when its TTL is below the profile's `minimum-ttl` (default 254). Single-hop sessions still require exactly 255.
+- The local address is the peer-group's `source-address` for BGP; otherwise `nos-bfdd` uses the address the kernel would use towards the peer, fixed when the session opens.
+- Changing a peer between single-hop and multi-hop (an address added or `max-hops` edited) replaces the session: the old one is deregistered and a new one starts `down`.
 
 ## Commit-time errors
 

@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
-use nos_proto::schema::BfdProfile;
 use nos_proto::{Config, IpNet};
 use tracing::warn;
 
@@ -392,7 +391,7 @@ pub fn build_from_config(cfg: &Config, table_name: &str, bfd_up: &HashSet<IpAddr
 /// The gateways of `table_name`'s static routes that name a `BfdProfile`,
 /// with that profile (a reference to a missing profile is skipped: commit
 /// validation rejects it). Two routes through one gateway share a session.
-pub fn bfd_target(cfg: &Config, table_name: &str) -> HashMap<IpAddr, BfdProfile> {
+pub fn bfd_target(cfg: &Config, table_name: &str) -> crate::bfd_client::Target {
     let routes = cfg
         .routing_tables
         .iter()
@@ -408,7 +407,13 @@ pub fn bfd_target(cfg: &Config, table_name: &str) -> HashMap<IpAddr, BfdProfile>
                 .bfd_profiles
                 .iter()
                 .find(|p| Some(&p.name) == r.bfd.as_ref())?;
-            Some((r.gateway, profile.clone()))
+            Some((
+                r.gateway,
+                crate::bfd_client::Want {
+                    profile: profile.clone(),
+                    multihop: !cfg.is_connected(table_name, r.gateway),
+                },
+            ))
         })
         .collect()
 }
@@ -416,6 +421,7 @@ pub fn bfd_target(cfg: &Config, table_name: &str) -> HashMap<IpAddr, BfdProfile>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nos_proto::schema::BfdProfile;
     use nos_proto::{RoutingTable, StaticRoute, StaticRoutingInstance};
 
     fn cfg(tables: Vec<RoutingTable>, instances: Vec<StaticRoutingInstance>) -> Config {
@@ -1087,7 +1093,18 @@ mod tests {
 
         let target = bfd_target(&c, "rt1");
         assert_eq!(target.len(), 1);
-        assert_eq!(target[&gw].name, "fast");
+        assert_eq!(target[&gw].profile.name, "fast");
+        assert!(target[&gw].multihop, "no connected subnet in the config");
         assert!(bfd_target(&c, "nope").is_empty());
+        c.interfaces = vec![nos_proto::Interface {
+            name: "loopback-rt1".into(),
+            routing_table: Some("rt1".into()),
+            addresses: vec![nos_proto::schema::interface::InterfaceAddress {
+                address: "10.0.0.254/24".parse().unwrap(),
+                label: None,
+            }],
+            ..Default::default()
+        }];
+        assert!(!bfd_target(&c, "rt1")[&gw].multihop);
     }
 }

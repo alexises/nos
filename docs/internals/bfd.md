@@ -42,12 +42,13 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - `nos-bfdd` is one fixed process (`/run/nos/bfd.sock`, `ServiceRef::Bfd`). Clients `Register` a session on a persistent connection and get `BfdEvent::State` (current state first, then each change).
 - `Manager` keeps one task per `SessionKey`, shared by every client that registered it; the last client leaving drops it.
 - A re-`Register` with a different profile is the profile edit: intervals go through Poll/Final, `shutdown` through AdminDown.
-- Sockets (RFC 5881): one receive socket per (table, family) on UDP 3784, bound to the table's VRF; one connected transmit socket per session with a random source port in 49152-65535 and TTL 255. Received TTL must be 255.
+- Sockets (RFC 5881, RFC 5883): one receive socket per (table, family, multihop) on UDP 3784 or 4784, bound to the table's VRF; one connected transmit socket per session with a random source port in 49152-65535 and TTL 255. `Demux::route` checks the TTL per session with `ttl_ok`: exactly 255 single-hop, at least the profile's `minimum_ttl` multihop.
+- Multihop: the key keeps `multihop` and `local`, never an interface; the transmit socket binds to the VRF and to `local`, else to `kernel_source` (a connected UDP socket's local address, no packet sent). Zero-discriminator demux is by (table, source, multihop). `ponytail:` no destination address in it (RFC 5883 §4 names the pair), so two multihop sessions to one peer from different local addresses in one table collide; add `IP_PKTINFO` if that matters.
 - The VRF device comes from the table's `nos-ribd` (`GetVrfName`); a session whose VRF or local address is not ready retries every second.
 
 ## Static routes (`nos-ribd`)
 
-- `rib/src/bfd_client.rs` registers the gateway of every static route with a `bfd` reference (one session per gateway).
+- `rib/src/bfd_client.rs` registers the gateway of every static route with a `bfd` reference (one session per gateway), multihop when `!Config::is_connected(table, gateway)`; `local` is left to `nos-bfdd`.
 - A route is left out of the RIB until its gateway's session is `Up`; `Down`, `Init` and `AdminDown` all take it out. While `nos-bfdd` is unreachable nothing is up (fail closed); after a reconnect everything is registered again.
 - `reconcile::resync` reads the up set and re-runs when it changes.
 
@@ -55,7 +56,7 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 
 - `BfdRequest::GetSessions { peer }` is a one-shot request answered with `BfdEvent::Sessions(Vec<BfdSessionView>)`, ordered by (table, peer); `peer: Some(ip)` filters in the daemon.
 - `BfdSessionView` carries the `SessionKey` (table, peer, optional local/interface, multihop), `state`, `diag`, both discriminators, the negotiated `tx_interval_us` and `detection_time_us`. There is no uptime or receive interval in it.
-- A session is keyed by (table, peer address) only: `nos-ribd` registers with `local: None, interface: None`, so `show` prints no local address or interface.
+- Single-hop sessions are keyed by (table, peer address) only: `nos-ribd` registers with `interface: None`, so `show` prints no interface; a BGP multihop session also shows its `local`.
 - Only `Role::User` (`nos-cli`) and `Role::Restd` may ask (`authz::allowed`); `cli/src/bfd_client.rs` and `rest/src/show.rs::bfd_sessions` are the two clients.
 
 ## Check it by hand
