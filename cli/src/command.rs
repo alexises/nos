@@ -39,6 +39,11 @@ pub enum Command {
     },
     /// `show lldp statistics` — every LLDP-enabled interface's counters.
     ShowLldpStatistics,
+    /// `show bfd sessions [<peer>]` — every BFD session `nos-bfdd` holds, or
+    /// only those to one peer address.
+    ShowBfdSessions {
+        peer: Option<IpAddr>,
+    },
     /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
     /// optionally filtered to one source, or a live tail with `--follow`.
     ShowLog {
@@ -209,6 +214,28 @@ mod tests {
         assert_eq!(
             Command::parse("show lldp"),
             Command::Unknown("show lldp".to_string())
+        );
+    }
+
+    #[test]
+    fn show_bfd_sessions() {
+        assert_eq!(
+            Command::parse("show bfd sessions"),
+            Command::ShowBfdSessions { peer: None }
+        );
+        assert_eq!(
+            Command::parse("show bfd sessions 192.0.2.1"),
+            Command::ShowBfdSessions {
+                peer: Some("192.0.2.1".parse().unwrap())
+            }
+        );
+        assert_eq!(
+            Command::parse("show bfd sessions nope"),
+            Command::Unknown("show bfd sessions nope".to_string())
+        );
+        assert_eq!(
+            Command::parse("show bfd"),
+            Command::Unknown("show bfd".to_string())
         );
     }
 

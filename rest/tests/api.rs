@@ -14,9 +14,9 @@ use futures::{SinkExt, StreamExt};
 use nos_config::{Config, ConfigStore, ListenAddr};
 use nos_pki::testing::shared;
 use nos_proto::{
-    BgpEvent, BgpInstance, BgpRequest, IpcCodec, LogEntry, LogEvent, LogLevel, LogRequest,
-    PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind, ServiceRef, User,
-    WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS,
+    BfdEvent, BfdRequest, BgpEvent, BgpInstance, BgpRequest, IpcCodec, LogEntry, LogEvent,
+    LogLevel, LogRequest, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
+    ServiceRef, User, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS,
 };
 use nos_rest::auth::PeerUser;
 use nos_rest::{api, ipc::Daemons};
@@ -638,6 +638,61 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
     );
     assert_eq!(
         send(&f.app, Method::GET, "/v1/interfaces", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn show_bfd_sessions_filters_by_peer_and_rejects_a_bad_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let bfd = dir.path().join("bfd.sock");
+    serve(&bfd, ("bfdd", ""), |req: BfdRequest| match req {
+        BfdRequest::GetSessions { peer } => BfdEvent::Sessions(
+            [("192.0.2.1", 1u32), ("192.0.2.2", 2)]
+                .into_iter()
+                .filter(|(p, _)| peer.is_none_or(|q| q.to_string() == *p))
+                .map(|(p, n)| nos_proto::BfdSessionView {
+                    key: nos_proto::SessionKey {
+                        table: "rt1".into(),
+                        peer: p.parse().unwrap(),
+                        local: None,
+                        interface: None,
+                        multihop: false,
+                    },
+                    state: nos_proto::BfdState::Up,
+                    diag: nos_proto::BfdDiag::NoDiagnostic,
+                    local_discriminator: n,
+                    remote_discriminator: 9,
+                    tx_interval_us: 100_000,
+                    detection_time_us: 300_000,
+                })
+                .collect(),
+        ),
+        _ => panic!("only GetSessions is asked"),
+    });
+    let f = fixture(vec![(ServiceRef::Bfd, bfd)]).await;
+
+    let (s, v) = send(&f.app, Method::GET, "/v1/bfd/sessions", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    assert_eq!(v[0]["state"], "Up");
+    let (s, v) = send(&f.app, Method::GET, "/v1/bfd/sessions?peer=192.0.2.2", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["key"]["peer"], "192.0.2.2");
+    assert_eq!(
+        send(&f.app, Method::GET, "/v1/bfd/sessions?peer=nope", None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // No nos-bfdd registered with the broker: 503.
+    let none = fixture(vec![]).await;
+    assert_eq!(
+        send(&none.app, Method::GET, "/v1/bfd/sessions", None)
+            .await
+            .0,
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
