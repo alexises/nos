@@ -168,7 +168,7 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 - No push yet counts as not Up: a member of an aggregate with `bfd` stays out of the bond until its session is Up (fail closed, like LACP).
 - A push is applied at once and survives unrelated config changes.
 - The commit is refused when `bfd` names no `bfd-profile`, has no `bfd-peer`, or the untagged subinterface has no address of the peer's family (the session source). `bfd` on an aggregate without members is accepted.
-- Set with `set port-aggregate bond-lacp bfd fast` and `set port-aggregate bond-lacp bfd-peer 10.0.0.2`. The sessions themselves come with `nos-bfdd`'s member sessions (#299): until then a `bfd` aggregate has no member enslaved.
+- Set with `set port-aggregate bond-lacp bfd fast` and `set port-aggregate bond-lacp bfd-peer 10.0.0.2`. The sessions are `nos-bfdd`'s micro-BFD member sessions: see [BFD profiles](bfd.md#micro-bfd-on-a-port-aggregate-rfc-7130).
 
 **Individual ports.** A partner that clears the Aggregation bit of its LACPDUs declares the link Individual: it will not bundle it with any other link. NOS never selects such a member, and it does not count towards the partner groups of the others.
 

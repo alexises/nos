@@ -24,6 +24,10 @@ pub struct SessionKey {
     pub local: Option<IpAddr>,
     pub interface: Option<String>,
     pub multihop: bool,
+    /// RFC 7130 micro-BFD: the `PortAggregate` this session probes a member of
+    /// (`interface` is the member, `table` is empty). Appended last for postcard.
+    #[serde(default)]
+    pub aggregate: Option<String>,
 }
 
 /// RFC 5880 §4.1 `Sta` values.
@@ -205,6 +209,7 @@ mod tests {
 
     fn key() -> SessionKey {
         SessionKey {
+            aggregate: None,
             table: "rt1".into(),
             peer: "192.0.2.1".parse().unwrap(),
             local: None,

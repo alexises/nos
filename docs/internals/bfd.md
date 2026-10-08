@@ -11,8 +11,17 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - `timers`: `Timers`, `now` and the jitter draw passed in.
 - `authz`: `allowed(role, &BfdRequest)`, no wildcard arm.
 - `echo`: the Echo packet, pure. `payload` (our discriminator and a sequence), `build` (IPv4/IPv6 + UDP 3785 from a port in 49152-65535, TTL 255, source = destination = our address, checksums), `parse` (accepts TTL 254..=255, checks both addresses, checksums, payload length).
+- `micro`: RFC 7130 frames, pure: `build_frame`/`parse_frame` (IPv4 and IPv6 + UDP 6784, TTL 255, hand-built checksums), `untag_priority` (802.1p tag 0), `GROUP` (`01-00-5E-90-00-01`).
+- `micro_sessions`: `wanted(&Config)` derives one `SessionKey` (with `aggregate` set, `interface` = the member, `local` = the bond's address) per member of every aggregate with `bfd`; `Micro::apply` registers them with the `Manager` as an internal client; `UpSets` computes the aggregate's Up set and returns a `PushBfdMembers` payload only when it changed; `run` follows `Interfaces`/`PortAggregates`/`BfdProfiles` diffs. `interface_client` resends the cached sets to `nos-interfaced` on every reconnect.
 - `neigh`: the neighbour's MAC from an `rtnetlink` neighbour dump (usable states only), never written.
 - Wire types live in `nos_proto::bfd`.
+
+## Micro-BFD (RFC 7130)
+
+- `socket::MicroTx` is the session's `Tx`: an `nos_l2_socket::L2Socket` per member (ethertype by the peer's family, kernel-filtered to UDP 6784, own-unicast accepted) plus one on 0x8100 for tag-0 frames; two rx tasks feed `Demux::route_micro`, which takes the arrival member as part of the key (RFC 7130 section 2.2: Your Discriminator nonzero must also match the interface).
+- The socket is bound to the member's ifindex, so it keeps receiving once the member is enslaved: the packet tap sees the skb with `orig_dev` = the member after the bond's `rx_handler`. `nos-e2e`'s `micro-bfd` proves it.
+- A `tc` ingress drop on UDP 6784 starves the IP packet socket the same way it does Echo.
+- No Echo for a session with `aggregate` set (`Manager::register`).
 
 ## Authentication
 

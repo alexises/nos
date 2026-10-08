@@ -84,6 +84,7 @@ fn key_of(req: &BfdRequest) -> Option<SessionKey> {
             multihop,
             ..
         } => Some(SessionKey {
+            aggregate: None,
             table: table.clone(),
             peer: *peer,
             local: *local,

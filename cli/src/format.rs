@@ -298,10 +298,15 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
         .map(|s| {
             let k = &s.key;
             let local = k.local.map_or_else(String::new, |l| format!(" from {l}"));
-            let interface = k
-                .interface
-                .as_deref()
-                .map_or_else(String::new, |i| format!(" on {i}"));
+            let interface = k.interface.as_deref().map_or_else(String::new, |i| {
+                // RFC 7130: the interface is a LAG member, the "table" its aggregate.
+                let word = if k.aggregate.is_some() {
+                    "member"
+                } else {
+                    "on"
+                };
+                format!(" {word} {i}")
+            });
             let multihop = if k.multihop { " multihop" } else { "" };
             let auth = match (s.auth_method, s.auth_key_id) {
                 (Some(m), Some(id)) => format!(
@@ -320,7 +325,7 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
             format!(
                 "{}: peer {}{local}{interface}{multihop}, {}, diag {}, tx {}ms, detect {}ms, \
                  discriminators {}/{}{auth}{echo}",
-                k.table,
+                k.aggregate.as_deref().unwrap_or(&k.table),
                 k.peer,
                 s.state,
                 s.diag,
@@ -1750,6 +1755,7 @@ mod tests {
         assert_eq!(render_bfd_sessions(&[]), "no bfd sessions");
         let view = |peer: &str, state, diag, interface: Option<&str>| BfdSessionView {
             key: SessionKey {
+                aggregate: None,
                 table: "rt1".into(),
                 peer: peer.parse().unwrap(),
                 local: None,
@@ -1776,6 +1782,17 @@ mod tests {
             BfdDiag::ControlDetectionTimeExpired,
             Some("eth1"),
         );
+        let mut micro = view(
+            "10.0.0.2",
+            BfdState::Up,
+            BfdDiag::NoDiagnostic,
+            Some("eth1"),
+        );
+        micro.key.aggregate = Some("bond0".into());
+        micro.key.table = String::new();
+        micro.key.local = Some("10.0.0.1".parse().unwrap());
+        assert!(render_bfd_sessions(&[micro])
+            .starts_with("bond0: peer 10.0.0.2 from 10.0.0.1 member eth1, up,"),);
         let authed = BfdSessionView {
             auth_method: Some(nos_proto::schema::BfdAuthMethod::KeyedSha1),
             auth_key_id: Some(2),

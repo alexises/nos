@@ -617,6 +617,19 @@ pub async fn run(
 }
 
 fn log_transition(key: &SessionKey, s: &Status) {
+    // RFC 7130 micro-BFD: the anchors the `micro-bfd` e2e phase waits for.
+    if let (Some(aggregate), Some(member)) = (&key.aggregate, &key.interface) {
+        match s.state {
+            BfdState::Up => {
+                info!(aggregate = %aggregate, member = %member, peer = %key.peer, "bfd session up");
+            }
+            BfdState::Down | BfdState::AdminDown => {
+                info!(aggregate = %aggregate, member = %member, peer = %key.peer, diag = %s.diag, "bfd session down");
+            }
+            BfdState::Init => debug!(member = %member, peer = %key.peer, "bfd session init"),
+        }
+        return;
+    }
     match s.state {
         BfdState::Up => info!(peer = %key.peer, table = %key.table, "bfd session up"),
         BfdState::Down | BfdState::AdminDown => {

@@ -132,6 +132,20 @@ set echo-interval 50
 - Single-hop only: a multihop key logs `bfd unaffiliated echo needs a single-hop session` and stays `down`.
 - Changing `echo-mode` between `unaffiliated` and another value restarts the session.
 
+## Micro-BFD on a port aggregate (RFC 7130)
+
+- Set `bfd <profile>` and `bfd-peer <ip>` on a `port-aggregate` (xor or lacp), and put an address of the peer's family on its untagged subinterface: `nos-bfdd` runs one session per member link, each over that member only.
+  - `set port-aggregate bond0 bfd fast`, `set port-aggregate bond0 bfd-peer 10.0.0.2`, `set port-aggregate bond0 address 10.0.0.1/30`.
+  - The profile's timers and `detect-multiplier` apply per member; an edit runs Poll/Final and flaps nothing. `echo-mode` is ignored (Echo is out of scope in RFC 7130 section 2.2); `auth` applies as for any session.
+  - The commit rules are those of the aggregate: a missing profile, a missing `bfd-peer` or no source address of the peer's family is refused.
+- What goes on the wire: control packets in IP/UDP to the peer's address, UDP destination port 6784, TTL 255, source address the bond's, source MAC the member's own, destination MAC `01-00-5E-90-00-01` (the dedicated multicast MAC; unicast to our own MAC is accepted too). Untagged and 802.1p tag-0 frames are received.
+- What Up and Down do: a member is enslaved into the bond only while its session is Up, and released when it goes Down. `nos-bfdd` sends `nos-interfaced` the whole Up set of the aggregate on every change (`PushBfdMembers`); no push means no member is enslaved.
+- The sessions run on the member itself, whether or not it is enslaved, so a released member keeps probing and rejoins by itself once its session is Up again.
+- Deviation from RFC 7130 section 3: sessions exist for every configured member, not only those LACP has in Distributing or Standby. Cost: an extra probe on a link LACP has not selected yet.
+- Check with `show bfd sessions`: a micro session is listed under the aggregate's name with `member <interface>`, for example `bond0: peer 10.0.0.2 from 10.0.0.1 member eth1, up, ...`. In REST the session `key` has `aggregate` and `interface` (the member).
+- Log lines: `bfd session up aggregate=<a> member=<if> peer=<ip>` and `bfd session down aggregate=<a> member=<if> peer=<ip> diag=<...>`.
+- Kernel noise: the frames carry the peer's unicast IP in a multicast MAC; the kernel finds no socket on UDP port 6784 and drops them; it does not send ICMP port unreachable for a frame received as link-layer multicast.
+
 ## Check sessions
 
 - `show bfd sessions` lists every session, `show bfd sessions <peer>` those to one address. Sample:
