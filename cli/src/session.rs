@@ -111,6 +111,8 @@ pub enum Resolved {
     },
     /// `show lldp statistics` — data-plane, valid in any mode.
     ShowLldpStatistics,
+    /// `show spanning-tree` — data-plane, valid in any mode.
+    ShowSpanningTree,
     /// `show bfd sessions [<peer>]` — data-plane, valid in any mode.
     ShowBfdSessions {
         peer: Option<std::net::IpAddr>,
@@ -207,6 +209,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowLacp { name } => Resolved::ShowLacp { name },
         Command::ShowLldpNeighbors { detail } => Resolved::ShowLldpNeighbors { detail },
         Command::ShowLldpStatistics => Resolved::ShowLldpStatistics,
+        Command::ShowSpanningTree => Resolved::ShowSpanningTree,
         Command::ShowBfdSessions { peer } => Resolved::ShowBfdSessions { peer },
         Command::ShowBfdReflector => Resolved::ShowBfdReflector,
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
@@ -307,6 +310,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowLacp { .. }
         | Command::ShowLldpNeighbors { .. }
         | Command::ShowLldpStatistics
+        | Command::ShowSpanningTree
         | Command::ShowBfdSessions { .. }
         | Command::ShowBfdReflector
         | Command::ShowLog { .. }

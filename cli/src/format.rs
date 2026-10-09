@@ -414,6 +414,99 @@ pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
         .join("\n")
 }
 
+/// Render `nos-stpd`'s summary, for `show spanning-tree`: the bridge/root
+/// block, then one row per port.
+pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
+    if !s.enabled {
+        return "spanning-tree is disabled".to_string();
+    }
+    let root = match &s.root_port {
+        Some(p) => format!("root port {p}, cost {}", s.root_path_cost),
+        None => "this bridge is the root".to_string(),
+    };
+    let mut lines = vec![
+        "mode rstp".to_string(),
+        format!("bridge id {}", s.bridge_id),
+        format!("root id   {} ({root})", s.root_id),
+        format!(
+            "hello {}s, max age {}s, forward delay {}s",
+            s.hello_time_secs, s.max_age_secs, s.forward_delay_secs
+        ),
+    ];
+    if s.ports.is_empty() {
+        lines.push("no spanning-tree ports".to_string());
+        return lines.join("\n");
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated",
+        "Name", "Role", "State", "Cost", "Prio"
+    ));
+    for p in &s.ports {
+        let designated = if p.designated_bridge.is_empty() {
+            "-".to_string()
+        } else {
+            format!("{} {}", p.designated_bridge, p.designated_port)
+        };
+        lines.push(format!(
+            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}",
+            p.name,
+            p.role.as_str(),
+            p.state.as_str(),
+            p.cost,
+            p.priority,
+        ));
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod stp_tests {
+    use super::render_spanning_tree;
+    use nos_proto::{StpPortInfo, StpRole, StpState, StpSummary};
+
+    #[test]
+    fn spanning_tree_disabled_root_and_non_root() {
+        assert_eq!(
+            render_spanning_tree(&StpSummary::default()),
+            "spanning-tree is disabled"
+        );
+        let mut s = StpSummary {
+            enabled: true,
+            bridge_id: "8000.02:00:00:00:00:02".into(),
+            root_id: "8000.02:00:00:00:00:01".into(),
+            root_path_cost: 20000,
+            root_port: Some("eth1".into()),
+            hello_time_secs: 2,
+            max_age_secs: 20,
+            forward_delay_secs: 15,
+            ..StpSummary::default()
+        };
+        s.ports = vec![
+            StpPortInfo {
+                name: "eth1".into(),
+                role: StpRole::Root,
+                state: StpState::Forwarding,
+                cost: 20000,
+                priority: 128,
+                designated_bridge: "8000.02:00:00:00:00:01".into(),
+                designated_port: "128.1".into(),
+            },
+            StpPortInfo {
+                name: "eth2".into(),
+                ..StpPortInfo::default()
+            },
+        ];
+        let out = render_spanning_tree(&s);
+        assert!(out.contains("root id   8000.02:00:00:00:00:01 (root port eth1, cost 20000)"));
+        assert!(out.contains("eth1         root        forwarding"));
+        assert!(out.contains("8000.02:00:00:00:00:01 128.1"));
+        assert!(out.lines().last().unwrap().ends_with("  -"));
+        s.root_port = None;
+        assert!(render_spanning_tree(&s).contains("(this bridge is the root)"));
+    }
+}
+
 fn yes_no(value: bool) -> &'static str {
     if value {
         "yes"

@@ -15,7 +15,8 @@ use nos_proto::{
     LacpRequest, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent,
     LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
-    PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef,
+    PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
+    StpRequest, StpSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -166,6 +167,13 @@ pub async fn lldp_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Vec<Lldp
     {
         LldpEvent::Neighbors(v) => Ok(Json(v)),
         other @ LldpEvent::Statistics(_) => Err(unexpected("nos-lldpd", &other)),
+    }
+}
+
+#[utoipa::path(get, path = "/v1/spanning-tree", tag = "show", summary = "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is not rstp)", responses((status = 200, body = StpSummary), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn spanning_tree(State(d): State<Daemons>) -> ApiResult<Json<StpSummary>> {
+    match d.service(ServiceRef::Stp, StpRequest::GetSummary).await? {
+        StpEvent::Summary(s) => Ok(Json(s)),
     }
 }
 

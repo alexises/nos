@@ -17,4 +17,5 @@ pub mod ospfv3_client;
 pub mod rib_client;
 pub mod session;
 pub mod spec;
+pub mod stp_client;
 pub mod watchdog_client;

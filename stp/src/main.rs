@@ -5,7 +5,7 @@ use clap::Parser;
 use nos_log_client::ForwardingLayer;
 use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
-use nos_stp::{daemon, interface_client, link_client, reconcile, watchdog_client};
+use nos_stp::{daemon, interface_client, link_client, reconcile, server, watchdog_client};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -26,8 +26,7 @@ struct Args {
     #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
 
-    /// Accepted so the watchdog wiring does not change when the status
-    /// server arrives (#328); nothing listens on it yet.
+    /// Unix socket to listen on for `show spanning-tree` queries.
     #[arg(long, default_value = DEFAULT_LISTEN_SOCKET)]
     listen_socket: PathBuf,
 
@@ -83,7 +82,17 @@ async fn main() -> anyhow::Result<()> {
         push_rx,
         shutdown_rx.clone(),
     ));
-    let daemon_task = tokio::spawn(daemon::run(plan_rx, links_rx, push_tx, shutdown_rx.clone()));
+    let snapshot = server::Snapshot::default();
+    let server_task = server::start(&args.listen_socket, snapshot.clone(), &identity)
+        .inspect_err(|e| tracing::error!(error = %e, "failed to start stp IPC server"))
+        .context("starting stp IPC server")?;
+    let daemon_task = tokio::spawn(daemon::run(
+        plan_rx,
+        links_rx,
+        push_tx,
+        snapshot,
+        shutdown_rx.clone(),
+    ));
 
     wait_for_shutdown_signal()
         .await
@@ -101,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
             warn!(error = %e, task = name, "task ended abnormally");
         }
     }
+    server_task.abort();
     info!("shutting down");
     Ok(())
 }

@@ -707,6 +707,39 @@ async fn show_bfd_sessions_filters_by_peer_and_rejects_a_bad_one() {
 }
 
 #[tokio::test]
+async fn show_spanning_tree_serves_the_summary_and_503s_without_stpd() {
+    let dir = tempfile::tempdir().unwrap();
+    let stp = dir.path().join("stp.sock");
+    serve(&stp, ("stpd", ""), |_: nos_proto::StpRequest| {
+        nos_proto::StpEvent::Summary(nos_proto::StpSummary {
+            enabled: true,
+            bridge_id: "8000.02:00:00:00:00:01".into(),
+            ports: vec![nos_proto::StpPortInfo {
+                name: "eth1".into(),
+                role: nos_proto::StpRole::Alternate,
+                state: nos_proto::StpState::Discarding,
+                ..nos_proto::StpPortInfo::default()
+            }],
+            ..nos_proto::StpSummary::default()
+        })
+    });
+    let f = fixture(vec![(ServiceRef::Stp, stp)]).await;
+    let (s, v) = send(&f.app, Method::GET, "/v1/spanning-tree", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["enabled"], true);
+    assert_eq!(v["ports"][0]["role"], "alternate");
+    assert_eq!(v["ports"][0]["state"], "discarding");
+
+    let none = fixture(vec![]).await;
+    assert_eq!(
+        send(&none.app, Method::GET, "/v1/spanning-tree", None)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
 async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let f = fixture(vec![]).await;
     let app = &f.app;

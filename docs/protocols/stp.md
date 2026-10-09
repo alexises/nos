@@ -1,10 +1,49 @@
 # Spanning tree
 
-Spanning tree (IEEE 802.1Q clause 13) keeps an L2 topology loop-free. This page covers the configuration only.
+Spanning tree (IEEE 802.1Q clause 13) keeps an L2 topology loop-free.
 
-- **Nothing negotiates yet.** The daemon that speaks BPDUs (`nos-stpd`) arrives in a later step of the STP series (#316). Until then, with a mode other than `disabled`, `nos-interfaced` keeps every bridge port blocked (fail-safe, see [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326)): set `spanning-tree mode disabled` to forward without it.
-- Everything is checked at commit time, so a config that commits now will not be refused when the daemon lands.
-- **One rule already bites:** a port aggregate with an `esi` needs a guard profile (see [ESI port aggregates](#esi-port-aggregates)).
+- **Only `mode rstp` runs today.** `nos-stpd` speaks RSTP on every physical interface or port aggregate that has a `switching-profile`. `mstp` and `rapid-pvst` are accepted and checked but the daemon stays idle for them (and for `disabled`).
+- **Fail-safe:** with a mode other than `disabled`, a new bridge port starts blocked and BPDUs are trapped until `nos-stpd` pushes a state (see [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326)). Set `spanning-tree mode disabled` to forward without spanning tree.
+- Everything is checked at commit time.
+- A port aggregate with an `esi` needs a guard profile (see [ESI port aggregates](#esi-port-aggregates)).
+
+## Enable it and pick the root
+
+```
+set spanning-tree mode rstp
+set spanning-tree priority 4096
+```
+
+- `rstp` is the default mode. Both switches need it; the lowest priority (then lowest bridge MAC) becomes the root.
+- Set the priority on the bridge you want as root. Leave the rest at 32768.
+- Without spanning tree, two parallel links between two switches in one broadcast domain are a loop: broadcasts circulate forever. With it, one link is blocked until the other fails.
+
+## Read the state
+
+```
+show spanning-tree
+```
+
+- Prints the bridge id, the root id (and the root port and path cost, or "this bridge is the root"), the timers, then one row per port: `Name Role State Cost Prio Designated`.
+- REST: `GET /v1/spanning-tree` (same data as JSON; `enabled: false` and no ports when the mode is not `rstp`).
+- `nos-stpd is not running` means the daemon is down; `spanning-tree is disabled` means the mode is not `rstp`.
+
+| Role | Meaning |
+|------|---------|
+| `root` | The port toward the root bridge; at most one per non-root bridge |
+| `designated` | The port that sends the best BPDUs on its segment |
+| `alternate` | A backup path to the root through another bridge; takes over within about a second on a point-to-point link |
+| `backup` | A second port of this bridge on a segment it already serves |
+| `disabled` | No carrier, or not usable |
+
+| State | Meaning |
+|-------|---------|
+| `discarding` | No learning, no forwarding (the kernel's blocking) |
+| `learning` | Learns source MACs, does not forward |
+| `forwarding` | Normal operation |
+
+- `Designated` is the bridge id and port id (`priority.number`) the segment is led by; `-` for a disabled port.
+- A port is discarding right after start-up or a topology change, until the handshake with its neighbour finishes (about a second between RSTP switches, up to `2 * forward-delay` toward a legacy STP one).
 
 ## Configure the bridge
 
@@ -104,7 +143,7 @@ A multi-homed segment must never become a root or transit port of the spanning t
 ## Verify
 
 - `show config` prints what is set; the transaction diff shows what a commit would change.
-- There is no `show spanning-tree` yet: the daemon does not exist.
-- The bounds come from the 802.1Q-2022 tables for the bridge and port parameters (Table 13-5 for the timers and counters); the standard is paywalled and was not available while writing this page, so re-check the ranges against it when `nos-stpd` lands.
+- `show spanning-tree` shows what the daemon computed (above).
+- The bounds come from the 802.1Q-2022 tables for the bridge and port parameters (Table 13-5 for the timers and counters); the standard is paywalled and was not available while writing this page, so re-check the ranges against it.
 
 Related: [L2 switching](l2-switching.md), [Port aggregation and LACP](port-aggregation-lacp.md), [EVPN/VXLAN](evpn-vxlan.md).

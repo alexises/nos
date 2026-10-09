@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
+use nos_proto::{StpRole, StpState};
 use reqwest::Method;
 
 use crate::consts::*;
@@ -1146,6 +1147,14 @@ pub async fn stp_failsafe(w: &mut World) -> anyhow::Result<()> {
     a.established().await
 }
 
+/// `GET /v1/spanning-tree` (#328).
+async fn stp_summary(r: &Router) -> anyhow::Result<nos_proto::StpSummary> {
+    let body = r
+        .rest_expect(Method::GET, "/v1/spanning-tree", None, 200)
+        .await?;
+    Ok(serde_json::from_str(&body)?)
+}
+
 /// `key`'s value on the latest line matching `pattern`.
 fn last_value(r: &Router, pattern: &str, key: &str) -> Option<String> {
     let line = r.logs.last(pattern)?;
@@ -1241,6 +1250,24 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
         );
     }
 
+    // #328: `GET /v1/spanning-tree` on both routers agrees with the logs.
+    let (sa, sb) = (stp_summary(a).await?, stp_summary(b).await?);
+    if !sa.enabled || sa.root_id != sb.root_id || sa.root_id != sa.bridge_id {
+        bail!("summaries disagree on the root (router-a has priority 4096): {sa:?} vs {sb:?}");
+    }
+    if sa.root_port.is_some() || sb.root_port.is_none() {
+        bail!("only router-b has a root port: {sa:?} vs {sb:?}");
+    }
+    let blocked = sa
+        .ports
+        .iter()
+        .chain(&sb.ports)
+        .filter(|p| p.role == StpRole::Alternate && p.state == StpState::Discarding)
+        .count();
+    if blocked != 1 || sa.ports.len() != 2 || sb.ports.len() != 2 {
+        bail!("want exactly one alternate/discarding port: {sa:?} vs {sb:?}");
+    }
+
     // No BPDU storm: a hello is 2s, so a 10s summary is ~5 per port.
     for r in routers {
         for p in ["eth1", "eth2"] {
@@ -1279,6 +1306,13 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
         base_takeover,
         1000,
     )?;
+    let sb = stp_summary(b).await?;
+    let took_over = sb.ports.iter().find(|p| p.name == alt_if);
+    if !took_over.is_some_and(|p| p.role == StpRole::Root && p.state == StpState::Forwarding)
+        || sb.root_port.as_deref() != Some(alt_if)
+    {
+        bail!("router-b's {alt_if} should be the forwarding root port: {sb:?}");
+    }
 
     // The link comes back: reconverge to exactly one blocking port.
     w.set_link("router-b", root_if, true).await?;

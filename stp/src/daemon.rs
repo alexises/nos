@@ -24,6 +24,7 @@ use crate::interface_client::Push;
 use crate::link;
 use crate::link_client::{gate, Gate, LinkTable};
 use crate::ports::Plan;
+use crate::server::Snapshot;
 
 const TICK: Duration = Duration::from_secs(1);
 /// Seconds between the per-port BPDU receive summaries.
@@ -54,12 +55,15 @@ struct Daemon {
     push_tx: mpsc::Sender<Push>,
     frames_tx: mpsc::Sender<(String, Vec<u8>)>,
     ticks: u32,
+    /// What `show spanning-tree` serves; refreshed after every event.
+    snapshot: Snapshot,
 }
 
 pub async fn run(
     mut plan_rx: watch::Receiver<Option<Plan>>,
     mut links_rx: watch::Receiver<LinkTable>,
     push_tx: mpsc::Sender<Push>,
+    snapshot: Snapshot,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let (frames_tx, mut frames_rx) = mpsc::channel(256);
@@ -73,6 +77,7 @@ pub async fn run(
         push_tx,
         frames_tx,
         ticks: 0,
+        snapshot,
     };
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -92,6 +97,7 @@ pub async fn run(
             _ = tick.tick() => d.on_tick().await,
             _ = shutdown.changed() => if *shutdown.borrow() { break },
         }
+        d.publish();
     }
     for (_, io) in d.io.drain() {
         io.reader.abort();
@@ -117,6 +123,16 @@ async fn read_loop(socket: Arc<L2Socket>, name: String, tx: mpsc::Sender<(String
 }
 
 impl Daemon {
+    /// Disabled mode (no engine) answers `enabled: false`.
+    fn publish(&self) {
+        let s = self
+            .engine
+            .as_ref()
+            .map(Engine::summary)
+            .unwrap_or_default();
+        *self.snapshot.write().expect("snapshot lock") = s;
+    }
+
     async fn apply_plan(&mut self, plan: Option<Plan>) {
         if plan == self.plan {
             return;

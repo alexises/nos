@@ -14,6 +14,7 @@ pub mod timers;
 pub mod vector;
 
 // The daemon (#327).
+pub mod authz;
 pub mod config_client;
 pub mod daemon;
 pub mod engine;
@@ -23,6 +24,7 @@ pub mod link;
 pub mod link_client;
 pub mod ports;
 pub mod reconcile;
+pub mod server;
 pub mod watchdog_client;
 
 #[cfg(test)]

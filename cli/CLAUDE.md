@@ -22,7 +22,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `spec.rs` | `COMMAND_SPECS`: one `cmd!` row per show/shell command (tokens, `Doc`, `Availability`, `Command`), so the parser can't accept a command without its doc. `CONFIG_VERBS` documents `edit`/`set`/`delete` |
 | `completer.rs`, `help_menu.rs` | `NosCompleter` (Tab and live `?`, one injected config source for the tree and `*Name` slots), `HelpMenu` (the `?` menu) |
 | `client.rs` | One-shot calls to `nos-configd`, plus `subscribe`, the one long-lived exception |
-| `*_client.rs` | `watchdog`, `rib`, `interface`, `log` (also long-lived `tail`), `bgp`, `lacp`, `lldp`, `bfd`, `fdb`, `ospf`, `ospfv3`: one-shot query per daemon |
+| `*_client.rs` | `watchdog`, `rib`, `interface`, `log` (also long-lived `tail`), `bgp`, `lacp`, `lldp`, `stp`, `bfd`, `fdb`, `ospf`, `ospfv3`: one-shot query per daemon |
 | `format.rs` | Human-readable rendering. `render_config`/`render_transaction` are one call into `nos_proto::cli::render`, so a field can't be missing (`tests/render.rs`). `render_diff` is the only ANSI emitter (hand-rolled); `render_log_entry` the only `chrono` use |
 
 ## Commands

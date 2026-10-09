@@ -123,7 +123,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 
 ## Daemon (`nos-stpd`, #327)
 
-- One fixed process, supervised like `nos-lldpd`; `--listen-socket` is accepted but nothing listens on it until the status server (#328).
+- One fixed process, supervised like `nos-lldpd`; `--listen-socket` serves the status query (below).
 - Ports: a physical `Interface` or a `PortAggregate` (the bond, never a member) with a `switching_profile`; loopbacks, VXLAN and L3-only interfaces are not ports. Only mode `rstp` runs; `disabled`, `mstp` and `rapid-pvst` leave the daemon idle.
 - Task layout, all in `stp/src/daemon.rs`: one actor owns the bridge core and every BPDU socket; a reader task per port, the link table, plan changes and a 1 s tick are events to it. A changed plan rebuilds the bridge (the protocol restarts, sockets of ports that stay are kept).
 - The BPDU socket (`L2Socket::open_bpdu`) is `ETH_P_ALL` with a classic BPF for the group MAC plus LLC `42 42 03`. A protocol-bound socket runs after tc ingress and the bridge `rx_handler`, where the trap from #326 drops the frame; the tap runs before. It sees its own outgoing frames, so the source MAC is filtered.
@@ -144,5 +144,13 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 | `port carrier up` / `port carrier lost` | `port` |
 | `bpdu rx` | `port`, `count` received in the last 10 s, every 10 s per enabled port |
 
+## Status query (#328)
+
+- Path: `nos show spanning-tree` / `GET /v1/spanning-tree` resolve `ServiceRef::Stp` through the watchdog, then send `StpRequest::GetSummary`; the reply is one `StpEvent::Summary(StpSummary)`.
+- `stp/src/server.rs` answers from an `Arc<RwLock<StpSummary>>` snapshot. The daemon actor rewrites it after every event (plan change, BPDU, link change, tick) from `Engine::summary()`; no engine (mode not `rstp`) publishes the default, `enabled: false`.
+- `stp/src/authz.rs`: `allowed(role, &StpRequest)` lists `User` and `Restd`, no wildcard arm; any other role is disconnected with a `warn!`.
+- Roles and states are the `StpRole`/`StpState` enums, so the CLI and REST print the same words. Bridge and port ids are display strings (`8000.02:aa:bb:cc:dd:ee`, `128.1`).
+- Root path cost is the root port's received cost plus its own; the timers are the root's (`rootTimes`), what the bridge actually runs.
+- `StpSummary` only grows by appended fields (per-instance MSTP views come with #323).
 - Read the state of a running lab: `cargo run -p nos-e2e -- logs 200` and look at the last `port state changed` per port.
 - Limits: no in-place update of priority, timers or cost (a config change restarts the protocol); a link whose speed changes without a carrier change keeps its old cost.
