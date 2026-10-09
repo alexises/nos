@@ -653,6 +653,7 @@ async fn show_bfd_sessions_filters_by_peer_and_rejects_a_bad_one() {
                 .filter(|(p, _)| peer.is_none_or(|q| q.to_string() == *p))
                 .map(|(p, n)| nos_proto::BfdSessionView {
                     key: nos_proto::SessionKey {
+                        aggregate: None,
                         table: "rt1".into(),
                         peer: p.parse().unwrap(),
                         local: None,

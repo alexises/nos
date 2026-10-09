@@ -25,14 +25,14 @@ pub fn payload(disc: u32, seq: u32) -> [u8; 8] {
     p
 }
 
-fn sum(data: &[u8], acc: u32) -> u32 {
+pub(crate) fn sum(data: &[u8], acc: u32) -> u32 {
     // An odd last byte is the high half of a zero-padded word.
     data.chunks(2).fold(acc, |a, c| {
         a + (u32::from(c[0]) << 8 | c.get(1).map_or(0, |b| u32::from(*b)))
     })
 }
 
-fn fold(mut acc: u32) -> u16 {
+pub(crate) fn fold(mut acc: u32) -> u16 {
     while acc > 0xffff {
         acc = (acc & 0xffff) + (acc >> 16);
     }
@@ -41,7 +41,7 @@ fn fold(mut acc: u32) -> u16 {
 
 /// UDP checksum over the pseudo header, the UDP header (checksum field as
 /// given) and the payload.
-fn udp_checksum(src: IpAddr, dst: IpAddr, udp: &[u8]) -> u16 {
+pub(crate) fn udp_checksum(src: IpAddr, dst: IpAddr, udp: &[u8]) -> u16 {
     let len = u32::try_from(udp.len()).unwrap_or(0);
     let mut acc = match (src, dst) {
         (IpAddr::V4(s), IpAddr::V4(d)) => sum(&d.octets(), sum(&s.octets(), 0)) + 17 + len,

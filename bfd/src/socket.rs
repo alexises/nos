@@ -36,11 +36,12 @@ use tracing::{debug, warn};
 
 use crate::echo;
 use crate::manager::{Demux, Net};
+use crate::micro;
 use crate::neigh;
 use crate::packet;
 use crate::session::{rand_u32, EchoPath, EchoTx, Looped, Tx};
 use crate::watchdog_client;
-use nos_l2_socket::L2Unicast;
+use nos_l2_socket::{L2Socket, L2Unicast};
 
 pub const BFD_PORT: u16 = 3784;
 /// RFC 5883 §2: multihop control packets.
@@ -54,6 +55,8 @@ const fn port(multihop: bool) -> u16 {
     }
 }
 const TTL: u32 = 255;
+/// Largest micro-BFD frame worth reading (Ethernet + IP + UDP + a 24-byte-plus-auth PDU).
+const RX_FRAME: usize = 256;
 
 fn ifindex(name: &str) -> u32 {
     CString::new(name)
@@ -369,6 +372,64 @@ async fn echo_rx_loop(
     }
 }
 
+/// One RFC 7130 micro-BFD session's transport: control packets leave the LAG
+/// member in an IP/UDP frame to the dedicated multicast MAC; two receive
+/// tasks (untagged, and 802.1p tag 0) feed the `Demux`. The member's own
+/// socket is not affected by the bond enslaving it (it is bound to the
+/// member's ifindex and the bond's `rx_handler` re-targets the skb after the
+/// packet tap: `nos-e2e`'s `micro-bfd` phase proves it).
+struct MicroTx {
+    sock: Arc<L2Socket>,
+    local: IpAddr,
+    peer: IpAddr,
+    sport: u16,
+    rx: Vec<tokio::task::AbortHandle>,
+}
+
+impl Tx for MicroTx {
+    fn send(&self, bytes: &[u8]) -> io::Result<()> {
+        let ip = micro::build_frame(self.local, self.peer, self.sport, bytes)
+            .ok_or_else(|| io::Error::other("local and peer address families differ"))?;
+        self.sock.send(&ip)
+    }
+}
+
+impl Drop for MicroTx {
+    fn drop(&mut self) {
+        for t in &self.rx {
+            t.abort();
+        }
+    }
+}
+
+async fn micro_rx_loop(
+    sock: Arc<L2Socket>,
+    tagged: bool,
+    member: String,
+    local: IpAddr,
+    demux: Demux,
+) {
+    loop {
+        let payload = match sock.recv().await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(member = %member, error = %e, "bfd micro receive failed");
+                return;
+            }
+        };
+        let ip = if tagged {
+            micro::untag_priority(&payload)
+        } else {
+            Some(&payload[..])
+        };
+        // Addressed to the bond's address; TTL 255 is `parse_frame`'s.
+        if let Some(f) = ip.and_then(micro::parse_frame).filter(|f| f.dst == local) {
+            let ok = demux.route_micro(&member, f.src, f.pdu);
+            debug!(member = %member, peer = %f.src, delivered = ok, "bfd micro packet received");
+        }
+    }
+}
+
 type RxTasks = HashMap<(String, bool, bool), (u32, JoinHandle<()>)>;
 
 /// The real transport. Owns the receive sockets and feeds the `Demux`.
@@ -452,6 +513,46 @@ impl UdpNet {
         })
     }
 
+    fn open_micro(&self, key: &SessionKey) -> io::Result<Arc<dyn Tx>> {
+        let member = key
+            .interface
+            .clone()
+            .ok_or_else(|| io::Error::other("micro-BFD session without a member"))?;
+        let local = key
+            .local
+            .ok_or_else(|| io::Error::other("micro-BFD session without a source address"))?;
+        let ethertype = if local.is_ipv4() { 0x0800 } else { 0x86dd };
+        let ip = Arc::new(
+            L2Socket::open(&member, ethertype, micro::GROUP, RX_FRAME)?
+                .accept_own_unicast()
+                .udp_dst_port(micro::PORT)?,
+        );
+        // ponytail: no kernel filter on the tagged socket: it wakes for every
+        // VLAN frame of the member (RFC 7130 §2.3 wants tag 0 received).
+        let tag =
+            Arc::new(L2Socket::open(&member, 0x8100, micro::GROUP, RX_FRAME)?.accept_own_unicast());
+        let rx = [(ip.clone(), false), (tag, true)]
+            .into_iter()
+            .map(|(sock, tagged)| {
+                tokio::spawn(micro_rx_loop(
+                    sock,
+                    tagged,
+                    member.clone(),
+                    local,
+                    self.demux.clone(),
+                ))
+                .abort_handle()
+            })
+            .collect();
+        Ok(Arc::new(MicroTx {
+            sock: ip,
+            local,
+            peer: key.peer,
+            sport: 49152 + u16::try_from(rand_u32() % 16384).unwrap_or(0),
+            rx,
+        }))
+    }
+
     /// Starts the table's receive socket, or restarts it when the VRF device
     /// behind it was recreated (a `nos-ribd` restart): the old socket is
     /// bound to the deleted device's index.
@@ -479,6 +580,9 @@ impl UdpNet {
 #[async_trait]
 impl Net for UdpNet {
     async fn open(&self, key: &SessionKey) -> io::Result<Arc<dyn Tx>> {
+        if key.aggregate.is_some() {
+            return self.open_micro(key);
+        }
         let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
             .await
             .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;

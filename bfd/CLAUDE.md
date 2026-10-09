@@ -13,6 +13,9 @@ The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fix
 | `manager` | Session table, refcount per client, `Demux` (rx packet to session), `Net` trait |
 | `server` | `--listen-socket`: `Register` streams `BfdEvent::State`, `GetSessions` replies once |
 | `echo` | Echo packet build/parse (IP + UDP 3785, TTL 255, source = destination) |
+| `micro` | RFC 7130 IP/UDP 6784 frame build/parse (pure), 802.1p tag-0 untagging |
+| `micro_sessions` | `wanted(&Config)` (one session per aggregate member), `Micro::apply`, `UpSets` (push-on-change), config follow loop |
+| `config_client`, `interface_client` | `nos-configd` diff stream; the `PushBfdMembers` connection to `nos-interfaced` (cached, resent on reconnect) |
 | `neigh` | The neighbour's MAC from rtnetlink (read-only) |
 | `socket` | UDP 3784/4784 sockets and the Echo `AF_PACKET` transport (`UdpNet`); excluded from coverage, `nos-e2e`'s `bfd` and `bfd-echo` phases are its test |
 | `watchdog_client` | Broker lookups, the table's VRF device via `nos-ribd` `GetVrfName` |
@@ -29,11 +32,12 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 - Echo (#290, single-hop, affiliated only): `Core::sync_echo` toggles it and Desired Min TX goes to 1 s through `Timers::change`; never write the neighbour table; echoes are received at the packet layer (the IP stack drops our own source). No demand mode. Multihop (#287): UDP 4784, TTL checked per session in `Demux::route`; no destination address in the zero-discriminator demux (`ponytail:` in `manager.rs`).
 - Unaffiliated echo (#291, RFC 9747): `echo-mode unaffiliated` makes Echo the whole session. `Core` ignores Control, sends encoded Control packets as the Echo payload and feeds the FSM its own looped state; no 3784 socket, no `Demux` slot (`NoTx`); only TTL 254 accepted. The neighbour is resolved by an empty UDP datagram (`neigh_loop`). `auth` ignored (`ponytail:`).
 - Desired Min TX is floored at 1 s while not Up by `Timers` itself; reaching Up needs no `change`.
-- The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` subscribes to no config.
+- The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` follows only `Interfaces`/`PortAggregates`/`BfdProfiles` diffs, for micro-BFD.
 - A client's connection drop releases its sessions; the last client drops the session. Request-side EOF ends the connection (`ponytail:` in `server.rs`).
 - A TX socket must bind an explicit source address (`socket::local_for`): bound to a VRF with a wildcard source the kernel sends from 0.0.0.0.
 - RX: UDP 3784 per (table, family) bound to the VRF; TTL must be exactly 255. Demux is by Your Discriminator, else (table, source address): no interface in the key (`ponytail:` in `manager.rs`).
 - `BfdEvent::State.control_plane_independent` is the C bit at both ends (`nos-bfdd` always sets its own; the remote's is from the last received packet): BGP flushes routes on Down only when it is set (RFC 5882 §4.3).
-- Log anchors the e2e relies on: `bfd session up peer=`, `bfd session down peer= diag=`, `bfd echo active peer=`.
+- Micro-BFD (#299, RFC 7130): a `SessionKey` with `aggregate` set (`interface` = member, `table` empty) is a member session; `socket::MicroTx` runs on the member itself via `nos-l2-socket` (UDP 6784, dst MAC `01-00-5E-90-00-01`), `Demux::route_micro` requires the arrival member, no Echo. The aggregate's Up set goes to `nos-interfaced` whole and only on change; no push = not Up. `ponytail:` sessions exist for every member, not only LACP Distributing/Standby.
+- Log anchors the e2e relies on: `bfd session up aggregate= member= peer=` (micro), `bfd session up peer=`, `bfd session down peer= diag=`, `bfd echo active peer=`.
 
 Details: [docs/internals/bfd.md](../docs/internals/bfd.md).

@@ -65,6 +65,7 @@ pub struct Book {
 impl Book {
     fn key(&self, peer: IpAddr, want: &Want) -> SessionKey {
         SessionKey {
+            aggregate: None,
             table: self.table.clone(),
             peer,
             local: want.local,
@@ -273,6 +274,7 @@ mod tests {
 
     fn key(table: &str, peer: &str) -> SessionKey {
         SessionKey {
+            aggregate: None,
             table: table.into(),
             peer: ip(peer),
             local: Some(ip("192.0.2.254")),

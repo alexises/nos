@@ -432,6 +432,10 @@ pub const OSPFV3_BROADCAST_ADDRESS_C: &str = "2001:db8:3::3/64";
 
 /// Distinct from `port-aggregate`'s "bond1" so the two phases' log greps never collide.
 pub const LACP_AGGREGATE: &str = "bond-lacp";
+/// `micro-bfd`'s aggregate and the two routers' bond addresses (a /30 no other phase uses).
+pub const MICRO_AGGREGATE: &str = "bond-micro";
+pub const MICRO_ADDRESS_A: &str = "203.0.113.201/30";
+pub const MICRO_ADDRESS_B: &str = "203.0.113.202/30";
 pub const NETNS_HELPER_IMAGE: &str = "nos-verify-netns-helper:local";
 /// Debian + python3 (raw `AF_PACKET` injection, `lacp`'s Marker PDU).
 pub const PYTHON_HELPER_IMAGE: &str = "nos-verify-python-helper:local";

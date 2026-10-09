@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_bfd::manager::{Demux, Manager};
-use nos_bfd::{server, socket::UdpNet};
+use nos_bfd::micro_sessions::{self, Micro};
+use nos_bfd::{interface_client, server, socket::UdpNet, watchdog_client};
 use nos_log_client::ForwardingLayer;
 use nos_pki::Identity;
-use nos_proto::{DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -50,17 +51,35 @@ async fn main() -> anyhow::Result<()> {
             "nos-bfdd",
             args.log_socket.clone(),
             identity.clone(),
-            shutdown_rx,
+            shutdown_rx.clone(),
         ))
         .init();
     info!(listen_socket = %args.listen_socket.display(), "nos-bfdd starting");
 
     let demux = Demux::default();
-    let net = UdpNet::new(args.watchdog_socket, demux.clone());
+    let net = UdpNet::new(args.watchdog_socket.clone(), demux.clone());
     let manager = Manager::new(net, demux);
-    let server_task = server::start(&args.listen_socket, manager, &identity)
+    let server_task = server::start(&args.listen_socket, manager.clone(), &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start bfd IPC server"))
         .context("starting bfd IPC server")?;
+
+    // RFC 7130 micro-BFD: the only config this daemon follows. Its sessions
+    // go through the same manager; their Up sets go to nos-interfaced.
+    let (push_tx, push_rx) = mpsc::channel(16);
+    let micro = Micro::new(manager.clone(), push_tx);
+    let (watchdog, mut sd) = (args.watchdog_socket.clone(), shutdown_rx.clone());
+    let micro_task = tokio::spawn(async move {
+        if let Some(config) =
+            watchdog_client::resolve_with_retry(&watchdog, ServiceRef::Config, &mut sd).await
+        {
+            micro_sessions::run(config, micro, sd).await;
+        }
+    });
+    let interface_task = tokio::spawn(interface_client::run(
+        args.watchdog_socket.clone(),
+        push_rx,
+        shutdown_rx.clone(),
+    ));
 
     wait_for_shutdown_signal()
         .await
@@ -68,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
     info!("shutdown signal received");
     let _ = shutdown_tx.send(true);
     server_task.abort();
+    let _ = tokio::join!(micro_task, interface_task);
     info!("shutting down");
     Ok(())
 }

@@ -3654,6 +3654,13 @@
       "SessionKey": {
         "description": "What identifies one BFD session: a routing table, the remote system and\nthe path to it (RFC 5881 single-hop is bound to an interface, RFC 5883\nmultihop is not).",
         "properties": {
+          "aggregate": {
+            "description": "RFC 7130 micro-BFD: the `PortAggregate` this session probes a member of\n(`interface` is the member, `table` is empty). Appended last for postcard.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "interface": {
             "type": [
               "string",

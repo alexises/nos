@@ -832,6 +832,7 @@ pub struct Args {
     /// If set (requires `--port-aggregate`), runs micro-BFD with this
     /// `bfd-profile` on the aggregate's members (`PortAggregateOp::SetBfd`);
     /// needs `--port-aggregate-bfd-peer` and a bond address at commit time.
+    /// `fast` also creates that profile (`--bfd-interval-ms` intervals).
     #[arg(long)]
     pub port_aggregate_bfd: Option<String>,
 
@@ -1205,6 +1206,17 @@ pub struct Args {
     pub ospfv3_broadcast_domain_svi_address: Option<IpNet>,
 }
 
+impl Args {
+    /// Whether any flag needs `bfd-profile fast` (with `--bfd-interval-ms`).
+    fn wants_bfd_profile(&self) -> bool {
+        self.bfd_static
+            || self.bfd_bgp
+            || self.ospf_bfd
+            || self.ospfv3_bfd
+            || self.port_aggregate_bfd.as_deref() == Some(BFD_PROFILE)
+    }
+}
+
 /// Builds the ordered `ConfigOp` list for one provisioning invocation — pure,
 /// so a caller can apply it over IPC (this crate's bin) or locally onto a
 /// `Config` (`nos-e2e`, which then PUTs the result over the REST API).
@@ -1538,7 +1550,7 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
                 .map(|a| serde_json::to_string(a).expect("BfdAuth serializes")),
         ));
     }
-    if !(args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd) {
+    if !args.wants_bfd_profile() {
         return v;
     }
     let profile = |field: &str| {
@@ -1652,7 +1664,7 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             p.auth.clone_from(&args.bfd_auth);
         }
     }
-    if !(args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd) {
+    if !args.wants_bfd_profile() {
         return;
     }
     for p in config
@@ -1788,7 +1800,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }),
     ]);
 
-    if args.bfd_static || args.bfd_bgp || args.ospf_bfd || args.ospfv3_bfd {
+    if args.wants_bfd_profile() {
         ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
             name: BFD_PROFILE.to_string(),
         }));

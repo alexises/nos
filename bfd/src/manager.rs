@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::micro;
 use crate::packet::{self, Packet};
 use crate::session::{self, Core, EchoPath, Status, Tx};
 
@@ -51,6 +52,17 @@ struct Slot {
     multihop: bool,
     /// RFC 5883 §5 / GTSM floor from the profile (multihop only).
     min_ttl: u8,
+    /// RFC 7130 §2.2: a micro-BFD session only takes packets that arrived on
+    /// its member link.
+    member: Option<String>,
+}
+
+/// The `by_peer` table half of `key`: the routing table, or a member's own.
+fn peer_table(key: &SessionKey) -> String {
+    match (&key.aggregate, &key.interface) {
+        (Some(_), Some(member)) => micro::demux_table(member),
+        _ => key.table.clone(),
+    }
 }
 
 /// RFC 5881 §5: single-hop packets must arrive with TTL 255; RFC 5883 §5:
@@ -86,10 +98,11 @@ impl Demux {
             tx: tx.clone(),
             multihop: key.multihop,
             min_ttl,
+            member: key.aggregate.as_ref().and(key.interface.clone()),
         };
         t.by_disc.insert(disc, slot.clone());
         t.by_peer
-            .insert((key.table.clone(), key.peer, key.multihop), slot);
+            .insert((peer_table(key), key.peer, key.multihop), slot);
     }
 
     fn set_min_ttl(&self, disc: u32, key: &SessionKey, min_ttl: u8) {
@@ -99,7 +112,7 @@ impl Demux {
         }
         if let Some(s) = t
             .by_peer
-            .get_mut(&(key.table.clone(), key.peer, key.multihop))
+            .get_mut(&(peer_table(key), key.peer, key.multihop))
         {
             s.min_ttl = min_ttl;
         }
@@ -108,8 +121,7 @@ impl Demux {
     fn remove(&self, disc: u32, key: &SessionKey) {
         let mut t = self.0.lock().unwrap();
         t.by_disc.remove(&disc);
-        t.by_peer
-            .remove(&(key.table.clone(), key.peer, key.multihop));
+        t.by_peer.remove(&(peer_table(key), key.peer, key.multihop));
     }
 
     /// Decodes `data` (received on `table`'s single-hop or `multihop` socket
@@ -118,6 +130,31 @@ impl Demux {
     pub fn route(
         &self,
         table: &str,
+        src: IpAddr,
+        multihop: bool,
+        ttl: Option<u8>,
+        data: &[u8],
+    ) -> bool {
+        self.route_on(table, None, src, multihop, ttl, data)
+    }
+
+    /// A micro-BFD packet (already TTL-checked by `micro::parse_frame`) that
+    /// arrived on LAG member `member`.
+    pub fn route_micro(&self, member: &str, src: IpAddr, data: &[u8]) -> bool {
+        self.route_on(
+            &micro::demux_table(member),
+            Some(member),
+            src,
+            false,
+            Some(255),
+            data,
+        )
+    }
+
+    fn route_on(
+        &self,
+        table: &str,
+        member: Option<&str>,
         src: IpAddr,
         multihop: bool,
         ttl: Option<u8>,
@@ -136,7 +173,7 @@ impl Demux {
         } else {
             t.by_disc
                 .get(&p.your_discriminator)
-                .filter(|s| s.multihop == multihop)
+                .filter(|s| s.multihop == multihop && s.member.as_deref() == member)
         };
         let Some(s) = session else { return false };
         if !ttl_ok(multihop, ttl, s.min_ttl) {
@@ -275,7 +312,7 @@ impl Manager {
                     }
                 }
             };
-            let echo = if k.multihop {
+            let echo = if k.multihop || k.aggregate.is_some() {
                 None
             } else {
                 net.open_echo(&k, disc, false).await
@@ -361,7 +398,13 @@ impl Manager {
                 }
             })
             .collect();
-        all.sort_by(|a, b| (&a.key.table, a.key.peer).cmp(&(&b.key.table, b.key.peer)));
+        all.sort_by(|a, b| {
+            (&a.key.table, a.key.peer, &a.key.interface).cmp(&(
+                &b.key.table,
+                b.key.peer,
+                &b.key.interface,
+            ))
+        });
         all
     }
 }
@@ -416,6 +459,7 @@ pub(crate) mod tests {
 
     pub fn key(peer: &str) -> SessionKey {
         SessionKey {
+            aggregate: None,
             table: "rt1".into(),
             peer: peer.parse().unwrap(),
             local: None,

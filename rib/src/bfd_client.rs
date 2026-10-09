@@ -61,6 +61,7 @@ impl Book {
     /// Interface resolved by the peer address alone.
     fn key(&self, peer: IpAddr, multihop: bool) -> SessionKey {
         SessionKey {
+            aggregate: None,
             table: self.table.clone(),
             peer,
             local: None,
@@ -268,6 +269,7 @@ mod tests {
 
     fn key(table: &str, peer: &str) -> SessionKey {
         SessionKey {
+            aggregate: None,
             table: table.into(),
             peer: ip(peer),
             local: None,

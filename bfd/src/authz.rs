@@ -20,6 +20,7 @@ mod tests {
     #[test]
     fn every_role_against_every_request() {
         let key = SessionKey {
+            aggregate: None,
             table: "rt1".into(),
             peer: "192.0.2.1".parse().unwrap(),
             local: None,

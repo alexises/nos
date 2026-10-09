@@ -606,6 +606,167 @@ async fn lacp_passive(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<(
     Ok(())
 }
 
+/// Polls `GET /v1/bfd/sessions` on `r` until the aggregate's micro-BFD
+/// sessions are exactly `want` (member, state) pairs.
+async fn micro_sessions_are(r: &Router, want: &[(&str, &str)], secs: u64) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..secs * 5 {
+        last = r
+            .rest_expect(Method::GET, "/v1/bfd/sessions", None, 200)
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&last)?;
+        let mut got: Vec<(String, String)> = v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|s| s["key"]["aggregate"] == MICRO_AGGREGATE)
+            .map(|s| {
+                (
+                    s["key"]["interface"].as_str().unwrap_or("").to_string(),
+                    s["state"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        got.sort();
+        if got
+            .iter()
+            .map(|(m, s)| (m.as_str(), s.as_str()))
+            .eq(want.iter().copied())
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    bail!(
+        "{}: micro-bfd sessions never became {want:?}: {last}",
+        r.name()
+    )
+}
+
+/// `micro-bfd` (RFC 7130): a static (`xor`) aggregate over the `lacp` phase's
+/// veth pairs with `bfd fast` (100 ms x 3) on both routers. A member is
+/// enslaved only while its micro-BFD session is Up; the sessions run on the
+/// member itself, so they must keep receiving once it is enslaved (the packet
+/// socket is bound to the member, the bond's rx_handler re-targets the skb).
+/// Dropping UDP 6784 on router-a's eth2 takes that member out of the bond
+/// within the detection time, eth1 untouched; lifting it puts it back.
+pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let enslaved = |iface: &str| format!("enslaved interface to bond interface={iface} bond=bond");
+    let released =
+        |iface: &str| format!("removed interface from master enslavement interface={iface}");
+    let mut enslave_base = Vec::new();
+    for r in [a, b] {
+        for iface in ["eth1", "eth2"] {
+            enslave_base.push(r.count(&enslaved(iface)));
+        }
+    }
+    w.link_veths().await?;
+    let flags = |addr: &str, peer: &str| {
+        strings(&[
+            "--port-aggregate",
+            MICRO_AGGREGATE,
+            "--port-aggregate-address",
+            addr,
+            "--port-aggregate-bfd",
+            "fast",
+            "--port-aggregate-bfd-peer",
+            peer,
+            "--enslave-interface-into-port-aggregate",
+            "eth1",
+            "--enslave-interface-into-port-aggregate",
+            "eth2",
+        ])
+    };
+    let (ip_a, ip_b) = (
+        MICRO_ADDRESS_A.split('/').next().unwrap_or_default(),
+        MICRO_ADDRESS_B.split('/').next().unwrap_or_default(),
+    );
+    a.provision(&flags(MICRO_ADDRESS_A, ip_b)).await?;
+    b.provision(&flags(MICRO_ADDRESS_B, ip_a)).await?;
+
+    log("micro-bfd sessions reach Up on every member, then the members are enslaved");
+    for (r, peer) in [(a, ip_b), (b, ip_a)] {
+        for iface in ["eth1", "eth2"] {
+            r.wait(&format!(
+                "bfd session up aggregate={MICRO_AGGREGATE} member={iface} peer={peer}"
+            ))
+            .await?;
+        }
+    }
+    let mut base = enslave_base.into_iter();
+    for r in [a, b] {
+        for iface in ["eth1", "eth2"] {
+            r.wait_new(&enslaved(iface), base.next().unwrap_or(0), 60)
+                .await?;
+        }
+    }
+
+    // The risk of the whole design: with both members enslaved the sessions
+    // must stay Up, i.e. frames still reach the member-bound packet sockets.
+    log("enslaved members keep receiving: the sessions stay Up");
+    let down = format!("bfd session down aggregate={MICRO_AGGREGATE}");
+    let down_base = a.count(&down);
+    a.assert_quiet(&down, down_base, 5).await?;
+    micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
+    micro_sessions_are(b, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
+
+    log("dropping UDP 6784 on router-a's eth2: it leaves the bond, eth1 stays");
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    let up_eth2 = format!("bfd session up aggregate={MICRO_AGGREGATE} member=eth2");
+    let down_eth2 = format!("{down} member=eth2");
+    let (down2, rel2, rel1, up2, ens2) = (
+        a.count(&down_eth2),
+        a.count(&released("eth2")),
+        a.count(&released("eth1")),
+        a.count(&up_eth2),
+        a.count(&enslaved("eth2")),
+    );
+    super::bfd::tc(&w.dock, &["qdisc", "add", "dev", "eth2", "clsact"]).await?;
+    let dropped = super::bfd::tc(
+        &w.dock,
+        &[
+            "filter", "add", "dev", "eth2", "ingress", "protocol", "ip", "u32", "match", "ip",
+            "protocol", "17", "0xff", "match", "ip", "dport", "6784", "0xffff", "action", "drop",
+        ],
+    )
+    .await;
+    let result = async {
+        dropped?;
+        a.wait_new(&down_eth2, down2, 10).await?;
+        a.wait_new(&released("eth2"), rel2, 10).await?;
+        micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Down")], 10).await?;
+        a.assert_quiet(&released("eth1"), rel1, 2).await
+    }
+    .await;
+    // Lift it whatever happened, so a failure does not leave the lab broken.
+    let lifted = super::bfd::tc(&w.dock, &["qdisc", "del", "dev", "eth2", "clsact"]).await;
+    result?;
+    lifted?;
+
+    log("filter lifted: eth2 is Up again and rejoins the bond");
+    a.wait_new(&up_eth2, up2, 30).await?;
+    a.wait_new(&enslaved("eth2"), ens2, 30).await?;
+    micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
+
+    log("removing the aggregate stops the sessions");
+    for r in [a, b] {
+        r.provision(&[
+            "--port-aggregate",
+            MICRO_AGGREGATE,
+            "--enslave-interface-into-port-aggregate",
+            "eth1",
+            "--enslave-interface-into-port-aggregate",
+            "eth2",
+            "--delete-port-aggregate",
+        ])
+        .await?;
+        micro_sessions_are(r, &[], 10).await?;
+    }
+    w.unlink_veths().await;
+    Ok(())
+}
+
 pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let learned_a = |extra: &str| {

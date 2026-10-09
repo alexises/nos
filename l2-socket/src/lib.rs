@@ -4,6 +4,10 @@
 //! no NOS dependencies, like `nos-tcp-auth`, so both daemons can use it
 //! without depending on each other.
 //!
+//! `L2Socket::accept_own_unicast` and `udp_dst_port` are the opt-ins of `nos-bfd`'s
+//! RFC 7130 micro-BFD (IP/UDP frames to a multicast MAC, also accepted when
+//! unicast to our own MAC); LACP/LLDP leave them off.
+//!
 //! `L2Unicast` is the second type: one interface, one ethertype, frames sent
 //! to an explicit neighbour MAC (BFD Echo, RFC 5881 §4: an IP packet addressed
 //! to ourselves, looped by the neighbour's forwarding).
@@ -109,6 +113,9 @@ pub struct L2Socket {
     ethertype: u16,
     group: [u8; 6],
     recv_buf_len: usize,
+    /// Also accept frames addressed to `own_hw_addr` (RFC 7130 §2.3: a peer
+    /// may move micro-BFD to our unicast MAC). Off for LACP/LLDP.
+    accept_own_unicast: bool,
 }
 
 impl L2Socket {
@@ -134,7 +141,23 @@ impl L2Socket {
             ethertype,
             group,
             recv_buf_len,
+            accept_own_unicast: false,
         })
+    }
+
+    /// Also receive frames addressed to this port's own MAC, not just `group`.
+    #[must_use]
+    pub fn accept_own_unicast(mut self) -> Self {
+        self.accept_own_unicast = true;
+        self
+    }
+
+    /// Kernel-filters received frames to UDP datagrams for `udp_dst_port`
+    /// (IPv4 or IPv6 `ethertype` only), so a raw IP socket does not wake for
+    /// all the port's other traffic.
+    pub fn udp_dst_port(self, udp_dst_port: u16) -> io::Result<Self> {
+        attach_udp_port_filter(self.inner.get_ref(), self.ethertype, udp_dst_port)?;
+        Ok(self)
     }
 
     /// This port's own real MAC address — this socket's Ethernet source.
@@ -168,9 +191,12 @@ impl L2Socket {
             let mut guard = self.inner.readable().await?;
             match guard.try_io(|inner| inner.get_ref().read(&mut buf)) {
                 Ok(Ok(n)) => {
-                    if let Some(payload) =
-                        payload_of_foreign_frame(&buf[..n], self.own_hw_addr, self.group)
-                    {
+                    if let Some(payload) = payload_of_foreign_frame(
+                        &buf[..n],
+                        self.own_hw_addr,
+                        self.group,
+                        self.accept_own_unicast,
+                    ) {
                         return Ok(payload.to_vec());
                     }
                 }
@@ -327,12 +353,20 @@ pub fn is_link_down(e: &io::Error) -> bool {
 }
 
 /// The payload of a received frame, or `None` for a runt, a frame not
-/// addressed to `group`, or one this port sent itself. An `AF_PACKET` socket
+/// addressed to `group` (or, with `own_unicast`, to `own`), or one this port sent itself. An `AF_PACKET` socket
 /// also sees its own *outgoing* frames; treating those as the peer's makes a
 /// port "talk to itself" and, where each receive triggers a reply, loop at
 /// line rate.
-fn payload_of_foreign_frame(frame: &[u8], own: [u8; 6], group: [u8; 6]) -> Option<&[u8]> {
-    if frame.len() < ETH_HEADER_LEN || frame[..6] != group || frame[6..12] == own {
+fn payload_of_foreign_frame(
+    frame: &[u8],
+    own: [u8; 6],
+    group: [u8; 6],
+    own_unicast: bool,
+) -> Option<&[u8]> {
+    if frame.len() < ETH_HEADER_LEN
+        || (frame[..6] != group && !(own_unicast && frame[..6] == own))
+        || frame[6..12] == own
+    {
         return None;
     }
     Some(&frame[ETH_HEADER_LEN..])
@@ -482,19 +516,42 @@ mod tests {
             f
         };
         assert_eq!(
-            payload_of_foreign_frame(&frame(GROUP, other), own, GROUP),
+            payload_of_foreign_frame(&frame(GROUP, other), own, GROUP, false),
             Some(&b"pdu"[..])
         );
         assert_eq!(
-            payload_of_foreign_frame(&frame(GROUP, own), own, GROUP),
+            payload_of_foreign_frame(&frame(GROUP, own), own, GROUP, false),
             None
         );
         // Addressed to a different group than this socket joined.
         assert_eq!(
-            payload_of_foreign_frame(&frame([0x01, 0x80, 0xC2, 0, 0, 0], other), own, GROUP),
+            payload_of_foreign_frame(
+                &frame([0x01, 0x80, 0xC2, 0, 0, 0], other),
+                own,
+                GROUP,
+                false
+            ),
             None
         );
-        assert_eq!(payload_of_foreign_frame(&[0; 5], own, GROUP), None);
+        assert_eq!(payload_of_foreign_frame(&[0; 5], own, GROUP, false), None);
+        // Unicast to us: dropped by default, accepted when opted in; a foreign
+        // unicast and our own frames never are.
+        assert_eq!(
+            payload_of_foreign_frame(&frame(own, other), own, GROUP, false),
+            None
+        );
+        assert_eq!(
+            payload_of_foreign_frame(&frame(own, other), own, GROUP, true),
+            Some(&b"pdu"[..])
+        );
+        assert_eq!(
+            payload_of_foreign_frame(&frame([2, 0, 0, 0, 0, 9], other), own, GROUP, true),
+            None
+        );
+        assert_eq!(
+            payload_of_foreign_frame(&frame(own, own), own, GROUP, true),
+            None
+        );
     }
 
     #[test]
