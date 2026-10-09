@@ -656,6 +656,7 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             ospfv3_profile: None,
+            bfd_unsolicited: None,
         }];
         let interfaces =
             build_from_config(&cfg(vec![iface]), &NoopInterfaceDriver, &Interfaces::new()).await;
@@ -675,6 +676,7 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             ospfv3_profile: None,
+            bfd_unsolicited: None,
         }];
         let interfaces =
             build_from_config(&cfg(vec![iface]), &NoopInterfaceDriver, &Interfaces::new()).await;

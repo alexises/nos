@@ -165,7 +165,7 @@ S-BFD probes a target that keeps no per-session state: the far end only has to a
 - Not available yet: `mode sbfd` is refused together with `echo-mode`, `padded-pdu-size` and `auth` (a follow-up adds S-BFD authentication after RFC 5880 authentication, #289; until then the reflector drops any packet with the A bit set and counts it).
 - Interoperability: FRR's `bfdd` implements RFC 5880, 5881, 5882 and 5883 only (its documentation lists no S-BFD, checked against FRR 10.4), so it can be neither initiator nor reflector. The e2e phase `bfd-sbfd` therefore runs `nos` against `nos`, with an FRR classical session alongside to prove the two kinds do not disturb each other.
 - Check the reflector with `show bfd reflector` (`GET /v1/bfd/reflector`): the discriminators and counters of packets received, replied and dropped per reason (`malformed`, `source_port`, `martian`, `filtered`, `rate_limited`, `authenticated`, `demand_clear`, `unknown_discriminator`).
-- An initiator is listed by `show bfd sessions` with `sbfd` after the peer; REST has `kind` (`Classical` or `SbfdInitiator`), and `remote_discriminator` is the S-BFD discriminator probed.
+- An initiator is listed by `show bfd sessions` with `sbfd` after the peer; REST has `kind` (`Classical`, `SbfdInitiator` or `Unsolicited`), and `remote_discriminator` is the S-BFD discriminator probed.
 - To take an initiator down on purpose, remove the discriminator from the reflector: the initiator logs `bfd session down … diag=control-detection-time-expired` and the guarded route is withdrawn. Re-adding it brings both back.
 
 ## Micro-BFD on a port aggregate (RFC 7130)
@@ -181,6 +181,22 @@ S-BFD probes a target that keeps no per-session state: the far end only has to a
 - Check with `show bfd sessions`: a micro session is listed under the aggregate's name with `member <interface>`, for example `bond0: peer 10.0.0.2 from 10.0.0.1 member eth1, up, ...`. In REST the session `key` has `aggregate` and `interface` (the member).
 - Log lines: `bfd session up aggregate=<a> member=<if> peer=<ip>` and `bfd session down aggregate=<a> member=<if> peer=<ip> diag=<...>`.
 - Kernel noise: the frames carry the peer's unicast IP in a multicast MAC; the kernel finds no socket on UDP port 6784 and drops them; it does not send ICMP port unreachable for a frame received as link-layer multicast.
+
+## Unsolicited BFD (RFC 9468)
+
+- Use it where the peers start the sessions and you do not want to configure each one: a peer sends BFD Control with Your Discriminator 0 and `nos-bfdd` answers with a passive session.
+  - `set interface eth0 subinterface 0 bfd-unsolicited fast` names the `bfd-profile` (`fast`) for those sessions. The subinterface needs a `routing-table` and an address: the VRF picks the socket, and a source must be inside one of the subinterface's subnets.
+  - Single-hop only (UDP 3784, TTL exactly 255). A packet on a subinterface without `bfd-unsolicited` is dropped silently, as before.
+- What the profile does here: intervals, `detect-multiplier`, `auth` and `minimum-ttl` apply (`echo-mode` is not tested here); `passive` is ignored, the session is always passive. It never sends before the peer's first packet, and stops sending when the peer goes away.
+- A session is created only for a packet from state `Down`; one in any other state, with a nonzero discriminator or from `AdminDown` creates nothing.
+- Limits, fixed in the code:
+  - 256 unsolicited sessions per subinterface; the next packets are dropped with a warning (`bfd unsolicited session limit reached`, at most one per 10 s).
+  - A session that has not been Up for 60 s is deleted (`bfd unsolicited session aged out`). Down or never-Up counts; coming back Up resets the clock. The peer's next packet creates a new one.
+- Editing the profile applies by Poll/Final. Removing `bfd-unsolicited` (or the profile's subinterface) deletes its sessions (`bfd unsolicited session removed: no longer configured`).
+- Registering the same peer from a client (a static route, BGP) adopts the session; the client then owns it and nothing ages it out.
+- `show bfd sessions` prints `unsolicited` after the peer; REST has `kind` `Unsolicited`.
+- Security: the TTL check and the cap are the only defences against a spoofed source filling the table. Use it only on links where every neighbour is trusted, and set `auth` on the profile when the peers support it. IPv6 sources must be inside a configured prefix (a link-local source is not accepted).
+- Not built: unsolicited sessions on port-aggregate subinterfaces, a configurable age or cap.
 
 ## Check sessions
 

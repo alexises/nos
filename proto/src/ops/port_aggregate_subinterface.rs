@@ -215,6 +215,7 @@ fn ensure_subinterface_mut<'a>(
             routing_table: None,
             ospf_profile: None,
             ospfv3_profile: None,
+            bfd_unsolicited: None,
         });
     }
     Ok(agg.subinterfaces.iter_mut().find(|s| s.tag == tag).unwrap())
@@ -314,6 +315,7 @@ mod tests {
                     routing_table: None,
                     ospf_profile: None,
                     ospfv3_profile: None,
+                    bfd_unsolicited: None,
                 }],
             )],
             ..Default::default()

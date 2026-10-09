@@ -347,10 +347,10 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
                 format!(" {word} {i}")
             });
             let multihop = if k.multihop { " multihop" } else { "" };
-            let sbfd = if s.kind == nos_proto::BfdSessionKind::SbfdInitiator {
-                " sbfd"
-            } else {
-                ""
+            let sbfd = match s.kind {
+                nos_proto::BfdSessionKind::SbfdInitiator => " sbfd",
+                nos_proto::BfdSessionKind::Unsolicited => " unsolicited",
+                nos_proto::BfdSessionKind::Classical => "",
             };
             let auth = match (s.auth_method, s.auth_key_id) {
                 (Some(m), Some(id)) => format!(

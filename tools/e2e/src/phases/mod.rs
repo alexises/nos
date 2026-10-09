@@ -31,6 +31,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "bfd-sbfd" => bfd::bfd_sbfd(w).await,
         "bfd-echo" => bfd_echo::bfd_echo(w).await,
         "bfd-echo-unaffiliated" => bfd_echo::bfd_echo_unaffiliated(w).await,
+        "bfd-unsolicited" => bfd::bfd_unsolicited(w).await,
         "auth" => bgp::auth(w).await,
         "ao" => bgp::ao(w).await,
         "gtsm" => bgp::gtsm(w).await,
@@ -225,6 +226,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "bfd-sbfd",
             "bfd-echo",
             "bfd-echo-unaffiliated",
+            "bfd-unsolicited",
         ],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
@@ -281,6 +283,7 @@ pub const ALL: &[&str] = &[
     "bfd-sbfd",
     "bfd-echo",
     "bfd-echo-unaffiliated",
+    "bfd-unsolicited",
     "as4",
     "malformed-update",
     "maximum-prefix",

@@ -710,6 +710,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Run OSPFv3 on this attach point under a profile.",
             "Joins OSPFv3 (RFC 5340) on this interface, subinterface or broadcast domain with the named OSPFv3 profile's timers, cost and authentication. Needs a routing-table on the same attach point. `delete` leaves OSPFv3 there.",
         ),
+        Topic::InterfaceBfdUnsolicited => (
+            "Answer unsolicited BFD on this subinterface.",
+            "Names a `bfd-profile`. A BFD Control packet with Your Discriminator 0 from a peer on this subinterface's subnet then creates a passive session under that profile (RFC 9468), which is removed once it stays down. Single-hop only; needs a routing-table on the same subinterface. `delete` stops answering and drops the unsolicited sessions.",
+        ),
         Topic::InterfaceSwitchingProfile => (
             "Associate a switching profile with an interface.",
             concat!(

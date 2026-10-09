@@ -1020,6 +1020,7 @@ mod tests {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
@@ -1070,6 +1071,7 @@ mod tests {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
@@ -1153,6 +1155,7 @@ mod tests {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
@@ -1186,6 +1189,7 @@ mod tests {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
@@ -1283,6 +1287,7 @@ mod tests {
         iface.subinterfaces = vec![
             Subinterface {
                 ospfv3_profile: None,
+                bfd_unsolicited: None,
                 tag: 0,
                 addresses: vec![addr],
                 routing_table: Some("rt1".into()),
@@ -1290,6 +1295,7 @@ mod tests {
             },
             Subinterface {
                 ospfv3_profile: None,
+                bfd_unsolicited: None,
                 tag: 1,
                 addresses: Vec::new(),
                 routing_table: Some("rt1".into()),
