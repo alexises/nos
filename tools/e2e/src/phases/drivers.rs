@@ -1111,6 +1111,45 @@ pub async fn switching(w: &mut World) -> anyhow::Result<()> {
         .await
 }
 
+/// #326: with `spanning-tree mode` on and no `nos-stpd` yet, a trunk's bridge
+/// port is enslaved blocking and BPDU-trapped; turning STP off restores it.
+pub async fn stp_failsafe(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let port = "interface=eth0.100";
+    a.provision(&[
+        "--switching-profile",
+        "sp1",
+        "--switching-profile-member",
+        "bd1:100",
+        "--stp-mode",
+        "rstp",
+    ])
+    .await?;
+    a.wait(&format!("bridge port enslaved blocking {port}"))
+        .await?;
+    a.wait(&format!("bpdu trap installed {port}")).await?;
+    // Nothing opens the port: a resync (10s tick) writes no other state.
+    let opened = a.count("bridge port state set");
+    a.assert_quiet("bridge port state set", opened, 12).await?;
+
+    let restored = a.count("bridge port forwarding restored");
+    let removed = a.count("bpdu trap removed");
+    a.provision(&["--stp-mode", "disabled"]).await?;
+    a.wait_new(
+        &format!("bridge port forwarding restored {port}"),
+        restored,
+        30,
+    )
+    .await?;
+    a.wait_new(&format!("bpdu trap removed {port}"), removed, 30)
+        .await?;
+
+    a.provision(&["--delete-switching-profile"]).await?;
+    a.wait("deleted vlan sub-interface interface=eth0 sub_interface=eth0.100")
+        .await?;
+    a.established().await
+}
+
 pub async fn svi(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&[

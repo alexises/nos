@@ -44,7 +44,8 @@ pub use fdb::{
 };
 pub use interface::{
     BfdAggregateMembers, BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus,
-    LacpAggregateMembers, LinkState, PortAggregateStatus, SubinterfaceStatus,
+    LacpAggregateMembers, LinkState, PortAggregateStatus, StpPortAssignment, StpPortState,
+    SubinterfaceStatus,
 };
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
@@ -85,7 +86,7 @@ pub use schema::{
     OspfProfile, OspfVirtualLink, Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition,
     PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry, Redistribute,
     RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn, RpkiCache,
-    SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SwitchingProfile,
+    SourceAddress, StaticRoute, StaticRoutingInstance, StpMode, Subinterface, SwitchingProfile,
     SwitchingProfileMember, SyslogFacility, SyslogServer, SyslogTls, SyslogTransport, User,
     VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, GR_RESTART_TIME_DEFAULT,
     GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT, HELLO_INTERVAL_DEFAULT,

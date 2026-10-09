@@ -192,6 +192,32 @@ pub enum InterfaceRequest {
     /// micro-BFD Up set and applies it to the kernel bond immediately. No
     /// reply.
     PushBfdMembers(BfdAggregateMembers),
+    /// Fire-and-forget, sent by `nos-stpd`: sets the kernel bridge-port state
+    /// of each `(port, domain)`. Only honoured while `spanning-tree mode` is
+    /// not `disabled`. No reply.
+    SetStpPortStates(Vec<StpPortAssignment>),
+    /// Fire-and-forget, sent by `nos-stpd`: flushes the dynamic FDB entries
+    /// learned on one bridge port (topology change). No reply.
+    FlushFdb { port: String, domain: String },
+}
+
+/// The kernel state `nos-stpd` wants a bridge port in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StpPortState {
+    /// Neither learns nor forwards (kernel `DISABLED`, see `docs/internals/stp.md`).
+    Blocking,
+    /// Learns, does not forward.
+    Learning,
+    Forwarding,
+}
+
+/// One `SetStpPortStates` entry: the member `port` (an `Interface` or a
+/// `PortAggregate` name) in the broadcast `domain` it is a member of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StpPortAssignment {
+    pub port: String,
+    pub domain: String,
+    pub state: StpPortState,
 }
 
 /// Messages sent from `nos-interfaced` to a client.

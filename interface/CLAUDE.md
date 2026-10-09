@@ -15,7 +15,8 @@ Reconciles configured network interfaces against the OS (binary `nos-interfaced`
 - **One bridge per domain**, never one 802.1Q-aware bridge: the dot1q tag is local to an interface. A `BroadcastDomain`'s own `addresses`/`routing_table` make its bridge an SVI, reconciled by `ensure_broadcast_domain`.
 - **Every tag>0 sub-link goes through `reconcile_tagged_subinterfaces`** over the union of `Dot1q` switching-profile tags and L3 `Subinterface` tags; scanning them separately deletes the other kind's live sub-link.
 - **Bonds are always `BondMode::BalanceXor`** (`bond_mode_of`), for `Xor` and `Lacp`; never the kernel `Ieee8023Ad`, which would swallow LACPDUs. For `Lacp`, enslavement is gated on `Interfaces.lacp_active_members`, pushed by `nos-lacpd` (`PushLacpMembers`, applied at once by `driver.apply`) and carried forward by `build_from_config`, never rebuilt from config. A `PortAggregate.bfd` adds `bfd_up_members` (`PushBfdMembers`, `Role::Bfdd` only, same treatment): active = `lacp_ok && bfd_ok`, no push = not Up.
-- **Link watcher.** `driver/links.rs`'s `LinkHub` mirrors the kernel link table (`RTMGRP_LINK` + 30 s re-dump) and `SubscribeLinks` streams it (snapshot first, again after lag; `observed: false` under noop). `ospfd`/`ospfv3d` only; the stream owns its connection.
+- **Link watcher.** `driver/links.rs`'s `LinkHub` mirrors the kernel link table (`RTMGRP_LINK` + 30 s re-dump) and `SubscribeLinks` streams it (snapshot first, again after lag; `observed: false` under noop). `ospfd`/`ospfv3d`/`stpd` only; the stream owns its connection.
+- **Spanning tree (#326).** While `spanning-tree mode` is not `disabled` (`InterfaceState.stp.on`), a bridge port is DISABLED (`StpPortState::Blocking`; the kernel undoes BLOCKING on a `BR_NO_STP` bridge) with an ingress `flower`+`gact drop` BPDU trap (`driver/tc.rs`) until `nos-stpd` pushes a state (`SetStpPortStates`, remembered in `Interfaces.stp_port_states` like `lacp_active_members`). Off, it undoes only what it did (`StpMemory`: `nos-fdbd` also disables ports). Never touches a VXLAN port. `reconcile_stp_port` runs after every enslavement and every `up`. Kernel findings: `docs/internals/stp.md`.
 - **Order inside a resync:** bridges, then bonds, then each interface's `apply`.
 - **Cross-daemon links.** To `nos-ribd`: `GetVrfName`/`GetTableId` via `ServiceRef::RibTable`; "not resolvable yet" is normal and retried by the 10s `reconcile::REAPPLY_INTERVAL`. Served queries (`GetInterfaces`, `GetInterface`, `GetBroadcastDomain`, `GetPortAggregates`, `GetPortAggregate`) report desired state; `allowed` admits `Role::Ribd` to them, never to `PushLacpMembers`.
 
@@ -25,9 +26,9 @@ Reconciles configured network interfaces against the OS (binary `nos-interfaced`
 |---|---|
 | `main.rs` | Args (`--watchdog-socket`, `--listen-socket`, `--driver`, `--bridge-registry-path`, `--port-aggregate-registry-path`), shared `Arc<RwLock<Interfaces>>` |
 | `state.rs` | `InterfaceState`, `BroadcastDomainState`, `PortAggregateState`, `Interfaces`, async `build_from_config` |
-| `driver/` | `mod.rs` trait, `noop.rs`, `linux.rs`, `links.rs` (pure link table), `bridge_registry.rs`, `port_aggregate_registry.rs`, `rib_client.rs` |
+| `driver/` | `mod.rs` trait, `noop.rs`, `linux.rs`, `links.rs` (pure link table), `bridge_registry.rs`, `port_aggregate_registry.rs`, `rib_client.rs`, `tc.rs` (hand-built BPDU trap) |
 | `reconcile.rs` | Diff-triggered full resync plus the 10s tick |
-| `server.rs` | Status queries, `PushLacpMembers`/`PushBfdMembers`, `SubscribeLinks` stream |
+| `server.rs` | Status queries, `PushLacpMembers`/`PushBfdMembers`, `SetStpPortStates`/`FlushFdb`, `SubscribeLinks` stream |
 | `config_client.rs`, `watchdog_client.rs` | Per-crate clients (star dependency graph) |
 
 Details: [internals](../docs/internals/interface.md) (driver call sequences, registries, daemon-to-daemon links, per-module notes), [interfaces](../docs/protocols/interfaces.md), [L2 switching](../docs/protocols/l2-switching.md), [port aggregation](../docs/protocols/port-aggregation-lacp.md).

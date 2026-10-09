@@ -2,7 +2,7 @@
 
 Spanning tree (IEEE 802.1Q clause 13) keeps an L2 topology loop-free. This page covers the configuration only.
 
-- **Nothing runs yet.** The daemon that speaks BPDUs (`nos-stpd`) arrives in a later step of the STP series (#316), so none of the settings below changes forwarding today.
+- **Nothing negotiates yet.** The daemon that speaks BPDUs (`nos-stpd`) arrives in a later step of the STP series (#316). Until then, with a mode other than `disabled`, `nos-interfaced` keeps every bridge port blocked (fail-safe, see [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326)): set `spanning-tree mode disabled` to forward without it.
 - Everything is checked at commit time, so a config that commits now will not be refused when the daemon lands.
 - **One rule already bites:** a port aggregate with an `esi` needs a guard profile (see [ESI port aggregates](#esi-port-aggregates)).
 

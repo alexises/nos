@@ -50,6 +50,8 @@ pub enum ServiceRef {
     FdbDomain(String),
     /// The single `nos-bfdd` instance, resolved directly like `Lldp`.
     Bfd,
+    /// The single `nos-stpd` instance, resolved directly like `Bfd`.
+    Stp,
 }
 
 impl ServiceRef {
@@ -68,6 +70,7 @@ impl ServiceRef {
             ServiceRef::Lldp => Role::Lldpd,
             ServiceRef::FdbDomain(_) => Role::Fdbd,
             ServiceRef::Bfd => Role::Bfdd,
+            ServiceRef::Stp => Role::Stpd,
         }
     }
 
@@ -85,7 +88,8 @@ impl ServiceRef {
             | ServiceRef::Log
             | ServiceRef::Lacp
             | ServiceRef::Lldp
-            | ServiceRef::Bfd => "",
+            | ServiceRef::Bfd
+            | ServiceRef::Stp => "",
         }
     }
 }
@@ -115,12 +119,13 @@ pub enum Role {
     Fdbd,
     Restd,
     Bfdd,
+    Stpd,
     /// A person, authenticated by login; the certificate's name is the username.
     User,
 }
 
 impl Role {
-    pub const ALL: [Role; 14] = [
+    pub const ALL: [Role; 15] = [
         Role::Watchdog,
         Role::Configd,
         Role::Logd,
@@ -134,6 +139,7 @@ impl Role {
         Role::Fdbd,
         Role::Restd,
         Role::Bfdd,
+        Role::Stpd,
         Role::User,
     ];
 
@@ -152,6 +158,7 @@ impl Role {
             Role::Fdbd => "fdbd",
             Role::Restd => "restd",
             Role::Bfdd => "bfdd",
+            Role::Stpd => "stpd",
             Role::User => "user",
         }
     }
@@ -295,6 +302,10 @@ mod tests {
         assert_eq!(
             (ServiceRef::Bfd.role(), ServiceRef::Bfd.instance()),
             (Role::Bfdd, "")
+        );
+        assert_eq!(
+            (ServiceRef::Stp.role(), ServiceRef::Stp.instance()),
+            (Role::Stpd, "")
         );
     }
 

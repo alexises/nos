@@ -28,6 +28,22 @@ use nos_proto::{
     SwitchingProfileOp, SyslogFacility, SyslogTransport, UserOp, VlanTag,
 };
 
+/// Clap-facing mirror of the `spanning-tree mode` values the e2e lab uses.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum StpModeArg {
+    Rstp,
+    Disabled,
+}
+
+impl From<StpModeArg> for nos_proto::StpMode {
+    fn from(mode: StpModeArg) -> Self {
+        match mode {
+            StpModeArg::Rstp => nos_proto::StpMode::Rstp,
+            StpModeArg::Disabled => nos_proto::StpMode::Disabled,
+        }
+    }
+}
+
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
 /// can't be derived on a `nos-proto` type directly (that crate stays
 /// dependency-free of `clap`, per the star-dependency rule).
@@ -832,6 +848,13 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub port_aggregate_redundancy_mode: Option<EsRedundancyArg>,
 
+    /// The `spanning-tree mode`. Unset means `disabled`, not the schema's
+    /// `rstp` default: since #326 an STP-on bridge port stays blocked until
+    /// `nos-stpd` (#327) opens it, which would black-hole every phase that
+    /// forwards through a bridge.
+    #[arg(long, value_enum)]
+    pub stp_mode: Option<StpModeArg>,
+
     /// If set (requires `--port-aggregate`), sets the aggregate's Ethernet
     /// Segment DF election algorithm (`PortAggregateOp::SetDfAlgorithm`);
     /// needs an ESI at commit time. `modulo` resets it.
@@ -1523,7 +1546,10 @@ pub const SBFD_PROFILE: &str = "sb";
 /// for a profile's intervals or a route's `bfd` reference, so these go in
 /// through the generic path edit after the ops.
 pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
-    let mut v = Vec::new();
+    let mut v = vec![(
+        vec!["spanning-tree".to_string(), "mode".to_string()],
+        Some(format!("\"{:?}\"", stp_mode(args))),
+    )];
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         let guard = |field: &str| {
             vec![
@@ -1688,9 +1714,16 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     v
 }
 
+/// `--stp-mode`, `disabled` when unset (see `Args::stp_mode`).
+fn stp_mode(args: &Args) -> nos_proto::StpMode {
+    args.stp_mode
+        .map_or(nos_proto::StpMode::Disabled, Into::into)
+}
+
 /// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
+    config.spanning_tree.mode = stp_mode(args);
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         for p in config
             .stp_port_profiles

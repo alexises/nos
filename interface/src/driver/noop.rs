@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use tracing::debug;
 
-use super::{DriverError, InterfaceDriver, LinkWatch};
+use nos_proto::StpPortState;
+
+use super::{BridgePortRef, DriverError, InterfaceDriver, LinkWatch};
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
 /// Platform-agnostic default: logs the state that would be applied but
@@ -73,6 +75,24 @@ impl InterfaceDriver for NoopInterfaceDriver {
 
     async fn link_local_address(&self, _kernel_interface: &str) -> Option<std::net::Ipv6Addr> {
         None
+    }
+
+    async fn set_bridge_port_state(
+        &self,
+        port: &BridgePortRef,
+        state: StpPortState,
+    ) -> Result<(), DriverError> {
+        debug!(
+            port = ?port,
+            state = ?state,
+            "would set bridge port state (noop driver — no OS effect)"
+        );
+        Ok(())
+    }
+
+    async fn flush_bridge_port(&self, port: &BridgePortRef) -> Result<(), DriverError> {
+        debug!(port = ?port, "would flush bridge port (noop driver — no OS effect)");
+        Ok(())
     }
 
     fn watch_links(&self) -> LinkWatch {

@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
 
-use nos_proto::{loopback_table_name, Config, InterfaceAddress, PortAggregateMode, VlanTag};
+use nos_proto::{
+    loopback_table_name, Config, InterfaceAddress, PortAggregateMode, StpMode, StpPortAssignment,
+    StpPortState, VlanTag,
+};
 use tracing::{debug, trace, warn};
 
-use crate::driver::InterfaceDriver;
+use crate::driver::{BridgePortRef, InterfaceDriver};
 
 /// One subinterface's desired state, mirroring `nos_proto::Subinterface`.
 /// `tag == 0` is the untagged/native case, applied directly to the physical
@@ -41,6 +44,15 @@ pub struct BroadcastDomainState {
     /// see `SubinterfaceState.link_local_address`'s doc comment. `None`
     /// until `bridge_name` itself is known (queried against it once it is).
     pub link_local_address: Option<Ipv6Addr>,
+}
+
+/// What spanning tree wants of one port (an interface or an aggregate): the
+/// fail-safe applies exactly while `on`, and `states` is the last state
+/// `nos-stpd` pushed per broadcast domain (absent = still blocking).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StpPorts {
+    pub on: bool,
+    pub states: HashMap<String, StpPortState>,
 }
 
 /// One interface's desired state, as reconciled from the running config.
@@ -86,6 +98,8 @@ pub struct InterfaceState {
     /// This (non-loopback) interface's per-tag L3 subinterfaces — see
     /// `SubinterfaceState`. Empty for a loopback interface.
     pub subinterfaces: Vec<SubinterfaceState>,
+    /// Spanning-tree view of this interface's bridge ports.
+    pub stp: StpPorts,
 }
 
 /// A `PortAggregate`'s desired state, mirroring `nos_proto::PortAggregate` —
@@ -111,6 +125,8 @@ pub struct PortAggregateState {
     /// `PortAggregate.bfd` is set: a member is only enslaved while
     /// `nos-bfdd` reports its micro-BFD session Up (`bfd_up_members`).
     pub bfd: bool,
+    /// Spanning-tree view of this aggregate's bridge ports.
+    pub stp: StpPorts,
 }
 
 /// Every configured interface's desired state, rebuilt wholesale on every
@@ -150,6 +166,12 @@ pub struct Interfaces {
     /// `build_from_config` like `lacp_active_members`. No push = no member
     /// Up (fail closed).
     bfd_up_members: HashMap<String, Vec<String>>,
+    /// `spanning-tree mode` is not `disabled` as of the last resync.
+    stp_on: bool,
+    /// The last state `nos-stpd` pushed per `(port, domain)`; carried forward
+    /// by `build_from_config` like `lacp_active_members`, so a resync never
+    /// resets a port the daemon has opened.
+    stp_port_states: HashMap<(String, String), StpPortState>,
 }
 
 impl Interfaces {
@@ -219,6 +241,55 @@ impl Interfaces {
         self.recompute_members(aggregate)
     }
 
+    /// The bridge port `port` (an interface or an aggregate) has in `domain`,
+    /// if its switching profile makes it a member.
+    pub fn bridge_port(&self, port: &str, domain: &str) -> Option<BridgePortRef> {
+        let (aggregate, members) = match self.by_name.get(port) {
+            Some(i) => (false, &i.switching_profile_members),
+            None => (
+                true,
+                &self.by_port_aggregate.get(port)?.switching_profile_members,
+            ),
+        };
+        let tag = members.iter().find(|(d, _)| d == domain)?.1;
+        Some(BridgePortRef {
+            name: port.to_string(),
+            aggregate,
+            tag,
+        })
+    }
+
+    /// Applies a `nos-stpd` push (`InterfaceRequest::SetStpPortStates`):
+    /// remembers every state, and returns the ports to write now. Nothing to
+    /// write while spanning tree is off, or for a `(port, domain)` that is not
+    /// a bridge port.
+    pub fn set_stp_port_states(
+        &mut self,
+        assignments: Vec<StpPortAssignment>,
+    ) -> Vec<(BridgePortRef, StpPortState)> {
+        let mut writes = Vec::new();
+        for a in assignments {
+            let stp = match self.by_name.get_mut(&a.port) {
+                Some(i) => Some(&mut i.stp),
+                None => self.by_port_aggregate.get_mut(&a.port).map(|g| &mut g.stp),
+            };
+            if let Some(stp) = stp {
+                stp.states.insert(a.domain.clone(), a.state);
+            }
+            let port = self.bridge_port(&a.port, &a.domain);
+            self.stp_port_states.insert((a.port, a.domain), a.state);
+            if let Some(p) = port.filter(|_| self.stp_on) {
+                writes.push((p, a.state));
+            }
+        }
+        writes
+    }
+
+    /// Whether spanning tree is on (`spanning-tree mode` not `disabled`).
+    pub fn stp_on(&self) -> bool {
+        self.stp_on
+    }
+
     /// Recomputes `port_aggregate_active` of every member of `aggregate`
     /// from both pushed sets (never from one half alone).
     fn recompute_members(&mut self, aggregate: &str) -> Vec<InterfaceState> {
@@ -257,6 +328,16 @@ pub async fn build_from_config(
     driver: &dyn InterfaceDriver,
     previous: &Interfaces,
 ) -> Interfaces {
+    let stp_on = cfg.spanning_tree.mode != StpMode::Disabled;
+    let port_stp = |port: &str| StpPorts {
+        on: stp_on,
+        states: previous
+            .stp_port_states
+            .iter()
+            .filter(|((p, _), _)| p == port)
+            .map(|((_, d), s)| (d.clone(), *s))
+            .collect(),
+    };
     let mut by_domain = HashMap::with_capacity(cfg.broadcast_domains.len());
     for domain in &cfg.broadcast_domains {
         let mut state = BroadcastDomainState {
@@ -308,6 +389,7 @@ pub async fn build_from_config(
             bond_name: None,
             link_local_address: None,
             bfd: agg.bfd.is_some(),
+            stp: port_stp(&agg.name),
         };
         match driver.ensure_port_aggregate(&state).await {
             Ok(bond_name) => {
@@ -360,6 +442,7 @@ pub async fn build_from_config(
             port_aggregate_active,
             mtu: iface.mtu,
             subinterfaces,
+            stp: port_stp(&iface.name),
         };
         trace!(
             interface = %state.name,
@@ -398,6 +481,8 @@ pub async fn build_from_config(
         port_aggregates,
         lacp_active_members: previous.lacp_active_members.clone(),
         bfd_up_members: previous.bfd_up_members.clone(),
+        stp_on,
+        stp_port_states: previous.stp_port_states.clone(),
     }
 }
 
@@ -605,6 +690,21 @@ mod tests {
 
         async fn link_local_address(&self, _kernel_interface: &str) -> Option<Ipv6Addr> {
             None
+        }
+
+        async fn set_bridge_port_state(
+            &self,
+            _port: &crate::driver::BridgePortRef,
+            _state: StpPortState,
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        async fn flush_bridge_port(
+            &self,
+            _port: &crate::driver::BridgePortRef,
+        ) -> Result<(), DriverError> {
+            Ok(())
         }
 
         fn watch_links(&self) -> crate::driver::LinkWatch {
@@ -1130,5 +1230,87 @@ mod tests {
         assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
         interfaces.set_bfd_up_members("bond1", Vec::new());
         assert!(!interfaces.get("eth0").unwrap().port_aggregate_active);
+    }
+    /// `eth0` trunked untagged into `bd1`, plus `bond1` carrying `bd1` tagged.
+    fn stp_config(mode: StpMode) -> Config {
+        let mut eth0 = interface("eth0");
+        eth0.switching_profile = Some("sp1".to_string());
+        let mut config = cfg(vec![eth0]);
+        config.spanning_tree.mode = mode;
+        config.switching_profiles = vec![nos_proto::SwitchingProfile {
+            name: "sp1".to_string(),
+            members: vec![nos_proto::SwitchingProfileMember {
+                broadcast_domain: "bd1".to_string(),
+                tag: VlanTag::Untagged,
+                ..Default::default()
+            }],
+        }];
+        config
+    }
+
+    fn assignment(port: &str, domain: &str, state: StpPortState) -> StpPortAssignment {
+        StpPortAssignment {
+            port: port.to_string(),
+            domain: domain.to_string(),
+            state,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_failsafe_applies_exactly_when_the_mode_is_not_disabled() {
+        for (mode, on) in [
+            (StpMode::Rstp, true),
+            (StpMode::Mstp, true),
+            (StpMode::RapidPvst, true),
+            (StpMode::Disabled, false),
+        ] {
+            let interfaces =
+                build_from_config(&stp_config(mode), &NoopInterfaceDriver, &Interfaces::new())
+                    .await;
+            assert_eq!(interfaces.get("eth0").unwrap().stp.on, on, "{mode:?}");
+            assert_eq!(interfaces.stp_on(), on, "{mode:?}");
+        }
+        // The #317 default is rstp: an untouched config blocks new ports.
+        let default = Config::default();
+        assert_eq!(default.spanning_tree.mode, StpMode::Rstp);
+    }
+
+    #[tokio::test]
+    async fn a_pushed_port_state_survives_a_resync_and_is_written_only_while_on() {
+        let config = stp_config(StpMode::Rstp);
+        let mut interfaces =
+            build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        assert!(interfaces.get("eth0").unwrap().stp.states.is_empty());
+
+        let writes = interfaces.set_stp_port_states(vec![
+            assignment("eth0", "bd1", StpPortState::Forwarding),
+            // not a member of bd2, and unknown port: remembered, never written
+            assignment("eth0", "bd2", StpPortState::Learning),
+            assignment("nope", "bd1", StpPortState::Learning),
+        ]);
+        assert_eq!(
+            writes,
+            vec![(
+                BridgePortRef {
+                    name: "eth0".to_string(),
+                    aggregate: false,
+                    tag: VlanTag::Untagged
+                },
+                StpPortState::Forwarding
+            )]
+        );
+
+        let interfaces = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
+        assert_eq!(
+            interfaces.get("eth0").unwrap().stp.states.get("bd1"),
+            Some(&StpPortState::Forwarding)
+        );
+
+        // Off: the push is remembered but nothing is written.
+        let off = stp_config(StpMode::Disabled);
+        let mut interfaces = build_from_config(&off, &NoopInterfaceDriver, &interfaces).await;
+        let writes =
+            interfaces.set_stp_port_states(vec![assignment("eth0", "bd1", StpPortState::Blocking)]);
+        assert_eq!(writes, Vec::new());
     }
 }
