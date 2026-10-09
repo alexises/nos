@@ -249,6 +249,21 @@ impl World {
         Ok(())
     }
 
+    /// `ip link set <iface> up|down` inside `router`'s network namespace (the
+    /// runtime image has no iproute2, the privileged helper does it).
+    pub async fn set_link(&self, router: &str, iface: &str, up: bool) -> anyhow::Result<()> {
+        let state = if up { "up" } else { "down" };
+        self.dock
+            .ip(
+                NETNS_HELPER_IMAGE,
+                Some(router),
+                false,
+                &["link", "set", iface, state],
+            )
+            .await
+            .map(drop)
+    }
+
     /// Deleting one end of a veth pair deletes both.
     pub async fn unlink_veths(&self) {
         for iface in ["eth1", "eth2"] {

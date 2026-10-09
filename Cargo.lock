@@ -2187,8 +2187,19 @@ dependencies = [
 name = "nos-stp"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "nos-l2-socket",
+ "nos-log-client",
+ "nos-pki",
+ "nos-proto",
  "proptest",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

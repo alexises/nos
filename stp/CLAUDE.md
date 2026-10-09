@@ -1,6 +1,6 @@
-# nos-stp — spanning-tree building blocks
+# nos-stp — spanning tree
 
-Pure library (no NOS dependencies, no I/O, no tokio) for the STP series (#316). The `nos-stpd` daemon arrives in a later sub-issue; byte layouts, cost table, the 13.25 rule, the machine table, the host contract and the deviations from the standard: `docs/internals/stp.md`.
+The pure core (`bpdu`, `vector`, `cost`, `timers`, `machines`, `bridge`, `actions`: no I/O, no tokio) and the `nos-stpd` daemon (`main.rs` plus the modules below) for the STP series (#316). Byte layouts, cost table, the 13.25 rule, the machine table, the host contract and the deviations from the standard: `docs/internals/stp.md`.
 
 ## Modules
 
@@ -13,7 +13,15 @@ Pure library (no NOS dependencies, no I/O, no tokio) for the STP series (#316). 
 - `bridge.rs`: `Bridge` (host inputs: `set_port_enabled`, `set_oper_point_to_point`, `receive`, `tick`; `run()` loops all machines to quiescence, cap 1000 passes). `actions.rs`: what the host drains (`Transmit`, `SetPortState`, `FlushFdb`, `Log`).
 - `sim.rs` (test-only): deterministic multi-bridge simulator plus proptest on random graphs.
 
+## Daemon (`nos-stpd`)
+
+- `ports.rs` (pure): config to `Plan` (STP ports, timers, priority) and the core's state to `SetStpPortStates`/`FlushFdb` assignments per domain. `identity.rs`, `link.rs` (sysfs speed/duplex, cost, point-to-point): pure.
+- `engine.rs`: the core plus its action-to-`Out` mapping and the e2e log lines. `daemon.rs`: the one actor owning the engine, the BPDU sockets (`L2Socket::open_bpdu`) and the 1 s tick.
+- `reconcile.rs` (diff resync to a `Plan`), `link_client.rs` (`SubscribeLinks`), `interface_client.rs` (push + resend cache), `config_client.rs`, `watchdog_client.rs`: per-crate client copies (star graph), as `lacp/`.
+- A changed plan rebuilds the bridge. Log lines are the e2e contract (`docs/internals/stp.md`): change them with `phases::stp`.
+
 ## Invariants
+
 
 - Time enters only through `Bridge::tick` (1 s); no clock reads. A change to a machine guard needs a sim scenario or proptest run (`PROPTEST_CASES=3000`), the unit tests alone do not catch stalls.
 - Timers in a BPDU stay raw `u16` (1/256 s) so any peer value round-trips; use `secs`/`raw_secs` for whole seconds.

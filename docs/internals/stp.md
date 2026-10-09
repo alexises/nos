@@ -65,7 +65,7 @@ How the bridge ports are made safe before `nos-stpd` exists. Spike results, on k
 
 Fail-safe rules:
 
-- While `spanning-tree mode` is not `disabled` (the default is `rstp`), a bridge port is blocked and trapped until `nos-stpd` pushes a state. Log: `bridge port enslaved blocking interface=<link>`, `bpdu trap installed interface=<link>`. Until #327 lands this blackholes bridge ports by design.
+- While `spanning-tree mode` is not `disabled` (the default is `rstp`), a bridge port is blocked and trapped until `nos-stpd` pushes a state. Log: `bridge port enslaved blocking interface=<link>`, `bpdu trap installed interface=<link>`. Until `nos-stpd` pushes a state this blackholes the bridge port by design.
 - Window: one netlink round trip between the kernel opening a freshly enslaved running port and the block; and, after a carrier flap, up to the 10s resync. `nos-stpd` shortens the second one by reacting to `SubscribeLinks`.
 - Mode `disabled` restores forwarding and removes the trap, but only on ports this process blocked or trapped (`nos-fdbd` also disables ports, for single-active segments). Logs: `bridge port forwarding restored`, `bpdu trap removed`.
 - The VXLAN port of a VNI domain is never touched.
@@ -120,3 +120,29 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 - A failing scenario prints `Sim::dump()`: root port, role and state of every port. `Sim::converged()` means one root everywhere, every port settled, and the forwarding links form a tree (a loop of stale root info otherwise looks settled).
 - Property tests: `PROPTEST_CASES=3000 cargo test -p nos-stp random` stresses random 4-8 bridge graphs (also with a cut link).
 - Expected timing with default timers: a point-to-point link converges within a few hello times; a shared segment waits `max-age + forward-delay` after start.
+
+## Daemon (`nos-stpd`, #327)
+
+- One fixed process, supervised like `nos-lldpd`; `--listen-socket` is accepted but nothing listens on it until the status server (#328).
+- Ports: a physical `Interface` or a `PortAggregate` (the bond, never a member) with a `switching_profile`; loopbacks, VXLAN and L3-only interfaces are not ports. Only mode `rstp` runs; `disabled`, `mstp` and `rapid-pvst` leave the daemon idle.
+- Task layout, all in `stp/src/daemon.rs`: one actor owns the bridge core and every BPDU socket; a reader task per port, the link table, plan changes and a 1 s tick are events to it. A changed plan rebuilds the bridge (the protocol restarts, sockets of ports that stay are kept).
+- The BPDU socket (`L2Socket::open_bpdu`) is `ETH_P_ALL` with a classic BPF for the group MAC plus LLC `42 42 03`. A protocol-bound socket runs after tc ingress and the bridge `rx_handler`, where the trap from #326 drops the frame; the tap runs before. It sees its own outgoing frames, so the source MAC is filtered.
+- Inputs to the core per port:
+  - `portEnabled`: socket open and the `SubscribeLinks` table shows carrier (no table or an unobserved one counts as up).
+  - Cost: the profile `cost`, else `20 000 000 / speed` from `/sys/class/net/<dev>/speed`; unknown speed falls back to 1 Gb/s with a `warn!`.
+  - `operPointToPoint`: profile `link-type`, else full duplex (unknown counts as full). Re-read on every carrier change.
+  - Edge: `edge-port admin` is admin edge, `auto` (the default) is the core's own BPDU-absence detection, `disabled` neither.
+- Bridge identifier: configured priority, extension 0, MAC derived from hostname + machine-id (locally administered); port number is the index in the name-sorted port list plus one.
+- Output: the core's `SetPortState` becomes one `SetStpPortStates` assignment per domain in the port's switching profile (`Discarding` is `Blocking`); `FlushFdb` becomes one `FlushFdb` per domain. The push is fire-and-forget; the cache is resent on every reconnect.
+- Logs (the e2e anchors; `Debug` renders roles and states capitalised):
+
+| Line | Fields |
+|------|--------|
+| `port role changed` | `port`, `role` (`Root`, `Designated`, `Alternate`, `Backup`, `Disabled`) |
+| `port state changed` | `port`, `state` (`Discarding`, `Learning`, `Forwarding`) |
+| `root bridge changed` | `root` (`8000.02:aa:bb:cc:dd:ee`) |
+| `port carrier up` / `port carrier lost` | `port` |
+| `bpdu rx` | `port`, `count` received in the last 10 s, every 10 s per enabled port |
+
+- Read the state of a running lab: `cargo run -p nos-e2e -- logs 200` and look at the last `port state changed` per port.
+- Limits: no in-place update of priority, timers or cost (a config change restarts the protocol); a link whose speed changes without a carrier change keeps its old cost.
