@@ -29,6 +29,7 @@ nix                = { workspace = true, features = ["net"] }
 nos-l2-socket      = { workspace = true }
 rtnetlink          = { workspace = true }
 netlink-packet-route = { workspace = true }
+ipnet              = { workspace = true }
 
 [[bin]]
 name = "nos-bfdd"

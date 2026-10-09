@@ -233,7 +233,7 @@ async fn run(
                             sessions.bfd_down(key.peer, cpi).await;
                         }
                     }
-                    Some(Ok(BfdEvent::Sessions(_))) => {}
+                    Some(Ok(BfdEvent::Sessions(_) | BfdEvent::Reflector(_))) => {}
                     Some(Err(_)) | None => break,
                 },
                 _ = shutdown.changed() => if *shutdown.borrow() { return },

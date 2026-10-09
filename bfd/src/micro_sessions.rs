@@ -26,6 +26,7 @@ use tracing::{debug, info, warn};
 
 use crate::config_client;
 use crate::manager::Manager;
+use crate::socket::ReflectorNet;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// Insurance against a missed diff, like `nos-lacpd`'s.
@@ -212,11 +213,19 @@ async fn watch_state(
 /// Follows the running config for the daemon's lifetime, like `nos-lacpd`'s
 /// `reconcile::run`: any diff of the sections that matter re-derives the
 /// sessions from a fresh `Get`.
-pub async fn run(config_socket: PathBuf, mut micro: Micro, mut shutdown: watch::Receiver<bool>) {
+pub async fn run(
+    config_socket: PathBuf,
+    mut micro: Micro,
+    reflector: Arc<ReflectorNet>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let scopes = vec![
         DiffScope::Interfaces,
         DiffScope::PortAggregates,
         DiffScope::BfdProfiles,
+        // The S-BFD reflector (#294) rides on the same resync.
+        DiffScope::SbfdReflector,
+        DiffScope::RoutingTables,
     ];
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
@@ -227,7 +236,7 @@ pub async fn run(config_socket: PathBuf, mut micro: Micro, mut shutdown: watch::
                 loop {
                     tokio::select! {
                         event = reader.next() => match event {
-                            Some(Ok(Event::Diff(_))) => resync(&config_socket, &mut micro).await,
+                            Some(Ok(Event::Diff(_))) => resync(&config_socket, &mut micro, &reflector).await,
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
                                 warn!(error = %e, "error reading diff stream, reconnecting");
@@ -239,7 +248,7 @@ pub async fn run(config_socket: PathBuf, mut micro: Micro, mut shutdown: watch::
                             }
                         },
                         // The first tick is immediate: the initial sync.
-                        _ = tick.tick() => resync(&config_socket, &mut micro).await,
+                        _ = tick.tick() => resync(&config_socket, &mut micro, &reflector).await,
                         _ = shutdown.changed() => break,
                     }
                 }
@@ -257,12 +266,13 @@ pub async fn run(config_socket: PathBuf, mut micro: Micro, mut shutdown: watch::
     micro.stop();
 }
 
-async fn resync(config_socket: &Path, micro: &mut Micro) {
+async fn resync(config_socket: &Path, micro: &mut Micro, reflector: &ReflectorNet) {
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
             let wanted = wanted(&cfg);
             debug!(sessions = wanted.len(), "reconciling micro-bfd sessions");
             micro.apply(wanted).await;
+            reflector.configure(&cfg).await;
         }
         Err(e) => warn!(error = %e, "failed to fetch running config, keeping previous state"),
     }

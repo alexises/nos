@@ -234,7 +234,7 @@ async fn run(
                             publish(&up_tx, &book);
                         }
                     }
-                    Some(Ok(BfdEvent::Sessions(_))) => {}
+                    Some(Ok(BfdEvent::Sessions(_) | BfdEvent::Reflector(_))) => {}
                     Some(Err(_)) | None => break,
                 },
                 _ = shutdown.changed() => if *shutdown.borrow() { return },

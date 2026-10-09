@@ -25,7 +25,10 @@ pub mod rib;
 pub mod schema;
 pub mod validators;
 
-pub use bfd::{BfdDiag, BfdEvent, BfdRequest, BfdSessionView, BfdState, SessionKey};
+pub use bfd::{
+    BfdDiag, BfdEvent, BfdRequest, BfdSessionKind, BfdSessionView, BfdState, ReflectorDiscards,
+    ReflectorView, SessionKey,
+};
 pub use bgp::{
     BgpEvent, BgpRequest, BgpSessionState, EvpnRouteSummary, GrSummary, PeerSummary,
     RedistributeUpdate, RedistributedRoute, RpkiCacheStatus, RpkiSessionState,

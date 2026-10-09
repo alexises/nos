@@ -44,6 +44,8 @@ pub enum Command {
     ShowBfdSessions {
         peer: Option<IpAddr>,
     },
+    /// `show bfd reflector` — the S-BFD reflector's discriminators and counters.
+    ShowBfdReflector,
     /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
     /// optionally filtered to one source, or a live tail with `--follow`.
     ShowLog {
@@ -214,6 +216,14 @@ mod tests {
         assert_eq!(
             Command::parse("show lldp"),
             Command::Unknown("show lldp".to_string())
+        );
+    }
+
+    #[test]
+    fn show_bfd_reflector() {
+        assert_eq!(
+            Command::parse("show bfd reflector"),
+            Command::ShowBfdReflector
         );
     }
 

@@ -39,6 +39,8 @@ use crate::manager::{Demux, Net};
 use crate::micro;
 use crate::neigh;
 use crate::packet;
+use crate::reflector::Reflector;
+use crate::sbfd::{self, SbfdPath};
 use crate::session::{rand_u32, EchoPath, EchoTx, Looped, Tx};
 use crate::watchdog_client;
 use nos_l2_socket::{L2Socket, L2Unicast};
@@ -249,7 +251,15 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Resul
     if v6 {
         s.set_unicast_hops_v6(TTL)?;
         set_int(s.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG, 1)?;
+        // An S-BFD initiator's reflections arrive here (`open_sbfd`) and are TTL-checked.
+        set_int(
+            s.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVHOPLIMIT,
+            1,
+        )?;
     } else {
+        set_int(s.as_raw_fd(), libc::IPPROTO_IP, libc::IP_RECVTTL, 1)?;
         s.set_ttl(TTL)?;
         set_int(
             s.as_raw_fd(),
@@ -439,6 +449,298 @@ async fn micro_rx_loop(
     }
 }
 
+/// Reads reflections off an initiator's own socket (RFC 7881 §2: they come
+/// back to its source port) and hands them to the session with their TTL.
+async fn sbfd_rx_loop(
+    sock: AsyncFd<Socket>,
+    peer: IpAddr,
+    out: tokio::sync::mpsc::Sender<sbfd::Reflection>,
+) {
+    let mut buf = [0u8; 128];
+    loop {
+        let mut guard = match sock.readable().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(peer = %peer, error = %e, "bfd sbfd receive socket failed");
+                return;
+            }
+        };
+        match guard.try_io(|s| recv_one(s.get_ref().as_raw_fd(), &mut buf)) {
+            Ok(Ok(d)) => {
+                if let Ok(p) = packet::decode(&buf[..d.len.min(buf.len())]) {
+                    let _ = out.try_send((p, d.ttl));
+                }
+            }
+            // ICMP errors on a connected socket (reflector unreachable) are not fatal.
+            Ok(Err(e))
+                if e.kind() == io::ErrorKind::Interrupted
+                    || matches!(
+                        e.raw_os_error(),
+                        Some(libc::ECONNREFUSED | libc::EHOSTUNREACH | libc::ENETUNREACH)
+                    ) => {}
+            Ok(Err(e)) => {
+                warn!(peer = %peer, error = %e, "bfd sbfd receive failed");
+                return;
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// One datagram for the reflector: who sent it, which of our addresses it
+/// was sent to (`IP_PKTINFO`), and the raw sender address to answer to.
+struct Probe {
+    src: SocketAddr,
+    dst: IpAddr,
+    name: SockAddr,
+    len: usize,
+}
+
+fn recv_probe(fd: RawFd, buf: &mut [u8]) -> io::Result<Probe> {
+    // SAFETY: as `recv_one`: every pointer is to a local that outlives the
+    // call, the cmsg walk stays inside `msg_controllen`.
+    unsafe {
+        let mut name: libc::sockaddr_storage = std::mem::zeroed();
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        };
+        let mut ctrl = [0u64; 32];
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_name = (&raw mut name).cast();
+        msg.msg_namelen =
+            libc::socklen_t::try_from(size_of::<libc::sockaddr_storage>()).unwrap_or(128);
+        msg.msg_iov = &raw mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = ctrl.as_mut_ptr().cast();
+        msg.msg_controllen = size_of_val(&ctrl) as _;
+        let n = libc::recvmsg(fd, &raw mut msg, 0);
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let name = SockAddr::new(name, msg.msg_namelen);
+        let src = name
+            .as_socket()
+            .ok_or_else(|| io::Error::other("datagram without an IP source"))?;
+        let mut dst = if src.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        };
+        let mut c = libc::CMSG_FIRSTHDR(&raw const msg);
+        while !c.is_null() {
+            let h = &*c;
+            if h.cmsg_level == libc::IPPROTO_IP && h.cmsg_type == libc::IP_PKTINFO {
+                let i = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::in_pktinfo>());
+                dst = IpAddr::V4(Ipv4Addr::from(u32::from_be(i.ipi_addr.s_addr)));
+            } else if h.cmsg_level == libc::IPPROTO_IPV6 && h.cmsg_type == libc::IPV6_PKTINFO {
+                let i = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::in6_pktinfo>());
+                dst = IpAddr::V6(Ipv6Addr::from(i.ipi6_addr.s6_addr));
+            }
+            c = libc::CMSG_NXTHDR(&raw const msg, c);
+        }
+        Ok(Probe {
+            src,
+            dst,
+            name,
+            len: usize::try_from(n).unwrap_or(0),
+        })
+    }
+}
+
+/// Sends `data` to `to` with `from` as the IP source (`IP_PKTINFO`'s
+/// `ipi_spec_dst`): RFC 7881 §6.1 answers from the address that was probed,
+/// which a wildcard-bound socket would not otherwise pick.
+fn send_from(fd: RawFd, to: &SockAddr, from: Option<IpAddr>, data: &[u8]) -> io::Result<()> {
+    // SAFETY: the buffers outlive the call; the control message is built with
+    // the `CMSG_*` macros inside a buffer larger than `CMSG_SPACE` of either.
+    unsafe {
+        let mut ctrl = [0u64; 8];
+        let mut iov = libc::iovec {
+            iov_base: data.as_ptr().cast_mut().cast(),
+            iov_len: data.len(),
+        };
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_name = to.as_ptr().cast_mut().cast();
+        msg.msg_namelen = to.len();
+        msg.msg_iov = &raw mut iov;
+        msg.msg_iovlen = 1;
+        if let Some(from) = from {
+            msg.msg_control = ctrl.as_mut_ptr().cast();
+            let (level, kind, size) = match from {
+                IpAddr::V4(_) => (
+                    libc::IPPROTO_IP,
+                    libc::IP_PKTINFO,
+                    size_of::<libc::in_pktinfo>(),
+                ),
+                IpAddr::V6(_) => (
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_PKTINFO,
+                    size_of::<libc::in6_pktinfo>(),
+                ),
+            };
+            let size = u32::try_from(size).unwrap_or(0);
+            msg.msg_controllen = libc::CMSG_SPACE(size) as _;
+            let h = libc::CMSG_FIRSTHDR(&raw const msg);
+            (*h).cmsg_level = level;
+            (*h).cmsg_type = kind;
+            (*h).cmsg_len = libc::CMSG_LEN(size) as _;
+            match from {
+                IpAddr::V4(a) => {
+                    let mut i: libc::in_pktinfo = std::mem::zeroed();
+                    i.ipi_spec_dst.s_addr = u32::from(a).to_be();
+                    std::ptr::write_unaligned(libc::CMSG_DATA(h).cast(), i);
+                }
+                IpAddr::V6(a) => {
+                    let mut i: libc::in6_pktinfo = std::mem::zeroed();
+                    i.ipi6_addr.s6_addr = a.octets();
+                    std::ptr::write_unaligned(libc::CMSG_DATA(h).cast(), i);
+                }
+            }
+        }
+        if libc::sendmsg(fd, &raw const msg, 0) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// Whether `a` may be the source of a reply: not loopback (RFC 7881 §6.1 lets
+/// the kernel pick then), not a broadcast/multicast/unspecified destination.
+fn reply_source(a: IpAddr) -> Option<IpAddr> {
+    let ok = !(a.is_unspecified()
+        || a.is_loopback()
+        || a.is_multicast()
+        || matches!(a, IpAddr::V4(v) if v.is_broadcast()));
+    ok.then_some(a)
+}
+
+fn reflector_socket(vrf: &str, v6: bool) -> io::Result<AsyncFd<Socket>> {
+    let s = Socket::new(domain(v6), Type::DGRAM, Some(Protocol::UDP))?;
+    s.bind_device(Some(vrf.as_bytes()))?;
+    let fd = s.as_raw_fd();
+    let bind: SocketAddr = if v6 {
+        s.set_only_v6(true)?;
+        set_int(fd, libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO, 1)?;
+        s.set_unicast_hops_v6(TTL)?;
+        (Ipv6Addr::UNSPECIFIED, sbfd::PORT).into()
+    } else {
+        set_int(fd, libc::IPPROTO_IP, libc::IP_PKTINFO, 1)?;
+        s.set_ttl(TTL)?;
+        (Ipv4Addr::UNSPECIFIED, sbfd::PORT).into()
+    };
+    s.bind(&bind.into())?;
+    s.set_nonblocking(true)?;
+    AsyncFd::new(s)
+}
+
+async fn reflect_loop(sock: AsyncFd<Socket>, vrf: String, reflector: Arc<Reflector>) {
+    let mut buf = [0u8; 128];
+    loop {
+        let mut guard = match sock.readable().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(vrf = %vrf, error = %e, "bfd reflector socket failed");
+                return;
+            }
+        };
+        match guard.try_io(|s| recv_probe(s.get_ref().as_raw_fd(), &mut buf)) {
+            Ok(Ok(p)) => {
+                let data = &buf[..p.len.min(buf.len())];
+                if let Some(reply) = reflector.handle(std::time::Instant::now(), p.src, p.dst, data)
+                {
+                    let fd = sock.get_ref().as_raw_fd();
+                    if let Err(e) = send_from(fd, &p.name, reply_source(p.dst), &reply) {
+                        debug!(peer = %p.src, error = %e, "bfd reflector reply failed");
+                    }
+                }
+            }
+            Ok(Err(e)) if e.kind() != io::ErrorKind::Interrupted => {
+                warn!(vrf = %vrf, error = %e, "bfd reflector receive failed");
+                return;
+            }
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
+}
+
+type ReflectorTasks = HashMap<(String, bool), (u32, JoinHandle<()>)>;
+
+/// The reflector's UDP 7784 sockets: one per (VRF, family) while a
+/// discriminator is configured, restarted when the VRF device is recreated.
+pub struct ReflectorNet {
+    watchdog_socket: PathBuf,
+    reflector: Arc<Reflector>,
+    /// (table, v6) -> (VRF ifindex it was opened for, its task).
+    tasks: Mutex<ReflectorTasks>,
+}
+
+impl ReflectorNet {
+    pub fn new(watchdog_socket: PathBuf, reflector: Arc<Reflector>) -> Self {
+        ReflectorNet {
+            watchdog_socket,
+            reflector,
+            tasks: Mutex::default(),
+        }
+    }
+
+    /// Follows the running config: the policy, then the sockets of every table.
+    pub async fn configure(&self, cfg: &nos_proto::Config) {
+        self.reflector.set_policy(crate::reflector::policy_of(cfg));
+        let tables: Vec<String> = cfg.routing_tables.iter().map(|t| t.name.clone()).collect();
+        self.apply(&tables).await;
+    }
+
+    /// Makes the sockets match the policy and the routing `tables`; idempotent.
+    pub async fn apply(&self, tables: &[String]) {
+        if !self.reflector.enabled() {
+            for (_, (_, t)) in self.tasks.lock().unwrap().drain() {
+                t.abort();
+            }
+            return;
+        }
+        self.tasks.lock().unwrap().retain(|(t, _), (_, task)| {
+            let keep = tables.contains(t);
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        for table in tables {
+            let Some(vrf) = watchdog_client::vrf_name(&self.watchdog_socket, table).await else {
+                continue;
+            };
+            let idx = ifindex(&vrf);
+            for v6 in [false, true] {
+                let mut tasks = self.tasks.lock().unwrap();
+                let key = (table.clone(), v6);
+                if let Some((have, task)) = tasks.get(&key) {
+                    if *have == idx && !task.is_finished() {
+                        continue;
+                    }
+                    task.abort();
+                }
+                match reflector_socket(&vrf, v6) {
+                    Ok(sock) => {
+                        tasks.insert(
+                            key,
+                            (
+                                idx,
+                                tokio::spawn(reflect_loop(
+                                    sock,
+                                    vrf.clone(),
+                                    self.reflector.clone(),
+                                )),
+                            ),
+                        );
+                    }
+                    Err(e) => debug!(vrf = %vrf, v6, error = %e, "bfd reflector socket not opened"),
+                }
+            }
+        }
+    }
+}
+
 type RxTasks = HashMap<(String, bool, bool), (u32, JoinHandle<()>)>;
 
 /// The real transport. Owns the receive sockets and feeds the `Demux`.
@@ -602,6 +904,28 @@ impl Net for UdpNet {
             .filter(|_| !key.multihop)
             .unwrap_or(&vrf);
         Ok(Arc::new(tx_socket(device, &vrf, key, port(key.multihop))?))
+    }
+
+    async fn open_sbfd(&self, key: &SessionKey) -> io::Result<SbfdPath> {
+        let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
+            .await
+            .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
+        let device = key
+            .interface
+            .as_deref()
+            .filter(|_| !key.multihop)
+            .unwrap_or(&vrf);
+        // Its own source port (never 7784, unique per session: `bind` fails
+        // on a port in use) so the reflections find their way back.
+        let tx = tx_socket(device, &vrf, key, sbfd::PORT)?;
+        let rx = AsyncFd::new(tx.0.try_clone()?)?;
+        let (out, rx_chan) = tokio::sync::mpsc::channel(64);
+        let task = tokio::spawn(sbfd_rx_loop(rx, key.peer, out));
+        Ok(SbfdPath {
+            tx: Arc::new(tx),
+            rx: rx_chan,
+            task: task.abort_handle(),
+        })
     }
 
     async fn open_echo(&self, key: &SessionKey, disc: u32, unaffiliated: bool) -> Option<EchoPath> {

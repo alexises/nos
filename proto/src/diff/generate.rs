@@ -69,6 +69,7 @@ fn put(d: &mut ConfigDiff, name: &str, mut fields: Vec<FieldDiff>, subs: Vec<Sec
         "users" => d.users = subs,
         "logging" => d.logging = fields,
         "bfd_profiles" => d.bfd_profiles = subs,
+        "sbfd_reflector" => d.sbfd_reflector = fields,
         _ => return false,
     }
     true

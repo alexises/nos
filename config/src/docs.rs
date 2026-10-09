@@ -1541,6 +1541,26 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Pad BFD Control packets to a size.",
             "RFC 9764: the UDP payload of every Control packet is padded with zeros to this many bytes, 24 to 9000, to test that the path carries packets that large (a path MTU, not the link MTU). The packet is never smaller than a bare Control packet. Set it on both ends to test both directions; a peer that cannot receive such packets drops them and the session goes down by detection time. Packets that do not fit are sent with the don't-fragment bit, so the session also goes down when the path cannot carry them. Unset sends the bare packet.",
         ),
+        Topic::BfdProfileMode => (
+            "Choose classical or Seamless BFD.",
+            "`async` (default) is the RFC 5880 handshake with a BFD peer. `sbfd` is the RFC 7880 S-BFD initiator: it probes a reflector on UDP 7784 that keeps no state for it, and the session is up while the reflector answers (Down/Up only). The peer needs `sbfd reflector discriminator` for the value in `sbfd-remote-discriminator`. Not combinable with `echo-mode`, `padded-pdu-size` or `auth`; authentication for S-BFD is not built yet.",
+        ),
+        Topic::BfdProfileSbfdRemoteDiscriminator => (
+            "Set the S-BFD discriminator to probe.",
+            "For `mode sbfd`: the reflector's S-BFD discriminator, written as an IPv4 address (its 32 bits). Unset uses the session peer's own IPv4 address, so a reflector configured with its own address needs nothing here. An IPv6 peer needs it.",
+        ),
+        Topic::SbfdReflector => (
+            "Answer Seamless BFD probes.",
+            "The RFC 7880 S-BFD reflector: stateless, listens on UDP 7784 in the VRF of every routing table, and answers a probe whose Your Discriminator is one of its discriminators. Off while no discriminator is set.",
+        ),
+        Topic::SbfdReflectorDiscriminator => (
+            "Add an S-BFD discriminator to answer for.",
+            "Written as an IPv4 address, the 32 bits of the discriminator (10.0.0.1 is 167772161); not 0.0.0.0. A probe for any other discriminator is dropped, which an initiator sees as the target being down. Remove one to take its initiators down.",
+        ),
+        Topic::SbfdReflectorAllowFrom => (
+            "Only answer probes from these sources.",
+            "RFC 7881 section 7 source filtering: a prefix per entry. With none, any non-martian source is answered; martian sources (unspecified, multicast, loopback, broadcast) never are.",
+        ),
         Topic::BfdReference => (
             "Run BFD with a BFD profile.",
             "The name of a `bfd-profile` whose parameters apply to the sessions of this peer-group, OSPF or OSPFv3 profile, or static route. The commit is refused when the profile does not exist. Unset runs no BFD.",

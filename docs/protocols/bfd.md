@@ -144,6 +144,30 @@ set echo-interval 50
 - When several clients share one session, the profile of the last `Register` wins (as for every other setting).
 - `show bfd sessions` ends the line with `pdu <n>B` while padding is set; REST has `tx_pdu_bytes` (0 when not padded).
 
+## Seamless BFD (RFC 7880, RFC 7881)
+
+S-BFD probes a target that keeps no per-session state: the far end only has to answer for a discriminator. Two parts: a reflector and an initiator profile.
+
+- Reflector, on the system being probed:
+  - `set sbfd reflector discriminator 10.0.0.2` (repeat for more). A discriminator is a 32-bit value, written as an IPv4 address (`10.0.0.2` is 167772162); 0.0.0.0 is refused.
+  - `nos-bfdd` then listens on UDP 7784 in the VRF of every routing table and answers a probe whose Your Discriminator is one of them. With none configured it listens on nothing.
+  - It sends nothing on a timer and remembers nothing per initiator: one probe in, at most one reply out (State Up, D bit 0, Required Min RX 10 ms, replied from the address that was probed, TTL 255).
+  - `set sbfd reflector allow-from 10.0.0.0/24` (repeatable) answers only those sources (RFC 7881 section 7). Martian sources (unspecified, multicast, loopback, broadcast, reserved, link-local towards a global address) are never answered; reverse-path validation is the kernel's `rp_filter`.
+  - A global limit of 10 000 packets a second (burst 2 000) bounds the work a flood can cause.
+- Initiator, on the system that wants to know the target is reachable:
+  - `edit bfd-profile sb`, `set mode sbfd`, optionally `set sbfd-remote-discriminator 10.0.0.2`, then reference the profile as for any other: `set static-routing-instance <i> route <cidr> bfd sb`.
+  - Without `sbfd-remote-discriminator` the discriminator is the session peer's own IPv4 address, which suits a reflector configured with its own address. An IPv6 peer needs it; a static route to an IPv6 gateway without one is refused at commit.
+  - The probe goes to UDP 7784 from a source port of its own (never 7784), so the reflection finds its way back to that session's socket.
+  - There is no Init state: the session is `up` on a reflected Up and `down` when `detect-multiplier` x the transmit interval pass without a reflection (`diag control-detection-time-expired`).
+  - The transmit interval is `min-tx-interval`, raised to the Required Min RX the reflector answers with. Probing starts at that rate at once; the one-second wait of classical BFD while not Up does not apply.
+  - A reflector that answers AdminDown (out of service) takes the session `down` without a failure diagnostic and slows probing to one packet a second until it answers Up again.
+  - Single-hop sessions require TTL 255 on the reflection.
+- Not available yet: `mode sbfd` is refused together with `echo-mode`, `padded-pdu-size` and `auth` (a follow-up adds S-BFD authentication after RFC 5880 authentication, #289; until then the reflector drops any packet with the A bit set and counts it).
+- Interoperability: FRR's `bfdd` implements RFC 5880, 5881, 5882 and 5883 only (its documentation lists no S-BFD, checked against FRR 10.4), so it can be neither initiator nor reflector. The e2e phase `bfd-sbfd` therefore runs `nos` against `nos`, with an FRR classical session alongside to prove the two kinds do not disturb each other.
+- Check the reflector with `show bfd reflector` (`GET /v1/bfd/reflector`): the discriminators and counters of packets received, replied and dropped per reason (`malformed`, `source_port`, `martian`, `filtered`, `rate_limited`, `authenticated`, `demand_clear`, `unknown_discriminator`).
+- An initiator is listed by `show bfd sessions` with `sbfd` after the peer; REST has `kind` (`Classical` or `SbfdInitiator`), and `remote_discriminator` is the S-BFD discriminator probed.
+- To take an initiator down on purpose, remove the discriminator from the reflector: the initiator logs `bfd session down … diag=control-detection-time-expired` and the guarded route is withdrawn. Re-adding it brings both back.
+
 ## Micro-BFD on a port aggregate (RFC 7130)
 
 - Set `bfd <profile>` and `bfd-peer <ip>` on a `port-aggregate` (xor or lacp), and put an address of the peer's family on its untagged subinterface: `nos-bfdd` runs one session per member link, each over that member only.
@@ -170,6 +194,7 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 - With `auth` set the line ends with `auth <method> key <id> (<n> failures)`; the key is never shown.
 - While Echo runs the line ends with `echo active <n>ms`, followed by `(echo-only)` for an unaffiliated session, where `tx` is the echo interval and `detect` is `echo-interval x detect-multiplier`.
 - With `padded-pdu-size` set the line ends with `pdu <n>B`.
+- An S-BFD initiator has `sbfd` after the peer, and its second discriminator is the one probed.
 - A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
 - The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id`, `auth_failures`, `echo_active`, `echo_interval_us` (0 while Echo is off), `echo_only` (unaffiliated) and `tx_pdu_bytes` (0 when not padded).
 - "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
@@ -203,6 +228,8 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 | `minimum_ttl` | `set minimum-ttl <n>` | integer | 254 | |
 | `shutdown` | `set shutdown enable` | bool | off | |
 | `auth` | `set auth key-id <n> method <m> key <k>` | key id, method, key | none | key length per method, below |
+| `mode` | `set mode async\|sbfd` | enum | `async` | `sbfd` excludes `echo-mode`, `padded-pdu-size` and `auth` |
+| `sbfd_remote_discriminator` | `set sbfd-remote-discriminator <ipv4>` | IPv4 address | the peer's IPv4 address | not 0.0.0.0 |
 
 - Methods: `simple-password`, `keyed-md5`, `meticulous-md5`, `keyed-sha1`, `meticulous-sha1`.
 - Key length (RFC 5880 sections 4.2 and 4.3): 1 to 16 bytes for `simple-password` and the MD5 methods, 1 to 20 bytes for the SHA1 methods.

@@ -17,6 +17,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show lldp neighbors` / `show lldp neighbors detail` | `GET /v1/lldp/neighbors` |
 | `show lldp statistics` | `GET /v1/lldp/statistics` |
 | `show bfd sessions` / `show bfd sessions <peer>` | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` |
+| `show bfd reflector` | `GET /v1/bfd/reflector` |
 | `show bgp brief` | `GET /v1/bgp/summary` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
 | `show bgp rpki` | `GET /v1/bgp/rpki` |

@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{BfdEvent, BfdRequest, BfdSessionView, IpcCodec, Role};
+use nos_proto::{BfdEvent, BfdRequest, BfdSessionView, IpcCodec, ReflectorView, Role};
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -48,6 +48,14 @@ pub async fn get_sessions(
 ) -> Result<Vec<BfdSessionView>, BfdClientError> {
     match ask(bfd_socket, BfdRequest::GetSessions { peer }).await? {
         BfdEvent::Sessions(sessions) => Ok(sessions),
-        BfdEvent::State { .. } => Err(BfdClientError::UnexpectedReply("reply to GetSessions")),
+        _ => Err(BfdClientError::UnexpectedReply("reply to GetSessions")),
+    }
+}
+
+/// Fetches the S-BFD reflector's discriminators and counters.
+pub async fn get_reflector(bfd_socket: &Path) -> Result<ReflectorView, BfdClientError> {
+    match ask(bfd_socket, BfdRequest::GetReflector).await? {
+        BfdEvent::Reflector(v) => Ok(v),
+        _ => Err(BfdClientError::UnexpectedReply("reply to GetReflector")),
     }
 }

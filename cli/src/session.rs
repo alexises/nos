@@ -115,6 +115,8 @@ pub enum Resolved {
     ShowBfdSessions {
         peer: Option<std::net::IpAddr>,
     },
+    /// `show bfd reflector` — data-plane, valid in any mode.
+    ShowBfdReflector,
     /// `show log [<source>] [--follow]` — data-plane, valid in any mode.
     ShowLog {
         source: Option<String>,
@@ -206,6 +208,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowLldpNeighbors { detail } => Resolved::ShowLldpNeighbors { detail },
         Command::ShowLldpStatistics => Resolved::ShowLldpStatistics,
         Command::ShowBfdSessions { peer } => Resolved::ShowBfdSessions { peer },
+        Command::ShowBfdReflector => Resolved::ShowBfdReflector,
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowBgpEvpn => Resolved::ShowBgpEvpn,
@@ -305,6 +308,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowLldpNeighbors { .. }
         | Command::ShowLldpStatistics
         | Command::ShowBfdSessions { .. }
+        | Command::ShowBfdReflector
         | Command::ShowLog { .. }
         | Command::ShowBgpBrief
         | Command::ShowBgpEvpn

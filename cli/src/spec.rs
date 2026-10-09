@@ -465,6 +465,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         |peer| Command::ShowBfdSessions {
             peer: Some(peer.parse().ok()?),
         }),
+    cmd!(["show" "bfd" "reflector"],
+        Doc::Local {
+            summary: "Show the S-BFD reflector.",
+            detail: "Queries nos-bfdd (resolved via nos-watchdogd) for the Seamless BFD reflector \
+                     (RFC 7880): the discriminators it answers for, how many probes it received \
+                     and answered, and how many it dropped per reason.",
+        },
+        Always,
+        Command::ShowBfdReflector),
     cmd!(["show" "lacp"],
         Doc::Local {
             summary: "Show every LACP port aggregate's negotiation state.",

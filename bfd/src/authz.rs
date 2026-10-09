@@ -8,7 +8,9 @@ pub fn allowed(role: Role, req: &BfdRequest) -> bool {
         BfdRequest::Register { .. } | BfdRequest::Deregister { .. } => {
             matches!(role, Role::Bgpd | Role::Ribd | Role::Ospfd | Role::Ospfv3d)
         }
-        BfdRequest::GetSessions { .. } => matches!(role, Role::User | Role::Restd),
+        BfdRequest::GetSessions { .. } | BfdRequest::GetReflector => {
+            matches!(role, Role::User | Role::Restd)
+        }
     }
 }
 
@@ -47,6 +49,7 @@ mod tests {
                 BfdRequest::GetSessions { peer: None },
                 &[Role::User, Role::Restd][..],
             ),
+            (BfdRequest::GetReflector, &[Role::User, Role::Restd][..]),
         ];
         for (req, ok) in &reqs {
             for role in Role::ALL {

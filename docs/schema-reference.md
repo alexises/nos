@@ -21,7 +21,7 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 ## References by name, with and without ownership
 
 - `RoutingTable` shows the pattern for a section that only *references* other top-level sections by name (`bgp_instance`, `static_routing_instance`) rather than owning them, with an ownership constraint (at most one table may claim a given instance); `Subinterface.routing_table` is the same by-name reference pattern but without that ownership constraint — many interfaces/subinterfaces may share one routing table (which doubles as a VRF).
-- `BfdProfile` (`Config.bfd_profiles`) is referenced by an optional `bfd: Option<String>` on `BgpPeerGroup`, `OspfProfile`, `Ospfv3Profile` and `StaticRoute`, all checked by `validators::bfd_reference_valid`. Deleting a profile needs no edit-time check: every dangling reference fails at commit under its own path. See [BFD profiles](protocols/bfd.md).
+- `BfdProfile` (`Config.bfd_profiles`) is referenced by an optional `bfd: Option<String>` on `BgpPeerGroup`, `OspfProfile`, `Ospfv3Profile` and `StaticRoute`, all checked by `validators::bfd_reference_valid`. Deleting a profile needs no edit-time check: every dangling reference fails at commit under its own path. `BfdProfile.mode` `sbfd` makes the session a Seamless BFD initiator and excludes `echo_mode`, `padded_pdu_size` and `auth`; `sbfd_remote_discriminator` is an IPv4 address (the 32 bits) and not 0.0.0.0; a static route to an IPv6 gateway with an `sbfd` profile needs it. `Config.sbfd_reflector` (`discriminators`, `allow_from`) is the reflector: discriminators are IPv4-written, not 0.0.0.0 and unique. See [BFD profiles](protocols/bfd.md).
 
 ## Loopbacks by name prefix, and the flat vs subinterface L3 split
 

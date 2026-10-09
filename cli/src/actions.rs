@@ -214,6 +214,10 @@ pub async fn handle_action(
             show_lldp_statistics(watchdog_socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowBfdReflector => {
+            show_bfd_reflector(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowBfdSessions { peer } => {
             show_bfd_sessions(watchdog_socket, peer).await;
             Outcome::Continue(mode)
@@ -571,6 +575,16 @@ async fn show_bfd_sessions(watchdog_socket: &Path, peer: Option<std::net::IpAddr
     };
     match bfd_client::get_sessions(&bfd_socket, peer).await {
         Ok(sessions) => println!("{}", format::render_bfd_sessions(&sessions)),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+async fn show_bfd_reflector(watchdog_socket: &Path) {
+    let Some(bfd_socket) = resolve_bfd(watchdog_socket).await else {
+        return;
+    };
+    match bfd_client::get_reflector(&bfd_socket).await {
+        Ok(view) => println!("{}", format::render_bfd_reflector(&view)),
         Err(e) => eprintln!("error: {e}"),
     }
 }

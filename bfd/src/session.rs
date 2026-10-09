@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nos_proto::schema::{BfdAuthMethod, BfdProfile, EchoMode};
-use nos_proto::{BfdDiag, BfdState, SessionKey};
+use nos_proto::{BfdDiag, BfdSessionKind, BfdState, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
@@ -80,6 +80,7 @@ pub struct Status {
     pub echo_only: bool,
     /// RFC 9764 `padded-pdu-size`, 0 when not padded.
     pub tx_pdu_bytes: u32,
+    pub kind: BfdSessionKind,
 }
 
 /// Where a session's Echo packets leave: the IP packet looped through the
@@ -191,6 +192,7 @@ impl Core {
             },
             echo_only: self.unaffiliated(),
             tx_pdu_bytes: self.profile.padded_pdu_size.map_or(0, u32::from),
+            kind: BfdSessionKind::Classical,
         }
     }
 
@@ -545,7 +547,7 @@ pub fn rand_u32() -> u32 {
 /// Minimum gap between two `bfd auth failed` warnings of one session.
 const AUTH_WARN_EVERY: Duration = Duration::from_secs(10);
 
-fn jitter_pct() -> u32 {
+pub(crate) fn jitter_pct() -> u32 {
     75 + rand_u32() % 26
 }
 
@@ -641,7 +643,7 @@ pub async fn run(
     }
 }
 
-fn log_transition(key: &SessionKey, s: &Status) {
+pub(crate) fn log_transition(key: &SessionKey, s: &Status) {
     // RFC 7130 micro-BFD: the anchors the `micro-bfd` e2e phase waits for.
     if let (Some(aggregate), Some(member)) = (&key.aggregate, &key.interface) {
         match s.state {

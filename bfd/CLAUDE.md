@@ -17,7 +17,9 @@ The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fix
 | `micro_sessions` | `wanted(&Config)` (one session per aggregate member), `Micro::apply`, `UpSets` (push-on-change), config follow loop |
 | `config_client`, `interface_client` | `nos-configd` diff stream; the `PushBfdMembers` connection to `nos-interfaced` (cached, resent on reconnect) |
 | `neigh` | The neighbour's MAC from rtnetlink (read-only) |
-| `socket` | UDP 3784/4784 sockets and the Echo `AF_PACKET` transport (`UdpNet`); excluded from coverage, `nos-e2e`'s `bfd` and `bfd-echo` phases are its test |
+| `sbfd` | RFC 7880 Seamless BFD, pure: `reflect` (the stateless reflector's decision) and `Initiator` (Figure 4), `run` its task |
+| `reflector` | The reflector's policy, token bucket and counters (`Manager::reflector()`) |
+| `socket` | UDP 3784/4784/7784 sockets (`UdpNet`, `ReflectorNet`) and the Echo `AF_PACKET` transport; excluded from coverage, `nos-e2e`'s `bfd`, `bfd-echo` and `bfd-sbfd` phases are its test |
 | `watchdog_client` | Broker lookups, the table's VRF device via `nos-ribd` `GetVrfName` |
 
 Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`.
@@ -25,20 +27,21 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 ## Rules that bite
 
 - `decode` never panics: use `get`/`try_into`, never index untrusted bytes.
-- Auth (#289): `Core::authenticate` before `on_packet`, `Core::sign` on every send; a failed packet must not reach the FSM or timers. A profile edit keeps the old key valid for 4 detection times. #294 adds reflector auth on top.
+- Auth (#289): `Core::authenticate` before `on_packet`, `Core::sign` on every send; a failed packet must not reach the FSM or timers. A profile edit keeps the old key valid for 4 detection times. S-BFD reflector auth is a follow-up.
 - `timers` and `Core` take `now` and the jitter percentage as arguments; only `session::run` reads the clock.
 - Discriminators come from the manager's counter (random start), never 0.
 - `BfdRequest`/`BfdEvent` variants are appended, never reordered (postcard). A new `BfdRequest` must be classified in `authz::allowed`.
 - Echo (#290, single-hop, affiliated only): `Core::sync_echo` toggles it and Desired Min TX goes to 1 s through `Timers::change`; never write the neighbour table; echoes are received at the packet layer (the IP stack drops our own source). No demand mode. Multihop (#287): UDP 4784, TTL checked per session in `Demux::route`; no destination address in the zero-discriminator demux (`ponytail:` in `manager.rs`).
 - Unaffiliated echo (#291, RFC 9747): `echo-mode unaffiliated` makes Echo the whole session. `Core` ignores Control, sends encoded Control packets as the Echo payload and feeds the FSM its own looped state; no 3784 socket, no `Demux` slot (`NoTx`); only TTL 254 accepted. The neighbour is resolved by an empty UDP datagram (`neigh_loop`). `auth` ignored (`ponytail:`).
 - Padding (#293, RFC 9764): `Core::wire` = `sign` + zero padding after the `length` bytes (auth digest untouched); `decode` already ignores trailing bytes. TX sockets always set `IP_PMTUDISC_DO`/`IPV6_DONTFRAG`; `EMSGSIZE` logs `bfd padded packet exceeds the path mtu` once. The RX buffer stays 128 bytes: a longer datagram is truncated, harmless as only `length` bytes are read.
+- S-BFD (#294, RFC 7880/7881): `mode sbfd` makes a session an `Initiator` with no `Demux` slot; its own connected socket (source port other than 7784) receives the reflection, TTL checked in `sbfd::run`. The reflector (`Reflector`, UDP 7784 per VRF, only while a discriminator is configured) answers from the probed address via `IP_PKTINFO`, drops D=0, A bit, source port 7784, martians, non-`allow-from` and over-rate packets, and counts each. Authentication is not built for S-BFD (follow-up after #289); the reflector discards A-bit packets.
 - Desired Min TX is floored at 1 s while not Up by `Timers` itself; reaching Up needs no `change`.
-- The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` follows only `Interfaces`/`PortAggregates`/`BfdProfiles` diffs, for micro-BFD.
+- The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` follows only `Interfaces`/`PortAggregates`/`BfdProfiles` diffs (micro-BFD) and `SbfdReflector`/`RoutingTables` (the reflector).
 - A client's connection drop releases its sessions; the last client drops the session. Request-side EOF ends the connection (`ponytail:` in `server.rs`).
 - A TX socket must bind an explicit source address (`socket::local_for`): bound to a VRF with a wildcard source the kernel sends from 0.0.0.0.
 - RX: UDP 3784 per (table, family) bound to the VRF; TTL must be exactly 255. Demux is by Your Discriminator, else (table, source address): no interface in the key (`ponytail:` in `manager.rs`).
 - `BfdEvent::State.control_plane_independent` is the C bit at both ends (`nos-bfdd` always sets its own; the remote's is from the last received packet): BGP flushes routes on Down only when it is set (RFC 5882 §4.3).
 - Micro-BFD (#299, RFC 7130): a `SessionKey` with `aggregate` set (`interface` = member, `table` empty) is a member session; `socket::MicroTx` runs on the member itself via `nos-l2-socket` (UDP 6784, dst MAC `01-00-5E-90-00-01`), `Demux::route_micro` requires the arrival member, no Echo. The aggregate's Up set goes to `nos-interfaced` whole and only on change; no push = not Up. `ponytail:` sessions exist for every member, not only LACP Distributing/Standby.
-- Log anchors the e2e relies on: `bfd session up aggregate= member= peer=` (micro), `bfd session up peer=`, `bfd session down peer= diag=`, `bfd echo active peer=`.
+- Log anchors the e2e relies on: `bfd session up aggregate= member= peer=` (micro), `bfd session up peer=`, `bfd session down peer= diag=`, `bfd echo active peer=` (S-BFD initiators log the same up/down lines).
 
 Details: [docs/internals/bfd.md](../docs/internals/bfd.md).

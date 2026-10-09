@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +103,58 @@ pub struct BfdProfile {
     #[garde(inner(range(min = PADDED_PDU_MIN, max = PADDED_PDU_MAX)))]
     #[cli(topic = BfdProfilePaddedPduSize)]
     pub padded_pdu_size: Option<u16>,
+
+    /// `sbfd`: Seamless BFD initiator (RFC 7880/7881): probes a reflector
+    /// that keeps no per-session state. Excludes `echo-mode`, `padded-pdu-size`
+    /// and `auth` (not built for S-BFD yet).
+    #[serde(default)]
+    #[garde(custom(sbfd_compatible(self.echo_mode, self.padded_pdu_size.is_some(), self.auth.is_some())))]
+    #[cli(topic = BfdProfileMode)]
+    pub mode: BfdMode,
+
+    /// RFC 7880 S-BFD discriminator of the remote entity, written as an IPv4
+    /// address (the 32 bits). `None`: the peer's own IPv4 address.
+    #[serde(default)]
+    #[garde(inner(custom(nonzero_discriminator)))]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = BfdProfileSbfdRemoteDiscriminator)]
+    pub sbfd_remote_discriminator: Option<Ipv4Addr>,
+}
+
+/// Which BFD a session runs: the classical RFC 5880 handshake, or the RFC
+/// 7880 S-BFD initiator (Down/Up only, against a stateless reflector).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum BfdMode {
+    #[default]
+    Async,
+    Sbfd,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "garde hands the validator a reference"
+)]
+fn nonzero_discriminator(d: &Ipv4Addr, _ctx: &Config) -> garde::Result {
+    if d.is_unspecified() {
+        return Err(garde::Error::new("an S-BFD discriminator must not be 0"));
+    }
+    Ok(())
+}
+
+fn sbfd_compatible(
+    echo: EchoMode,
+    padded: bool,
+    auth: bool,
+) -> impl FnOnce(&BfdMode, &Config) -> garde::Result {
+    move |mode, _ctx| {
+        if *mode == BfdMode::Sbfd && (echo != EchoMode::Disabled || padded || auth) {
+            return Err(garde::Error::new(
+                "mode sbfd does not support echo-mode, padded-pdu-size or auth",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Whether this system loops its own Echo packets through the peer (RFC 5880
@@ -145,6 +199,8 @@ impl Default for BfdProfile {
             echo_mode: EchoMode::Disabled,
             echo_interval: ECHO_INTERVAL_DEFAULT,
             padded_pdu_size: None,
+            mode: BfdMode::Async,
+            sbfd_remote_discriminator: None,
         }
     }
 }
@@ -266,6 +322,30 @@ mod tests {
         };
         assert!(with(None) && with(Some(24)) && with(Some(9000)));
         assert!(!with(Some(23)) && !with(Some(9001)));
+    }
+
+    #[test]
+    fn sbfd_mode_rules() {
+        let with = |f: &dyn Fn(&mut BfdProfile)| {
+            let mut p = profile("a");
+            p.mode = BfdMode::Sbfd;
+            f(&mut p);
+            ok(p)
+        };
+        assert!(with(&|_| {}));
+        assert!(with(
+            &|p| p.sbfd_remote_discriminator = Some("10.0.0.2".parse().unwrap())
+        ));
+        assert!(!with(
+            &|p| p.sbfd_remote_discriminator = Some(Ipv4Addr::UNSPECIFIED)
+        ));
+        assert!(!with(&|p| p.echo_mode = EchoMode::Affiliated));
+        assert!(!with(&|p| p.padded_pdu_size = Some(100)));
+        assert!(!with(&|p| p.auth = Some(BfdAuth::default())));
+        // The same fields are fine on an async profile.
+        let mut p = profile("a");
+        p.padded_pdu_size = Some(100);
+        assert!(ok(p));
     }
 
     #[test]
