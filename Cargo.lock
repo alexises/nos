@@ -2187,6 +2187,7 @@ dependencies = [
 name = "nos-stp"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "thiserror 1.0.69",
 ]
 
