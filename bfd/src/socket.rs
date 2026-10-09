@@ -244,10 +244,19 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Resul
     let v6 = key.peer.is_ipv6();
     let s = Socket::new(domain(v6), Type::DGRAM, Some(Protocol::UDP))?;
     s.bind_device(Some(device.as_bytes()))?;
+    // RFC 9764 §3: padded packets must not be fragmented, or they would test
+    // nothing (EMSGSIZE on send instead). Harmless for bare packets.
     if v6 {
         s.set_unicast_hops_v6(TTL)?;
+        set_int(s.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG, 1)?;
     } else {
         s.set_ttl(TTL)?;
+        set_int(
+            s.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER,
+            libc::IP_PMTUDISC_DO,
+        )?;
     }
     // A wildcard source left to the kernel goes out as 0.0.0.0 from a socket
     // bound to a VRF, so the source is picked here.

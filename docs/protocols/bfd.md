@@ -132,6 +132,18 @@ set echo-interval 50
 - Single-hop only: a multihop key logs `bfd unaffiliated echo needs a single-hop session` and stays `down`.
 - Changing `echo-mode` between `unaffiliated` and another value restarts the session.
 
+## Test the path with padded packets (RFC 9764)
+
+- Set `padded-pdu-size <bytes>` (24 to 9000) on the `bfd-profile`: every Control packet's UDP payload is zero-padded to that size.
+  - `edit bfd-profile fast`, then `set padded-pdu-size 1500`.
+  - The size is a path MTU you want proven, not the link MTU: an IP packet of `size + 28` bytes (IPv6: `size + 48`) must cross every hop.
+  - A size below the bare packet (24 bytes, more with `auth`) sends the bare packet. The padding follows the authenticated part, so `auth` is unaffected.
+- Set it on both ends to test both directions. One padded end and one bare end is valid: padding is a local transmit property, never negotiated, and an edit applies from the next packet with no Poll.
+- Every BFD transmit socket sets don't-fragment (`IP_PMTUDISC_DO`, `IPV6_DONTFRAG`), so a packet that does not fit fails instead of fragmenting. `nos-bfdd` logs `bfd padded packet exceeds the path mtu peer=<ip> size=<n>` once and the peer goes `down` by detection time. Restoring the MTU brings the session back by itself.
+- A peer that drops large packets also takes the session `down` by detection time. The receiver never checks the padding.
+- When several clients share one session, the profile of the last `Register` wins (as for every other setting).
+- `show bfd sessions` ends the line with `pdu <n>B` while padding is set; REST has `tx_pdu_bytes` (0 when not padded).
+
 ## Micro-BFD on a port aggregate (RFC 7130)
 
 - Set `bfd <profile>` and `bfd-peer <ip>` on a `port-aggregate` (xor or lacp), and put an address of the peer's family on its untagged subinterface: `nos-bfdd` runs one session per member link, each over that member only.
@@ -157,8 +169,9 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 - `tx` is the negotiated transmit interval, `detect` the detection time, `discriminators` local/remote.
 - With `auth` set the line ends with `auth <method> key <id> (<n> failures)`; the key is never shown.
 - While Echo runs the line ends with `echo active <n>ms`, followed by `(echo-only)` for an unaffiliated session, where `tx` is the echo interval and `detect` is `echo-interval x detect-multiplier`.
+- With `padded-pdu-size` set the line ends with `pdu <n>B`.
 - A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
-- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id`, `auth_failures`, `echo_active`, `echo_interval_us` (0 while Echo is off) and `echo_only` (unaffiliated).
+- The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id`, `auth_failures`, `echo_active`, `echo_interval_us` (0 while Echo is off), `echo_only` (unaffiliated) and `tx_pdu_bytes` (0 when not padded).
 - "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
 
 ## Multi-hop sessions

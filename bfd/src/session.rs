@@ -78,6 +78,8 @@ pub struct Status {
     pub echo_interval_us: u32,
     /// RFC 9747: Echo is the whole session, there is no Control traffic.
     pub echo_only: bool,
+    /// RFC 9764 `padded-pdu-size`, 0 when not padded.
+    pub tx_pdu_bytes: u32,
 }
 
 /// Where a session's Echo packets leave: the IP packet looped through the
@@ -188,6 +190,7 @@ impl Core {
                 0
             },
             echo_only: self.unaffiliated(),
+            tx_pdu_bytes: self.profile.padded_pdu_size.map_or(0, u32::from),
         }
     }
 
@@ -350,6 +353,16 @@ impl Core {
     pub fn sign(&mut self, now: Instant, p: &Packet) -> Vec<u8> {
         let d = self.detection_time();
         self.auth.sign(now, &p.encode(), d)
+    }
+
+    /// `sign`, then RFC 9764 §3: zero padding after the packet (and its auth
+    /// section, which covers only the `length` bytes) up to `padded-pdu-size`.
+    pub fn wire(&mut self, now: Instant, p: &Packet) -> Vec<u8> {
+        let mut b = self.sign(now, p);
+        if let Some(n) = self.profile.padded_pdu_size {
+            b.resize(b.len().max(usize::from(n)), 0);
+        }
+        b
     }
 
     /// Applies one FSM event; whether the state changed.
@@ -553,6 +566,7 @@ pub async fn run(
     core.set_echo_path(echo.is_some());
     let mut last = core.status();
     let mut last_warn: Option<Instant> = None;
+    let mut too_big = false;
     loop {
         let deadline = tokio::time::Instant::from_std(core.deadline());
         let out = tokio::select! {
@@ -589,8 +603,19 @@ pub async fn run(
             }
         };
         if let Some(p) = out {
-            if let Err(e) = tx.send(&core.sign(now(), &p)) {
-                debug!(peer = %key.peer, error = %e, "bfd send failed");
+            if let Err(e) = tx.send(&core.wire(now(), &p)) {
+                if e.raw_os_error() == Some(libc::EMSGSIZE) {
+                    // RFC 9764: the padded packet does not fit the path; the
+                    // session goes down by detection time. Once per session.
+                    if !too_big {
+                        too_big = true;
+                        warn!(peer = %key.peer, size = core.status().tx_pdu_bytes, "bfd padded packet exceeds the path mtu");
+                    }
+                } else {
+                    debug!(peer = %key.peer, error = %e, "bfd send failed");
+                }
+            } else {
+                too_big = false;
             }
         }
         if let (Some((_, payload)), Some(e)) = (core.echo_due(now()), echo.as_ref()) {
@@ -683,7 +708,7 @@ mod tests {
                     (&mut *b, &mut *a)
                 };
                 // Over the wire, auth section included.
-                let wire = tx.sign(now, &p);
+                let wire = tx.wire(now, &p);
                 let p = crate::packet::decode(&wire).expect("our own packet decodes");
                 if rx.authenticate(now, &p).is_err() {
                     continue;
@@ -782,6 +807,50 @@ mod tests {
         assert_eq!(p.a.status().tx_interval_us, 100_000);
         assert_eq!(p.a.state, BfdState::Up);
         assert_eq!(p.b.state, BfdState::Up);
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn padding_is_zero_after_the_packet_and_ignored_by_the_peer() {
+        let padded = |n, auth| BfdProfile {
+            padded_pdu_size: Some(n),
+            auth,
+            ..profile(100, 100)
+        };
+        let now = Instant::now();
+        let sha1 = Some(nos_proto::schema::BfdAuth {
+            key_id: 1,
+            method: BfdAuthMethod::KeyedSha1,
+            key: "k".into(),
+        });
+        // Unauthenticated: 1500 bytes, the 24 real ones first.
+        let mut c = Core::new(padded(1500, None), 1, now);
+        let p = c.on_timer(now, 100).expect("first packet");
+        let w = c.wire(now, &p);
+        assert_eq!(w.len(), 1500);
+        assert!(w[24..].iter().all(|b| *b == 0));
+        assert_eq!(crate::packet::decode(&w).unwrap().my_discriminator, 1);
+        assert_eq!(c.status().tx_pdu_bytes, 1500);
+        // Below the minimum (here 24 + the 28-byte SHA1 section): raised, not truncated.
+        let mut c = Core::new(padded(24, sha1.clone()), 1, now);
+        let p = c.on_timer(now, 100).expect("first packet");
+        assert_eq!(c.wire(now, &p).len(), 52);
+        // Authenticated and padded: the digest covers `length` bytes only.
+        let (mut a, mut b) = (
+            Core::new(padded(300, sha1.clone()), 1, now),
+            Core::new(padded(24, sha1), 2, now),
+        );
+        let p = a.on_timer(now, 100).expect("first packet");
+        let w = a.wire(now, &p);
+        assert_eq!(w.len(), 300);
+        assert_eq!(w[3], 52, "length field excludes the padding");
+        let d = crate::packet::decode(&w).unwrap();
+        assert!(b.authenticate(now, &d).is_ok());
+        // Nothing to pad by default.
+        let mut c = Core::new(profile(100, 100), 1, now);
+        let p = c.on_timer(now, 100).expect("first packet");
+        assert_eq!(c.wire(now, &p).len(), 24);
+        assert_eq!(c.status().tx_pdu_bytes, 0);
     }
 
     fn echoing(tx: u32, rx: u32, echo_ms: u32) -> BfdProfile {

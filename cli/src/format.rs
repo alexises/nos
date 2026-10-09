@@ -316,6 +316,11 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
                 ),
                 _ => String::new(),
             };
+            let pdu = if s.tx_pdu_bytes > 0 {
+                format!(", pdu {}B", s.tx_pdu_bytes)
+            } else {
+                String::new()
+            };
             let echo = if s.echo_active {
                 let only = if s.echo_only { " (echo-only)" } else { "" };
                 format!(", echo active {}ms{only}", s.echo_interval_us / 1000)
@@ -324,7 +329,7 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
             };
             format!(
                 "{}: peer {}{local}{interface}{multihop}, {}, diag {}, tx {}ms, detect {}ms, \
-                 discriminators {}/{}{auth}{echo}",
+                 discriminators {}/{}{auth}{pdu}{echo}",
                 k.aggregate.as_deref().unwrap_or(&k.table),
                 k.peer,
                 s.state,
@@ -1774,6 +1779,7 @@ mod tests {
             echo_active: false,
             echo_interval_us: 0,
             echo_only: false,
+            tx_pdu_bytes: 0,
         };
         let up = view("192.0.2.1", BfdState::Up, BfdDiag::NoDiagnostic, None);
         let down = view(

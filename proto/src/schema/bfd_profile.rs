@@ -18,6 +18,11 @@ pub const INTERVAL_MAX_MS: u32 = 4_294_967;
 pub const INTERVAL_MIN_MS: u32 = 10;
 /// Default `echo-interval`, milliseconds.
 pub const ECHO_INTERVAL_DEFAULT: u32 = 50;
+/// `padded-pdu-size` bounds (RFC 9764): the smallest is a Control packet with
+/// the largest RFC 5880 §6.7 auth section; the largest a jumbo frame's UDP
+/// payload, which also bounds the receive buffer.
+pub const PADDED_PDU_MIN: u16 = 24;
+pub const PADDED_PDU_MAX: u16 = 9000;
 
 /// A named set of BFD (RFC 5880) session parameters, referenced by bare name
 /// from a BGP peer-group, an OSPF/OSPFv3 profile or a static route
@@ -88,6 +93,14 @@ pub struct BfdProfile {
     #[garde(range(min = INTERVAL_MIN_MS, max = INTERVAL_MAX_MS))]
     #[cli(topic = BfdProfileEchoInterval)]
     pub echo_interval: u32,
+
+    /// RFC 9764: pad each Control packet's UDP payload with zeros to this
+    /// many bytes, to test that the path carries packets that large. `None`
+    /// sends the bare packet.
+    #[serde(default)]
+    #[garde(inner(range(min = PADDED_PDU_MIN, max = PADDED_PDU_MAX)))]
+    #[cli(topic = BfdProfilePaddedPduSize)]
+    pub padded_pdu_size: Option<u16>,
 }
 
 /// Whether this system loops its own Echo packets through the peer (RFC 5880
@@ -131,6 +144,7 @@ impl Default for BfdProfile {
             auth: None,
             echo_mode: EchoMode::Disabled,
             echo_interval: ECHO_INTERVAL_DEFAULT,
+            padded_pdu_size: None,
         }
     }
 }
@@ -241,6 +255,17 @@ mod tests {
         p.min_tx_interval = 10;
         p.min_rx_interval = INTERVAL_MAX_MS;
         assert!(ok(p));
+    }
+
+    #[test]
+    fn padded_pdu_size_range() {
+        let with = |n| {
+            let mut p = profile("a");
+            p.padded_pdu_size = n;
+            ok(p)
+        };
+        assert!(with(None) && with(Some(24)) && with(Some(9000)));
+        assert!(!with(Some(23)) && !with(Some(9001)));
     }
 
     #[test]

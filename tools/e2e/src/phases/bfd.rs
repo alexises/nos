@@ -283,3 +283,89 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
     b.assert_quiet(est, est_b, 0).await?;
     a.established().await
 }
+
+/// `bfd-padded`, self-contained (RFC 9764, #293). Both routers run `bfd-profile
+/// fast` (100 ms x 3) with `padded-pdu-size 1400`: Up, and REST shows
+/// `tx_pdu_bytes` 1400. Lowering router-a's eth0 MTU to 1300 makes its padded
+/// sends fail (`IP_PMTUDISC_DO` gives `EMSGSIZE`): it logs `bfd padded packet
+/// exceeds the path mtu` once and router-b's session goes Down by detection
+/// time; restoring the MTU brings it Up again. An FRR `bfdd` (`router-f`)
+/// ignores the padding and reaches Up with router-a.
+pub async fn bfd_padded(w: &mut World) -> anyhow::Result<()> {
+    let padded = strings(&["--bfd-padded-pdu-size", "1400"]);
+    let mut fa = A.base_flags();
+    fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
+    fa.extend(padded.clone());
+    let mut fb = B.base_flags();
+    fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
+    fb.extend(padded);
+    w.start(A, Some(fa), &[]).await?;
+    w.start(B, Some(fb), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+
+    let up_a = format!("bfd session up peer={IP_B}");
+    let up_b = format!("bfd session up peer={IP_A}");
+    let down_b = format!("bfd session down peer={IP_A} diag=control-detection-time-expired");
+    let toobig = format!("bfd padded packet exceeds the path mtu peer={IP_B}");
+
+    log("both Up with 1400-byte packets; REST reports the padded size");
+    a.wait(&up_a).await?;
+    b.wait(&up_b).await?;
+    let body = a
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bfd/sessions?peer={IP_B}"),
+            None,
+            200,
+        )
+        .await?;
+    anyhow::ensure!(
+        body.contains("\"tx_pdu_bytes\":1400"),
+        "expected tx_pdu_bytes 1400: {body}"
+    );
+
+    log("router-a eth0 mtu 1300: padded sends fail, router-b detects the loss");
+    let (n_down, n_up, n_big) = (b.count(&down_b), a.count(&up_a), a.count(&toobig));
+    a.provision(&["--mtu", "1300"]).await?;
+    let result = async {
+        a.wait_new(&toobig, n_big, 15).await?;
+        b.wait_new(&down_b, n_down, 15).await
+    }
+    .await;
+    let restored = a.provision(&["--clear-mtu"]).await;
+    result?;
+    restored?;
+
+    log("mtu restored: Up again");
+    a.wait_new(&up_a, n_up, 30).await?;
+    session_is(a, IP_B, "Up", None, 5).await?;
+
+    log("interop: FRR bfdd ignores the padding and reaches Up with router-a");
+    let conf = format!(
+        "frr defaults traditional\nhostname router-f\n!\nbfd\n peer {IP_A}\n  \
+         detect-multiplier 3\n  receive-interval 100\n  transmit-interval 100\n  \
+         no shutdown\n exit\nexit\n"
+    );
+    w.dock.container_remove("router-f").await;
+    w.dock.ensure_pulled(FRR_IMAGE).await?;
+    w.dock
+        .start_plain_caps(
+            "router-f",
+            FRR_IMAGE,
+            NET,
+            IP_G,
+            &[
+                "sh",
+                "-c",
+                "sed -i 's/^bfdd=no/bfdd=yes/' /etc/frr/daemons && exec /usr/lib/frr/docker-start",
+            ],
+            ("/etc/frr", "frr.conf", conf.as_bytes()),
+            &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
+        )
+        .await?;
+    a.provision(&bfd_route(BFD_PREFIX_F, IP_G)).await?;
+    a.wait(&format!("bfd session up peer={IP_G}")).await?;
+    session_is(a, IP_G, "Up", None, 5).await?;
+    w.dock.container_remove("router-f").await;
+    Ok(())
+}

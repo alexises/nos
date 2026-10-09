@@ -403,6 +403,8 @@ topics! {
     BfdProfileEchoMode,
     /// `BfdProfile.echo_interval`
     BfdProfileEchoInterval,
+    /// `BfdProfile.padded_pdu_size`
+    BfdProfilePaddedPduSize,
     /// The `bfd` reference on a peer-group, OSPF/OSPFv3 profile or static route
     BfdReference,
 }
