@@ -17,8 +17,8 @@ use nos_proto::{
     BfdEvent, BfdRequest, BgpEvent, BgpInstance, BgpRequest, CommandDoc, Config, ConfigDiff, Event,
     FdbEvent, FdbRequest, InterfaceEvent, InterfaceRequest, IpcCodec, LacpEvent, LacpRequest,
     LldpEvent, LldpRequest, LogEvent, LogRequest, OspfEvent, OspfRequest, Ospfv3Event,
-    Ospfv3Request, Request, RibEvent, RibRequest, ServiceRef, Topic, TransactionSnapshot,
-    WatchdogEvent, WatchdogRequest,
+    Ospfv3Request, Request, RibEvent, RibRequest, ServiceRef, StpEvent, StpRequest, StpSummary,
+    Topic, TransactionSnapshot, WatchdogEvent, WatchdogRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -209,6 +209,7 @@ fn lab() -> Lab {
         ("interfaces", "interfaced", ""),
         ("lacp", "lacpd", ""),
         ("lldp", "lldpd", ""),
+        ("stp", "stpd", ""),
         ("bfd", "bfdd", ""),
         ("log", "logd", ""),
         ("bgp", "bgpd", "b1"),
@@ -251,6 +252,9 @@ fn lab() -> Lab {
             }),
             "lldp" => serve(role, name, &path, |_: LldpRequest| {
                 vec![LldpEvent::Neighbors(Vec::new())]
+            }),
+            "stp" => serve(role, name, &path, |_: StpRequest| {
+                vec![StpEvent::Summary(StpSummary::default())]
             }),
             "bfd" => serve(role, name, &path, |_: BfdRequest| {
                 vec![BfdEvent::Sessions(Vec::new())]
@@ -298,6 +302,7 @@ fn lab() -> Lab {
                 ServiceRef::Interfaces => "interfaces",
                 ServiceRef::Lacp => "lacp",
                 ServiceRef::Lldp => "lldp",
+                ServiceRef::Stp => "stp",
                 ServiceRef::Bfd => "bfd",
                 ServiceRef::Log => "log",
                 ServiceRef::BgpInstance(_) => "bgp",
@@ -365,6 +370,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "show lacp",
             "show lacp bond9",
             "show lldp neighbors",
+            "show spanning-tree",
             "show bfd sessions",
             "show bfd sessions 192.0.2.1",
             "show log",

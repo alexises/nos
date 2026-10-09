@@ -445,6 +445,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowLldpStatistics),
+    cmd!(["show" "spanning-tree"],
+        Doc::Local {
+            summary: "Show the spanning-tree bridge and every port's role and state.",
+            detail: "Queries nos-stpd (resolved via nos-watchdogd) for this bridge's id, the \
+                     root bridge, the root path cost and root port, the hello/max-age/\
+                     forward-delay timers, and a table of every spanning-tree port: its role \
+                     (root, designated, alternate, backup, disabled), state (discarding, \
+                     learning, forwarding), path cost, priority and the designated \
+                     bridge/port on its segment.",
+        },
+        Always,
+        Command::ShowSpanningTree),
     cmd!(["show" "bfd" "sessions"],
         Doc::Local {
             summary: "Show every BFD session.",

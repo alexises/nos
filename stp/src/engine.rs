@@ -2,13 +2,14 @@
 //! things the daemon does (send a BPDU, push kernel states, flush an FDB) and
 //! into the log lines the e2e phase anchors on. No I/O, no clock.
 
-use nos_proto::StpPortAssignment;
+use nos_proto::{StpMode, StpPortAssignment, StpPortInfo, StpRole, StpState, StpSummary};
 use tracing::{error, info};
 
-use crate::actions::{Action, Event};
+use crate::actions::{Action, Event, PortState};
 use crate::bpdu::Bpdu;
 use crate::bridge::{Bridge, PortParams};
 use crate::identity;
+use crate::machines::Role;
 use crate::ports::{self, Plan, PortCfg};
 use crate::vector::{IdError, PortId};
 use nos_proto::schema::EdgePort;
@@ -66,6 +67,64 @@ impl Engine {
         &self.ports
     }
 
+    /// The live view `show spanning-tree` serves.
+    pub fn summary(&self) -> StpSummary {
+        let b = &self.bridge;
+        let root_cost = b.root_port.map_or(0, |i| {
+            b.ports[i]
+                .port_priority
+                .root_path_cost
+                .saturating_add(b.ports[i].path_cost)
+        });
+        StpSummary {
+            enabled: true,
+            mode: StpMode::Rstp,
+            bridge_id: identity::show(&b.id),
+            root_id: identity::show(&b.root_id),
+            root_path_cost: root_cost,
+            root_port: b.root_port.map(|i| self.ports[i].name.clone()),
+            hello_time_secs: b.root_times.hello,
+            max_age_secs: b.root_times.max_age,
+            forward_delay_secs: b.root_times.forward_delay,
+            ports: self
+                .ports
+                .iter()
+                .enumerate()
+                .map(|(i, cfg)| {
+                    let p = &b.ports[i];
+                    let (designated_bridge, designated_port) = if p.role == Role::Disabled {
+                        (String::new(), String::new())
+                    } else {
+                        let dp = p.port_priority.designated_port;
+                        (
+                            identity::show(&p.port_priority.designated_bridge),
+                            format!("{}.{}", dp.priority(), dp.number()),
+                        )
+                    };
+                    StpPortInfo {
+                        name: cfg.name.clone(),
+                        role: match p.role {
+                            Role::Root => StpRole::Root,
+                            Role::Designated => StpRole::Designated,
+                            Role::Alternate => StpRole::Alternate,
+                            Role::Backup => StpRole::Backup,
+                            Role::Disabled => StpRole::Disabled,
+                        },
+                        state: match b.port_state(i) {
+                            PortState::Discarding => StpState::Discarding,
+                            PortState::Learning => StpState::Learning,
+                            PortState::Forwarding => StpState::Forwarding,
+                        },
+                        cost: p.path_cost,
+                        priority: cfg.priority,
+                        designated_bridge,
+                        designated_port,
+                    }
+                })
+                .collect(),
+        }
+    }
+
     pub fn receive(&mut self, port: usize, bpdu: Bpdu) -> Vec<Out> {
         self.bridge.receive(port, bpdu);
         self.drain()
@@ -120,7 +179,6 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::PortState;
     use crate::timers::Timers;
 
     fn plan() -> Plan {
@@ -169,6 +227,18 @@ mod tests {
         assert!(forwarding);
         assert_eq!(e.bridge.port_state(0), PortState::Forwarding);
         assert_eq!(e.bridge.port_state(1), PortState::Discarding);
+
+        let s = e.summary();
+        assert!(s.enabled && s.root_port.is_none() && s.root_path_cost == 0);
+        assert_eq!(s.root_id, s.bridge_id, "a lone bridge is its own root");
+        assert_eq!(
+            (s.ports[0].role, s.ports[0].state),
+            (StpRole::Designated, StpState::Forwarding)
+        );
+        assert_eq!(s.ports[0].designated_bridge, s.bridge_id);
+        assert_eq!(s.ports[0].designated_port, "128.1");
+        assert_eq!(s.ports[1].role, StpRole::Disabled);
+        assert_eq!(s.ports[1].designated_bridge, "");
     }
 
     #[test]

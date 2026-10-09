@@ -2195,6 +2195,7 @@ dependencies = [
  "nos-pki",
  "nos-proto",
  "proptest",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",

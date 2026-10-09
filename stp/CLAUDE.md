@@ -18,6 +18,7 @@ The pure core (`bpdu`, `vector`, `cost`, `timers`, `machines`, `bridge`, `action
 - `ports.rs` (pure): config to `Plan` (STP ports, timers, priority) and the core's state to `SetStpPortStates`/`FlushFdb` assignments per domain. `identity.rs`, `link.rs` (sysfs speed/duplex, cost, point-to-point): pure.
 - `engine.rs`: the core plus its action-to-`Out` mapping and the e2e log lines. `daemon.rs`: the one actor owning the engine, the BPDU sockets (`L2Socket::open_bpdu`) and the 1 s tick.
 - `reconcile.rs` (diff resync to a `Plan`), `link_client.rs` (`SubscribeLinks`), `interface_client.rs` (push + resend cache), `config_client.rs`, `watchdog_client.rs`: per-crate client copies (star graph), as `lacp/`.
+- `server.rs` (`--listen-socket`, `GetSummary` from an `Arc<RwLock<StpSummary>>` the actor refreshes after every event via `Engine::summary`) and `authz.rs` (`allowed`: `User`/`Restd`, no wildcard arm): backs `show spanning-tree` (#328).
 - A changed plan rebuilds the bridge. Log lines are the e2e contract (`docs/internals/stp.md`): change them with `phases::stp`.
 
 ## Invariants

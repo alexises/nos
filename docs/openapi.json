@@ -4187,6 +4187,48 @@
         ],
         "type": "string"
       },
+      "StpPortInfo": {
+        "description": "One spanning-tree port. Bridge and port ids are display strings\n(`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.",
+        "properties": {
+          "cost": {
+            "description": "Path cost this port adds to the root path.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "designated_bridge": {
+            "description": "The designated bridge/port on this port's segment.",
+            "type": "string"
+          },
+          "designated_port": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "$ref": "#/components/schemas/StpRole"
+          },
+          "state": {
+            "$ref": "#/components/schemas/StpState"
+          }
+        },
+        "required": [
+          "name",
+          "role",
+          "state",
+          "cost",
+          "priority",
+          "designated_bridge",
+          "designated_port"
+        ],
+        "type": "object"
+      },
       "StpPortMstInstance": {
         "description": "This port's cost and priority in one MST instance, which must exist in\n`spanning-tree mst-instance`.",
         "properties": {
@@ -4293,6 +4335,88 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "StpRole": {
+        "description": "IEEE 802.1Q 13.4 port role (the CIST's).",
+        "enum": [
+          "root",
+          "designated",
+          "alternate",
+          "backup",
+          "disabled"
+        ],
+        "type": "string"
+      },
+      "StpState": {
+        "description": "The port state as the core sees it (the kernel's `Blocking` is `Discarding`).",
+        "enum": [
+          "discarding",
+          "learning",
+          "forwarding"
+        ],
+        "type": "string"
+      },
+      "StpSummary": {
+        "description": "`show spanning-tree`. `enabled: false` (mode not `rstp`) leaves the rest at\nits default.\n\nFields are only ever appended (MSTI views, #323, extend it).",
+        "properties": {
+          "bridge_id": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "forward_delay_secs": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hello_time_secs": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_age_secs": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/StpMode"
+          },
+          "ports": {
+            "items": {
+              "$ref": "#/components/schemas/StpPortInfo"
+            },
+            "type": "array"
+          },
+          "root_id": {
+            "type": "string"
+          },
+          "root_path_cost": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "root_port": {
+            "description": "`None` when this bridge is the root.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "enabled",
+          "mode",
+          "bridge_id",
+          "root_id",
+          "root_path_cost",
+          "hello_time_secs",
+          "max_age_secs",
+          "forward_delay_secs",
+          "ports"
+        ],
         "type": "object"
       },
       "Subinterface": {
@@ -5829,6 +5953,37 @@
           }
         },
         "summary": "Longest-prefix-match lookup",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/spanning-tree": {
+      "get": {
+        "operationId": "spanning_tree",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StpSummary"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is not rstp)",
         "tags": [
           "show"
         ]

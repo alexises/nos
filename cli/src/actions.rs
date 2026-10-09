@@ -19,7 +19,7 @@ use crate::session::{self, Mode, Resolved};
 use crate::spec::{self, Doc};
 use crate::{
     bfd_client, bgp_client, client, fdb_client, format, interface_client, lacp_client, lldp_client,
-    log_client, ospf_client, ospfv3_client, rib_client, watchdog_client,
+    log_client, ospf_client, ospfv3_client, rib_client, stp_client, watchdog_client,
 };
 
 /// Per-session cache of operation documentation fetched from `nos-configd`,
@@ -212,6 +212,10 @@ pub async fn handle_action(
         }
         Resolved::ShowLldpStatistics => {
             show_lldp_statistics(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowSpanningTree => {
+            show_spanning_tree(watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBfdReflector => {
@@ -585,6 +589,24 @@ async fn show_bfd_reflector(watchdog_socket: &Path) {
     };
     match bfd_client::get_reflector(&bfd_socket).await {
         Ok(view) => println!("{}", format::render_bfd_reflector(&view)),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+async fn show_spanning_tree(watchdog_socket: &Path) {
+    let socket = match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Stp).await {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!("nos-stpd is not running");
+            return;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    match stp_client::get_summary(&socket).await {
+        Ok(s) => println!("{}", format::render_spanning_tree(&s)),
         Err(e) => eprintln!("error: {e}"),
     }
 }

@@ -39,6 +39,8 @@ pub enum Command {
     },
     /// `show lldp statistics` — every LLDP-enabled interface's counters.
     ShowLldpStatistics,
+    /// `show spanning-tree` — the bridge and every port's role/state.
+    ShowSpanningTree,
     /// `show bfd sessions [<peer>]` — every BFD session `nos-bfdd` holds, or
     /// only those to one peer address.
     ShowBfdSessions {
@@ -196,6 +198,14 @@ mod tests {
         assert_eq!(
             Command::parse("show route rt1 not-an-address"),
             Command::Unknown("show route rt1 not-an-address".to_string())
+        );
+    }
+
+    #[test]
+    fn show_spanning_tree() {
+        assert_eq!(
+            Command::parse("show spanning-tree"),
+            Command::ShowSpanningTree
         );
     }
 

@@ -23,6 +23,7 @@ pub mod ospfv3;
 pub mod paths;
 pub mod rib;
 pub mod schema;
+pub mod stp;
 pub mod validators;
 
 pub use bfd::{
@@ -93,3 +94,4 @@ pub use schema::{
     HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
     REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
 };
+pub use stp::{StpEvent, StpPortInfo, StpRequest, StpRole, StpState, StpSummary};
