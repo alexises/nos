@@ -545,6 +545,20 @@ pub struct Args {
     /// `padded-pdu-size` of `bfd-profile fast` (RFC 9764), bytes.
     #[arg(long)]
     pub bfd_padded_pdu_size: Option<u16>,
+    /// S-BFD (#294): profile `sb` (mode sbfd, `--bfd-interval-ms` intervals)
+    /// guards these `--static-route`s; one per repetition.
+    #[arg(long)]
+    pub sbfd_static_route: Vec<IpNet>,
+    /// `sbfd-remote-discriminator` of profile `sb`, an IPv4 address.
+    #[arg(long)]
+    pub sbfd_remote_discriminator: Option<std::net::Ipv4Addr>,
+    /// The S-BFD reflector's discriminators, one per repetition (replaces
+    /// the list).
+    #[arg(long)]
+    pub sbfd_reflector: Vec<std::net::Ipv4Addr>,
+    /// Removes every S-BFD reflector discriminator.
+    #[arg(long)]
+    pub no_sbfd_reflector: bool,
 
     #[arg(long)]
     pub save: bool,
@@ -1489,6 +1503,9 @@ fn parse_echo_mode(s: &str) -> Result<nos_proto::schema::EchoMode, String> {
 /// The profile `--bfd-static` creates and references.
 pub const BFD_PROFILE: &str = "fast";
 
+/// The S-BFD initiator profile `--sbfd-static-route` creates and references.
+pub const SBFD_PROFILE: &str = "sb";
+
 /// `SetTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
 /// for a profile's intervals or a route's `bfd` reference, so these go in
 /// through the generic path edit after the ops.
@@ -1551,6 +1568,48 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             args.bfd_auth
                 .as_ref()
                 .map(|a| serde_json::to_string(a).expect("BfdAuth serializes")),
+        ));
+    }
+    if !args.sbfd_static_route.is_empty() {
+        let sb = |field: &str| {
+            vec![
+                "bfd-profile".to_string(),
+                SBFD_PROFILE.to_string(),
+                field.to_string(),
+            ]
+        };
+        let ms = args.bfd_interval_ms.to_string();
+        v.extend([
+            (
+                sb("mode"),
+                Some(
+                    serde_json::to_string(&nos_proto::schema::BfdMode::Sbfd)
+                        .expect("BfdMode serializes"),
+                ),
+            ),
+            (sb("min-tx-interval"), Some(ms.clone())),
+            (sb("min-rx-interval"), Some(ms)),
+        ]);
+        if let Some(d) = args.sbfd_remote_discriminator {
+            v.push((sb("sbfd-remote-discriminator"), Some(format!("\"{d}\""))));
+        }
+        for subnet in &args.sbfd_static_route {
+            v.push((
+                vec![
+                    "static-routing-instance".to_string(),
+                    args.static_routing_instance.clone(),
+                    "route".to_string(),
+                    subnet.to_string(),
+                    "bfd".to_string(),
+                ],
+                Some(format!("\"{SBFD_PROFILE}\"")),
+            ));
+        }
+    }
+    if !args.sbfd_reflector.is_empty() || args.no_sbfd_reflector {
+        v.push((
+            vec!["sbfd-reflector".to_string(), "discriminator".to_string()],
+            Some(serde_json::to_string(&args.sbfd_reflector).expect("addresses serialize")),
         ));
     }
     if !args.wants_bfd_profile() {
@@ -1669,6 +1728,39 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
         {
             p.auth.clone_from(&args.bfd_auth);
         }
+    }
+    if !args.sbfd_static_route.is_empty() {
+        for p in config
+            .bfd_profiles
+            .iter_mut()
+            .filter(|p| p.name == SBFD_PROFILE)
+        {
+            p.mode = nos_proto::schema::BfdMode::Sbfd;
+            p.min_tx_interval = args.bfd_interval_ms;
+            p.min_rx_interval = args.bfd_interval_ms;
+            if let Some(d) = args.sbfd_remote_discriminator {
+                p.sbfd_remote_discriminator = Some(d);
+            }
+        }
+        for i in config
+            .static_routing_instances
+            .iter_mut()
+            .filter(|i| i.name == args.static_routing_instance)
+        {
+            for r in i
+                .routes
+                .iter_mut()
+                .filter(|r| args.sbfd_static_route.contains(&r.subnet))
+            {
+                r.bfd = Some(SBFD_PROFILE.to_string());
+            }
+        }
+    }
+    if !args.sbfd_reflector.is_empty() || args.no_sbfd_reflector {
+        config
+            .sbfd_reflector
+            .discriminators
+            .clone_from(&args.sbfd_reflector);
     }
     if !args.wants_bfd_profile() {
         return;
@@ -1812,6 +1904,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if args.wants_bfd_profile() {
         ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
             name: BFD_PROFILE.to_string(),
+        }));
+    }
+    if !args.sbfd_static_route.is_empty() {
+        ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
+            name: SBFD_PROFILE.to_string(),
         }));
     }
 
@@ -4267,6 +4364,89 @@ mod tests {
         assert_eq!(
             value.as_deref(),
             Some(r#"{"key_id":1,"method":"KeyedMd5","key":"k"}"#)
+        );
+    }
+
+    #[test]
+    fn sbfd_flags_become_profile_route_and_reflector_edits() {
+        let args = Args::try_parse_from([
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "1",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "2",
+            "--peer",
+            "10.0.0.2",
+            "--static-route",
+            "198.51.100.0/24",
+            "--static-gateway",
+            "10.0.0.2",
+            "--sbfd-static-route",
+            "198.51.100.0/24",
+            "--sbfd-remote-discriminator",
+            "10.77.0.1",
+            "--sbfd-reflector",
+            "10.0.0.1",
+            "--sbfd-reflector",
+            "10.77.0.1",
+        ])
+        .unwrap();
+        let edits = bfd_paths(&args);
+        let get = |p: &[&str]| {
+            edits
+                .iter()
+                .find(|(path, _)| path == p)
+                .and_then(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            get(&["bfd-profile", "sb", "mode"]).as_deref(),
+            Some("\"Sbfd\"")
+        );
+        assert_eq!(
+            get(&["bfd-profile", "sb", "sbfd-remote-discriminator"]).as_deref(),
+            Some("\"10.77.0.1\"")
+        );
+        assert_eq!(
+            get(&[
+                "static-routing-instance",
+                &args.static_routing_instance,
+                "route",
+                "198.51.100.0/24",
+                "bfd"
+            ])
+            .as_deref(),
+            Some("\"sb\"")
+        );
+        assert_eq!(
+            get(&["sbfd-reflector", "discriminator"]).as_deref(),
+            Some(r#"["10.0.0.1","10.77.0.1"]"#)
+        );
+        assert!(build_ops(&args)
+            .unwrap()
+            .contains(&ConfigOp::BfdProfile(BfdProfileOp::Ensure {
+                name: "sb".into()
+            })));
+
+        // The same flags applied straight to a local Config (the e2e seed).
+        let mut cfg = nos_proto::Config::default();
+        for op in build_ops(&args).unwrap() {
+            op.apply(&mut cfg).unwrap();
+        }
+        apply_bfd(&args, &mut cfg);
+        let sb = cfg.bfd_profiles.iter().find(|p| p.name == "sb").unwrap();
+        assert_eq!(sb.mode, nos_proto::schema::BfdMode::Sbfd);
+        assert_eq!(
+            sb.sbfd_remote_discriminator,
+            Some("10.77.0.1".parse().unwrap())
+        );
+        assert_eq!(cfg.sbfd_reflector.discriminators.len(), 2);
+        assert_eq!(
+            cfg.static_routing_instances[0].routes[0].bfd.as_deref(),
+            Some("sb")
         );
     }
 

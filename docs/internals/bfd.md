@@ -93,10 +93,21 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - `BfdSessionView` carries the `SessionKey` (table, peer, optional local/interface, multihop), `state`, `diag`, both discriminators, the negotiated `tx_interval_us` and `detection_time_us`. There is no uptime or receive interval in it.
 - Single-hop sessions are keyed by (table, peer address) only: `nos-ribd` registers with `interface: None`, so `show` prints no interface; a BGP multihop session also shows its `local`.
 - Only `Role::User` (`nos-cli`) and `Role::Restd` may ask (`authz::allowed`); `cli/src/bfd_client.rs` and `rest/src/show.rs::bfd_sessions` are the two clients.
+- `BfdRequest::GetReflector` is answered with `BfdEvent::Reflector(ReflectorView)` (discriminators, received, replied, `ReflectorDiscards`), for the same two roles; `show bfd reflector` and `GET /v1/bfd/reflector`.
+
+## Seamless BFD (#294)
+
+- `sbfd` (pure): `reflect(packet, source, destination, policy)` returns the reply or a `Discard` reason, in this order: source port 7784, martian source, `allow-from`, A bit, D bit clear, unknown discriminator. `Initiator` is RFC 7880 Figure 4 (Down and Up only) with the same `now`-as-argument style as `session::Core`.
+- `reflector`: `Reflector` holds the policy (`policy_of(&Config)`), a global token bucket (10 000 pps, burst 2 000, checked before the packet is parsed) and the counters `GetReflector` returns. It lives in the `Manager` (`manager.reflector()`); `handle` takes the datagram and returns the reply bytes.
+- `socket::ReflectorNet`: one UDP 7784 socket per (table VRF, family) while a discriminator is configured, `IP_PKTINFO`/`IPV6_RECVPKTINFO` to learn the probed address and a `sendmsg` with that address as the source of the reply (a wildcard-bound socket would pick the route's source); TTL 255. A recreated VRF device (new ifindex) reopens the socket. `micro_sessions::run` drives it from the same config resync (scopes `SbfdReflector` and `RoutingTables`, plus the 10 s re-apply that also retries a VRF `nos-ribd` has not created yet).
+- An initiator is a `Manager` session whose profile has `mode sbfd`: no `Demux` slot (the reflection comes back to the session's own connected socket, `Net::open_sbfd`, which also reads the TTL), and `sbfd::run` instead of `session::run`. A change of `mode` replaces the session, like `echo-mode unaffiliated`. `BfdSessionView.kind` tells them apart.
+- The target discriminator is `sbfd-remote-discriminator`, else the peer's IPv4 address (`sbfd::remote_discriminator`); none (IPv6 peer) logs a warning and the session stays `down` and silent.
+- `ponytail:` the reflector rate limit is one global bucket and its constants are not configurable; reflector authentication (RFC 7880 section 11) is a follow-up after #289.
 
 ## Check it by hand
 
 - `nos show bfd sessions` or `GET /v1/bfd/sessions` lists what the daemon holds.
+- `cargo run -p nos-e2e -- bfd-sbfd` proves an S-BFD initiator Up from reflections alone, the reflector's counters over REST, the Down and route withdrawal when the reflector stops answering for the discriminator, and a classical FRR session undisturbed beside it.
 - `cargo run -p nos-e2e -- bfd-padded` proves 1400-byte packets between the routers, the `EMSGSIZE` warning and the peer's detection-time Down when router-a's MTU drops to 1300, recovery, and FRR `bfdd` accepting padded packets.
 - `cargo run -p nos-e2e -- bfd-auth` proves matching and wrong keys, a live key and method change without a flap, and the unauthenticated FRR staying down.
 - `cargo run -p nos-e2e -- bfd-echo-unaffiliated` proves a BFD-less forwarding gateway (router-b with `ip_forward`) brings the session and the guarded route up from looped packets, `echo-function-failed` and route withdrawal when UDP 3785 is dropped, and recovery.

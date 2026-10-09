@@ -15,7 +15,7 @@ use nos_proto::{
     LacpRequest, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent,
     LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
-    PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest, ServiceRef,
+    PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -202,7 +202,15 @@ pub async fn bfd_sessions(
         .await?
     {
         BfdEvent::Sessions(v) => Ok(Json(v)),
-        other @ BfdEvent::State { .. } => Err(unexpected("nos-bfdd", &other)),
+        other => Err(unexpected("nos-bfdd", &other)),
+    }
+}
+
+#[utoipa::path(get, path = "/v1/bfd/reflector", tag = "show", summary = "The S-BFD reflector's discriminators and counters", responses((status = 200, body = ReflectorView), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bfd_reflector(State(d): State<Daemons>) -> ApiResult<Json<ReflectorView>> {
+    match d.service(ServiceRef::Bfd, BfdRequest::GetReflector).await? {
+        BfdEvent::Reflector(v) => Ok(Json(v)),
+        other => Err(unexpected("nos-bfdd", &other)),
     }
 }
 

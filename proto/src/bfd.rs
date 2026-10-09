@@ -162,6 +162,62 @@ pub struct BfdSessionView {
     pub echo_only: bool,
     /// RFC 9764: the UDP payload size Control packets are padded to, 0 when not padded.
     pub tx_pdu_bytes: u32,
+    /// RFC 7880 S-BFD: which end of which protocol this session is.
+    pub kind: BfdSessionKind,
+}
+
+/// What a session is: a classical RFC 5880 peer, or an RFC 7880 S-BFD
+/// initiator probing a stateless reflector.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BfdSessionKind {
+    #[default]
+    Classical,
+    SbfdInitiator,
+}
+
+impl fmt::Display for BfdSessionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            BfdSessionKind::Classical => "classical",
+            BfdSessionKind::SbfdInitiator => "sbfd-initiator",
+        })
+    }
+}
+
+/// Why the S-BFD reflector dropped a packet, counted per reason.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectorDiscards {
+    /// Not a valid BFD Control packet.
+    pub malformed: u64,
+    /// UDP source port 7784 (RFC 7881 §6).
+    pub source_port: u64,
+    /// A martian source address (RFC 7881 §7).
+    pub martian: u64,
+    /// Not in `allow-from`.
+    pub filtered: u64,
+    /// Over the reflector's global packet rate.
+    pub rate_limited: u64,
+    /// The A bit is set: reflector authentication is not built yet.
+    pub authenticated: u64,
+    /// D bit clear (RFC 7880 §7.2.3).
+    pub demand_clear: u64,
+    /// Your Discriminator is not one of the reflector's.
+    pub unknown_discriminator: u64,
+}
+
+/// The S-BFD reflector, for `show bfd reflector`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectorView {
+    /// The discriminators answered for, as 32-bit values.
+    pub discriminators: Vec<u32>,
+    /// Packets that reached the reflector.
+    pub received: u64,
+    /// Replies sent.
+    pub replied: u64,
+    pub discarded: ReflectorDiscards,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -185,6 +241,8 @@ pub enum BfdRequest {
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
         peer: Option<IpAddr>,
     },
+    /// The S-BFD reflector's discriminators and counters.
+    GetReflector,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -200,6 +258,7 @@ pub enum BfdEvent {
         control_plane_independent: bool,
     },
     Sessions(Vec<BfdSessionView>),
+    Reflector(ReflectorView),
 }
 
 #[cfg(test)]
@@ -234,6 +293,7 @@ mod tests {
             },
             BfdRequest::Deregister { key: key() },
             BfdRequest::GetSessions { peer: None },
+            BfdRequest::GetReflector,
         ] {
             let mut b = BytesMut::new();
             c.encode(r.clone(), &mut b).unwrap();

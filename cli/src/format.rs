@@ -286,6 +286,45 @@ fn bfd_method_name(m: nos_proto::schema::BfdAuthMethod) -> &'static str {
     }
 }
 
+/// Render the S-BFD reflector, for `show bfd reflector`: its discriminators
+/// (as the IPv4 addresses they are configured as) and the counters.
+pub fn render_bfd_reflector(v: &nos_proto::ReflectorView) -> String {
+    if v.discriminators.is_empty() {
+        return "sbfd reflector: off (no discriminator configured)".to_string();
+    }
+    let d = &v.discarded;
+    let reasons: Vec<String> = [
+        ("malformed", d.malformed),
+        ("source-port-7784", d.source_port),
+        ("martian-source", d.martian),
+        ("not-in-allow-from", d.filtered),
+        ("rate-limited", d.rate_limited),
+        ("authenticated", d.authenticated),
+        ("demand-bit-clear", d.demand_clear),
+        ("unknown-discriminator", d.unknown_discriminator),
+    ]
+    .iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(r, n)| format!("{r} {n}"))
+    .collect();
+    let discriminators: Vec<String> = v
+        .discriminators
+        .iter()
+        .map(|d| std::net::Ipv4Addr::from(*d).to_string())
+        .collect();
+    let dropped = if reasons.is_empty() {
+        "none".to_string()
+    } else {
+        reasons.join(", ")
+    };
+    format!(
+        "sbfd reflector: discriminators {}\nreceived {}, replied {}, dropped: {dropped}",
+        discriminators.join(" "),
+        v.received,
+        v.replied
+    )
+}
+
 /// Render `nos-bfdd`'s sessions, for `show bfd sessions`: one line each,
 /// ordered as the daemon sent them (table, then peer). `local` and
 /// `interface` are shown only when the key carries them.
@@ -308,6 +347,11 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
                 format!(" {word} {i}")
             });
             let multihop = if k.multihop { " multihop" } else { "" };
+            let sbfd = if s.kind == nos_proto::BfdSessionKind::SbfdInitiator {
+                " sbfd"
+            } else {
+                ""
+            };
             let auth = match (s.auth_method, s.auth_key_id) {
                 (Some(m), Some(id)) => format!(
                     ", auth {} key {id} ({} failures)",
@@ -328,7 +372,7 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
                 String::new()
             };
             format!(
-                "{}: peer {}{local}{interface}{multihop}, {}, diag {}, tx {}ms, detect {}ms, \
+                "{}: peer {}{local}{interface}{multihop}{sbfd}, {}, diag {}, tx {}ms, detect {}ms, \
                  discriminators {}/{}{auth}{pdu}{echo}",
                 k.aggregate.as_deref().unwrap_or(&k.table),
                 k.peer,
@@ -987,13 +1031,14 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         users,
         logging,
         bfd_profiles,
+        sbfd_reflector,
     } = diff;
     let mut lines = Vec::new();
 
     if let Some(field) = hostname {
         render_field_diff(&mut lines, field, "", color);
     }
-    for field in lldp.iter().chain(logging) {
+    for field in lldp.iter().chain(logging).chain(sbfd_reflector) {
         render_field_diff(&mut lines, field, "", color);
     }
 
@@ -1755,6 +1800,36 @@ mod tests {
     }
 
     #[test]
+    fn render_bfd_reflector_off_and_counting() {
+        use nos_proto::{ReflectorDiscards, ReflectorView};
+        let mut v = ReflectorView {
+            discriminators: vec![],
+            received: 0,
+            replied: 0,
+            discarded: ReflectorDiscards::default(),
+        };
+        assert_eq!(
+            render_bfd_reflector(&v),
+            "sbfd reflector: off (no discriminator configured)"
+        );
+        v.discriminators = vec![0x0a00_0002];
+        v.received = 5;
+        v.replied = 3;
+        assert!(render_bfd_reflector(&v).ends_with("received 5, replied 3, dropped: none"));
+        v.discarded.unknown_discriminator = 2;
+        v.discarded.martian = 1;
+        let out = render_bfd_reflector(&v);
+        assert!(
+            out.starts_with("sbfd reflector: discriminators 10.0.0.2\n"),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("dropped: martian-source 1, unknown-discriminator 2"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn render_bfd_sessions_empty_and_populated() {
         use nos_proto::{BfdDiag, BfdSessionView, BfdState, SessionKey};
         assert_eq!(render_bfd_sessions(&[]), "no bfd sessions");
@@ -1780,6 +1855,7 @@ mod tests {
             echo_interval_us: 0,
             echo_only: false,
             tx_pdu_bytes: 0,
+            kind: nos_proto::BfdSessionKind::Classical,
         };
         let up = view("192.0.2.1", BfdState::Up, BfdDiag::NoDiagnostic, None);
         let down = view(

@@ -5,7 +5,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
-use crate::validators::bfd_reference_valid;
+use crate::validators::{bfd_reference_valid, sbfd_peer_valid};
 use nos_proto_derive::Cli;
 
 /// A single static route within a `StaticRoutingInstance`.
@@ -35,7 +35,10 @@ pub struct StaticRoute {
     /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD.
     /// Inert until `nos-bfdd` exists.
     #[serde(default)]
-    #[garde(custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)))]
+    #[garde(
+        custom(|b: &Option<String>, ctx: &Config| bfd_reference_valid(b.as_ref(), ctx)),
+        custom(sbfd_peer(self.gateway))
+    )]
     #[cli(topic = BfdReference)]
     pub bfd: Option<String>,
 }
@@ -49,6 +52,10 @@ impl Default for StaticRoute {
             bfd: None,
         }
     }
+}
+
+fn sbfd_peer(gateway: IpAddr) -> impl FnOnce(&Option<String>, &Config) -> garde::Result {
+    move |b, ctx| sbfd_peer_valid(b.as_ref(), gateway, ctx)
 }
 
 /// The gateway's address family must match the subnet's — unlike
@@ -100,6 +107,25 @@ mod tests {
             gateway: "2001:db8::1".parse().unwrap(),
         };
         let cfg = config_with(vec![route]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn sbfd_profile_on_an_ipv6_route_needs_a_remote_discriminator() {
+        use crate::schema::{BfdMode, BfdProfile};
+        let route = StaticRoute {
+            bfd: Some("sb".into()),
+            subnet: "2001:db8::/32".parse().unwrap(),
+            gateway: "2001:db8::1".parse().unwrap(),
+        };
+        let mut cfg = config_with(vec![route]);
+        cfg.bfd_profiles = vec![BfdProfile {
+            name: "sb".into(),
+            mode: BfdMode::Sbfd,
+            ..Default::default()
+        }];
+        assert!(cfg.validate_with(&cfg).is_err());
+        cfg.bfd_profiles[0].sbfd_remote_discriminator = Some("10.0.0.2".parse().unwrap());
         cfg.validate_with(&cfg).unwrap();
     }
 

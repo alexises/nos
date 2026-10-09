@@ -92,7 +92,7 @@ fn key_of(req: &BfdRequest) -> Option<SessionKey> {
             multihop: *multihop,
         }),
         BfdRequest::Deregister { key } => Some(key.clone()),
-        BfdRequest::GetSessions { .. } => None,
+        BfdRequest::GetSessions { .. } | BfdRequest::GetReflector => None,
     }
 }
 
@@ -132,6 +132,11 @@ async fn handle_connection(stream: Stream, role: Role, name: &str, manager: Arc<
                     }
                     BfdRequest::GetSessions { peer } => {
                         if writer.send(BfdEvent::Sessions(manager.sessions(*peer))).await.is_err() {
+                            break;
+                        }
+                    }
+                    BfdRequest::GetReflector => {
+                        if writer.send(BfdEvent::Reflector(manager.reflector().view())).await.is_err() {
                             break;
                         }
                     }
@@ -211,6 +216,11 @@ mod tests {
             panic!("no sessions");
         };
         assert_eq!(v.len(), 1);
+        w2.send(BfdRequest::GetReflector).await.unwrap();
+        let Some(Ok(BfdEvent::Reflector(v))) = r2.next().await else {
+            panic!("no reflector");
+        };
+        assert_eq!((v.received, v.discriminators.len()), (0, 0));
 
         w.send(BfdRequest::Deregister { key }).await.unwrap();
         w.send(register("192.0.2.2")).await.unwrap();

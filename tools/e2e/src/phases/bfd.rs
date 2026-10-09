@@ -369,3 +369,157 @@ pub async fn bfd_padded(w: &mut World) -> anyhow::Result<()> {
     w.dock.container_remove("router-f").await;
     Ok(())
 }
+
+/// Starts an FRR `bfdd` (`router-f`, `IP_G`) with a classical session to router-a.
+async fn start_frr_bfd(w: &World) -> anyhow::Result<()> {
+    let conf = format!(
+        "frr defaults traditional\nhostname router-f\n!\nbfd\n peer {IP_A}\n  \
+         detect-multiplier 3\n  receive-interval 100\n  transmit-interval 100\n  \
+         no shutdown\n exit\nexit\n"
+    );
+    w.dock.container_remove("router-f").await;
+    w.dock.ensure_pulled(FRR_IMAGE).await?;
+    w.dock
+        .start_plain_caps(
+            "router-f",
+            FRR_IMAGE,
+            NET,
+            IP_G,
+            &[
+                "sh",
+                "-c",
+                "sed -i 's/^bfdd=no/bfdd=yes/' /etc/frr/daemons && exec /usr/lib/frr/docker-start",
+            ],
+            ("/etc/frr", "frr.conf", conf.as_bytes()),
+            &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
+        )
+        .await
+}
+
+/// Polls `GET /v1/bfd/reflector` on `r` until `done` holds for it.
+async fn reflector_is(
+    r: &crate::router::Router,
+    secs: u64,
+    what: &str,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<serde_json::Value> {
+    let mut last = String::new();
+    for _ in 0..secs * 5 {
+        last = r
+            .rest_expect(Method::GET, "/v1/bfd/reflector", None, 200)
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&last)?;
+        if done(&v) {
+            return Ok(v);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    anyhow::bail!("{}: reflector never showed {what}: {last}", r.name())
+}
+
+/// `bfd-sbfd`, self-contained (RFC 7880/7881, #294). Router-b runs an S-BFD
+/// reflector for discriminator 10.50.0.3 (its own address) and nothing else;
+/// router-a guards a static route via router-b with `bfd-profile sb` (mode
+/// sbfd, 100 ms x 3, no remote discriminator: the peer's address). The
+/// initiator comes Up from reflections alone (REST: kind `SbfdInitiator`,
+/// remote discriminator 171048963; router-b holds no session and its
+/// `GET /v1/bfd/reflector` counts the replies) and the route is installed.
+/// An FRR `bfdd` (`router-f`) keeps a classical session with router-a
+/// throughout. Router-b then answers for 10.77.0.1 instead: router-a goes
+/// Down by `control-detection-time-expired`, the route is withdrawn, the
+/// reflector counts the probes as `unknown_discriminator` and the classical
+/// session never blinks; naming 10.77.0.1 as `sbfd-remote-discriminator` on
+/// router-a brings it Up and the route back.
+pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
+    let mut fa = A.base_flags();
+    fa.extend(strings(&[
+        "--static-route",
+        BFD_PREFIX_B,
+        "--static-gateway",
+        IP_B,
+        "--sbfd-static-route",
+        BFD_PREFIX_B,
+    ]));
+    let mut fb = B.base_flags();
+    fb.extend(strings(&["--sbfd-reflector", IP_B]));
+    w.start(A, Some(fa), &[]).await?;
+    w.start(B, Some(fb), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+
+    let up = format!("bfd session up peer={IP_B}");
+    let down = format!("bfd session down peer={IP_B} diag=control-detection-time-expired");
+    let added = format!("added route prefix={BFD_PREFIX_B} gateway={IP_B}");
+    let removed = format!("removed route prefix={BFD_PREFIX_B}");
+    let frr_down = format!("bfd session down peer={IP_G}");
+
+    log("the S-BFD initiator comes Up from reflections and guards the route");
+    a.wait(&up).await?;
+    a.wait(&added).await?;
+    let body = a
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bfd/sessions?peer={IP_B}"),
+            None,
+            200,
+        )
+        .await?;
+    anyhow::ensure!(
+        body.contains("\"kind\":\"SbfdInitiator\"")
+            && body.contains("\"remote_discriminator\":171048963"),
+        "expected an S-BFD session probing 10.50.0.3: {body}"
+    );
+    session_is(a, IP_B, "Up", None, 5).await?;
+
+    log("the reflector keeps no session, only counters");
+    let sessions = b
+        .rest_expect(Method::GET, "/v1/bfd/sessions", None, 200)
+        .await?;
+    anyhow::ensure!(
+        sessions.trim() == "[]",
+        "reflector side holds no session: {sessions}"
+    );
+    let v = reflector_is(b, 10, "replies", |v| v["replied"].as_u64() > Some(0)).await?;
+    anyhow::ensure!(
+        v["discriminators"] == serde_json::json!([171_048_963]),
+        "reflector discriminators: {v}"
+    );
+
+    log("interop: a classical session with FRR bfdd on the same link");
+    start_frr_bfd(w).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.provision(&bfd_route(BFD_PREFIX_F, IP_G)).await?;
+    a.wait(&format!("bfd session up peer={IP_G}")).await?;
+
+    log("router-b answers for another discriminator: Down, route withdrawn, counted");
+    let (n_down, n_removed, n_up, n_added, n_frr) = (
+        a.count(&down),
+        a.count(&removed),
+        a.count(&up),
+        a.count(&added),
+        a.count(&frr_down),
+    );
+    b.provision(&["--sbfd-reflector", "10.77.0.1"]).await?;
+    a.wait_new(&down, n_down, 10).await?;
+    a.wait_new(&removed, n_removed, 10).await?;
+    session_is(a, IP_B, "Down", Some("ControlDetectionTimeExpired"), 5).await?;
+    reflector_is(b, 10, "unknown_discriminator drops", |v| {
+        v["discarded"]["unknown_discriminator"].as_u64() > Some(0)
+    })
+    .await?;
+    a.assert_quiet(&frr_down, n_frr, 0).await?;
+
+    log("naming that discriminator on router-a: Up again, route re-added");
+    a.provision(&[
+        "--sbfd-static-route",
+        BFD_PREFIX_B,
+        "--sbfd-remote-discriminator",
+        "10.77.0.1",
+    ])
+    .await?;
+    a.wait_new(&up, n_up, 30).await?;
+    a.wait_new(&added, n_added, 30).await?;
+    session_is(a, IP_B, "Up", None, 5).await?;
+    a.assert_quiet(&frr_down, n_frr, 3).await?;
+    w.dock.container_remove("router-f").await;
+    Ok(())
+}

@@ -58,6 +58,27 @@ pub fn bfd_reference_valid(bfd: Option<&String>, ctx: &crate::schema::Config) ->
     Ok(())
 }
 
+/// An S-BFD initiator profile (`mode sbfd`) probes the IPv4 address of its
+/// peer unless `sbfd-remote-discriminator` names one: an IPv6 `peer` with
+/// neither is refused. `peer` is where the attach point sends the session.
+pub fn sbfd_peer_valid(
+    bfd: Option<&String>,
+    peer: std::net::IpAddr,
+    ctx: &crate::schema::Config,
+) -> garde::Result {
+    use crate::schema::BfdMode;
+    let Some(p) = bfd.and_then(|n| ctx.bfd_profiles.iter().find(|p| &p.name == n)) else {
+        return Ok(());
+    };
+    if p.mode == BfdMode::Sbfd && peer.is_ipv6() && p.sbfd_remote_discriminator.is_none() {
+        return Err(garde::Error::new(format!(
+            "bfd profile '{}' is mode sbfd: an IPv6 peer needs sbfd-remote-discriminator",
+            p.name
+        )));
+    }
+    Ok(())
+}
+
 /// If set, `ospf_profile` must name an existing `OspfProfile`, flattened
 /// across every instance's areas — mirrors `routing_table_reference_valid`
 /// from the reference side, and `ospf_profile::unique_name` from the

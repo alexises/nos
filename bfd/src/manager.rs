@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nos_proto::schema::{BfdProfile, EchoMode};
+use nos_proto::schema::{BfdMode, BfdProfile, EchoMode};
 use nos_proto::{BfdSessionView, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -18,6 +18,8 @@ use tracing::{debug, info, warn};
 
 use crate::micro;
 use crate::packet::{self, Packet};
+use crate::reflector::Reflector;
+use crate::sbfd::{self, Initiator, SbfdPath};
 use crate::session::{self, Core, EchoPath, Status, Tx};
 
 /// How long a session waits before retrying a failed `Net::open` (the VRF
@@ -35,6 +37,12 @@ pub trait Net: Send + Sync {
     /// Echo).
     /// `unaffiliated`: RFC 9747, Echo is the whole session (no Control
     /// traffic ever resolves the neighbour, so the transport must).
+    /// RFC 7881 §2: the transport of an S-BFD initiator, a socket of its own
+    /// (source port other than 7784) that the reflections come back to.
+    async fn open_sbfd(&self, _key: &SessionKey) -> io::Result<SbfdPath> {
+        Err(io::Error::other("no S-BFD transport"))
+    }
+
     async fn open_echo(
         &self,
         _key: &SessionKey,
@@ -200,6 +208,7 @@ pub struct Manager {
     sessions: Mutex<HashMap<SessionKey, Entry>>,
     next_disc: AtomicU32,
     next_client: AtomicU64,
+    reflector: Arc<Reflector>,
 }
 
 impl Manager {
@@ -211,7 +220,14 @@ impl Manager {
             // Random start (§6.8.1: not guessable), never 0.
             next_disc: AtomicU32::new(session::rand_u32() | 1),
             next_client: AtomicU64::new(1),
+            reflector: Arc::default(),
         })
+    }
+
+    /// The S-BFD reflector's state: the socket side feeds it, `GetReflector`
+    /// reads it.
+    pub fn reflector(&self) -> Arc<Reflector> {
+        self.reflector.clone()
     }
 
     pub fn new_client(&self) -> u64 {
@@ -244,10 +260,11 @@ impl Manager {
         // demux slot, or Echo alone): switching it starts a fresh session.
         // ponytail: the old one's clients are not carried over, they re-register.
         let echo_only = profile.echo_mode == EchoMode::Unaffiliated;
-        if sessions
-            .get(key)
-            .is_some_and(|e| (e.profile.echo_mode == EchoMode::Unaffiliated) != echo_only)
-        {
+        let sbfd = profile.mode == BfdMode::Sbfd;
+        if sessions.get(key).is_some_and(|e| {
+            (e.profile.echo_mode == EchoMode::Unaffiliated) != echo_only
+                || (e.profile.mode == BfdMode::Sbfd) != sbfd
+        }) {
             self.release_all(&mut sessions, key);
         }
         if let Some(e) = sessions.get_mut(key) {
@@ -265,19 +282,57 @@ impl Manager {
             disc,
             tokio::time::Instant::now().into_std(),
         );
-        let (status_tx, status_rx) = watch::channel(core.status());
+        let initiator = sbfd.then(|| {
+            Initiator::new(
+                profile,
+                disc,
+                sbfd::remote_discriminator(key.peer, profile),
+                tokio::time::Instant::now().into_std(),
+            )
+        });
+        let (status_tx, status_rx) = watch::channel(
+            initiator
+                .as_ref()
+                .map_or_else(|| core.status(), Initiator::status),
+        );
         let (pkt_tx, pkt_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
-        if !echo_only {
+        if !echo_only && !sbfd {
             self.demux.add(disc, key, &pkt_tx, profile.minimum_ttl);
         }
         info!(peer = %key.peer, table = %key.table, multihop = key.multihop, "bfd session registered");
         let net = self.net.clone();
         let k = key.clone();
+        let core_profile = profile.clone();
         let task = tokio::spawn(async move {
             // An unaffiliated session has no Demux slot holding the sender: keep
             // it, or `run` sees the closed channel and ends at once.
             let _pkt_tx = pkt_tx;
+            if let Some(initiator) = initiator {
+                if sbfd::remote_discriminator(k.peer, &core_profile).is_none() {
+                    sbfd::warn_no_discriminator(&k);
+                }
+                // The reflections come back to the session's own socket.
+                let path = loop {
+                    match net.open_sbfd(&k).await {
+                        Ok(p) => break p,
+                        Err(e) => {
+                            debug!(peer = %k.peer, table = %k.table, error = %e, "bfd sbfd session not ready, retrying");
+                            tokio::time::sleep(OPEN_RETRY).await;
+                        }
+                    }
+                };
+                sbfd::run(
+                    k,
+                    initiator,
+                    path,
+                    core_profile.minimum_ttl,
+                    cmd_rx,
+                    status_tx,
+                )
+                .await;
+                return;
+            }
             if echo_only {
                 // RFC 9747: no Control socket. The Echo transport is retried
                 // until the interface has an address towards the peer.
@@ -337,8 +392,15 @@ impl Manager {
     fn release_all(&self, sessions: &mut HashMap<SessionKey, Entry>, key: &SessionKey) {
         if let Some(e) = sessions.remove(key) {
             e.task.abort();
-            self.demux.remove(e.disc, key);
+            self.forget(&e, key);
             info!(peer = %key.peer, table = %key.table, "bfd session removed");
+        }
+    }
+
+    /// Takes a dropped session out of the receive path (an S-BFD one was never in it).
+    fn forget(&self, e: &Entry, key: &SessionKey) {
+        if e.profile.mode != BfdMode::Sbfd {
+            self.demux.remove(e.disc, key);
         }
     }
 
@@ -350,7 +412,7 @@ impl Manager {
         if e.clients.is_empty() {
             let e = sessions.remove(key).expect("just seen");
             e.task.abort();
-            self.demux.remove(e.disc, key);
+            self.forget(&e, key);
             info!(peer = %key.peer, table = %key.table, "bfd session removed");
         }
     }
@@ -396,6 +458,7 @@ impl Manager {
                     echo_interval_us: s.echo_interval_us,
                     echo_only: s.echo_only,
                     tx_pdu_bytes: s.tx_pdu_bytes,
+                    kind: s.kind,
                 }
             })
             .collect();
@@ -662,6 +725,104 @@ pub(crate) mod tests {
         assert!(!all[0].echo_only);
         assert_ne!(all[0].local_discriminator, d1, "a fresh session");
         assert_eq!(demux.0.lock().unwrap().by_disc.len(), 1);
+    }
+
+    /// A transport whose S-BFD replies the test injects.
+    struct SbfdNet {
+        sent: Arc<Sent>,
+        replies: Mutex<Option<mpsc::Receiver<sbfd::Reflection>>>,
+    }
+
+    #[async_trait]
+    impl Net for SbfdNet {
+        async fn open(&self, _: &SessionKey) -> io::Result<Arc<dyn Tx>> {
+            Err(io::Error::other(
+                "classical sessions are not part of this test",
+            ))
+        }
+
+        async fn open_sbfd(&self, _: &SessionKey) -> io::Result<SbfdPath> {
+            let rx = self.replies.lock().unwrap().take().expect("opened once");
+            let task = tokio::spawn(async {});
+            Ok(SbfdPath {
+                tx: self.sent.clone(),
+                rx,
+                task: task.abort_handle(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sbfd_session_probes_the_peer_discriminator_and_comes_up_on_a_reflection() {
+        let sent = Arc::new(Sent(Mutex::default()));
+        let (reply_tx, reply_rx) = mpsc::channel(4);
+        let demux = Demux::default();
+        let m = Manager::new(
+            Arc::new(SbfdNet {
+                sent: sent.clone(),
+                replies: Mutex::new(Some(reply_rx)),
+            }),
+            demux.clone(),
+        );
+        let k = key("10.0.0.2");
+        let profile = BfdProfile {
+            mode: BfdMode::Sbfd,
+            min_tx_interval: 20,
+            ..BfdProfile::default()
+        };
+        let mut rx = m.register(m.new_client(), &k, &profile);
+        assert_eq!(rx.borrow().state, BfdState::Down);
+        assert!(
+            demux.0.lock().unwrap().by_disc.is_empty(),
+            "own socket, not the shared demux"
+        );
+        let probe = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(b) = sent.0.lock().unwrap().first() {
+                    break packet::decode(b).unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a probe goes out");
+        assert!(probe.demand);
+        assert_eq!(
+            probe.your_discriminator, 0x0a00_0002,
+            "the peer's IPv4 address"
+        );
+        let mine = rx.borrow().local_discriminator;
+        assert_eq!(probe.my_discriminator, mine);
+
+        let reflection = Packet {
+            state: BfdState::Up,
+            demand: false,
+            my_discriminator: probe.your_discriminator,
+            your_discriminator: mine,
+            required_min_rx: 10_000,
+            ..probe
+        };
+        reply_tx
+            .send((reflection.clone(), Some(254)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rx.borrow().state,
+            BfdState::Down,
+            "single-hop wants TTL 255"
+        );
+        reply_tx.send((reflection, Some(255))).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while rx.borrow().state != BfdState::Up {
+                rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("up on a reflection");
+        let v = &m.sessions(None)[0];
+        assert_eq!(v.kind, nos_proto::BfdSessionKind::SbfdInitiator);
+        assert_eq!(v.remote_discriminator, 0x0a00_0002);
     }
 
     #[tokio::test]

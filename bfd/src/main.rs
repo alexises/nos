@@ -1,10 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
 use nos_bfd::manager::{Demux, Manager};
 use nos_bfd::micro_sessions::{self, Micro};
-use nos_bfd::{interface_client, server, socket::UdpNet, watchdog_client};
+use nos_bfd::socket::{ReflectorNet, UdpNet};
+use nos_bfd::{interface_client, server, watchdog_client};
 use nos_log_client::ForwardingLayer;
 use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
@@ -67,12 +69,16 @@ async fn main() -> anyhow::Result<()> {
     // go through the same manager; their Up sets go to nos-interfaced.
     let (push_tx, push_rx) = mpsc::channel(16);
     let micro = Micro::new(manager.clone(), push_tx);
+    let reflector = Arc::new(ReflectorNet::new(
+        args.watchdog_socket.clone(),
+        manager.reflector(),
+    ));
     let (watchdog, mut sd) = (args.watchdog_socket.clone(), shutdown_rx.clone());
     let micro_task = tokio::spawn(async move {
         if let Some(config) =
             watchdog_client::resolve_with_retry(&watchdog, ServiceRef::Config, &mut sd).await
         {
-            micro_sessions::run(config, micro, sd).await;
+            micro_sessions::run(config, micro, reflector, sd).await;
         }
     });
     let interface_task = tokio::spawn(interface_client::run(

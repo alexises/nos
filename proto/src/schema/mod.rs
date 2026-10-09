@@ -19,6 +19,7 @@ pub mod policy_definition;
 pub mod port_aggregate;
 pub mod prefix_list;
 pub mod routing_table;
+pub mod sbfd;
 pub mod static_route;
 pub mod static_routing_instance;
 pub mod sugar;
@@ -26,7 +27,7 @@ pub mod switching_profile;
 pub mod user;
 
 pub use as_path_list::AsPathList;
-pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdProfile, EchoMode};
+pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdMode, BfdProfile, EchoMode};
 pub use bgp_instance::{
     BgpAggregate, BgpConfederation, BgpGracefulRestart, BgpInstance, RpkiCache,
     GR_RESTART_TIME_DEFAULT, GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT,
@@ -67,6 +68,7 @@ pub use routing_table::{
     Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
     REST_API_PORT_DEFAULT,
 };
+pub use sbfd::SbfdReflector;
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
@@ -186,6 +188,13 @@ pub struct Config {
     #[garde(dive)]
     #[cli(topic = BfdProfile)]
     pub bfd_profiles: Vec<BfdProfile>,
+
+    /// RFC 7880 S-BFD reflector. `serde(default)` so on-disk config saved
+    /// before this field existed still loads.
+    #[serde(default)]
+    #[garde(custom(|r: &SbfdReflector, _ctx: &Config| r.check()))]
+    #[cli(topic = SbfdReflector, words = "sbfd reflector")]
+    pub sbfd_reflector: SbfdReflector,
 }
 
 impl Config {
@@ -230,6 +239,7 @@ impl Default for Config {
             logging: LoggingSettings::default(),
             users: Vec::new(),
             bfd_profiles: Vec::new(),
+            sbfd_reflector: SbfdReflector::default(),
         }
     }
 }

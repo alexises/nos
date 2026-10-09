@@ -79,6 +79,8 @@ pub struct ConfigDiff {
     /// Field-level, like `lldp`: `Config.logging` is one singleton section.
     pub logging: Vec<FieldDiff>,
     pub bfd_profiles: Vec<SectionDiff>,
+    /// Field-level, like `lldp`: `Config.sbfd_reflector` is one singleton section.
+    pub sbfd_reflector: Vec<FieldDiff>,
 }
 
 impl ConfigDiff {
@@ -102,6 +104,7 @@ impl ConfigDiff {
             && self.users.is_empty()
             && self.logging.is_empty()
             && self.bfd_profiles.is_empty()
+            && self.sbfd_reflector.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -205,6 +208,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            sbfd_reflector: if scopes.contains(&DiffScope::SbfdReflector) {
+                self.sbfd_reflector.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -233,6 +241,7 @@ pub enum DiffScope {
     Users,
     Logging,
     BfdProfiles,
+    SbfdReflector,
 }
 
 /// The `FieldDiff` label `nos-watchdogd` keys on to decide whether a routing

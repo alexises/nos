@@ -405,6 +405,16 @@ topics! {
     BfdProfileEchoInterval,
     /// `BfdProfile.padded_pdu_size`
     BfdProfilePaddedPduSize,
+    /// `BfdProfile.mode`
+    BfdProfileMode,
+    /// `BfdProfile.sbfd_remote_discriminator`
+    BfdProfileSbfdRemoteDiscriminator,
+    /// `Config.sbfd_reflector`
+    SbfdReflector,
+    /// `SbfdReflector.discriminators`
+    SbfdReflectorDiscriminator,
+    /// `SbfdReflector.allow_from`
+    SbfdReflectorAllowFrom,
     /// The `bfd` reference on a peer-group, OSPF/OSPFv3 profile or static route
     BfdReference,
 }
