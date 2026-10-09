@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, Stream};
 use nos_proto::{IpcCodec, Role, StpEvent, StpRequest, StpSummary};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, warn};
@@ -17,21 +18,28 @@ use crate::authz::allowed;
 /// Written by the daemon actor after every change, read per query.
 pub type Snapshot = Arc<RwLock<StpSummary>>;
 
+/// An operator `mcheck`, answered by the daemon actor with the port count.
+pub struct McheckCmd {
+    pub interface: Option<String>,
+    pub reply: oneshot::Sender<u32>,
+}
+
 pub fn start(
     listen_socket: &Path,
     snapshot: Snapshot,
+    cmds: mpsc::Sender<McheckCmd>,
     identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
     let listener = identity.listen(listen_socket)?;
     info!(socket = %listen_socket.display(), "stp IPC server listening");
-    Ok(tokio::spawn(accept_loop(listener, snapshot)))
+    Ok(tokio::spawn(accept_loop(listener, snapshot, cmds)))
 }
 
-async fn accept_loop(listener: Listener, snapshot: Snapshot) {
+async fn accept_loop(listener: Listener, snapshot: Snapshot, cmds: mpsc::Sender<McheckCmd>) {
     loop {
         match listener.accept().await {
             Ok(incoming) => {
-                tokio::spawn(serve(incoming, snapshot.clone()));
+                tokio::spawn(serve(incoming, snapshot.clone(), cmds.clone()));
             }
             Err(e) => {
                 error!(error = %e, "stp IPC accept loop terminated");
@@ -41,14 +49,20 @@ async fn accept_loop(listener: Listener, snapshot: Snapshot) {
     }
 }
 
-async fn serve(incoming: Incoming, snapshot: Snapshot) {
+async fn serve(incoming: Incoming, snapshot: Snapshot, cmds: mpsc::Sender<McheckCmd>) {
     match incoming.handshake_as(Role::parse).await {
-        Ok((stream, role, name)) => handle_connection(stream, role, &name, snapshot).await,
+        Ok((stream, role, name)) => handle_connection(stream, role, &name, snapshot, cmds).await,
         Err(e) => debug!(error = %e, "stp IPC handshake refused"),
     }
 }
 
-async fn handle_connection(stream: Stream, role: Role, name: &str, snapshot: Snapshot) {
+async fn handle_connection(
+    stream: Stream,
+    role: Role,
+    name: &str,
+    snapshot: Snapshot,
+    cmds: mpsc::Sender<McheckCmd>,
+) {
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<StpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<StpEvent>::default());
@@ -64,6 +78,14 @@ async fn handle_connection(stream: Stream, role: Role, name: &str, snapshot: Sna
         let event = match req {
             StpRequest::GetSummary => {
                 StpEvent::Summary(snapshot.read().expect("snapshot lock").clone())
+            }
+            StpRequest::Mcheck { interface } => {
+                let (reply, rx) = oneshot::channel();
+                if cmds.send(McheckCmd { interface, reply }).await.is_err() {
+                    break;
+                }
+                let Ok(ports) = rx.await else { break };
+                StpEvent::Mcheck { ports }
             }
         };
         if writer.send(event).await.is_err() {
@@ -96,7 +118,15 @@ mod tests {
         let path = tmp.path().join("stp.sock");
         let snap: Snapshot = Arc::default();
         snap.write().unwrap().bridge_id = "8000.02:00:00:00:00:01".into();
-        let _server = start(&path, snap.clone(), &shared().identity("stpd", "")).unwrap();
+        let (cmds, mut cmd_rx) = mpsc::channel::<McheckCmd>(1);
+        tokio::spawn(async move {
+            while let Some(c) = cmd_rx.recv().await {
+                let _ = c
+                    .reply
+                    .send(u32::from(c.interface.as_deref() == Some("eth1")));
+            }
+        });
+        let _server = start(&path, snap.clone(), cmds, &shared().identity("stpd", "")).unwrap();
 
         let Some(StpEvent::Summary(s)) = ask(&path, "user").await else {
             panic!("no reply for a user");
@@ -110,5 +140,19 @@ mod tests {
         };
         assert!(s.enabled);
         assert!(ask(&path, "bgpd").await.is_none(), "other roles are cut");
+        let s = shared()
+            .identity("user", "t")
+            .connect(&path, &PeerId::new("stpd", ""))
+            .await
+            .unwrap();
+        let (r, w) = tokio::io::split(s);
+        let mut reader = FramedRead::new(r, IpcCodec::<StpEvent>::default());
+        let mut writer = FramedWrite::new(w, IpcCodec::<StpRequest>::default());
+        let interface = Some("eth1".to_string());
+        writer.send(StpRequest::Mcheck { interface }).await.unwrap();
+        assert!(matches!(
+            reader.next().await,
+            Some(Ok(StpEvent::Mcheck { ports: 1 }))
+        ));
     }
 }

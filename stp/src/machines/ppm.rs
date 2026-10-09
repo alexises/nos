@@ -1,5 +1,6 @@
 //! Port Protocol Migration machine, 13.31 (Figure 13-13).
 
+use crate::actions::{Action, Event};
 use crate::bridge::Bridge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +12,7 @@ pub enum State {
 
 pub fn enter(b: &mut Bridge, i: usize, s: State) {
     let (migrate, rstp) = (b.timers.migrate_time, b.rstp_version);
+    let was = b.ports[i].send_rstp;
     let p = &mut b.ports[i];
     p.ppm = s;
     match s {
@@ -27,6 +29,11 @@ pub fn enter(b: &mut Bridge, i: usize, s: State) {
             p.rcvd_rstp = false;
             p.rcvd_stp = false;
         }
+    }
+    let now = b.ports[i].send_rstp;
+    if now != was {
+        b.actions
+            .push(Action::Log(Event::ProtocolMigrated { port: i, rstp: now }));
     }
 }
 

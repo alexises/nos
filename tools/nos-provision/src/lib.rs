@@ -44,6 +44,22 @@ impl From<StpModeArg> for nos_proto::StpMode {
     }
 }
 
+/// Clap-facing mirror of `spanning-tree force-version`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum StpForceVersionArg {
+    Stp,
+    Rstp,
+}
+
+impl From<StpForceVersionArg> for nos_proto::schema::StpForceVersion {
+    fn from(v: StpForceVersionArg) -> Self {
+        match v {
+            StpForceVersionArg::Stp => nos_proto::schema::StpForceVersion::Stp,
+            StpForceVersionArg::Rstp => nos_proto::schema::StpForceVersion::Rstp,
+        }
+    }
+}
+
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
 /// can't be derived on a `nos-proto` type directly (that crate stays
 /// dependency-free of `clap`, per the star-dependency rule).
@@ -859,6 +875,10 @@ pub struct Args {
     #[arg(long)]
     pub stp_priority: Option<u16>,
 
+    /// `spanning-tree force-version` (`stp` = 802.1D only); unset leaves it.
+    #[arg(long, value_enum)]
+    pub stp_force_version: Option<StpForceVersionArg>,
+
     /// If set (requires `--port-aggregate`), sets the aggregate's Ethernet
     /// Segment DF election algorithm (`PortAggregateOp::SetDfAlgorithm`);
     /// needs an ESI at commit time. `modulo` resets it.
@@ -1560,6 +1580,13 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             Some(p.to_string()),
         ));
     }
+    if let Some(f) = args.stp_force_version {
+        let f: nos_proto::schema::StpForceVersion = f.into();
+        v.push((
+            vec!["spanning-tree".to_string(), "force-version".to_string()],
+            Some(format!("\"{f:?}\"")),
+        ));
+    }
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         let guard = |field: &str| {
             vec![
@@ -1736,6 +1763,9 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     config.spanning_tree.mode = stp_mode(args);
     if let Some(p) = args.stp_priority {
         config.spanning_tree.priority = p;
+    }
+    if let Some(f) = args.stp_force_version {
+        config.spanning_tree.force_version = Some(f.into());
     }
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         for p in config

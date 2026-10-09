@@ -114,6 +114,14 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 - `rcvInfo` treats a Designated BPDU from the same bridge/port as the stored info but with different values (e.g. a larger cost) as superior, so upstream changes are accepted.
 - A BPDU whose message age is already at max age is dropped in `PRX` (9.3.4).
 
+## Legacy 802.1D compatibility (#319)
+
+- `Bridge::set_rstp_version(false)` is `forceVersion < 2`: PPM restarts with `sendRSTP` false, so PTX sends Config (Designated) or TCN (Root) and PRT/PST use `fdWhile` instead of the proposal handshake. `Plan::rstp_version` carries the config value, so a change rebuilds the bridge.
+- A port starts with `sendRSTP` true; PPM moves it with `rcvdSTP`/`rcvdRSTP`/`mcheck` and each real change emits `Event::ProtocolMigrated`, logged as `port migrated to STP` / `port migrated to RSTP` (field `port`; a forced bridge logs STP once per port at start).
+- `Bridge::mcheck(port)` sets the `mcheck` variable; `Engine::mcheck(None | Some(name))` applies it and returns the port count. The actor serves it from `StpRequest::Mcheck` (`StpEvent::Mcheck { ports }`, `User` and `Restd`).
+- Port states stay discarding/learning/forwarding: legacy Listening is `Discarding` (the kernel neither learns nor forwards in it).
+- Sim scenarios: a forced-STP bridge in a triangle, an all-legacy topology change (TCN, `FlushFdb`) and the `mcheck` round trip, in `stp/src/sim.rs`.
+
 ## Run and read the simulator
 
 - `cargo test -p nos-stp sim` runs `stp/src/sim.rs`: N bridges joined by in-memory links (two ends point-to-point, more a shared segment), BPDUs delivered instantly, time moves only on `Sim::tick`.

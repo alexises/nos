@@ -24,7 +24,7 @@ use crate::interface_client::Push;
 use crate::link;
 use crate::link_client::{gate, Gate, LinkTable};
 use crate::ports::Plan;
-use crate::server::Snapshot;
+use crate::server::{McheckCmd, Snapshot};
 
 const TICK: Duration = Duration::from_secs(1);
 /// Seconds between the per-port BPDU receive summaries.
@@ -64,6 +64,7 @@ pub async fn run(
     mut links_rx: watch::Receiver<LinkTable>,
     push_tx: mpsc::Sender<Push>,
     snapshot: Snapshot,
+    mut cmds: mpsc::Receiver<McheckCmd>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let (frames_tx, mut frames_rx) = mpsc::channel(256);
@@ -94,6 +95,7 @@ pub async fn run(
                 d.sync_links().await;
             }
             Some((name, frame)) = frames_rx.recv() => d.receive(&name, &frame).await,
+            Some(cmd) = cmds.recv() => d.mcheck(cmd).await,
             _ = tick.tick() => d.on_tick().await,
             _ = shutdown.changed() => if *shutdown.borrow() { break },
         }
@@ -256,6 +258,17 @@ impl Daemon {
             }
             Err(e) => debug!(port = %name, error = %e, "dropping malformed bpdu"),
         }
+    }
+
+    async fn mcheck(&mut self, cmd: McheckCmd) {
+        let Some(engine) = self.engine.as_mut() else {
+            let _ = cmd.reply.send(0);
+            return;
+        };
+        let (ports, out) = engine.mcheck(cmd.interface.as_deref());
+        info!(ports, "mcheck requested");
+        let _ = cmd.reply.send(ports);
+        self.emit(out).await;
     }
 
     async fn on_tick(&mut self) {

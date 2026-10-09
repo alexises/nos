@@ -111,10 +111,18 @@ impl Default for StpSummary {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum StpRequest {
     GetSummary,
+    /// 802.1Q `mcheck`: re-probe for RSTP on one port, or on all (`None`).
+    Mcheck {
+        interface: Option<String>,
+    },
 }
 
 /// Messages sent from `nos-stpd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum StpEvent {
     Summary(StpSummary),
+    /// How many ports the `Mcheck` matched (0: no such interface).
+    Mcheck {
+        ports: u32,
+    },
 }

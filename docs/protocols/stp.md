@@ -97,6 +97,15 @@ set broadcast domain bd5 stp-hello-time 1
 - `stp-priority`, `stp-hello-time`, `stp-max-age` and `stp-forward-delay` on a domain override the global value for that VLAN; unset inherits.
 - Per switching profile member, `set switching-profile <sp> broadcast-domain <bd> stp-cost <n>` and `stp-priority <n>` tune the port.
 
+## Interoperate with an 802.1D switch
+
+- By default (`force-version` unset or `rstp`) each port starts in RSTP and falls back to 802.1D on its own when it hears a Config or TCN BPDU. Log: `port migrated to STP port=<if>`.
+- A port that fell back stays in STP: a peer that later turns to RSTP is noticed on its first RST BPDU and the port migrates back (`port migrated to RSTP`), but a peer that merely stops talking does not.
+- `set spanning-tree force-version stp` makes every port send Config/TCN BPDUs only, whatever the peer does. The port states then use the legacy Listening and Learning delays (`forward-delay` each, 30 s by default); Listening is shown as `discarding`.
+- `clear spanning-tree detected-protocols [interface <if>]` (REST: `POST /v1/spanning-tree/mcheck`, or `/v1/spanning-tree/port/<if>/mcheck`) is the standard's `mcheck`: ports go back to RSTP and migrate again after Migrate Time (3 s) if the peer still sends STP BPDUs. It answers with the number of ports it reached.
+- A change of `force-version` restarts the protocol, like any spanning-tree setting.
+- Expect convergence in tens of seconds, not sub-second, on a legacy segment. Lowering `forward-delay` (4 to 30 s) and `max-age` shortens it within the timer relation.
+
 ## ESI port aggregates
 
 A multi-homed segment must never become a root or transit port of the spanning tree.

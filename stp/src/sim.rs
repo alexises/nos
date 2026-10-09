@@ -340,6 +340,64 @@ mod tests {
         assert_eq!(role(&s, 2, 0), Role::Root);
     }
 
+    fn legacy(s: &mut Sim, b: usize) {
+        s.bridges[b].set_rstp_version(false);
+    }
+
+    #[test]
+    fn forced_stp_bridge_interoperates_and_never_sends_rstp() {
+        let mut s = Sim::new(&[4096, 32768, 36864], &[p2p(0, 1), p2p(1, 2), p2p(0, 2)]);
+        legacy(&mut s, 1);
+        s.start();
+        let t = s.converge(120).unwrap_or_else(|| panic!("{}", s.dump()));
+        assert!(
+            s.is_spanning_tree() && s.blocking_ports() == 1,
+            "{t} s\n{}",
+            s.dump()
+        );
+        assert!(s.bridges[1].ports.iter().all(|p| !p.send_rstp));
+        // The RSTP neighbours heard its Config BPDUs and fell back on that port only.
+        assert!(!s.bridges[0].ports[0].send_rstp, "{}", s.dump());
+        assert!(s.bridges[0].ports[1].send_rstp, "{}", s.dump());
+    }
+
+    #[test]
+    fn legacy_topology_change_goes_through_tcn_and_flushes() {
+        let mut s = Sim::new(&[4096, 32768, 36864], &[p2p(0, 1), p2p(1, 2), p2p(0, 2)]);
+        for b in 0..3 {
+            legacy(&mut s, b);
+        }
+        s.start();
+        s.converge(120).unwrap_or_else(|| panic!("{}", s.dump()));
+        s.run(10);
+        let before = s.flushes;
+        s.set_link(2, false); // bridge 2's root port: its alternate takes over
+        s.converge(200).unwrap_or_else(|| panic!("{}", s.dump()));
+        assert!(s.flushes > before, "TC reached the bridges' FDBs");
+        assert!(s.is_spanning_tree(), "{}", s.dump());
+        s.run(60);
+        assert!(s.converged(), "{}", s.dump());
+    }
+
+    #[test]
+    fn mcheck_probes_rstp_and_a_legacy_peer_pulls_the_port_back() {
+        let mut s = started(&[4096, 32768], &[p2p(0, 1)]);
+        legacy(&mut s, 0);
+        s.converge(120).unwrap_or_else(|| panic!("{}", s.dump()));
+        assert!(!s.bridges[1].ports[0].send_rstp);
+        s.bridges[1].mcheck(0);
+        assert!(s.bridges[1].ports[0].send_rstp, "mcheck restarts in RSTP");
+        s.run(10); // the legacy peer keeps sending Config BPDUs
+        assert!(!s.bridges[1].ports[0].send_rstp);
+        // The peer upgrades; the next mcheck sticks.
+        s.bridges[0].set_rstp_version(true);
+        s.run(5);
+        s.bridges[1].mcheck(0);
+        s.run(10);
+        assert!(s.bridges[1].ports[0].send_rstp);
+        assert!(s.converged(), "{}", s.dump());
+    }
+
     mod random {
         use super::*;
         use proptest::prelude::*;

@@ -72,6 +72,8 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::ospfv3_database))
         .routes(routes!(clear::bgp_soft_in))
         .routes(routes!(clear::bgp_clear_peer))
+        .routes(routes!(clear::stp_mcheck))
+        .routes(routes!(clear::stp_mcheck_port))
         .routes(routes!(login::login))
         .routes(routes!(login::renew))
         // `diff` and `commit` are static routes, so they win over the

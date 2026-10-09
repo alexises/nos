@@ -23,6 +23,12 @@ pub enum Event {
         root: BridgeId,
         root_port: Option<usize>,
     },
+    /// PPM changed what `port` transmits (13.31 `sendRSTP`): `rstp` false is
+    /// the 802.1D Config/TCN dialect.
+    ProtocolMigrated {
+        port: usize,
+        rstp: bool,
+    },
     /// `run` hit its pass cap: a machine bug, the state is left as it was.
     NotQuiescent,
 }

@@ -9,7 +9,7 @@ The pure core (`bpdu`, `vector`, `cost`, `timers`, `machines`, `bridge`, `action
 - `cost.rs`: Table 13-4 as `20 000 000 / speed_mbps` clamped to `1..=200 000 000`; speed 0 means unknown and gives the maximum.
 - `timers.rs`: `Timers` defaults, Table 13-5 ranges and the 13.25 relation. The relation is also in the config commit check (`nos-proto`); this crate cannot depend on it.
 
-- `machines/`: the nine clause 13 machines (`prx ppm bdm pim prs prt pst tcm ptx`), `step(&mut Bridge, port) -> bool` = one diagram edge; shared variables and procedures in `machines/mod.rs`. CIST only; `restricted*`/`mcheck` are seams.
+- `machines/`: the nine clause 13 machines (`prx ppm bdm pim prs prt pst tcm ptx`), `step(&mut Bridge, port) -> bool` = one diagram edge; shared variables and procedures in `machines/mod.rs`. CIST only; `restricted*` are seams; `force-version`/`mcheck` (#319) are `Bridge::set_rstp_version`/`mcheck`.
 - `bridge.rs`: `Bridge` (host inputs: `set_port_enabled`, `set_oper_point_to_point`, `receive`, `tick`; `run()` loops all machines to quiescence, cap 1000 passes). `actions.rs`: what the host drains (`Transmit`, `SetPortState`, `FlushFdb`, `Log`).
 - `sim.rs` (test-only): deterministic multi-bridge simulator plus proptest on random graphs.
 
@@ -18,7 +18,7 @@ The pure core (`bpdu`, `vector`, `cost`, `timers`, `machines`, `bridge`, `action
 - `ports.rs` (pure): config to `Plan` (STP ports, timers, priority) and the core's state to `SetStpPortStates`/`FlushFdb` assignments per domain. `identity.rs`, `link.rs` (sysfs speed/duplex, cost, point-to-point): pure.
 - `engine.rs`: the core plus its action-to-`Out` mapping and the e2e log lines. `daemon.rs`: the one actor owning the engine, the BPDU sockets (`L2Socket::open_bpdu`) and the 1 s tick.
 - `reconcile.rs` (diff resync to a `Plan`), `link_client.rs` (`SubscribeLinks`), `interface_client.rs` (push + resend cache), `config_client.rs`, `watchdog_client.rs`: per-crate client copies (star graph), as `lacp/`.
-- `server.rs` (`--listen-socket`, `GetSummary` from an `Arc<RwLock<StpSummary>>` the actor refreshes after every event via `Engine::summary`) and `authz.rs` (`allowed`: `User`/`Restd`, no wildcard arm): backs `show spanning-tree` (#328).
+- `server.rs` (`--listen-socket`, `GetSummary` from an `Arc<RwLock<StpSummary>>` the actor refreshes after every event via `Engine::summary`) and `authz.rs` (`allowed`: `User`/`Restd`, no wildcard arm): backs `show spanning-tree` (#328) and `StpRequest::Mcheck` (#319, forwarded to the actor over a channel).
 - A changed plan rebuilds the bridge. Log lines are the e2e contract (`docs/internals/stp.md`): change them with `phases::stp`.
 
 ## Invariants

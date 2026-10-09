@@ -1,7 +1,7 @@
 //! Config to the daemon's plan: which kernel links are STP ports and with
 //! which parameters (pure).
 
-use nos_proto::schema::{EdgePort, LinkType, SpanningTree};
+use nos_proto::schema::{EdgePort, LinkType, SpanningTree, StpForceVersion};
 use nos_proto::{Config, StpMode, StpPortAssignment, StpPortState, LOOPBACK_PREFIX};
 
 use crate::actions::PortState;
@@ -27,6 +27,8 @@ pub struct PortCfg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub priority: u16,
+    /// `force-version stp` turns RSTP off; unset and `rstp` allow it.
+    pub rstp_version: bool,
     pub timers: Timers,
     /// Sorted by name: a port's number is its index plus one.
     pub ports: Vec<PortCfg>,
@@ -63,6 +65,7 @@ pub fn plan(cfg: &Config) -> Option<Plan> {
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     Some(Plan {
         priority: st.priority,
+        rstp_version: st.force_version != Some(StpForceVersion::Stp),
         timers: Timers {
             hello: st.hello_time,
             max_age: st.max_age,
@@ -201,6 +204,16 @@ mod tests {
             c.spanning_tree.mode = mode;
             assert_eq!(plan(&c), None, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn force_version_stp_turns_rstp_off() {
+        let mut c = cfg();
+        assert!(plan(&c).unwrap().rstp_version);
+        c.spanning_tree.force_version = Some(StpForceVersion::Rstp);
+        assert!(plan(&c).unwrap().rstp_version);
+        c.spanning_tree.force_version = Some(StpForceVersion::Stp);
+        assert!(!plan(&c).unwrap().rstp_version);
     }
 
     #[test]

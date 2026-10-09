@@ -86,6 +86,11 @@ pub enum Command {
         instance: String,
         peer: IpAddr,
     },
+    /// `clear spanning-tree detected-protocols [interface <i>]` — 802.1Q
+    /// `mcheck`: re-probe a port (or all) for RSTP after a legacy fallback.
+    ClearStpMcheck {
+        interface: Option<String>,
+    },
     Save,
     Help,
     /// `exit` | `quit` | `end`
@@ -198,6 +203,20 @@ mod tests {
         assert_eq!(
             Command::parse("show route rt1 not-an-address"),
             Command::Unknown("show route rt1 not-an-address".to_string())
+        );
+    }
+
+    #[test]
+    fn clear_spanning_tree_detected_protocols() {
+        assert_eq!(
+            Command::parse("clear spanning-tree detected-protocols"),
+            Command::ClearStpMcheck { interface: None }
+        );
+        assert_eq!(
+            Command::parse("clear spanning-tree detected-protocols interface eth1"),
+            Command::ClearStpMcheck {
+                interface: Some("eth1".into())
+            }
         );
     }
 

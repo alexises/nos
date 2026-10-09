@@ -48,11 +48,12 @@ impl Engine {
                 })
             })
             .collect::<Result<Vec<_>, IdError>>()?;
-        let bridge = Bridge::new(
+        let mut bridge = Bridge::new(
             identity::bridge_id(plan.priority, mac)?,
             plan.timers,
             &params,
         );
+        bridge.set_rstp_version(plan.rstp_version);
         let mut e = Engine {
             bridge,
             ports: plan.ports.clone(),
@@ -61,6 +62,19 @@ impl Engine {
         info!(root = %identity::show(&e.bridge.root_id), "root bridge changed");
         let out = e.drain();
         Ok((e, out))
+    }
+
+    /// `mcheck` on the named port, or on every port (`None`); how many ports
+    /// matched.
+    pub fn mcheck(&mut self, interface: Option<&str>) -> (u32, Vec<Out>) {
+        let mut n = 0;
+        for i in 0..self.ports.len() {
+            if interface.is_none_or(|name| name == self.ports[i].name) {
+                self.bridge.mcheck(i);
+                n += 1;
+            }
+        }
+        (n, self.drain())
     }
 
     pub fn ports(&self) -> &[PortCfg] {
@@ -161,6 +175,14 @@ impl Engine {
                 Action::Log(Event::RoleChanged { port, to, .. }) => {
                     info!(port = %self.ports[port].name, role = ?to, "port role changed");
                 }
+                Action::Log(Event::ProtocolMigrated { port, rstp }) => {
+                    let name = &self.ports[port].name;
+                    if rstp {
+                        info!(port = %name, "port migrated to RSTP");
+                    } else {
+                        info!(port = %name, "port migrated to STP");
+                    }
+                }
                 Action::Log(Event::RootChanged { root, .. }) => {
                     info!(root = %identity::show(&root), "root bridge changed");
                 }
@@ -192,6 +214,7 @@ mod tests {
         };
         Plan {
             priority: 32768,
+            rstp_version: true,
             timers: Timers::default(),
             ports: vec![port("eth1"), port("eth2")],
         }
@@ -239,6 +262,37 @@ mod tests {
         assert_eq!(s.ports[0].designated_port, "128.1");
         assert_eq!(s.ports[1].role, StpRole::Disabled);
         assert_eq!(s.ports[1].designated_bridge, "");
+    }
+
+    #[test]
+    fn mcheck_counts_matching_ports() {
+        let (mut e, _) = Engine::new(&plan(), [2, 0, 0, 0, 0, 1]).unwrap();
+        assert_eq!(e.mcheck(None).0, 2);
+        assert_eq!(e.mcheck(Some("eth2")).0, 1);
+        assert_eq!(e.mcheck(Some("nope")).0, 0);
+    }
+
+    #[test]
+    fn forced_stp_never_transmits_rstp() {
+        let mut p = plan();
+        p.rstp_version = false;
+        let (mut e, _) = Engine::new(&p, [2, 0, 0, 0, 0, 1]).unwrap();
+        let mut out = e.set_link(0, true, true, 20_000);
+        for _ in 0..5 {
+            out.extend(e.tick());
+        }
+        let sent: Vec<_> = out
+            .iter()
+            .filter_map(|o| match o {
+                Out::Tx { bpdu, .. } => Some(bpdu),
+                _ => None,
+            })
+            .collect();
+        assert_ne!(sent.len(), 0);
+        assert!(
+            sent.iter().all(|b| matches!(b, Bpdu::Config(_))),
+            "{sent:?}"
+        );
     }
 
     #[test]

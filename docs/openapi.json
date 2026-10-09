@@ -2559,6 +2559,20 @@
         ],
         "type": "string"
       },
+      "McheckResult": {
+        "properties": {
+          "ports": {
+            "description": "Ports that restarted protocol migration.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ports"
+        ],
+        "type": "object"
+      },
       "MstInstance": {
         "description": "One MST instance and this bridge's priority in it.",
         "properties": {
@@ -5986,6 +6000,89 @@
         "summary": "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is not rstp)",
         "tags": [
           "show"
+        ]
+      }
+    },
+    "/v1/spanning-tree/mcheck": {
+      "post": {
+        "operationId": "stp_mcheck",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McheckResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-stpd is not running"
+          }
+        },
+        "summary": "Re-probe every spanning-tree port for RSTP (mcheck)",
+        "tags": [
+          "clear"
+        ]
+      }
+    },
+    "/v1/spanning-tree/port/{interface}/mcheck": {
+      "post": {
+        "operationId": "stp_mcheck_port",
+        "parameters": [
+          {
+            "description": "interface or port-aggregate name",
+            "in": "path",
+            "name": "interface",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McheckResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "not a spanning-tree port"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-stpd is not running"
+          }
+        },
+        "summary": "Re-probe one spanning-tree port for RSTP (mcheck)",
+        "tags": [
+          "clear"
         ]
       }
     },
