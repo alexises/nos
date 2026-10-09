@@ -157,6 +157,10 @@ pub enum Resolved {
         instance: String,
         peer: IpAddr,
     },
+    /// `clear spanning-tree detected-protocols [interface <i>]` — valid in any mode.
+    ClearStpMcheck {
+        interface: Option<String>,
+    },
     SaveRunningConfig,
     OpenTransaction {
         name: String,
@@ -222,6 +226,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowOspfv3Database => Resolved::ShowOspfv3Database,
         Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
         Command::ClearBgpPeer { instance, peer } => Resolved::ClearBgpPeer { instance, peer },
+        Command::ClearStpMcheck { interface } => Resolved::ClearStpMcheck { interface },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
         }
@@ -323,6 +328,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowOspfv3Database
         | Command::ClearBgpSoftIn { .. }
         | Command::ClearBgpPeer { .. }
+        | Command::ClearStpMcheck { .. }
         | Command::Unknown(_)
         | Command::Exit
         | Command::Save => {

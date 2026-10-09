@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nos_proto::{BgpEvent, BgpRequest, ServiceRef};
+use nos_proto::{BgpEvent, BgpRequest, ServiceRef, StpEvent, StpRequest};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -111,5 +111,61 @@ pub async fn bgp_clear_peer(
         | BgpEvent::EvpnRoutes(_)
         | BgpEvent::RouteRefreshSent
         | BgpEvent::RpkiSummary(_)) => Err(unexpected("nos-bgpd", &other)),
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct McheckResult {
+    /// Ports that restarted protocol migration.
+    ports: u32,
+}
+
+/// `clear spanning-tree detected-protocols`: 802.1Q `mcheck` on every port.
+#[utoipa::path(
+    post, path = "/v1/spanning-tree/mcheck", tag = "clear",
+    summary = "Re-probe every spanning-tree port for RSTP (mcheck)",
+    responses(
+        (status = 200, body = McheckResult),
+        (status = 503, body = ErrorBody, description = "nos-stpd is not running")
+    )
+)]
+pub async fn stp_mcheck(State(d): State<Daemons>) -> ApiResult<Json<McheckResult>> {
+    stp_mcheck_on(&d, None).await
+}
+
+/// `clear spanning-tree detected-protocols interface <name>`.
+#[utoipa::path(
+    post, path = "/v1/spanning-tree/port/{interface}/mcheck", tag = "clear",
+    summary = "Re-probe one spanning-tree port for RSTP (mcheck)",
+    params(("interface" = String, Path, description = "interface or port-aggregate name")),
+    responses(
+        (status = 200, body = McheckResult),
+        (status = 404, body = ErrorBody, description = "not a spanning-tree port"),
+        (status = 503, body = ErrorBody, description = "nos-stpd is not running")
+    )
+)]
+pub async fn stp_mcheck_port(
+    State(d): State<Daemons>,
+    Path(interface): Path<String>,
+) -> ApiResult<Json<McheckResult>> {
+    stp_mcheck_on(&d, Some(interface)).await
+}
+
+async fn stp_mcheck_on(d: &Daemons, interface: Option<String>) -> ApiResult<Json<McheckResult>> {
+    match d
+        .service(
+            ServiceRef::Stp,
+            StpRequest::Mcheck {
+                interface: interface.clone(),
+            },
+        )
+        .await?
+    {
+        StpEvent::Mcheck { ports: 0 } if interface.is_some() => Err(ApiError::NotFound(format!(
+            "{} is not a spanning-tree port",
+            interface.unwrap_or_default()
+        ))),
+        StpEvent::Mcheck { ports } => Ok(Json(McheckResult { ports })),
+        other @ StpEvent::Summary(_) => Err(unexpected("nos-stpd", &other)),
     }
 }

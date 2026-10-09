@@ -83,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     ));
     let snapshot = server::Snapshot::default();
-    let server_task = server::start(&args.listen_socket, snapshot.clone(), &identity)
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let server_task = server::start(&args.listen_socket, snapshot.clone(), cmd_tx, &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start stp IPC server"))
         .context("starting stp IPC server")?;
     let daemon_task = tokio::spawn(daemon::run(
@@ -91,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         links_rx,
         push_tx,
         snapshot,
+        cmd_rx,
         shutdown_rx.clone(),
     ));
 

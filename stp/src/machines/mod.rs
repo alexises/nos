@@ -79,7 +79,7 @@ pub struct Port {
     pub oper_point_to_point: bool,
     pub admin_edge: bool,
     pub auto_edge: bool,
-    /// Management `mcheck` (#319 drives it; false here).
+    /// Management `mcheck` (`Bridge::mcheck`).
     pub mcheck: bool,
     // Machine variables.
     pub oper_edge: bool,
@@ -194,7 +194,7 @@ impl Port {
             role: Role::Disabled,
             selected_role: Role::Disabled,
             selected: false,
-            send_rstp: false,
+            send_rstp: true,
             sync: false,
             synced: false,
             tc_ack: false,

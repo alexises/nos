@@ -1329,6 +1329,134 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     b.established().await
 }
 
+/// #319: router-b is forced to 802.1D (`force-version stp`), router-a stays
+/// RSTP. Router-a's ports fall back to STP when they hear its Config BPDUs,
+/// the tree still settles on one blocking port (legacy Listening/Learning, so
+/// ~30 s), `mcheck` sends router-a back to RSTP and a legacy peer pulls it
+/// straight down again; once router-b is RSTP again `mcheck` sticks.
+pub async fn stp_legacy(w: &mut World) -> anyhow::Result<()> {
+    const TO_STP: &str = "port migrated to STP";
+    const TO_RSTP: &str = "port migrated to RSTP";
+    let (a, b) = (w.a()?, w.b()?);
+    let routers = [a, b];
+    let state = |p: &str| format!("port state changed port={p} state=");
+    let base = routers.map(|r| ["eth1", "eth2"].map(|p| r.count(&state(p))));
+    let a_stp = a.count(TO_STP);
+
+    w.link_veths().await?;
+    for r in routers {
+        r.provision(&[
+            "--link-interface",
+            "eth2",
+            "--switching-profile",
+            "stp-sp2",
+            "--switching-profile-member",
+            "stp-d:untagged",
+        ])
+        .await?;
+        let mut on = strings(&[
+            "--link-interface",
+            "eth1",
+            "--switching-profile",
+            "stp-sp1",
+            "--switching-profile-member",
+            "stp-d:untagged",
+            "--stp-mode",
+            "rstp",
+        ]);
+        if r.name() == "router-a" {
+            on.extend(strings(&["--stp-priority", "4096"]));
+        } else {
+            on.extend(strings(&["--stp-force-version", "stp"]));
+        }
+        r.provision(&on).await?;
+    }
+
+    // Both of router-a's ports hear Config BPDUs and fall back, router-b
+    // never leaves STP.
+    log("waiting for router-a to migrate both ports to STP");
+    a.wait_new(TO_STP, a_stp, 30).await?;
+    for r in routers {
+        let sum = stp_summary(r).await?;
+        if sum.ports.len() != 2 {
+            bail!("{}: want two spanning-tree ports: {sum:?}", r.name());
+        }
+    }
+    if b.count(TO_STP) == 0 {
+        bail!("router-b should have been forced to STP");
+    }
+
+    log("waiting for one root bridge and exactly one blocking port (legacy timers)");
+    stp_settle(routers, &base, 150).await?;
+    let (sa, sb) = (stp_summary(a).await?, stp_summary(b).await?);
+    let blocked = sa
+        .ports
+        .iter()
+        .chain(&sb.ports)
+        .filter(|p| p.role == StpRole::Alternate && p.state == StpState::Discarding)
+        .count();
+    if !sa.enabled || sa.root_id != sa.bridge_id || sa.root_id != sb.root_id || blocked != 1 {
+        bail!("legacy tree: router-a must be root with one alternate port: {sa:?} vs {sb:?}");
+    }
+    for r in routers {
+        for p in ["eth1", "eth2"] {
+            let sum = format!("bpdu rx port={p} count=");
+            r.wait_new(&sum, r.count(&sum), 15).await?;
+            let n: u32 = last_value(r, &sum, "count").unwrap_or_default().parse()?;
+            if n >= 20 {
+                bail!("{}: {p} received {n} BPDUs in 10s (storm?)", r.name());
+            }
+        }
+    }
+
+    // mcheck: back to RSTP, then the STP peer pulls the port down again.
+    let (stp_base, rstp_base) = (a.count(TO_STP), a.count(TO_RSTP));
+    a.rest_expect(Method::POST, "/v1/spanning-tree/mcheck", None, 200)
+        .await?;
+    a.wait_new(TO_RSTP, rstp_base, 10).await?;
+    a.wait_new(TO_STP, stp_base, 20).await?;
+    a.rest_expect(
+        Method::POST,
+        "/v1/spanning-tree/port/not-a-port/mcheck",
+        None,
+        404,
+    )
+    .await?;
+
+    // Router-b upgrades: the same mcheck now leaves router-a on RSTP.
+    let rstp_base = a.count(TO_RSTP);
+    b.provision(&[
+        "--link-interface",
+        "eth1",
+        "--switching-profile",
+        "stp-sp1",
+        "--switching-profile-member",
+        "stp-d:untagged",
+        "--stp-mode",
+        "rstp",
+        "--stp-force-version",
+        "rstp",
+    ])
+    .await?;
+    a.rest_expect(Method::POST, "/v1/spanning-tree/mcheck", None, 200)
+        .await?;
+    a.wait_new(TO_RSTP, rstp_base, 30).await?;
+    let stp_base = a.count(TO_STP);
+    a.rest_expect(Method::POST, "/v1/spanning-tree/mcheck", None, 200)
+        .await?;
+    a.assert_quiet(TO_STP, stp_base, 10).await?;
+
+    for r in routers {
+        for iface in ["eth1", "eth2"] {
+            r.provision(&["--link-interface", iface, "--delete-switching-profile"])
+                .await?;
+        }
+    }
+    w.unlink_veths().await;
+    a.established().await?;
+    b.established().await
+}
+
 pub async fn svi(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&[

@@ -640,6 +640,25 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowOspfv3Database),
+    cmd!(["clear" "spanning-tree" "detected-protocols"],
+        Doc::Local {
+            summary: "Re-probe every spanning-tree port for RSTP (802.1Q mcheck).",
+            detail: "A port that heard an 802.1D STP BPDU falls back to STP and stays there. \
+                     This sends it back to RSTP on every port; a port whose peer still speaks \
+                     STP migrates again after Migrate Time (3 s).",
+        },
+        Always,
+        Command::ClearStpMcheck { interface: None }),
+    cmd!(["clear" "spanning-tree" "detected-protocols" "interface" (name: InterfaceName)],
+        Doc::Local {
+            summary: "Re-probe one spanning-tree port for RSTP (802.1Q mcheck).",
+            detail: "Like 'clear spanning-tree detected-protocols', for <name> only. Reported \
+                     as an error if <name> is not a spanning-tree port.",
+        },
+        Always,
+        |name| Command::ClearStpMcheck {
+            interface: Some(name.to_string()),
+        }),
     cmd!(["clear" "bgp" (instance: BgpInstanceName) (peer: IpAddr) "soft-in"],
         Doc::Local {
             summary: "Ask a peer to resend its routes (RFC 2918 route refresh).",

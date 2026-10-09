@@ -132,6 +132,23 @@ impl Bridge {
         self.run();
     }
 
+    /// `forceVersion` (13.7): `false` is 802.1D, no RSTP BPDU is ever sent.
+    /// Restarts the PPM machines, so call it before the ports come up.
+    pub fn set_rstp_version(&mut self, rstp: bool) {
+        self.rstp_version = rstp;
+        for i in 0..self.ports.len() {
+            ppm::enter(self, i, ppm::State::CheckingRstp);
+        }
+        self.run();
+    }
+
+    /// Management `mcheck` (13.7): probe `port` for RSTP again. A peer that
+    /// still sends STP BPDUs moves it straight back after Migrate Time.
+    pub fn mcheck(&mut self, port: usize) {
+        self.ports[port].mcheck = true;
+        self.run();
+    }
+
     pub fn role(&self, port: usize) -> Role {
         self.ports[port].role
     }
