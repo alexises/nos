@@ -3,10 +3,12 @@
 //! The standard's RECEIVE state is followed by one of five outcome states; all
 //! are modelled as real states so each diagram edge is one `step`.
 
+use super::Role;
 use super::{
     better_or_same_info, rcv_info, record_agreement, record_dispute, record_proposal, set_tc_flags,
     updt_rcvd_info_while, InfoIs, RcvdInfo,
 };
+use crate::actions::{Action, Event};
 use crate::bridge::Bridge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,8 +40,23 @@ pub fn enter(b: &mut Bridge, i: usize, s: State) {
             p.info_is = InfoIs::Disabled;
             p.reselect = true;
             p.selected = false;
+            // A link flap clears loop-inconsistency (decision 4 of #320).
+            if std::mem::take(&mut p.loop_inconsistent) {
+                b.actions
+                    .push(Action::Log(Event::LoopInconsistent { port: i, on: false }));
+            }
         }
         State::Aged => {
+            // Loop guard: a Root/Alternate port that lost its BPDUs must not
+            // become Designated; PRS holds it as Alternate until one arrives.
+            if p.prot.loop_guard
+                && matches!(p.role, Role::Root | Role::Alternate | Role::Backup)
+                && !p.loop_inconsistent
+            {
+                p.loop_inconsistent = true;
+                b.actions
+                    .push(Action::Log(Event::LoopInconsistent { port: i, on: true }));
+            }
             p.info_is = InfoIs::Aged;
             p.reselect = true;
             p.selected = false;
@@ -54,6 +71,12 @@ pub fn enter(b: &mut Bridge, i: usize, s: State) {
             p.updt_info = false;
             p.info_is = InfoIs::Mine;
             p.new_info = true;
+            if std::mem::take(&mut p.loop_inconsistent) {
+                p.reselect = true;
+                p.selected = false;
+                b.actions
+                    .push(Action::Log(Event::LoopInconsistent { port: i, on: false }));
+            }
         }
         State::Current => {}
         State::Receive => p.rcvd_info = rcv_info(p),
@@ -98,6 +121,8 @@ pub fn step(b: &mut Bridge, i: usize) -> bool {
         State::Disabled if p.rcvd_msg => State::Disabled,
         State::Disabled if p.port_enabled => State::Aged,
         State::Aged if p.selected && p.updt_info => State::Update,
+        // Loop guard: a BPDU is back, let it be judged like on a fresh port.
+        State::Aged if p.loop_inconsistent && p.rcvd_msg => State::Update,
         State::Update => State::Current,
         State::Current if p.selected && p.updt_info => State::Update,
         State::Current

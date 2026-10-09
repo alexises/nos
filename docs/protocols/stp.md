@@ -72,6 +72,39 @@ set bpdu-guard
 - An interface that is a member of a port aggregate cannot carry its own profile: the spanning-tree port is the aggregate.
 - `delete stp-port-profile <name>` is refused at commit while an interface or aggregate still names it; each user fails under its own path.
 
+## Protect a port
+
+Set the protections on the `stp-port-profile` of the port.
+
+```
+edit stp-port-profile edge
+set edge-port admin
+set bpdu-guard enable
+set bpdu-guard-recovery 300
+```
+
+| Protection | Use it on | Effect |
+|---|---|---|
+| `bpdu-guard` | A port to a host (an edge port, `admin` or detected by `auto`) | The first BPDU received shuts the link down (err-disabled) |
+| `bpdu-guard-recovery <s>` | With `bpdu-guard` | The link comes back after `s` seconds; unset means only `clear` or removing the guard brings it back |
+| `root-guard` | A port toward a switch that must never become the root | A superior BPDU makes the port alternate and discarding (root-inconsistent) for as long as it keeps arriving |
+| `loop-guard` | A root or alternate port on a point-to-point link | When BPDUs stop arriving the port stays discarding (loop-inconsistent) instead of turning designated |
+| `bpdu-filter` | A port that must stay silent | No BPDU is sent and none is processed |
+| `restricted-tcn` | A port toward a switch you do not trust | A topology change received on it is not propagated to the other ports |
+
+- `bpdu-guard` fires on any port that is an edge port at that moment: `edge-port admin`, or `auto` once no BPDU was heard for a few seconds. A port with `edge-port disabled` is never guarded.
+- `bpdu-filter` on a port that is not an edge port can create a loop: both sides stop hearing each other and forward. Use it on edge ports only.
+- A commit is refused for `root-guard` with `loop-guard`, `bpdu-filter` with `bpdu-guard`, and `bpdu-guard-recovery` without `bpdu-guard`.
+- Loop guard clears when a BPDU arrives again or when the link goes down and up.
+
+### Read and recover
+
+- `show spanning-tree` adds a `Flags` column when a port has any: `Edge`, `BpduGuard`, `BpduFilter`, `RootGuard`, `LoopGuard`, `RestrictedTcn`, then what holds the port now: `Root-inconsistent`, `Loop-inconsistent`, `Err-disabled (recovers in 12s)` or `Err-disabled (manual clear)`. `GET /v1/spanning-tree` has the same fields per port.
+- Logs: `port err-disabled port=<if> reason=bpdu-guard`, `port err-disabled recovered`, `port root-inconsistent` / `port root-consistent`, `port loop-inconsistent` / `port loop-consistent`.
+- Recover an err-disabled port at once with `clear spanning-tree err-disabled <if>` (REST: `POST /v1/spanning-tree/port/<if>/err-disabled/clear`). It answers an error if the port is not err-disabled. If the BPDU source is still there the port is shut again.
+- Removing `bpdu-guard` from the profile also brings the port back. Other config changes restart the protocol but keep an err-disabled port down.
+- An err-disabled link is administratively down: LLDP and LACP on it stop too. Never put the guard on the interface that carries management traffic.
+
 ## Use MSTP
 
 ```
@@ -132,8 +165,8 @@ A multi-homed segment must never become a root or transit port of the spanning t
 | link-type | `set stp-port-profile <p> link-type auto\|point-to-point\|shared` | `stp-port-profile/<p>/link-type` | `auto` | |
 | cost | `set stp-port-profile <p> cost <n>` | `stp-port-profile/<p>/cost` | 1-200000000; unset = from link speed | |
 | priority | `set stp-port-profile <p> priority <n>` | `stp-port-profile/<p>/priority` | 0-240, multiple of 16; 128 | |
-| bpdu-guard, bpdu-filter, root-guard, loop-guard, restricted-tcn | `set stp-port-profile <p> bpdu-guard` etc.; `delete …` | `stp-port-profile/<p>/bpdu-guard` etc. | bool; off | |
-| bpdu-guard-recovery | `set stp-port-profile <p> bpdu-guard-recovery <s>` | `stp-port-profile/<p>/bpdu-guard-recovery` | at least 1; unset = never | |
+| bpdu-guard, bpdu-filter, root-guard, loop-guard, restricted-tcn | `set stp-port-profile <p> bpdu-guard enable` etc.; `delete …` | `stp-port-profile/<p>/bpdu-guard` etc. | bool; off | see [Protect a port](#protect-a-port) |
+| bpdu-guard-recovery | `set stp-port-profile <p> bpdu-guard-recovery <s>` | `stp-port-profile/<p>/bpdu-guard-recovery` | at least 1; unset = never | needs `bpdu-guard` |
 | mst-instance (port) | `set stp-port-profile <p> mst-instance <id> cost\|priority <n>` | `stp-port-profile/<p>/mst-instance/<id>` | cost and priority as above | instance exists under `spanning-tree` |
 | stp-port-profile (attach) | `set interface <if> stp-port-profile <p>`; `set port-aggregate <pa> stp-port-profile <p>` | `interface/<if>/stp-port-profile`, `port-aggregate/<pa>/stp-port-profile` | name; unset | profile exists; not on a bond member; ESI rule |
 | stp-instance | `set broadcast domain <bd> stp-instance <id>` | `broadcast-domain/<bd>/stp-instance` | unset | instance exists |
@@ -146,6 +179,7 @@ A multi-homed segment must never become a root or transit port of the spanning t
 - **Priorities:** bridge, MST instance and per-VLAN priorities are multiples of 4096 up to 61440; port priorities are multiples of 16 up to 240.
 - **References:** an unknown profile, MST instance or deleted profile is refused.
 - **Per-VLAN modes** (`mstp`, `rapid-pvst`): every domain used by an interface or aggregate switching profile must have one VLAN across all of them (an untagged-only membership is VLAN 1), and two domains may not share a VLAN. The error names the domain and both tags.
+- **Protections:** `root-guard` with `loop-guard`, `bpdu-filter` with `bpdu-guard`, and `bpdu-guard-recovery` without `bpdu-guard` are refused.
 - **Bond members:** `stp-port-profile` on an interface with `port-aggregate` set is refused.
 - **ESI:** see [above](#esi-port-aggregates).
 

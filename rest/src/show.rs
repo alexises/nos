@@ -174,7 +174,9 @@ pub async fn lldp_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Vec<Lldp
 pub async fn spanning_tree(State(d): State<Daemons>) -> ApiResult<Json<StpSummary>> {
     match d.service(ServiceRef::Stp, StpRequest::GetSummary).await? {
         StpEvent::Summary(s) => Ok(Json(s)),
-        other @ StpEvent::Mcheck { .. } => Err(crate::ipc::unexpected("nos-stpd", &other)),
+        other @ (StpEvent::Mcheck { .. } | StpEvent::ErrDisabledCleared { .. }) => {
+            Err(crate::ipc::unexpected("nos-stpd", &other))
+        }
     }
 }
 

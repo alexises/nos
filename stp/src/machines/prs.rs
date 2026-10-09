@@ -52,7 +52,10 @@ fn updt_roles_tree(b: &mut Bridge) {
     };
     let mut root_port = None;
     for (i, p) in b.ports.iter().enumerate() {
-        if p.info_is == InfoIs::Received && p.port_priority.designated_bridge != me {
+        if p.info_is == InfoIs::Received
+            && p.port_priority.designated_bridge != me
+            && !p.prot.root_guard
+        {
             let mut v = p.port_priority;
             v.root_path_cost = v.root_path_cost.saturating_add(p.path_cost);
             if v.better_than(&best) {
@@ -87,8 +90,29 @@ fn updt_roles_tree(b: &mut Bridge) {
             bridge_port: p.port_id,
         };
         p.designated_times = root_times;
+        // Root guard: a root-guarded port that would have been the Root Port
+        // is root-inconsistent (and ends up Alternate below).
+        let would_be_root = p.prot.root_guard
+            && p.info_is == InfoIs::Received
+            && p.port_priority.designated_bridge != me
+            && {
+                let mut v = p.port_priority;
+                v.root_path_cost = v.root_path_cost.saturating_add(p.path_cost);
+                v.better_than(&best)
+            };
+        if would_be_root != p.root_inconsistent {
+            p.root_inconsistent = would_be_root;
+            b.actions.push(Action::Log(Event::RootInconsistent {
+                port: i,
+                on: would_be_root,
+            }));
+        }
         match p.info_is {
             InfoIs::Disabled => p.selected_role = Role::Disabled,
+            InfoIs::Aged if p.loop_inconsistent => {
+                p.selected_role = Role::Alternate;
+                p.updt_info = false;
+            }
             InfoIs::Aged => {
                 p.selected_role = Role::Designated;
                 p.updt_info = true;

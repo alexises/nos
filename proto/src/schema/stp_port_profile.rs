@@ -71,7 +71,8 @@ impl Default for StpPortMstInstance {
 pub struct StpPortProfile {
     #[garde(
         length(min = 1, max = 64),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.stp_port_profiles, |p| &p.name))
+        custom(|n, ctx: &Config| unique_in(n, &ctx.stp_port_profiles, |p| &p.name)),
+        custom(|n, ctx: &Config| valid_protections(n, ctx))
     )]
     #[cli(key)]
     pub name: String,
@@ -165,6 +166,25 @@ impl Default for StpPortProfile {
     }
 }
 
+/// Protections that contradict each other (#320). The profile is looked up by
+/// name because a field-level check cannot see its siblings.
+fn valid_protections(name: &str, ctx: &Config) -> garde::Result {
+    let Some(p) = ctx.stp_port_profiles.iter().find(|p| p.name == name) else {
+        return Ok(());
+    };
+    let refuse = |why: &str| Err(garde::Error::new(why.to_string()));
+    if p.root_guard && p.loop_guard {
+        return refuse("root-guard and loop-guard cannot be combined: a root-guarded port is never a root port, and loop-guard protects non-designated ports");
+    }
+    if p.bpdu_filter && p.bpdu_guard {
+        return refuse("bpdu-filter and bpdu-guard cannot be combined: the filter drops every BPDU, so the guard would never fire");
+    }
+    if p.bpdu_guard_recovery.is_some() && !p.bpdu_guard {
+        return refuse("bpdu-guard-recovery needs bpdu-guard");
+    }
+    Ok(())
+}
+
 fn valid_mst_instances(list: &[StpPortMstInstance], ctx: &Config) -> garde::Result {
     for (i, m) in list.iter().enumerate() {
         if !ctx.spanning_tree.mst_instances.iter().any(|g| g.id == m.id) {
@@ -239,8 +259,30 @@ mod tests {
 
     #[test]
     fn recovery_is_positive() {
-        assert!(ok(|p| p.bpdu_guard_recovery = Some(300)));
-        assert!(!ok(|p| p.bpdu_guard_recovery = Some(0)));
+        let guarded = |p: &mut StpPortProfile, secs| {
+            p.bpdu_guard = true;
+            p.bpdu_guard_recovery = Some(secs);
+        };
+        assert!(ok(|p| guarded(p, 300)));
+        assert!(!ok(|p| guarded(p, 0)));
+    }
+
+    #[test]
+    fn contradicting_protections_are_refused() {
+        assert!(ok(|p| {
+            p.root_guard = true;
+            p.bpdu_guard = true;
+            p.bpdu_guard_recovery = Some(30);
+        }));
+        assert!(!ok(|p| {
+            p.root_guard = true;
+            p.loop_guard = true;
+        }));
+        assert!(!ok(|p| {
+            p.bpdu_filter = true;
+            p.bpdu_guard = true;
+        }));
+        assert!(!ok(|p| p.bpdu_guard_recovery = Some(30)));
     }
 
     #[test]

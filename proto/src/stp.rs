@@ -56,6 +56,10 @@ impl StpState {
 /// One spanning-tree port. Bridge and port ids are display strings
 /// (`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one independent flag per protection, reported as-is"
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpPortInfo {
     pub name: String,
@@ -67,6 +71,32 @@ pub struct StpPortInfo {
     /// The designated bridge/port on this port's segment.
     pub designated_bridge: String,
     pub designated_port: String,
+    /// `operEdge`: the port is an edge port right now.
+    #[serde(default)]
+    pub edge: bool,
+    /// The protections configured on the port (`stp-port-profile`, #320).
+    #[serde(default)]
+    pub bpdu_guard: bool,
+    #[serde(default)]
+    pub bpdu_filter: bool,
+    #[serde(default)]
+    pub root_guard: bool,
+    #[serde(default)]
+    pub loop_guard: bool,
+    #[serde(default)]
+    pub restricted_tcn: bool,
+    /// Root guard holds the port in Discarding: a superior BPDU keeps arriving.
+    #[serde(default)]
+    pub root_inconsistent: bool,
+    /// Loop guard holds the port in Discarding: BPDUs stopped arriving.
+    #[serde(default)]
+    pub loop_inconsistent: bool,
+    /// BPDU guard took the port down.
+    #[serde(default)]
+    pub err_disabled: bool,
+    /// Seconds until an `err_disabled` port recovers; `None`: manual `clear`.
+    #[serde(default)]
+    pub err_recovery_secs: Option<u32>,
 }
 
 /// `show spanning-tree`. `enabled: false` (mode not `rstp`) leaves the rest at
@@ -115,6 +145,11 @@ pub enum StpRequest {
     Mcheck {
         interface: Option<String>,
     },
+    /// `clear spanning-tree err-disabled <port>` (#320): bring a port that
+    /// BPDU guard shut down back up.
+    ClearErrDisabled {
+        interface: String,
+    },
 }
 
 /// Messages sent from `nos-stpd` to a query client.
@@ -124,5 +159,9 @@ pub enum StpEvent {
     /// How many ports the `Mcheck` matched (0: no such interface).
     Mcheck {
         ports: u32,
+    },
+    /// Whether the `ClearErrDisabled` port was err-disabled.
+    ErrDisabledCleared {
+        cleared: bool,
     },
 }

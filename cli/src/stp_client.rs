@@ -23,7 +23,20 @@ pub enum StpClientError {
 pub async fn mcheck(stp_socket: &Path, interface: Option<String>) -> Result<u32, StpClientError> {
     match request(stp_socket, StpRequest::Mcheck { interface }).await? {
         StpEvent::Mcheck { ports } => Ok(ports),
-        StpEvent::Summary(_) => Err(StpClientError::ConnectionClosed),
+        StpEvent::Summary(_) | StpEvent::ErrDisabledCleared { .. } => {
+            Err(StpClientError::ConnectionClosed)
+        }
+    }
+}
+
+/// `clear spanning-tree err-disabled`; whether the port was err-disabled.
+pub async fn clear_err_disabled(
+    stp_socket: &Path,
+    interface: String,
+) -> Result<bool, StpClientError> {
+    match request(stp_socket, StpRequest::ClearErrDisabled { interface }).await? {
+        StpEvent::ErrDisabledCleared { cleared } => Ok(cleared),
+        StpEvent::Summary(_) | StpEvent::Mcheck { .. } => Err(StpClientError::ConnectionClosed),
     }
 }
 
@@ -31,7 +44,9 @@ pub async fn mcheck(stp_socket: &Path, interface: Option<String>) -> Result<u32,
 pub async fn get_summary(stp_socket: &Path) -> Result<StpSummary, StpClientError> {
     match request(stp_socket, StpRequest::GetSummary).await? {
         StpEvent::Summary(s) => Ok(s),
-        StpEvent::Mcheck { .. } => Err(StpClientError::ConnectionClosed),
+        StpEvent::Mcheck { .. } | StpEvent::ErrDisabledCleared { .. } => {
+            Err(StpClientError::ConnectionClosed)
+        }
     }
 }
 

@@ -70,8 +70,39 @@ impl Times {
     }
 }
 
+/// The port protections of an `stp-port-profile` (#320). `restricted_role` /
+/// `restricted_tcn` are 802.1Q 13.25; the rest are vendor-style and live in
+/// `Bridge::receive`, `transmit` and the PIM/PRS machines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Protections {
+    /// An `operEdge` port that receives a BPDU is err-disabled.
+    pub bpdu_guard: bool,
+    /// Seconds before an err-disabled port recovers; `None`: manual.
+    pub recovery: Option<u32>,
+    /// No BPDU is sent or processed on this port.
+    pub bpdu_filter: bool,
+    /// `restrictedRole`: never the Root Port.
+    pub root_guard: bool,
+    /// A Root/Alternate port whose BPDUs stop arriving stays Discarding.
+    pub loop_guard: bool,
+    /// `restrictedTcn`: a TC received here is not propagated.
+    pub restricted_tcn: bool,
+}
+
 /// Per-port variables (13.27) and machine states.
 pub struct Port {
+    pub prot: Protections,
+    /// Root guard holds the port as Alternate (a superior BPDU keeps arriving).
+    pub root_inconsistent: bool,
+    /// Loop guard holds the port as Alternate (BPDUs stopped arriving).
+    pub loop_inconsistent: bool,
+    /// What the host last said about the link, whatever err-disable did.
+    pub link_up: bool,
+    /// BPDU guard shut the port; only `Bridge::clear_err_disabled` (or the
+    /// recovery timer) lifts it.
+    pub err_disabled: bool,
+    /// Seconds to automatic recovery; `None`: manual.
+    pub err_remaining: Option<u32>,
     // Host inputs.
     pub port_id: PortId,
     pub path_cost: u32,
@@ -155,6 +186,12 @@ impl Port {
         times: Times,
     ) -> Self {
         Port {
+            prot: Protections::default(),
+            root_inconsistent: false,
+            loop_inconsistent: false,
+            err_disabled: false,
+            err_remaining: None,
+            link_up: false,
             port_id,
             path_cost,
             port_enabled: false,
@@ -293,7 +330,7 @@ pub(crate) fn set_re_root_tree(b: &mut Bridge) {
     b.ports.iter_mut().for_each(|p| p.re_root = true);
 }
 
-/// `restrictedTcn` is false (#320): every other port gets `tcProp`.
+/// Every other port gets `tcProp` (the caller checks `restrictedTcn`).
 pub(crate) fn set_tc_prop_tree(b: &mut Bridge, i: usize) {
     for (j, p) in b.ports.iter_mut().enumerate() {
         if j != i {
@@ -424,6 +461,9 @@ pub(crate) enum Tx {
 
 /// 13.30 `txConfig` / `txRstp` / `txTcn`.
 pub(crate) fn transmit(b: &mut Bridge, i: usize, kind: Tx) {
+    if b.ports[i].prot.bpdu_filter {
+        return;
+    }
     let id: BridgeId = b.id;
     let p = &b.ports[i];
     let dt = p.designated_times;

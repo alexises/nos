@@ -74,6 +74,7 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(clear::bgp_clear_peer))
         .routes(routes!(clear::stp_mcheck))
         .routes(routes!(clear::stp_mcheck_port))
+        .routes(routes!(clear::stp_clear_err_disabled))
         .routes(routes!(login::login))
         .routes(routes!(login::renew))
         // `diff` and `commit` are static routes, so they win over the

@@ -29,6 +29,16 @@ pub enum Event {
         port: usize,
         rstp: bool,
     },
+    /// Root guard changed `port`'s `root-inconsistent` state (#320).
+    RootInconsistent {
+        port: usize,
+        on: bool,
+    },
+    /// Loop guard changed `port`'s `loop-inconsistent` state (#320).
+    LoopInconsistent {
+        port: usize,
+        on: bool,
+    },
     /// `run` hit its pass cap: a machine bug, the state is left as it was.
     NotQuiescent,
 }
@@ -47,6 +57,14 @@ pub enum Action {
     },
     /// Flush the learned MACs of this port (`fdbFlush`, performed synchronously).
     FlushFdb {
+        port: usize,
+    },
+    /// BPDU guard fired: take the link of `port` down (`SetErrDisabled`).
+    ErrDisable {
+        port: usize,
+    },
+    /// The recovery timer or a `clear` lifted it: bring the link back up.
+    ErrRecover {
         port: usize,
     },
     Log(Event),

@@ -270,6 +270,10 @@ pub async fn handle_action(
             clear_stp_mcheck(watchdog_socket, interface).await;
             Outcome::Continue(mode)
         }
+        Resolved::ClearStpErrDisabled { interface } => {
+            clear_stp_err_disabled(watchdog_socket, interface).await;
+            Outcome::Continue(mode)
+        }
         Resolved::SaveRunningConfig => {
             save_running_config(socket).await;
             Outcome::Continue(mode)
@@ -615,6 +619,25 @@ async fn clear_stp_mcheck(watchdog_socket: &Path, interface: Option<String>) {
             interface.as_deref().unwrap_or("any interface")
         ),
         Ok(n) => println!("mcheck sent to {n} port(s)"),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+async fn clear_stp_err_disabled(watchdog_socket: &Path, interface: String) {
+    let socket = match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Stp).await {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!("nos-stpd is not running");
+            return;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    match stp_client::clear_err_disabled(&socket, interface.clone()).await {
+        Ok(true) => println!("{interface} is up again"),
+        Ok(false) => eprintln!("error: {interface} is not err-disabled"),
         Err(e) => eprintln!("error: {e}"),
     }
 }

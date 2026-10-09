@@ -1457,6 +1457,169 @@ pub async fn stp_legacy(w: &mut World) -> anyhow::Result<()> {
     b.established().await
 }
 
+/// Polls `GET /v1/spanning-tree` on `r` until `want` holds for `port`.
+async fn stp_wait_port(
+    r: &Router,
+    port: &str,
+    secs: u64,
+    want: impl Fn(&nos_proto::StpPortInfo) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..secs {
+        let sum = stp_summary(r).await?;
+        if let Some(p) = sum.ports.iter().find(|p| p.name == port) {
+            if want(p) {
+                return Ok(());
+            }
+            last = format!("{p:?}");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: {port} never reached the wanted state in {secs}s: {last}",
+        r.name()
+    )
+}
+
+/// One `stp-protections` provision of `eth1`: RSTP at `prio`, and on router-a
+/// the `e2e-prot` profile with `fields` (`name=json`, empty value deletes).
+/// Every provision repeats `--stp-mode rstp`: unset means disabled.
+async fn stp_prot_provision(r: &Router, prio: &str, fields: &[&str]) -> anyhow::Result<()> {
+    let mut args = strings(&[
+        "--link-interface",
+        "eth1",
+        "--switching-profile",
+        "stp-sp1",
+        "--switching-profile-member",
+        "stp-d:untagged",
+        "--stp-mode",
+        "rstp",
+        "--stp-priority",
+        prio,
+    ]);
+    if r.name() == "router-a" {
+        args.extend(strings(&["--stp-profile-interface", "eth1"]));
+        for f in fields {
+            args.extend(strings(&["--stp-profile-field", f]));
+        }
+    }
+    r.provision(&args).await
+}
+
+/// #320: port protections on the second link only (`eth1`; `eth0` is the
+/// management/BGP path and is never err-disabled). Root guard holds router-a's
+/// port Discarding while router-b is the better root; BPDU guard on an
+/// `edge-port admin` port err-disables it on the first BPDU, and the recovery
+/// timer, `clear` and removing the guard each bring it back.
+pub async fn stp_protections(w: &mut World) -> anyhow::Result<()> {
+    const DISABLED: &str = "port err-disabled port=eth1 reason=bpdu-guard";
+    const RECOVERED: &str = "port err-disabled recovered port=eth1";
+    const CLEAR: &str = "/v1/spanning-tree/port/eth1/err-disabled/clear";
+    let (a, b) = (w.a()?, w.b()?);
+    w.link_veths().await?;
+
+    // Router-b is the better root (4096): a root-guarded eth1 on router-a is
+    // root-inconsistent and stays Discarding, router-a keeps believing it is
+    // the root.
+    log("root guard on router-a eth1, router-b is the better root");
+    let inconsistent = a.count("port root-inconsistent port=eth1");
+    stp_prot_provision(b, "4096", &[]).await?;
+    stp_prot_provision(a, "32768", &["root-guard=true"]).await?;
+    a.wait_new("port root-inconsistent port=eth1", inconsistent, 40)
+        .await?;
+    stp_wait_port(a, "eth1", 20, |p| {
+        p.root_guard
+            && p.root_inconsistent
+            && p.role == StpRole::Alternate
+            && p.state == StpState::Discarding
+    })
+    .await?;
+    if stp_summary(a).await?.root_port.is_some() {
+        bail!("a root-guarded port must not become router-a's root port");
+    }
+    log("root guard removed: eth1 becomes the root port");
+    stp_prot_provision(a, "32768", &["root-guard=false"]).await?;
+    stp_wait_port(a, "eth1", 40, |p| {
+        !p.root_guard && p.role == StpRole::Root && p.state == StpState::Forwarding
+    })
+    .await?;
+
+    // BPDU guard: eth1 is an admin edge port, router-b's first BPDU shuts it.
+    log("bpdu guard (edge admin, recovery 5s) on router-a eth1");
+    let (down, up) = (a.count(DISABLED), a.count(RECOVERED));
+    stp_prot_provision(
+        a,
+        "32768",
+        &[
+            "edge-port=\"Admin\"",
+            "bpdu-guard=true",
+            "bpdu-guard-recovery=5",
+        ],
+    )
+    .await?;
+    a.wait_new(DISABLED, down, 40).await?;
+    stp_wait_port(a, "eth1", 3, |p| {
+        p.err_disabled && p.err_recovery_secs.is_some()
+    })
+    .await?;
+    // The recovery timer lifts it; router-b's BPDU shuts it again.
+    a.wait_new(RECOVERED, up, 15).await?;
+    a.wait_new(DISABLED, down + 1, 20).await?;
+
+    // Recovery off: only `clear` (or removing the guard) lifts it.
+    log("recovery off: manual clear");
+    stp_prot_provision(a, "32768", &["bpdu-guard-recovery="]).await?;
+    let up = a.count(RECOVERED);
+    stp_wait_port(a, "eth1", 40, |p| {
+        p.err_disabled && p.err_recovery_secs.is_none()
+    })
+    .await?;
+    a.rest_expect(
+        Method::POST,
+        "/v1/spanning-tree/port/not-a-port/err-disabled/clear",
+        None,
+        404,
+    )
+    .await?;
+    let down = a.count(DISABLED);
+    a.rest_expect(Method::POST, CLEAR, None, 200).await?;
+    a.wait_new(RECOVERED, up, 10).await?;
+    // The guard is still on, so router-b's next BPDU shuts it again.
+    a.wait_new(DISABLED, down, 30).await?;
+
+    // Removing the guard from the profile recovers the port at once.
+    log("guard removed: the port comes back");
+    let up = a.count(RECOVERED);
+    stp_prot_provision(a, "32768", &["bpdu-guard=false"]).await?;
+    a.wait_new(RECOVERED, up, 10).await?;
+    stp_wait_port(a, "eth1", 40, |p| {
+        !p.err_disabled && !p.bpdu_guard && p.role == StpRole::Root
+    })
+    .await?;
+
+    for r in [a, b] {
+        r.provision(&[
+            "--link-interface",
+            "eth1",
+            "--delete-switching-profile",
+            "--stp-priority",
+            "32768",
+        ])
+        .await?;
+    }
+    a.provision(&[
+        "--stp-profile-interface",
+        "eth1",
+        "--stp-profile-detach",
+        "--stp-priority",
+        "32768",
+    ])
+    .await?;
+    w.unlink_veths().await;
+    a.established().await?;
+    b.established().await
+}
+
 pub async fn svi(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&[

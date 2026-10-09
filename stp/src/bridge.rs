@@ -6,7 +6,9 @@
 
 use crate::actions::{Action, Event};
 use crate::bpdu::Bpdu;
-use crate::machines::{bdm, pim, ppm, prs, prt, prx, pst, ptx, tcm, Port, Role, Times};
+use crate::machines::{
+    bdm, pim, ppm, prs, prt, prx, pst, ptx, tcm, Port, Protections, Role, Times,
+};
 use crate::timers::Timers;
 use crate::vector::{BridgeId, PortId, PriorityVector};
 
@@ -96,18 +98,77 @@ impl Bridge {
     /// One second elapsed.
     pub fn tick(&mut self) {
         self.ports.iter_mut().for_each(Port::tick);
+        for i in 0..self.ports.len() {
+            match self.ports[i].err_remaining {
+                Some(1) => self.clear_err_disabled(i),
+                Some(n) => self.ports[i].err_remaining = Some(n - 1),
+                None => {}
+            }
+        }
         self.run();
+    }
+
+    /// Install a port's protections (#320); call before the port comes up.
+    pub fn set_protections(&mut self, port: usize, prot: Protections) {
+        let p = &mut self.ports[port];
+        p.prot = prot;
+        p.reselect = true;
+        self.run();
+    }
+
+    /// Whether BPDU guard holds `port` down, and the seconds to automatic
+    /// recovery (`Some(None)`: manual `clear`).
+    pub fn err_disabled(&self, port: usize) -> Option<Option<u32>> {
+        let p = &self.ports[port];
+        p.err_disabled.then_some(p.err_remaining)
+    }
+
+    /// Put `port` back in the err-disabled state it had before the bridge was
+    /// rebuilt (a plan change must not recover it).
+    pub fn restore_err_disabled(&mut self, port: usize, remaining: Option<u32>) {
+        let p = &mut self.ports[port];
+        p.err_disabled = true;
+        p.err_remaining = remaining;
+        self.refresh_enabled(port);
+    }
+
+    /// Lift err-disable (recovery timer, `clear`, guard removed). The link
+    /// comes back through the host's `set_port_enabled`.
+    pub fn clear_err_disabled(&mut self, port: usize) {
+        let p = &mut self.ports[port];
+        if std::mem::take(&mut p.err_disabled) {
+            p.err_remaining = None;
+            self.actions.push(Action::ErrRecover { port });
+            self.refresh_enabled(port);
+        }
     }
 
     pub fn receive(&mut self, port: usize, bpdu: Bpdu) {
         let p = &mut self.ports[port];
+        if p.prot.bpdu_filter || p.err_disabled {
+            return;
+        }
+        if p.prot.bpdu_guard && p.oper_edge && p.port_enabled {
+            p.err_disabled = true;
+            p.err_remaining = p.prot.recovery;
+            self.actions.push(Action::ErrDisable { port });
+            self.refresh_enabled(port);
+            return;
+        }
         p.rcvd = Some(bpdu);
         p.rcvd_bpdu = true;
         self.run();
     }
 
     pub fn set_port_enabled(&mut self, port: usize, up: bool) {
-        self.ports[port].port_enabled = up;
+        self.ports[port].link_up = up;
+        self.refresh_enabled(port);
+    }
+
+    /// `portEnabled` is the host's link state unless BPDU guard holds the port.
+    fn refresh_enabled(&mut self, port: usize) {
+        let p = &mut self.ports[port];
+        p.port_enabled = p.link_up && !p.err_disabled;
         self.run();
     }
 
@@ -217,6 +278,200 @@ mod tests {
         assert_eq!(b.role(0), Role::Root);
         assert!(!b.ports[0].send_rstp, "port 0 talks STP to a legacy peer");
         assert!(b.ports[1].send_rstp, "port 1 is unaffected");
+    }
+
+    fn edge_bridge(prot: Protections) -> Bridge {
+        let mut b = bridge(5);
+        b.ports[0].admin_edge = true;
+        b.set_protections(0, prot);
+        bdm_edge(&mut b);
+        b.set_port_enabled(0, true);
+        b
+    }
+
+    fn bdm_edge(b: &mut Bridge) {
+        bdm::enter(b, 0, bdm::State::Edge);
+    }
+
+    fn superior(b: &mut Bridge, port: usize) {
+        b.receive(port, crate::machines::tests::rst(b, port, false));
+    }
+
+    #[test]
+    fn bpdu_guard_err_disables_an_edge_port_and_it_recovers() {
+        let prot = Protections {
+            bpdu_guard: true,
+            recovery: Some(3),
+            ..Default::default()
+        };
+        let mut b = edge_bridge(prot);
+        b.take_actions();
+        superior(&mut b, 0);
+        assert!(b.take_actions().contains(&Action::ErrDisable { port: 0 }));
+        assert!(b.ports[0].link_up, "the host's view of the link is kept");
+        assert_eq!(b.err_disabled(0), Some(Some(3)));
+        assert!(!b.ports[0].port_enabled);
+        b.set_port_enabled(0, true);
+        assert!(!b.ports[0].port_enabled, "a link event cannot lift it");
+        b.tick();
+        b.tick();
+        assert!(b.err_disabled(0).is_some());
+        b.tick();
+        assert_eq!(b.err_disabled(0), None);
+        assert!(b.take_actions().contains(&Action::ErrRecover { port: 0 }));
+        b.set_port_enabled(0, true);
+        assert!(b.ports[0].port_enabled);
+    }
+
+    #[test]
+    fn bpdu_guard_without_recovery_waits_for_clear_and_ignores_non_edge() {
+        let prot = Protections {
+            bpdu_guard: true,
+            ..Default::default()
+        };
+        let mut b = edge_bridge(prot);
+        superior(&mut b, 0);
+        for _ in 0..50 {
+            b.tick();
+        }
+        assert_eq!(b.err_disabled(0), Some(None));
+        b.clear_err_disabled(0);
+        assert_eq!(b.err_disabled(0), None);
+        assert!(b.ports[0].port_enabled, "the link never went down");
+        // A port that is not operEdge is not guarded (port 1 has no edge).
+        b.set_protections(1, prot);
+        b.set_port_enabled(1, true);
+        superior(&mut b, 1);
+        assert_eq!(b.err_disabled(1), None);
+    }
+
+    #[test]
+    fn bpdu_filter_drops_both_directions() {
+        let prot = Protections {
+            bpdu_filter: true,
+            ..Default::default()
+        };
+        let mut b = bridge(5);
+        b.set_protections(0, prot);
+        b.set_port_enabled(0, true);
+        for _ in 0..5 {
+            b.tick();
+        }
+        assert!(!b
+            .take_actions()
+            .iter()
+            .any(|a| matches!(a, Action::Transmit { port: 0, .. })));
+        superior(&mut b, 0);
+        assert_eq!(b.root_port, None, "the BPDU was not processed");
+    }
+
+    #[test]
+    fn root_guard_keeps_a_superior_port_out_of_root() {
+        let mut b = bridge(5);
+        b.set_protections(
+            0,
+            Protections {
+                root_guard: true,
+                ..Default::default()
+            },
+        );
+        b.set_port_enabled(0, true);
+        b.set_port_enabled(1, true);
+        superior(&mut b, 0);
+        assert_eq!(b.root_port, None);
+        assert_eq!(b.role(0), Role::Alternate);
+        assert!(b.ports[0].root_inconsistent);
+        assert!(b
+            .take_actions()
+            .contains(&Action::Log(Event::RootInconsistent { port: 0, on: true })));
+        // The same BPDU on an unguarded port wins the root.
+        superior(&mut b, 1);
+        assert_eq!(b.root_port, Some(1));
+        // Silence ages the info out and the port is consistent again.
+        for _ in 0..8 {
+            b.tick();
+        }
+        assert!(!b.ports[0].root_inconsistent);
+    }
+
+    #[test]
+    fn loop_guard_holds_a_port_whose_bpdus_stop_until_one_returns() {
+        let mut b = bridge(5);
+        b.set_protections(
+            0,
+            Protections {
+                loop_guard: true,
+                ..Default::default()
+            },
+        );
+        b.set_port_enabled(0, true);
+        superior(&mut b, 0);
+        assert_eq!(b.role(0), Role::Root);
+        for _ in 0..8 {
+            b.tick(); // 3 * hello of silence
+        }
+        assert!(b.ports[0].loop_inconsistent);
+        assert_eq!(b.role(0), Role::Alternate);
+        assert_eq!(b.port_state(0), crate::actions::PortState::Discarding);
+        for _ in 0..60 {
+            b.tick();
+        }
+        assert_eq!(b.role(0), Role::Alternate, "stays held while silent");
+        superior(&mut b, 0);
+        assert!(!b.ports[0].loop_inconsistent);
+        assert_eq!(b.role(0), Role::Root);
+        // A link flap also clears it.
+        for _ in 0..8 {
+            b.tick();
+        }
+        assert!(b.ports[0].loop_inconsistent);
+        b.set_port_enabled(0, false);
+        assert!(!b.ports[0].loop_inconsistent);
+    }
+
+    #[test]
+    fn without_loop_guard_a_silent_port_becomes_designated() {
+        let mut b = bridge(5);
+        b.set_port_enabled(0, true);
+        superior(&mut b, 0);
+        for _ in 0..8 {
+            b.tick();
+        }
+        assert_eq!(b.role(0), Role::Designated);
+    }
+
+    #[test]
+    fn restricted_tcn_stops_propagation_of_a_received_tc() {
+        let tc = |b: &Bridge| {
+            let Bpdu::Rst(mut p) = crate::machines::tests::rst(b, 0, false) else {
+                unreachable!()
+            };
+            p.flags = p.flags.with(Flags::TC, true);
+            Bpdu::Rst(p)
+        };
+        for restricted in [false, true] {
+            let mut b = bridge(5);
+            b.set_protections(
+                0,
+                Protections {
+                    restricted_tcn: restricted,
+                    ..Default::default()
+                },
+            );
+            b.set_port_enabled(0, true);
+            b.set_port_enabled(1, true);
+            for _ in 0..40 {
+                b.tick();
+            }
+            b.take_actions();
+            let m = tc(&b);
+            b.receive(0, m);
+            let flushed = b
+                .take_actions()
+                .iter()
+                .any(|a| matches!(a, Action::FlushFdb { port: 1 }));
+            assert_eq!(flushed, !restricted, "restricted={restricted}");
+        }
     }
 
     #[test]

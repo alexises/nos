@@ -3,7 +3,7 @@
 //! `lacp::interface_client`: every pushed state is cached and the whole cache
 //! is resent on each fresh connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ type Writer = FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<Interf
 pub enum Push {
     States(Vec<StpPortAssignment>),
     Flush(Vec<(String, String)>),
+    ErrDisabled { port: String, disabled: bool },
 }
 
 /// Runs for the process's lifetime.
@@ -32,6 +33,8 @@ pub async fn run(
     // ponytail: entries of ports that left the plan stay until restart; the
     // resend of a stale (port, domain) is ignored by nos-interfaced.
     let mut cache: HashMap<(String, String), StpPortState> = HashMap::new();
+    // Ports BPDU guard holds down; resent on reconnect like the states.
+    let mut err_disabled: HashSet<String> = HashSet::new();
     let mut writer: Option<Writer> = None;
 
     loop {
@@ -49,7 +52,7 @@ pub async fn run(
                 Ok(stream) => {
                     let (_r, w) = tokio::io::split(stream);
                     let mut w = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
-                    if send_all(&mut w, &cache).await.is_ok() {
+                    if send_all(&mut w, &cache, &err_disabled).await.is_ok() {
                         info!("stp connected to nos-interfaced, resent cached port states");
                         writer = Some(w);
                     }
@@ -77,6 +80,15 @@ pub async fn run(
                         w.send(InterfaceRequest::SetStpPortStates(list)).await
                     }
                     Push::Flush(list) => flush_all(w, list).await,
+                    Push::ErrDisabled { port, disabled } => {
+                        if disabled {
+                            err_disabled.insert(port.clone());
+                        } else {
+                            err_disabled.remove(&port);
+                        }
+                        w.send(InterfaceRequest::SetErrDisabled { port, disabled })
+                            .await
+                    }
                 };
                 if sent.is_err() {
                     writer = None;
@@ -90,7 +102,15 @@ pub async fn run(
 async fn send_all(
     w: &mut Writer,
     cache: &HashMap<(String, String), StpPortState>,
+    err_disabled: &HashSet<String>,
 ) -> std::io::Result<()> {
+    for port in err_disabled {
+        w.send(InterfaceRequest::SetErrDisabled {
+            port: port.clone(),
+            disabled: true,
+        })
+        .await?;
+    }
     if cache.is_empty() {
         return Ok(());
     }

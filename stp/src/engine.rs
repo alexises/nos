@@ -3,7 +3,7 @@
 //! into the log lines the e2e phase anchors on. No I/O, no clock.
 
 use nos_proto::{StpMode, StpPortAssignment, StpPortInfo, StpRole, StpState, StpSummary};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::actions::{Action, Event, PortState};
 use crate::bpdu::Bpdu;
@@ -23,6 +23,8 @@ pub enum Out {
     States(Vec<StpPortAssignment>),
     /// `(port, domain)` pairs to flush.
     Flush(Vec<(String, String)>),
+    /// Take `port`'s link down (`true`) or back up (`false`) in `nos-interfaced`.
+    ErrDisabled { port: String, disabled: bool },
 }
 
 pub struct Engine {
@@ -54,6 +56,9 @@ impl Engine {
             &params,
         );
         bridge.set_rstp_version(plan.rstp_version);
+        for (i, p) in plan.ports.iter().enumerate() {
+            bridge.set_protections(i, p.prot);
+        }
         let mut e = Engine {
             bridge,
             ports: plan.ports.clone(),
@@ -75,6 +80,42 @@ impl Engine {
             }
         }
         (n, self.drain())
+    }
+
+    /// Err-disabled ports and their seconds to recovery (`None`: manual).
+    pub fn err_disabled(&self) -> Vec<(String, Option<u32>)> {
+        (0..self.ports.len())
+            .filter_map(|i| Some((self.ports[i].name.clone(), self.bridge.err_disabled(i)?)))
+            .collect()
+    }
+
+    /// Keep a port err-disabled across a bridge rebuild; false when the new
+    /// plan no longer has the port or its guard.
+    pub fn restore_err_disabled(&mut self, name: &str, remaining: Option<u32>) -> bool {
+        let Some(i) = self
+            .ports
+            .iter()
+            .position(|p| p.name == name && p.prot.bpdu_guard)
+        else {
+            return false;
+        };
+        // The new `bpdu-guard-recovery` wins: unset makes it manual.
+        let remaining = self.ports[i]
+            .prot
+            .recovery
+            .map(|r| remaining.map_or(r, |old| old.min(r)));
+        self.bridge.restore_err_disabled(i, remaining);
+        true
+    }
+
+    /// `clear spanning-tree err-disabled`: whether `name` was err-disabled.
+    pub fn clear_err_disabled(&mut self, name: &str) -> (bool, Vec<Out>) {
+        let Some(i) = self.ports.iter().position(|p| p.name == name) else {
+            return (false, Vec::new());
+        };
+        let was = self.bridge.err_disabled(i).is_some();
+        self.bridge.clear_err_disabled(i);
+        (was, self.drain())
     }
 
     pub fn ports(&self) -> &[PortCfg] {
@@ -133,6 +174,16 @@ impl Engine {
                         priority: cfg.priority,
                         designated_bridge,
                         designated_port,
+                        edge: p.oper_edge,
+                        bpdu_guard: cfg.prot.bpdu_guard,
+                        bpdu_filter: cfg.prot.bpdu_filter,
+                        root_guard: cfg.prot.root_guard,
+                        loop_guard: cfg.prot.loop_guard,
+                        restricted_tcn: cfg.prot.restricted_tcn,
+                        root_inconsistent: p.root_inconsistent,
+                        loop_inconsistent: p.loop_inconsistent,
+                        err_disabled: p.err_disabled,
+                        err_recovery_secs: p.err_remaining,
                     }
                 })
                 .collect(),
@@ -186,6 +237,38 @@ impl Engine {
                 Action::Log(Event::RootChanged { root, .. }) => {
                     info!(root = %identity::show(&root), "root bridge changed");
                 }
+                Action::ErrDisable { port } => {
+                    let name = self.ports[port].name.clone();
+                    warn!(port = %name, reason = %"bpdu-guard", "port err-disabled");
+                    out.push(Out::ErrDisabled {
+                        port: name,
+                        disabled: true,
+                    });
+                }
+                Action::ErrRecover { port } => {
+                    let name = self.ports[port].name.clone();
+                    info!(port = %name, "port err-disabled recovered");
+                    out.push(Out::ErrDisabled {
+                        port: name,
+                        disabled: false,
+                    });
+                }
+                Action::Log(Event::RootInconsistent { port, on }) => {
+                    let name = &self.ports[port].name;
+                    if on {
+                        warn!(port = %name, "port root-inconsistent");
+                    } else {
+                        info!(port = %name, "port root-consistent");
+                    }
+                }
+                Action::Log(Event::LoopInconsistent { port, on }) => {
+                    let name = &self.ports[port].name;
+                    if on {
+                        warn!(port = %name, "port loop-inconsistent");
+                    } else {
+                        info!(port = %name, "port loop-consistent");
+                    }
+                }
                 Action::Log(Event::NotQuiescent) => {
                     error!("spanning tree state machines did not reach quiescence");
                 }
@@ -211,6 +294,7 @@ mod tests {
             cost: None,
             edge: EdgePort::Disabled,
             link_type: nos_proto::schema::LinkType::Auto,
+            prot: crate::machines::Protections::default(),
         };
         Plan {
             priority: 32768,
@@ -293,6 +377,46 @@ mod tests {
             sent.iter().all(|b| matches!(b, Bpdu::Config(_))),
             "{sent:?}"
         );
+    }
+
+    #[test]
+    fn bpdu_guard_pushes_err_disable_and_clear_lifts_it() {
+        let mut p = plan();
+        p.ports[0].edge = EdgePort::Admin;
+        p.ports[0].prot.bpdu_guard = true;
+        let (mut e, _) = Engine::new(&p, [2, 0, 0, 0, 0, 1]).unwrap();
+        e.set_link(0, true, true, 20_000);
+        let bpdu = crate::machines::tests::rst(&e.bridge, 0, false);
+        let out = e.receive(0, bpdu);
+        assert!(out.contains(&Out::ErrDisabled {
+            port: "eth1".into(),
+            disabled: true
+        }));
+        assert_eq!(e.err_disabled(), [("eth1".to_string(), None)]);
+        let s = e.summary();
+        assert!(s.ports[0].err_disabled && s.ports[0].bpdu_guard);
+        assert!(!e.clear_err_disabled("eth2").0);
+        let (was, out) = e.clear_err_disabled("eth1");
+        assert!(was);
+        assert!(out.contains(&Out::ErrDisabled {
+            port: "eth1".into(),
+            disabled: false
+        }));
+        // A rebuilt bridge keeps the port down while the guard is configured.
+        let (mut e2, _) = Engine::new(&p, [2, 0, 0, 0, 0, 1]).unwrap();
+        assert!(e2.restore_err_disabled("eth1", Some(5)));
+        assert_eq!(
+            e2.err_disabled(),
+            [("eth1".to_string(), None)],
+            "recovery is unset in the new plan, so the port waits for clear"
+        );
+        assert!(!e2.restore_err_disabled("eth2", None), "no guard on eth2");
+        p.ports[0].prot.recovery = Some(60);
+        let (mut e3, _) = Engine::new(&p, [2, 0, 0, 0, 0, 1]).unwrap();
+        assert!(e3.restore_err_disabled("eth1", Some(5)));
+        assert_eq!(e3.err_disabled(), [("eth1".to_string(), Some(5))]);
+        assert!(e3.restore_err_disabled("eth1", None));
+        assert_eq!(e3.err_disabled(), [("eth1".to_string(), Some(60))]);
     }
 
     #[test]
