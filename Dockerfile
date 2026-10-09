@@ -14,7 +14,7 @@ COPY . .
 # "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
 # docs/architecture/development.md's "Memory profiling" note.
 ARG CARGO_FEATURES=
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision
 
 FROM debian:bookworm-slim AS runtime
 
@@ -32,6 +32,7 @@ COPY --from=builder /app/target/release/nos-ospfd      /usr/local/bin/nos-ospfd
 COPY --from=builder /app/target/release/nos-ospfv3d    /usr/local/bin/nos-ospfv3d
 COPY --from=builder /app/target/release/nos-lacpd      /usr/local/bin/nos-lacpd
 COPY --from=builder /app/target/release/nos-lldpd      /usr/local/bin/nos-lldpd
+COPY --from=builder /app/target/release/nos-stpd       /usr/local/bin/nos-stpd
 COPY --from=builder /app/target/release/nos-bfdd       /usr/local/bin/nos-bfdd
 COPY --from=builder /app/target/release/nos-fdbd       /usr/local/bin/nos-fdbd
 COPY --from=builder /app/target/release/nos-restd      /usr/local/bin/nos-restd
@@ -57,6 +58,8 @@ COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provis
 # CAP_NET_ADMIN, since it never touches rtnetlink (see lacp/CLAUDE.md).
 # nos-lldpd needs CAP_NET_RAW for the same reason, over a raw AF_PACKET
 # socket per LLDP-enabled interface (see lldp/CLAUDE.md).
+# nos-stpd needs CAP_NET_RAW for its ETH_P_ALL AF_PACKET BPDU socket per STP
+# port (see stp/CLAUDE.md); like nos-lacpd it never touches rtnetlink.
 # nos-bfdd needs CAP_NET_RAW for SO_BINDTODEVICE into each table's VRF and
 # CAP_NET_BIND_SERVICE for its receive socket on UDP 3784 (see bfd/CLAUDE.md).
 # nos-fdbd needs CAP_NET_ADMIN, like nos-ribd, to create its VXLAN device and
@@ -73,6 +76,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-ospfv3d \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-lacpd \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-lldpd \
+    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-stpd \
     && setcap 'cap_net_raw,cap_net_bind_service=eip' /usr/local/bin/nos-bfdd \
     && setcap 'cap_net_admin=eip' /usr/local/bin/nos-fdbd \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-restd \

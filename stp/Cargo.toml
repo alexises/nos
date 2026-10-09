@@ -9,7 +9,22 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-thiserror = { workspace = true }
+thiserror          = { workspace = true }
+nos-pki            = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+nos-proto          = { workspace = true }
+nos-log-client     = { workspace = true }
+nos-l2-socket      = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+
+[[bin]]
+name = "nos-stpd"
+path = "src/main.rs"
 
 [dev-dependencies]
 proptest = { workspace = true }

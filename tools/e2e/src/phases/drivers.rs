@@ -1128,12 +1128,8 @@ pub async fn stp_failsafe(w: &mut World) -> anyhow::Result<()> {
     a.wait(&format!("bridge port enslaved blocking {port}"))
         .await?;
     a.wait(&format!("bpdu trap installed {port}")).await?;
-    // Nothing opens the port: a resync (10s tick) writes no other state.
-    let opened = a.count("bridge port state set");
-    a.assert_quiet("bridge port state set", opened, 12).await?;
-
-    let restored = a.count("bridge port forwarding restored");
-    let removed = a.count("bpdu trap removed");
+    let restored = a.count(&format!("bridge port forwarding restored {port}"));
+    let removed = a.count(&format!("bpdu trap removed {port}"));
     a.provision(&["--stp-mode", "disabled"]).await?;
     a.wait_new(
         &format!("bridge port forwarding restored {port}"),
@@ -1148,6 +1144,155 @@ pub async fn stp_failsafe(w: &mut World) -> anyhow::Result<()> {
     a.wait("deleted vlan sub-interface interface=eth0 sub_interface=eth0.100")
         .await?;
     a.established().await
+}
+
+/// `key`'s value on the latest line matching `pattern`.
+fn last_value(r: &Router, pattern: &str, key: &str) -> Option<String> {
+    let line = r.logs.last(pattern)?;
+    line.rsplit(&format!("{key}=")).next().map(str::to_string)
+}
+
+/// The latest `port state changed` of `port`, only if one came after `base`.
+fn stp_port_state(r: &Router, port: &str, base: usize) -> Option<String> {
+    let p = format!("port state changed port={port} state=");
+    (r.count(&p) > base).then(|| last_value(r, &p, "state"))?
+}
+
+/// Polls until the four STP ports (both routers' `eth1`/`eth2`) hold exactly
+/// one `Discarding` and three `Forwarding` for three seconds in a row.
+async fn stp_settle(
+    routers: [&Router; 2],
+    base: &[[usize; 2]; 2],
+    secs: u64,
+) -> anyhow::Result<()> {
+    let mut stable = 0;
+    let mut last = String::new();
+    for _ in 0..secs {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let states: Vec<Option<String>> = routers
+            .iter()
+            .zip(base)
+            .flat_map(|(r, b)| {
+                ["eth1", "eth2"]
+                    .into_iter()
+                    .zip(b)
+                    .map(|(p, b)| stp_port_state(r, p, *b))
+            })
+            .collect();
+        let n = |want: &str| states.iter().filter(|s| s.as_deref() == Some(want)).count();
+        last = format!("{states:?}");
+        if n("Discarding") == 1 && n("Forwarding") == 3 {
+            stable += 1;
+            if stable >= 3 {
+                return Ok(());
+            }
+        } else {
+            stable = 0;
+        }
+    }
+    bail!("spanning tree did not settle on one blocking port in {secs}s: {last}")
+}
+
+/// #327: `nos-stpd` runs RSTP over the two parallel veth links of one
+/// domain: one root, one blocking port, no BPDU storm, sub-second failover
+/// on a cut link, and reconvergence when it comes back.
+pub async fn stp(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let routers = [a, b];
+    let state = |p: &str| format!("port state changed port={p} state=");
+    let base = routers.map(|r| ["eth1", "eth2"].map(|p| r.count(&state(p))));
+
+    w.link_veths().await?;
+    // One profile per link, both holding the same untagged domain. Every
+    // provision must repeat `--stp-mode rstp`: unset means disabled.
+    for r in routers {
+        r.provision(&[
+            "--link-interface",
+            "eth2",
+            "--switching-profile",
+            "stp-sp2",
+            "--switching-profile-member",
+            "stp-d:untagged",
+        ])
+        .await?;
+        let mut on = strings(&[
+            "--link-interface",
+            "eth1",
+            "--switching-profile",
+            "stp-sp1",
+            "--switching-profile-member",
+            "stp-d:untagged",
+            "--stp-mode",
+            "rstp",
+        ]);
+        if r.name() == "router-a" {
+            on.extend(strings(&["--stp-priority", "4096"]));
+        }
+        r.provision(&on).await?;
+    }
+
+    log("waiting for one root bridge and exactly one blocking port");
+    stp_settle(routers, &base, 60).await?;
+    let root = "root bridge changed root=";
+    let (ra, rb) = (last_value(a, root, "root"), last_value(b, root, "root"));
+    if ra.is_none() || ra != rb || !ra.as_deref().is_some_and(|r| r.starts_with("1000.")) {
+        bail!(
+            "routers disagree on the root, or it is not router-a (priority 4096): {ra:?} vs {rb:?}"
+        );
+    }
+
+    // No BPDU storm: a hello is 2s, so a 10s summary is ~5 per port.
+    for r in routers {
+        for p in ["eth1", "eth2"] {
+            let sum = format!("bpdu rx port={p} count=");
+            r.wait_new(&sum, r.count(&sum), 15).await?;
+            let n: u32 = last_value(r, &sum, "count").unwrap_or_default().parse()?;
+            log(format!("{}: {p} received {n} BPDUs in 10s", r.name()));
+            if n >= 20 {
+                bail!("{}: {p} received {n} BPDUs in 10s (storm?)", r.name());
+            }
+        }
+    }
+
+    // Cut router-b's root port; its alternate must take over within 1s of
+    // the carrier loss, both lines from router-b's own log.
+    let role = |p: &str| format!("port role changed port={p} role=");
+    let roles: Vec<_> = ["eth1", "eth2"]
+        .iter()
+        .map(|p| last_value(b, &role(p), "role"))
+        .collect();
+    let (root_if, alt_if) = match roles.iter().map(|r| r.as_deref()).collect::<Vec<_>>()[..] {
+        [Some("Root"), Some("Alternate")] => ("eth1", "eth2"),
+        [Some("Alternate"), Some("Root")] => ("eth2", "eth1"),
+        _ => bail!("router-b should have one root and one alternate port: {roles:?}"),
+    };
+    let takeover = format!("{}Forwarding", state(alt_if));
+    let base_takeover = b.count(&takeover);
+    log(format!(
+        "cutting router-b {root_if}; {alt_if} must take over"
+    ));
+    w.set_link("router-b", root_if, false).await?;
+    b.wait_new(&takeover, base_takeover, 10).await?;
+    b.assert_delay_under(
+        &format!("port carrier lost port={root_if}"),
+        &takeover,
+        base_takeover,
+        1000,
+    )?;
+
+    // The link comes back: reconverge to exactly one blocking port.
+    w.set_link("router-b", root_if, true).await?;
+    stp_settle(routers, &base, 60).await?;
+
+    for r in routers {
+        for iface in ["eth1", "eth2"] {
+            r.provision(&["--link-interface", iface, "--delete-switching-profile"])
+                .await?;
+        }
+    }
+    w.unlink_veths().await;
+    a.established().await?;
+    b.established().await
 }
 
 pub async fn svi(w: &mut World) -> anyhow::Result<()> {

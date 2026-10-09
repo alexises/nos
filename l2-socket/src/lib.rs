@@ -105,6 +105,12 @@ fn open_raw(ifindex: i32, ethertype: u16) -> io::Result<Socket> {
     Ok(socket)
 }
 
+/// The STP/RSTP BPDU group (IEEE 802.1D bridge group address).
+pub const BPDU_GROUP: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x00];
+const ETH_P_ALL: u16 = 0x0003;
+/// An 802.3 header, LLC and a BPDU (at most 38 bytes), generously rounded up.
+const BPDU_RECV_BUF_LEN: usize = 128;
+
 /// A raw L2 socket for one ethertype and one multicast group on one interface.
 pub struct L2Socket {
     inner: AsyncFd<Socket>,
@@ -143,6 +149,57 @@ impl L2Socket {
             recv_buf_len,
             accept_own_unicast: false,
         })
+    }
+
+    /// Opens the spanning-tree BPDU socket on `interface` (802.3 + LLC `42 42 03`
+    /// to [`BPDU_GROUP`]). It is an `ETH_P_ALL` socket on purpose: a protocol
+    /// tap sees the frame before tc ingress and the bridge `rx_handler`, where
+    /// `nos-interfaced`'s BPDU trap drops it (an `ETH_P_802_2` socket would see
+    /// nothing). Use [`Self::send_frame`]/[`Self::recv_frame`]: the frame
+    /// carries a length field, not an ethertype.
+    pub fn open_bpdu(interface: &str) -> io::Result<Self> {
+        let own_hw_addr = read_hw_addr(interface)?;
+        let ifindex = if_index(interface)?;
+        let socket = open_raw(ifindex, ETH_P_ALL)?;
+        join_multicast(&socket, ifindex, BPDU_GROUP)?;
+        attach_filter(&socket, &mut bpdu_program())?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            inner: AsyncFd::new(socket)?,
+            own_hw_addr,
+            ifindex,
+            ethertype: ETH_P_ALL,
+            group: BPDU_GROUP,
+            recv_buf_len: BPDU_RECV_BUF_LEN,
+            accept_own_unicast: false,
+        })
+    }
+
+    /// Sends a complete, already-built frame (header included).
+    pub fn send_frame(&self, frame: &[u8]) -> io::Result<()> {
+        self.inner.get_ref().send(frame)?;
+        Ok(())
+    }
+
+    /// Waits for the next complete frame, header included, that this port did
+    /// not send itself (an `ETH_P_ALL` socket also sees `PACKET_OUTGOING`).
+    pub async fn recv_frame(&self) -> io::Result<Vec<u8>> {
+        let mut buf = vec![0u8; self.recv_buf_len];
+        loop {
+            let mut guard = self.inner.readable().await?;
+            match guard.try_io(|inner| inner.get_ref().read(&mut buf)) {
+                Ok(Ok(n)) => {
+                    if n >= ETH_HEADER_LEN && buf[6..12] != self.own_hw_addr {
+                        return Ok(buf[..n].to_vec());
+                    }
+                }
+                Ok(Err(e)) if is_link_down(&e) => {
+                    tokio::time::sleep(LINK_DOWN_RETRY).await;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_would_block) => {}
+            }
+        }
     }
 
     /// Also receive frames addressed to this port's own MAC, not just `group`.
@@ -315,9 +372,33 @@ fn udp_port_program(ethertype: u16, port: u16) -> Option<Vec<libc::sock_filter>>
     }
 }
 
+/// Classic BPF accepting only frames to [`BPDU_GROUP`] whose first three
+/// bytes after the 802.3 length field are the LLC `42 42 03`.
+fn bpdu_program() -> Vec<libc::sock_filter> {
+    let ins = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
+    vec![
+        ins(0x20, 0, 0, 0),           // ld  [0]
+        ins(0x15, 0, 9, 0x0180_c200), // jeq group[..4]
+        ins(0x28, 0, 0, 4),           // ldh [4]
+        ins(0x15, 0, 7, 0x0000),      // jeq group[4..]
+        ins(0x30, 0, 0, 14),          // ldb [14]
+        ins(0x15, 0, 5, 0x42),
+        ins(0x30, 0, 0, 15),
+        ins(0x15, 0, 3, 0x42),
+        ins(0x30, 0, 0, 16),
+        ins(0x15, 0, 1, 0x03),
+        ins(0x06, 0, 0, 0xffff), // accept
+        ins(0x06, 0, 0, 0),      // drop
+    ]
+}
+
 fn attach_udp_port_filter(socket: &Socket, ethertype: u16, port: u16) -> io::Result<()> {
     let mut prog = udp_port_program(ethertype, port)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ethertype is not IP"))?;
+    attach_filter(socket, &mut prog)
+}
+
+fn attach_filter(socket: &Socket, prog: &mut [libc::sock_filter]) -> io::Result<()> {
     let fprog = libc::sock_fprog {
         len: u16::try_from(prog.len()).expect("fixed, small program"),
         filter: prog.as_mut_ptr(),
@@ -563,6 +644,44 @@ mod tests {
         f[6..12].copy_from_slice(&own);
         assert_eq!(payload_of_unicast_frame(&f, own), None);
         assert_eq!(payload_of_unicast_frame(&f[..13], own), None);
+    }
+
+    /// Interprets `bpdu_program` over a frame (only the ops it uses).
+    fn bpf_accepts(frame: &[u8]) -> bool {
+        let prog = bpdu_program();
+        let (mut pc, mut a) = (0usize, 0u32);
+        loop {
+            let i = &prog[pc];
+            let k = i.k as usize;
+            let get = |n: usize| frame.get(k..k + n);
+            match i.code {
+                0x20 => a = get(4).map_or(u32::MAX, |b| u32::from_be_bytes(b.try_into().unwrap())),
+                0x28 => {
+                    a = get(2).map_or(u32::MAX, |b| {
+                        u32::from(u16::from_be_bytes(b.try_into().unwrap()))
+                    });
+                }
+                0x30 => a = get(1).map_or(u32::MAX, |b| u32::from(b[0])),
+                0x15 => pc += usize::from(if a == i.k { i.jt } else { i.jf }),
+                0x06 => return i.k != 0,
+                c => panic!("op {c:#x}"),
+            }
+            pc += 1;
+        }
+    }
+
+    #[test]
+    fn bpdu_filter_takes_only_group_llc_frames() {
+        let mut f = BPDU_GROUP.to_vec();
+        f.extend_from_slice(&[2, 0, 0, 0, 0, 1, 0, 38, 0x42, 0x42, 0x03, 0, 0]);
+        assert!(bpf_accepts(&f));
+        let mut other_group = f.clone();
+        other_group[5] = 0x0E;
+        assert!(!bpf_accepts(&other_group));
+        let mut other_llc = f.clone();
+        other_llc[16] = 0x04;
+        assert!(!bpf_accepts(&other_llc));
+        assert!(!bpf_accepts(&f[..10]), "a runt never matches");
     }
 
     #[test]

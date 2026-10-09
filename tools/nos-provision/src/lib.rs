@@ -855,6 +855,10 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub stp_mode: Option<StpModeArg>,
 
+    /// `spanning-tree priority` (a multiple of 4096); unset keeps the default.
+    #[arg(long)]
+    pub stp_priority: Option<u16>,
+
     /// If set (requires `--port-aggregate`), sets the aggregate's Ethernet
     /// Segment DF election algorithm (`PortAggregateOp::SetDfAlgorithm`);
     /// needs an ESI at commit time. `modulo` resets it.
@@ -1550,6 +1554,12 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
         vec!["spanning-tree".to_string(), "mode".to_string()],
         Some(format!("\"{:?}\"", stp_mode(args))),
     )];
+    if let Some(p) = args.stp_priority {
+        v.push((
+            vec!["spanning-tree".to_string(), "priority".to_string()],
+            Some(p.to_string()),
+        ));
+    }
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         let guard = |field: &str| {
             vec![
@@ -1724,6 +1734,9 @@ fn stp_mode(args: &Args) -> nos_proto::StpMode {
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     config.spanning_tree.mode = stp_mode(args);
+    if let Some(p) = args.stp_priority {
+        config.spanning_tree.priority = p;
+    }
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         for p in config
             .stp_port_profiles

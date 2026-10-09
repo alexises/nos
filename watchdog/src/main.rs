@@ -172,6 +172,20 @@ struct Args {
     #[arg(long, default_value = "/run/nos/bfd.sock")]
     bfdd_listen_socket: PathBuf,
 
+    /// Path to the nos-stpd binary to supervise. Like nos-lldpd, exactly one
+    /// instance is always supervised — see `stp/CLAUDE.md`.
+    #[arg(long, default_value = "/usr/local/bin/nos-stpd")]
+    stpd_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-stpd.
+    #[arg(long = "stpd-arg", allow_hyphen_values = true)]
+    stpd_flags: Vec<String>,
+
+    /// Unix socket nos-stpd listens on. Also served out as the resolved
+    /// address for `ServiceRef::Stp` broker queries.
+    #[arg(long, default_value = "/run/nos/stp.sock")]
+    stpd_listen_socket: PathBuf,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -521,6 +535,27 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
+    let stpd_args = std::iter::once("--listen-socket".to_string())
+        .chain(std::iter::once(
+            args.stpd_listen_socket.display().to_string(),
+        ))
+        .chain(std::iter::once("--watchdog-socket".to_string()))
+        .chain(std::iter::once(args.listen_socket.display().to_string()))
+        .chain(std::iter::once("--log-socket".to_string()))
+        .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(args.stpd_flags)
+        .collect();
+    let stpd_spec = ProcessSpec::new("nos-stpd", args.stpd_bin, stpd_args).with_identity(
+        pki.clone(),
+        Role::Stpd,
+        "",
+    );
+    tasks.push(tokio::spawn(supervise_one(
+        stpd_spec,
+        policy,
+        shutdown_rx.clone(),
+    )));
+
     let broker_task = broker::start(
         &args.listen_socket,
         registry,
@@ -531,6 +566,7 @@ async fn main() -> anyhow::Result<()> {
             lacp: args.lacpd_listen_socket,
             lldp: args.lldpd_listen_socket,
             bfd: args.bfdd_listen_socket,
+            stp: args.stpd_listen_socket,
         },
         pki.clone(),
     )

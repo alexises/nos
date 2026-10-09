@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const DAEMONS: [&str; 12] = [
+const DAEMONS: [&str; 13] = [
     "nos-configd",
     "nos-bgpd",
     "nos-ribd",
@@ -29,6 +29,7 @@ const DAEMONS: [&str; 12] = [
     "nos-logd",
     "nos-lacpd",
     "nos-lldpd",
+    "nos-stpd",
     "nos-provision",
 ];
 
@@ -102,6 +103,7 @@ impl Stack {
             .args(["--logd-bin", &b("nos-logd")])
             .args(["--lacpd-bin", &b("nos-lacpd")])
             .args(["--lldpd-bin", &b("nos-lldpd")])
+            .args(["--stpd-bin", &b("nos-stpd")])
             .args(["--config-socket", &d("config.sock")])
             .args(["--listen-socket", &d("watchdog.sock")])
             .args(["--pki-dir", &d("pki")])
@@ -109,6 +111,7 @@ impl Stack {
             .args(["--interfaced-listen-socket", &d("interface.sock")])
             .args(["--lacpd-listen-socket", &d("lacp.sock")])
             .args(["--lldpd-listen-socket", &d("lldp.sock")])
+            .args(["--stpd-listen-socket", &d("stp.sock")])
             .args(["--run-dir", &d("")])
             .arg(format!("--configd-arg=--listen={}", d("config.sock")))
             .arg(format!("--configd-arg=--config-file={}", d("config.yaml")))
@@ -301,6 +304,7 @@ fn whole_stack_starts_reconfigures_and_stops_cleanly() {
         "nos-interfaced",
         "nos-lacpd",
         "nos-lldpd",
+        "nos-stpd",
         "nos-bgpd[r1]",
         "nos-ribd[rt1]",
         "nos-ospfd[o1]",
