@@ -47,7 +47,8 @@ pub fn start(
 /// `nos-ribd`'s connected prefixes from every applied address — `GetInterfaces`
 /// plus `GetBroadcastDomain` per SVI). The LACP member push rewrites kernel
 /// bond membership, so it is `nos-lacpd`'s alone (and the micro-BFD Up set
-/// push `nos-bfdd`'s alone). No wildcard arm: a new
+/// push `nos-bfdd`'s alone, and the bridge-port state/flush writes `nos-stpd`'s,
+/// which also gets the link stream for carrier events). No wildcard arm: a new
 /// request must be classified.
 fn allowed(role: Role, req: &InterfaceRequest) -> bool {
     match req {
@@ -69,7 +70,12 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
         }
         InterfaceRequest::PushLacpMembers(_) => role == Role::Lacpd,
         InterfaceRequest::PushBfdMembers(_) => role == Role::Bfdd,
-        InterfaceRequest::SubscribeLinks => matches!(role, Role::Ospfd | Role::Ospfv3d),
+        InterfaceRequest::SubscribeLinks => {
+            matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd)
+        }
+        InterfaceRequest::SetStpPortStates(_) | InterfaceRequest::FlushFdb { .. } => {
+            role == Role::Stpd
+        }
     }
 }
 
@@ -178,6 +184,33 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
                 .await
                 .set_bfd_up_members(&msg.aggregate, msg.up_members);
             apply_pushed(ctx, updated).await;
+            None
+        }
+        InterfaceRequest::SetStpPortStates(assignments) => {
+            let writes = ctx
+                .interfaces
+                .write()
+                .await
+                .set_stp_port_states(assignments);
+            for (port, state) in writes {
+                if let Err(e) = ctx.driver.set_bridge_port_state(&port, state).await {
+                    warn!(port = ?port, error = %e, "failed to set bridge port state");
+                }
+            }
+            None
+        }
+        InterfaceRequest::FlushFdb { port, domain } => {
+            let target = ctx.interfaces.read().await.bridge_port(&port, &domain);
+            match target {
+                Some(p) => {
+                    if let Err(e) = ctx.driver.flush_bridge_port(&p).await {
+                        warn!(port = ?p, error = %e, "failed to flush bridge port");
+                    }
+                }
+                None => {
+                    debug!(port = %port, domain = %domain, "flush for a port that is not a bridge member");
+                }
+            }
             None
         }
         // Streaming: `handle_connection` owns the connection for it.
@@ -367,13 +400,26 @@ mod authz_tests {
     }
 
     #[test]
-    fn only_the_ospf_daemons_may_subscribe_to_links() {
+    fn only_the_routing_daemons_and_stpd_may_subscribe_to_links() {
         for role in Role::ALL {
             assert_eq!(
                 allowed(role, &InterfaceRequest::SubscribeLinks),
-                matches!(role, Role::Ospfd | Role::Ospfv3d),
+                matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd),
                 "{role:?} subscribe"
             );
+        }
+    }
+
+    #[test]
+    fn only_stpd_may_write_bridge_port_state() {
+        let set = InterfaceRequest::SetStpPortStates(Vec::new());
+        let flush = InterfaceRequest::FlushFdb {
+            port: String::new(),
+            domain: String::new(),
+        };
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &set), role == Role::Stpd, "{role:?} set");
+            assert_eq!(allowed(role, &flush), role == Role::Stpd, "{role:?} flush");
         }
     }
 }

@@ -1,24 +1,34 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
+use netlink_packet_core::{DefaultNla, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_REQUEST};
 use nos_proto::{
-    loopback_table_name, InterfaceAddress, IpNet, PortAggregateMode, ServiceRef, VlanTag,
+    loopback_table_name, InterfaceAddress, IpNet, PortAggregateMode, ServiceRef, StpPortState,
+    VlanTag,
 };
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
-use rtnetlink::packet_route::link::{BondMode, LinkAttribute, LinkMessage};
+use rtnetlink::packet_route::link::{
+    BondMode, InfoBridgePort, InfoKind, InfoPortData, InfoPortKind, LinkAttribute, LinkInfo,
+    LinkMessage, LinkProtoInfoBridge,
+};
+use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{Handle, LinkBond, LinkBridge, LinkDummy, LinkUnspec, LinkVlan, MulticastGroup};
 use tracing::{debug, info, trace, warn};
 
 use super::links::{self, Delta, LinkHub};
+use super::tc::{self, Tc};
 use super::{
-    bridge_registry, port_aggregate_registry, rib_client, DriverError, InterfaceDriver, LinkWatch,
-    DEFAULT_MTU,
+    bridge_registry, port_aggregate_registry, rib_client, BridgePortRef, DriverError,
+    InterfaceDriver, LinkWatch, DEFAULT_MTU,
 };
-use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState, SubinterfaceState};
+use crate::state::{
+    BroadcastDomainState, InterfaceState, PortAggregateState, StpPorts, SubinterfaceState,
+};
 use crate::watchdog_client;
 
 /// Both `Xor` and `Lacp` create the kernel bond in the same
@@ -40,6 +50,88 @@ fn bond_mode_of(mode: PortAggregateMode) -> BondMode {
 /// errno(3) `ENODEV` — the kernel's reply to a targeted `RTM_GETLINK`
 /// lookup (`match_name`/`match_index`) for a link that doesn't exist.
 const ENODEV: i32 = 19;
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+/// Writing a bridge port's state while its device is down.
+const ENETDOWN: i32 = 100;
+/// Deleting a filter that isn't there: `ENOENT`, or `EINVAL` when the device
+/// has no filter chain at all yet.
+const NO_FILTER: &[i32] = &[ENOENT, EINVAL, ENODEV];
+
+/// `IFLA_BRPORT_STATE` / `IFLA_BRPORT_FLUSH`, sent as raw attributes.
+const IFLA_BRPORT_STATE: u16 = 1;
+const IFLA_BRPORT_FLUSH: u16 = 24;
+const BR_STATE_DISABLED: u8 = 0;
+const BR_STATE_LEARNING: u8 = 2;
+const BR_STATE_FORWARDING: u8 = 3;
+
+/// The kernel state `state` is written as. **Blocking is written as DISABLED**:
+/// on a `BR_NO_STP` bridge the kernel's `br_port_state_selection` turns a
+/// BLOCKING port straight back into FORWARDING (every port is designated), but
+/// leaves DISABLED ones alone — a disabled port neither learns nor forwards,
+/// the same data plane as blocking, and `ETH_P_ALL` taps still see its frames
+/// (`docs/internals/stp.md`).
+fn kernel_state(state: StpPortState) -> u8 {
+    match state {
+        StpPortState::Blocking => BR_STATE_DISABLED,
+        StpPortState::Learning => BR_STATE_LEARNING,
+        StpPortState::Forwarding => BR_STATE_FORWARDING,
+    }
+}
+
+/// The `IFLA_BRPORT_STATE` the link dump carries, if it is a bridge port.
+fn observed_port_state(link: &LinkMessage) -> Option<u8> {
+    link.attributes.iter().find_map(|a| match a {
+        LinkAttribute::LinkInfo(infos) => infos.iter().find_map(|i| match i {
+            LinkInfo::PortData(InfoPortData::BridgePort(ports)) => {
+                ports.iter().find_map(|p| match p {
+                    InfoBridgePort::State(s) => Some(u8::from(*s)),
+                    _ => None,
+                })
+            }
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+/// Whether `link` is a port spanning tree may touch: enslaved to a bridge, and
+/// never a VXLAN device — the VTEP of a VNI domain belongs to `nos-fdbd`.
+fn is_stp_port(link: &LinkMessage) -> bool {
+    let infos = link.attributes.iter().find_map(|a| match a {
+        LinkAttribute::LinkInfo(infos) => Some(infos),
+        _ => None,
+    });
+    infos.is_some_and(|infos| {
+        infos
+            .iter()
+            .any(|i| matches!(i, LinkInfo::PortKind(InfoPortKind::Bridge)))
+            && !infos
+                .iter()
+                .any(|i| matches!(i, LinkInfo::Kind(InfoKind::Vxlan)))
+    })
+}
+
+/// The `<link>` or `<link>.<tag>` name `port` has in the kernel, given its
+/// parent link's name.
+fn port_link_name(parent: &str, tag: VlanTag) -> String {
+    match tag {
+        VlanTag::Untagged => parent.to_string(),
+        VlanTag::Dot1q(id) => format!("{parent}.{id}"),
+    }
+}
+
+/// What this process has done to the kernel for spanning tree, by ifindex —
+/// the only ports it may undo when spanning tree goes off (`nos-fdbd` also
+/// disables ports, for single-active segments, and must not be fought).
+#[derive(Default)]
+struct StpMemory {
+    /// Ports with the BPDU trap installed.
+    trapped: HashSet<u32>,
+    /// Ports this driver wrote a non-forwarding state to.
+    held: HashSet<u32>,
+}
 
 /// Which kind of thing `reconcile_master` is enslaving a link into — picks
 /// only the log wording, see its doc comment.
@@ -119,6 +211,7 @@ pub struct LinuxInterfaceDriver {
     /// see `port_aggregate_registry` module docs. Never read by any other
     /// process.
     port_aggregate_registry_path: PathBuf,
+    stp: Mutex<StpMemory>,
 }
 
 impl LinuxInterfaceDriver {
@@ -137,7 +230,188 @@ impl LinuxInterfaceDriver {
             watchdog_socket,
             bridge_registry_path,
             port_aggregate_registry_path,
+            stp: Mutex::new(StpMemory::default()),
         })
+    }
+
+    /// One `RTM_SETLINK` in the `AF_BRIDGE` family carrying `attr` under
+    /// `IFLA_PROTINFO` (`bridge link set dev <port> state ..`). Not the
+    /// `RTM_NEWLINK` slave-data path: that one accepts `IFLA_BRPORT_STATE` and
+    /// silently ignores DISABLED (same finding as `nos-fdbd`'s
+    /// `set_port_forwarding`).
+    async fn set_port_attr(&self, index: u32, attr: DefaultNla) -> Result<(), DriverError> {
+        let mut msg = LinkMessage::default();
+        msg.header.interface_family = AddressFamily::Bridge;
+        msg.header.index = index;
+        msg.attributes.push(LinkAttribute::ProtoInfoBridge(vec![
+            LinkProtoInfoBridge::Other(attr),
+        ]));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::SetLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req)?;
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                if e.raw_code() != 0 {
+                    return Err(rtnetlink::Error::NetlinkError(e).into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn tc(&self, req: Tc, tolerate: &'static [i32]) -> Result<(), DriverError> {
+        tokio::task::spawn_blocking(move || tc::send(&req, tolerate))
+            .await
+            .map_err(|e| DriverError::Other(e.to_string()))?
+            .map_err(|e| DriverError::Other(format!("tc request failed: {e}")))
+    }
+
+    /// The kernel link of `port`, if it exists.
+    async fn find_port_link(
+        &self,
+        port: &BridgePortRef,
+    ) -> Result<Option<LinkMessage>, DriverError> {
+        let parent = if port.aggregate {
+            let Some(id) = port_aggregate_registry::lookup_port_aggregate_id(
+                &self.port_aggregate_registry_path,
+                &port.name,
+            ) else {
+                return Ok(None);
+            };
+            port_aggregate_registry::port_aggregate_ifname(id)
+        } else {
+            port.name.clone()
+        };
+        self.find_link(&port_link_name(&parent, port.tag)).await
+    }
+
+    /// Writes `want` to the bridge port `link` unless it already is in that
+    /// state. A down device refuses (`ENETDOWN`) but is already DISABLED, and
+    /// the next resync after it comes up catches it.
+    async fn write_port_state(
+        &self,
+        name: &str,
+        link: &LinkMessage,
+        want: StpPortState,
+        failsafe: bool,
+    ) -> Result<(), DriverError> {
+        let index = link.header.index;
+        let kernel = kernel_state(want);
+        if observed_port_state(link) == Some(kernel) {
+            return Ok(());
+        }
+        match self
+            .set_port_attr(index, DefaultNla::new(IFLA_BRPORT_STATE, vec![kernel]))
+            .await
+        {
+            Err(DriverError::Netlink(rtnetlink::Error::NetlinkError(e)))
+                if e.raw_code() == -ENETDOWN =>
+            {
+                debug!(interface = %name, "bridge port is down, state left for the next resync");
+                return Ok(());
+            }
+            r => r?,
+        }
+        {
+            let mut mem = self.stp.lock().unwrap();
+            if want == StpPortState::Forwarding {
+                mem.held.remove(&index);
+            } else {
+                mem.held.insert(index);
+            }
+        }
+        if failsafe {
+            info!(interface = %name, "bridge port enslaved blocking");
+        } else {
+            info!(interface = %name, state = ?want, "bridge port state set");
+        }
+        Ok(())
+    }
+
+    /// Spanning tree's view of the link `name`: `domain` is the domain it
+    /// should be a bridge port of, if any. While `stp.on`, installs the BPDU
+    /// trap and writes the pushed state — Blocking until `nos-stpd` pushes
+    /// one. Off, or not a bridge port, undoes only what this process did.
+    async fn reconcile_stp_port(
+        &self,
+        name: &str,
+        domain: Option<&str>,
+        stp: &StpPorts,
+    ) -> Result<(), DriverError> {
+        let Some(link) = self.find_link(name).await? else {
+            return Ok(());
+        };
+        let index = link.header.index;
+        let Some(domain) = domain.filter(|_| is_stp_port(&link)) else {
+            return self.stp_release(name, index).await;
+        };
+        if !stp.on {
+            self.remove_trap(name, index).await?;
+            let held = self.stp.lock().unwrap().held.contains(&index);
+            if held && observed_port_state(&link) != Some(BR_STATE_FORWARDING) {
+                self.set_port_attr(
+                    index,
+                    DefaultNla::new(IFLA_BRPORT_STATE, vec![BR_STATE_FORWARDING]),
+                )
+                .await?;
+                info!(interface = %name, "bridge port forwarding restored");
+            }
+            self.stp.lock().unwrap().held.remove(&index);
+            return Ok(());
+        }
+        // The trap first: no BPDU is flooded by a port we are about to open.
+        self.install_trap(name, index).await?;
+        let pushed = stp.states.get(domain).copied();
+        self.write_port_state(
+            name,
+            &link,
+            pushed.unwrap_or(StpPortState::Blocking),
+            pushed.is_none(),
+        )
+        .await
+    }
+
+    /// `name` is not (or no longer) a bridge port: drop what was installed.
+    async fn stp_release(&self, name: &str, index: u32) -> Result<(), DriverError> {
+        self.stp.lock().unwrap().held.remove(&index);
+        self.remove_trap(name, index).await
+    }
+
+    async fn install_trap(&self, name: &str, index: u32) -> Result<(), DriverError> {
+        self.tc(Tc::Clsact { ifindex: index }, &[EEXIST]).await?;
+        for (handle, dst_mac) in tc::TRAPPED {
+            self.tc(
+                Tc::BpduTrap {
+                    ifindex: index,
+                    handle,
+                    dst_mac,
+                },
+                &[],
+            )
+            .await?;
+        }
+        if self.stp.lock().unwrap().trapped.insert(index) {
+            info!(interface = %name, "bpdu trap installed");
+        }
+        Ok(())
+    }
+
+    async fn remove_trap(&self, name: &str, index: u32) -> Result<(), DriverError> {
+        if !self.stp.lock().unwrap().trapped.remove(&index) {
+            return Ok(());
+        }
+        for (handle, _) in tc::TRAPPED {
+            self.tc(
+                Tc::Delete {
+                    ifindex: index,
+                    handle,
+                },
+                NO_FILTER,
+            )
+            .await?;
+        }
+        info!(interface = %name, "bpdu trap removed");
+        Ok(())
     }
 
     /// `.match_name()` performs a targeted (non-dump) `RTM_GETLINK`
@@ -386,6 +660,7 @@ impl LinuxInterfaceDriver {
         interface: &str,
         physical_index: u32,
         desired: &[(u16, TaggedMaster)],
+        stp: &StpPorts,
     ) -> Result<(), DriverError> {
         let prefix = format!("{interface}.");
         let desired_tags: Vec<u16> = desired.iter().map(|(tag, _)| *tag).collect();
@@ -465,6 +740,12 @@ impl LinuxInterfaceDriver {
                 )
                 .execute()
                 .await?;
+            // Up means the kernel opened the port: close it again at once.
+            let domain = match master {
+                TaggedMaster::Bridge(domain) => Some(domain.as_str()),
+                TaggedMaster::Vrf { .. } => None,
+            };
+            self.reconcile_stp_port(&subname, domain, stp).await?;
         }
         Ok(())
     }
@@ -484,6 +765,10 @@ impl LinuxInterfaceDriver {
     /// enslavement actually happens right now (see
     /// `InterfaceState.port_aggregate_active`); ignored when
     /// `port_aggregate` is `None`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one reconciliation shared by interfaces and aggregates"
+    )]
     async fn reconcile_physical_link(
         &self,
         name: &str,
@@ -492,6 +777,7 @@ impl LinuxInterfaceDriver {
         port_aggregate: Option<&str>,
         port_aggregate_active: bool,
         subinterfaces: &[SubinterfaceState],
+        stp: &StpPorts,
     ) -> Result<(), DriverError> {
         let index = link.header.index;
 
@@ -536,6 +822,11 @@ impl LinuxInterfaceDriver {
         };
         self.reconcile_master(name, link, master_ifname.as_deref(), master_kind)
             .await?;
+        // Fail-safe, as soon as the enslaved port exists: before the caller's
+        // trailing `up` where the link is still down (the kernel keeps it
+        // DISABLED until then), else right after the enslavement.
+        self.reconcile_stp_port(name, untagged_domain(switching_profile_members), stp)
+            .await?;
 
         // Union of L2 dot1q switching-profile members and L3 subinterfaces
         // (tag>0) — commit-time validation guarantees the two sets of tags
@@ -556,10 +847,18 @@ impl LinuxInterfaceDriver {
                 },
             )
         }));
-        self.reconcile_tagged_subinterfaces(name, index, &tagged)
+        self.reconcile_tagged_subinterfaces(name, index, &tagged, stp)
             .await?;
         Ok(())
     }
+}
+
+/// The domain a link is an `Untagged` member of, if any.
+fn untagged_domain(members: &[(String, VlanTag)]) -> Option<&str> {
+    members
+        .iter()
+        .find(|(_, tag)| *tag == VlanTag::Untagged)
+        .map(|(domain, _)| domain.as_str())
 }
 
 #[async_trait]
@@ -604,6 +903,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
                 desired.port_aggregate.as_deref(),
                 desired.port_aggregate_active,
                 &desired.subinterfaces,
+                &desired.stp,
             )
             .await?;
         }
@@ -620,6 +920,15 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         }
         self.handle.link().set(link_set.build()).execute().await?;
         trace!(interface = %desired.name, "ensuring interface administratively up");
+        if loopback_table.is_none() {
+            // Up means the kernel opened a freshly enslaved port: close it.
+            self.reconcile_stp_port(
+                &desired.name,
+                untagged_domain(&desired.switching_profile_members),
+                &desired.stp,
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -645,12 +954,13 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             debug!(interface = %name, "interface not present in netns, nothing to remove");
             return Ok(());
         };
-        self.reconcile_tagged_subinterfaces(name, link.header.index, &[])
+        self.reconcile_tagged_subinterfaces(name, link.header.index, &[], &StpPorts::default())
             .await?;
         self.reconcile_addresses(name, link.header.index, &[])
             .await?;
         self.reconcile_master(name, &link, None, MasterKind::Vrf)
             .await?;
+        self.stp_release(name, link.header.index).await?;
         Ok(())
     }
 
@@ -757,6 +1067,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             None,
             true,
             &desired.subinterfaces,
+            &desired.stp,
         )
         .await?;
 
@@ -766,6 +1077,12 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             info!(port_aggregate = %desired.name, mtu, "applied port aggregate mtu");
         }
         self.handle.link().set(link_set.build()).execute().await?;
+        self.reconcile_stp_port(
+            &ifname,
+            untagged_domain(&desired.switching_profile_members),
+            &desired.stp,
+        )
+        .await?;
         Ok(ifname)
     }
 
@@ -808,6 +1125,36 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             }
         }
         None
+    }
+
+    async fn set_bridge_port_state(
+        &self,
+        port: &BridgePortRef,
+        state: StpPortState,
+    ) -> Result<(), DriverError> {
+        let link = self
+            .find_port_link(port)
+            .await?
+            .filter(is_stp_port)
+            .ok_or_else(|| DriverError::Other(format!("{port:?} is not a bridge port")))?;
+        let name = link_name(&link).unwrap_or_default().to_string();
+        self.write_port_state(&name, &link, state, false).await
+    }
+
+    async fn flush_bridge_port(&self, port: &BridgePortRef) -> Result<(), DriverError> {
+        let link = self
+            .find_port_link(port)
+            .await?
+            .filter(is_stp_port)
+            .ok_or_else(|| DriverError::Other(format!("{port:?} is not a bridge port")))?;
+        // `IFLA_BRPORT_FLUSH` is a flag attribute: no payload.
+        self.set_port_attr(
+            link.header.index,
+            DefaultNla::new(IFLA_BRPORT_FLUSH, vec![]),
+        )
+        .await?;
+        debug!(interface = %link_name(&link).unwrap_or_default(), "bridge port fdb flushed");
+        Ok(())
     }
 
     fn watch_links(&self) -> LinkWatch {
@@ -892,6 +1239,59 @@ mod tests {
         assert_eq!(mtu_change(&link, 9000), None);
     }
 
+    fn link_with(infos: Vec<LinkInfo>) -> LinkMessage {
+        let mut link = LinkMessage::default();
+        link.attributes.push(LinkAttribute::LinkInfo(infos));
+        link
+    }
+
+    #[test]
+    fn blocking_is_written_as_disabled_the_only_state_that_sticks_without_stp() {
+        assert_eq!(kernel_state(StpPortState::Blocking), BR_STATE_DISABLED);
+        assert_eq!(kernel_state(StpPortState::Learning), BR_STATE_LEARNING);
+        assert_eq!(kernel_state(StpPortState::Forwarding), BR_STATE_FORWARDING);
+    }
+
+    #[test]
+    fn only_bridge_ports_other_than_vxlan_are_stp_ports() {
+        let bridge_port = vec![LinkInfo::PortKind(InfoPortKind::Bridge)];
+        assert!(is_stp_port(&link_with(bridge_port.clone())));
+        assert!(!is_stp_port(&LinkMessage::default()));
+        assert!(!is_stp_port(&link_with(vec![LinkInfo::PortKind(
+            InfoPortKind::Bond
+        )])));
+        // The VTEP of a VNI domain is a bridge port too, and never ours.
+        let mut vtep = bridge_port;
+        vtep.push(LinkInfo::Kind(InfoKind::Vxlan));
+        assert!(!is_stp_port(&link_with(vtep)));
+    }
+
+    #[test]
+    fn the_observed_state_is_read_from_the_port_data() {
+        assert_eq!(observed_port_state(&LinkMessage::default()), None);
+        let link = link_with(vec![
+            LinkInfo::PortKind(InfoPortKind::Bridge),
+            LinkInfo::PortData(InfoPortData::BridgePort(vec![InfoBridgePort::State(
+                rtnetlink::packet_route::link::BridgePortState::Forwarding,
+            )])),
+        ]);
+        assert_eq!(observed_port_state(&link), Some(BR_STATE_FORWARDING));
+    }
+
+    #[test]
+    fn a_tagged_member_is_its_sub_link() {
+        assert_eq!(port_link_name("eth1", VlanTag::Untagged), "eth1");
+        assert_eq!(port_link_name("bond3", VlanTag::Dot1q(100)), "bond3.100");
+        assert_eq!(untagged_domain(&[("a".into(), VlanTag::Dot1q(5))]), None);
+        assert_eq!(
+            untagged_domain(&[
+                ("a".into(), VlanTag::Dot1q(5)),
+                ("b".into(), VlanTag::Untagged)
+            ]),
+            Some("b")
+        );
+    }
+
     #[test]
     fn loopback_ifname_formats_from_id() {
         assert_eq!(loopback_ifname(100), "lo100");
@@ -934,5 +1334,100 @@ mod tests {
         let (to_add, to_remove) = diff_addresses(&[], &desired);
         assert_eq!(to_add, desired);
         assert_eq!(to_remove, [] as [nos_proto::IpNet; 0]);
+    }
+
+    /// Against the real kernel: needs `CAP_NET_ADMIN` in the current netns and
+    /// `ip`/`bridge`/`tc` as the independent oracle, so run it in a throwaway
+    /// one: `unshare -Urn cargo test -p nos-interface stp_kernel -- --ignored`.
+    #[tokio::test]
+    #[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+    #[allow(
+        clippy::disallowed_types,
+        reason = "test code: ip/bridge/tc are the independent oracle for the netlink writes (#228)"
+    )]
+    async fn stp_kernel_blocks_traps_and_restores_a_bridge_port() {
+        let run = |cmd: &str| {
+            let o = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{cmd}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        run(
+            "ip link add br0 type bridge stp_state 0; ip link add va type veth peer name vb; \
+             ip link set va master br0; ip link set br0 up; ip link set va up; ip link set vb up",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxInterfaceDriver::new(
+            dir.path().join("w.sock"),
+            dir.path().join("bridges"),
+            dir.path().join("aggregates"),
+        )
+        .unwrap();
+        let mut stp = StpPorts {
+            on: true,
+            ..Default::default()
+        };
+        driver
+            .reconcile_stp_port("va", Some("bd"), &stp)
+            .await
+            .unwrap();
+        assert!(run("bridge link show dev va").contains("state disabled"));
+        let filters = run("tc filter show dev va ingress");
+        assert!(
+            filters.contains("01:80:c2:00:00:00") && filters.contains("drop"),
+            "{filters}"
+        );
+        assert!(filters.contains("01:00:0c:cc:cc:cd"), "{filters}");
+        // A second pass changes nothing.
+        driver
+            .reconcile_stp_port("va", Some("bd"), &stp)
+            .await
+            .unwrap();
+
+        let port = BridgePortRef {
+            name: "va".into(),
+            aggregate: false,
+            tag: VlanTag::Untagged,
+        };
+        for (state, shown) in [
+            (StpPortState::Learning, "state learning"),
+            (StpPortState::Forwarding, "state forwarding"),
+            (StpPortState::Blocking, "state disabled"),
+        ] {
+            driver.set_bridge_port_state(&port, state).await.unwrap();
+            assert!(run("bridge link show dev va").contains(shown), "{shown}");
+        }
+        driver.flush_bridge_port(&port).await.unwrap();
+
+        // The pushed state survives the next resync; off restores forwarding.
+        stp.states.insert("bd".into(), StpPortState::Forwarding);
+        driver
+            .reconcile_stp_port("va", Some("bd"), &stp)
+            .await
+            .unwrap();
+        assert!(run("bridge link show dev va").contains("state forwarding"));
+        driver
+            .set_bridge_port_state(&port, StpPortState::Blocking)
+            .await
+            .unwrap();
+        stp.on = false;
+        driver
+            .reconcile_stp_port("va", Some("bd"), &stp)
+            .await
+            .unwrap();
+        assert!(run("bridge link show dev va").contains("state forwarding"));
+        assert!(!run("tc filter show dev va ingress").contains("drop"));
+        // Not a bridge port: refused.
+        run("ip link set va nomaster");
+        assert!(driver
+            .set_bridge_port_state(&port, StpPortState::Blocking)
+            .await
+            .is_err());
     }
 }

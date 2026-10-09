@@ -100,6 +100,8 @@ impl EndpointRegistry {
             ServiceRef::Lacp => return Some(lacp_socket.to_path_buf()),
             ServiceRef::Lldp => return Some(lldp_socket.to_path_buf()),
             ServiceRef::Bfd => return Some(bfd_socket.to_path_buf()),
+            // nos-stpd does not exist yet (#327): nothing to resolve.
+            ServiceRef::Stp => return None,
             ServiceRef::RibTable(name) => (EndpointKind::RibTable, name),
             ServiceRef::BgpInstance(name) => (EndpointKind::BgpInstance, name),
             ServiceRef::OspfInstance(name) => (EndpointKind::OspfInstance, name),

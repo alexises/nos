@@ -14,6 +14,7 @@ pub mod linux;
 pub mod noop;
 pub mod port_aggregate_registry;
 pub mod rib_client;
+pub mod tc;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -21,6 +22,8 @@ use thiserror::Error;
 pub use links::LinkWatch;
 pub use linux::LinuxInterfaceDriver;
 pub use noop::NoopInterfaceDriver;
+
+use nos_proto::{StpPortState, VlanTag};
 
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
@@ -38,6 +41,19 @@ pub enum DriverError {
     LoopbackNotFound(String),
     #[error("created link {0} but could not find it afterwards")]
     LinkNotFoundAfterCreate(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+/// One bridge port, as the config names it: the `Interface` or
+/// `PortAggregate` `name`, and the `tag` it has in the domain's switching
+/// profile (`Untagged` = the link itself, `Dot1q(n)` = its `<name>.<n>`
+/// sub-link). The driver resolves the kernel link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgePortRef {
+    pub name: String,
+    pub aggregate: bool,
+    pub tag: VlanTag,
 }
 
 /// One instance lives for the process lifetime, constructed in `main.rs`
@@ -127,6 +143,19 @@ pub trait InterfaceDriver: Send + Sync {
     /// consumer with no kernel access of its own (`nos-ospfv3d`, sourcing
     /// RFC 5340 Hello/Link-LSA traffic from it).
     async fn link_local_address(&self, kernel_interface: &str) -> Option<std::net::Ipv6Addr>;
+
+    /// Puts one bridge port in `state` right now (`InterfaceRequest::
+    /// SetStpPortStates`). The port must exist and be a bridge port. A
+    /// resync keeps the state through `InterfaceState.stp`.
+    async fn set_bridge_port_state(
+        &self,
+        port: &BridgePortRef,
+        state: StpPortState,
+    ) -> Result<(), DriverError>;
+
+    /// Flushes the dynamic FDB entries learned on one bridge port
+    /// (`InterfaceRequest::FlushFdb`).
+    async fn flush_bridge_port(&self, port: &BridgePortRef) -> Result<(), DriverError>;
 
     /// Snapshot of the kernel's link table plus a receiver for later changes,
     /// for `InterfaceRequest::SubscribeLinks`. The noop driver reports

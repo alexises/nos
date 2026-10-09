@@ -50,6 +50,7 @@ pub async fn run(
         DiffScope::BroadcastDomains,
         DiffScope::SwitchingProfiles,
         DiffScope::PortAggregates,
+        DiffScope::SpanningTree,
     ];
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(&config_socket, scopes.clone()).await {

@@ -24,6 +24,9 @@ tokio-util         = { workspace = true }
 futures            = { workspace = true }
 async-trait        = { workspace = true }
 rtnetlink          = { workspace = true }
+netlink-packet-core  = { workspace = true }
+netlink-packet-route = { workspace = true }
+netlink-sys          = { workspace = true }
 fs2                = { workspace = true }
 serde_yaml         = { workspace = true }
 tempfile           = { workspace = true }
