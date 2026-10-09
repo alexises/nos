@@ -15,3 +15,4 @@ pki/CLAUDE.md 8192
 proto/CLAUDE.md 8192
 rest/CLAUDE.md 8192
 rib/CLAUDE.md 8192
+stp/CLAUDE.md 8192

@@ -2181,6 +2181,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-stp"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "nos-tcp-auth"
 version = "0.1.0"
 dependencies = [
