@@ -140,6 +140,11 @@ impl BroadcastDomainOp {
                         arp_redistribute: None,
                         connected_redistribute: None,
                         neigh_suppress: false,
+                        stp_instance: None,
+                        stp_priority: None,
+                        stp_hello_time: None,
+                        stp_max_age: None,
+                        stp_forward_delay: None,
                     });
                 }
                 Ok(())
@@ -333,6 +338,11 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            stp_instance: None,
+            stp_priority: None,
+            stp_hello_time: None,
+            stp_max_age: None,
+            stp_forward_delay: None,
         }
     }
 

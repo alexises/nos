@@ -179,4 +179,6 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 |---|---|---|---|---|---|---|
 | switching-profile | `set interface <if> switching-profile <sp>` / `set port-aggregate <pa> switching-profile <sp>` / `set switching-profile <sp>`; `delete … switching-profile` | `interface/<if>/switching-profile`; `port-aggregate/<pa>/switching-profile` (see [Port aggregation](port-aggregation-lacp.md#configuration-reference)) | name; default unset | profile exists; its tags don't collide with the interface's subinterfaces; not on a port aggregate member | joins the profile's domains | `show interface <if>`, `show port-aggregate <pa>` |
 
+Spanning tree settings for these objects (`stp-instance`, `stp-priority`, `stp-cost`, `stp-port-profile`) are in [Spanning tree](stp.md).
+
 Implementation notes for developers are in [`docs/internals/interface.md`](../internals/interface.md).

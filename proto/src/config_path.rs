@@ -40,6 +40,7 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "tag",
     "prefix",
     "to",
+    "id",
 ];
 
 #[derive(Debug, Error, PartialEq, Eq)]

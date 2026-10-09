@@ -20,8 +20,10 @@ pub mod port_aggregate;
 pub mod prefix_list;
 pub mod routing_table;
 pub mod sbfd;
+pub mod spanning_tree;
 pub mod static_route;
 pub mod static_routing_instance;
+pub mod stp_port_profile;
 pub mod sugar;
 pub mod switching_profile;
 pub mod user;
@@ -69,8 +71,10 @@ pub use routing_table::{
     REST_API_PORT_DEFAULT,
 };
 pub use sbfd::SbfdReflector;
+pub use spanning_tree::{MstInstance, SpanningTree, StpForceVersion, StpMode, StpRegion};
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
+pub use stp_port_profile::{EdgePort, LinkType, StpPortMstInstance, StpPortProfile};
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
 pub use user::{User, PASSWORD_HASH_PREFIX};
 
@@ -195,6 +199,21 @@ pub struct Config {
     #[garde(custom(|r: &SbfdReflector, _ctx: &Config| r.check()))]
     #[cli(topic = SbfdReflector, words = "sbfd reflector")]
     pub sbfd_reflector: SbfdReflector,
+
+    /// Bridge-wide spanning-tree parameters (inert until `nos-stpd`).
+    /// `serde(default)` so on-disk config saved before this field existed
+    /// still loads.
+    #[serde(default)]
+    #[garde(custom(|s: &SpanningTree, ctx: &Config| spanning_tree::valid_spanning_tree(s, ctx)))]
+    #[cli(topic = SpanningTree, words = "spanning-tree")]
+    pub spanning_tree: SpanningTree,
+
+    /// Named spanning-tree port settings, referenced by `stp-port-profile`
+    /// from interfaces and port aggregates.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = StpPortProfile, words = "stp-port-profile")]
+    pub stp_port_profiles: Vec<StpPortProfile>,
 }
 
 impl Config {
@@ -240,6 +259,8 @@ impl Default for Config {
             users: Vec::new(),
             bfd_profiles: Vec::new(),
             sbfd_reflector: SbfdReflector::default(),
+            spanning_tree: SpanningTree::default(),
+            stp_port_profiles: Vec::new(),
         }
     }
 }

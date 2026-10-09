@@ -61,6 +61,8 @@ impl SwitchingProfileOp {
                     None => profile.members.push(SwitchingProfileMember {
                         broadcast_domain: broadcast_domain.clone(),
                         tag: *tag,
+                        stp_cost: None,
+                        stp_priority: None,
                     }),
                 }
                 Ok(())
@@ -171,6 +173,7 @@ mod tests {
                 vec![SwitchingProfileMember {
                     broadcast_domain: "bd1".to_string(),
                     tag: VlanTag::Dot1q(100),
+                    ..Default::default()
                 }],
             )],
             ..Default::default()
@@ -207,6 +210,7 @@ mod tests {
                 vec![SwitchingProfileMember {
                     broadcast_domain: "bd1".to_string(),
                     tag: VlanTag::Dot1q(100),
+                    ..Default::default()
                 }],
             )],
             ..Default::default()

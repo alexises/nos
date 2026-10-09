@@ -3,10 +3,10 @@ use std::net::IpAddr;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::{bfd_reference_valid, unique_in};
+use crate::validators::{bfd_reference_valid, stp_port_profile_reference_valid, unique_in};
 
 use super::interface::{switching_profile_reference_valid, valid_mtu, valid_subinterface_list};
-use super::{Config, Subinterface, VlanTag};
+use super::{Config, EdgePort, StpMode, Subinterface, VlanTag};
 use nos_proto_derive::Cli;
 
 /// How a `PortAggregate`'s member set is decided. Both variants create the
@@ -190,6 +190,14 @@ pub struct PortAggregate {
     #[cli(topic = PortAggregateBfdPeer, words = "bfd-peer")]
     pub bfd_peer: Option<IpAddr>,
 
+    /// Names an `StpPortProfile` for this bond as a spanning-tree port.
+    /// Inert until `nos-stpd`. An ESI aggregate needs one with
+    /// `edge-port admin` and `bpdu-guard` (see `valid_port_aggregates`).
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| stp_port_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = PortAggregateStpPortProfile, words = "stp-port-profile")]
+    pub stp_port_profile: Option<String>,
+
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
@@ -228,6 +236,7 @@ impl Default for PortAggregate {
             min_links: default_min_links(),
             bfd: None,
             bfd_peer: None,
+            stp_port_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -285,6 +294,23 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
                 "port aggregate {} sets a df-algorithm but has no esi",
                 agg.name
             )));
+        }
+    }
+    // A multi-homed segment must never join the spanning tree as a root or
+    // transit port: the other PE's BPDUs would block it. An admin edge port
+    // with bpdu-guard makes a stray BPDU a visible err-disable instead.
+    if ctx.spanning_tree.mode != StpMode::Disabled {
+        for agg in aggregates.iter().filter(|a| a.esi.is_some()) {
+            let profile = agg
+                .stp_port_profile
+                .as_ref()
+                .and_then(|n| ctx.stp_port_profiles.iter().find(|p| &p.name == n));
+            if !profile.is_some_and(|p| p.edge_port == EdgePort::Admin && p.bpdu_guard) {
+                return Err(garde::Error::new(format!(
+                    "port aggregate {} has an esi: it needs an stp-port-profile with edge-port admin and bpdu-guard (or spanning-tree mode disabled)",
+                    agg.name
+                )));
+            }
         }
     }
     // One aggregate per Ethernet Segment on a PE: two bonds claiming the same
@@ -353,7 +379,7 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::InterfaceAddress;
+    use crate::schema::{InterfaceAddress, StpPortProfile};
 
     fn aggregate(name: &str) -> PortAggregate {
         PortAggregate {
@@ -368,17 +394,67 @@ mod tests {
             min_links: 1,
             bfd: None,
             bfd_peer: None,
+            stp_port_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }
     }
 
+    /// Spanning tree off: the ESI/guard rule has its own tests below.
     fn config_with(aggregates: Vec<PortAggregate>) -> Config {
-        Config {
+        let mut c = Config {
             port_aggregates: aggregates,
             ..Default::default()
+        };
+        c.spanning_tree.mode = StpMode::Disabled;
+        c
+    }
+
+    const ESI: &str = "00:11:22:33:44:55:66:77:88:99";
+
+    fn esi_config(profile: Option<StpPortProfile>, mode: StpMode) -> Config {
+        let mut a = aggregate("bond1");
+        a.esi = Some(ESI.to_string());
+        a.stp_port_profile = profile.as_ref().map(|p| p.name.clone());
+        let mut c = config_with(vec![a]);
+        c.spanning_tree.mode = mode;
+        c.stp_port_profiles = profile.into_iter().collect();
+        c
+    }
+
+    fn guard(edge_port: EdgePort, bpdu_guard: bool) -> StpPortProfile {
+        StpPortProfile {
+            name: "guard".into(),
+            edge_port,
+            bpdu_guard,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn esi_aggregate_needs_an_admin_edge_bpdu_guard_profile() {
+        let ok = |p, m| {
+            let c = esi_config(p, m);
+            c.validate_with(&c).is_ok()
+        };
+        assert!(ok(Some(guard(EdgePort::Admin, true)), StpMode::Rstp));
+        assert!(ok(Some(guard(EdgePort::Admin, true)), StpMode::Mstp));
+        // no profile / not admin edge / no bpdu-guard
+        assert!(!ok(None, StpMode::Rstp));
+        assert!(!ok(Some(guard(EdgePort::Auto, true)), StpMode::Rstp));
+        assert!(!ok(Some(guard(EdgePort::Admin, false)), StpMode::RapidPvst));
+        // spanning tree off: no requirement
+        assert!(ok(None, StpMode::Disabled));
+    }
+
+    #[test]
+    fn unknown_or_deleted_profile_is_refused_per_user() {
+        let mut a = aggregate("bond1");
+        a.stp_port_profile = Some("gone".into());
+        let c = config_with(vec![a]);
+        let err = c.validate_with(&c).unwrap_err().to_string();
+        assert!(err.contains("port_aggregates[0].stp_port_profile"), "{err}");
     }
 
     #[test]

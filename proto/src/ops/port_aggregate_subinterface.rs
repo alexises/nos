@@ -239,6 +239,7 @@ mod tests {
             min_links: 1,
             bfd: None,
             bfd_peer: None,
+            stp_port_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces,

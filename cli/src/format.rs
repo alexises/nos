@@ -1032,13 +1032,20 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         logging,
         bfd_profiles,
         sbfd_reflector,
+        spanning_tree,
+        stp_port_profiles,
     } = diff;
     let mut lines = Vec::new();
 
     if let Some(field) = hostname {
         render_field_diff(&mut lines, field, "", color);
     }
-    for field in lldp.iter().chain(logging).chain(sbfd_reflector) {
+    for field in lldp
+        .iter()
+        .chain(logging)
+        .chain(sbfd_reflector)
+        .chain(spanning_tree)
+    {
         render_field_diff(&mut lines, field, "", color);
     }
 
@@ -1059,6 +1066,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         as_path_lists,
         prefix_lists,
         bfd_profiles,
+        stp_port_profiles,
     ] {
         for section in sections {
             render_section(&mut lines, section, 0, color);

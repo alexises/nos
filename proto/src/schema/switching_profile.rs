@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_in;
 
+use super::spanning_tree::valid_port_priority;
 use super::Config;
 use nos_proto_derive::Cli;
 
@@ -29,6 +30,19 @@ pub struct SwitchingProfileMember {
     #[garde(custom(|t: &VlanTag, _ctx: &Config| valid_vlan_tag(*t)))]
     #[cli(topic = SwitchingProfileMember)]
     pub tag: VlanTag,
+
+    /// Spanning-tree port cost for the ports using this membership; `None`:
+    /// the profile's or automatic. Inert until `nos-stpd`.
+    #[serde(default)]
+    #[garde(inner(range(min = 1, max = 200_000_000)))]
+    #[cli(topic = SwitchingProfileMemberStpCost, words = "stp-cost")]
+    pub stp_cost: Option<u32>,
+
+    /// Spanning-tree port priority for this membership; a multiple of 16.
+    #[serde(default)]
+    #[garde(inner(custom(|p: &u8, _ctx: &Config| valid_port_priority(*p))))]
+    #[cli(topic = SwitchingProfileMemberStpPriority, words = "stp-priority")]
+    pub stp_priority: Option<u8>,
 }
 
 fn broadcast_domain_reference_valid(broadcast_domain: &str, ctx: &Config) -> garde::Result {
@@ -98,6 +112,7 @@ mod tests {
         SwitchingProfileMember {
             broadcast_domain: broadcast_domain.to_string(),
             tag,
+            ..Default::default()
         }
     }
 
@@ -121,6 +136,11 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            stp_instance: None,
+            stp_priority: None,
+            stp_hello_time: None,
+            stp_max_age: None,
+            stp_forward_delay: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -255,5 +275,29 @@ mod tests {
             vec![domain("bd1"), domain("bd2")],
         );
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn member_stp_port_settings_are_ranged() {
+        let ok = |cost, prio| {
+            let cfg = config_with(
+                vec![SwitchingProfile {
+                    name: "sp1".to_string(),
+                    members: vec![SwitchingProfileMember {
+                        broadcast_domain: "bd1".to_string(),
+                        stp_cost: cost,
+                        stp_priority: prio,
+                        ..Default::default()
+                    }],
+                }],
+                vec![domain("bd1")],
+            );
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(ok(None, None));
+        assert!(ok(Some(200_000_000), Some(240)));
+        assert!(!ok(Some(0), None));
+        assert!(!ok(Some(200_000_001), None));
+        assert!(!ok(None, Some(100)));
     }
 }

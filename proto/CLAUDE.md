@@ -32,6 +32,7 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 - Loopback = `Interface.name` starting `loopback-` (`LOOPBACK_PREFIX`); names may not contain `.`, which is reserved for `<interface>.<tag>`.
 - `OspfProfile.name` is unique across every instance's every area, since attach points reference it by bare name; each `ospf_profile` attach point also needs a `routing_table`.
 - A new keyed list needs its key in `config_path::ELEMENT_KEYS` and `#[cli(key)]`.
+- STP (#316): `Config.spanning_tree` is a singleton (field-level diff, no op), `stp_port_profiles` a keyed section; the commit checks live in `schema/spanning_tree.rs`, the ESI-needs-a-guard-profile rule in `valid_port_aggregates` (`nos-provision` attaches `esi-guard`). Inert until `nos-stpd`.
 - Wire semantics worth remembering: `Interfaces`/`Log`/`Lacp`/`Lldp` `ServiceRef`s carry no name (one instance each); `PushBgpRoutes`/`PushLacpMembers` are fire-and-forget; `GetVrfName` was the first daemon-to-daemon link; EVPN routes cross the wire structured because proto can't depend on `nos-bgp`; `BgpSessionState::Idle` is reporting-only.
 
 ## Wire format

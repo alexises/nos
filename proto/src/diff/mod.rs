@@ -81,6 +81,9 @@ pub struct ConfigDiff {
     pub bfd_profiles: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.sbfd_reflector` is one singleton section.
     pub sbfd_reflector: Vec<FieldDiff>,
+    /// Field-level, like `lldp`: `Config.spanning_tree` is one singleton section.
+    pub spanning_tree: Vec<FieldDiff>,
+    pub stp_port_profiles: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -105,6 +108,8 @@ impl ConfigDiff {
             && self.logging.is_empty()
             && self.bfd_profiles.is_empty()
             && self.sbfd_reflector.is_empty()
+            && self.spanning_tree.is_empty()
+            && self.stp_port_profiles.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -213,6 +218,16 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            spanning_tree: if scopes.contains(&DiffScope::SpanningTree) {
+                self.spanning_tree.clone()
+            } else {
+                Vec::new()
+            },
+            stp_port_profiles: if scopes.contains(&DiffScope::StpPortProfiles) {
+                self.stp_port_profiles.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -242,6 +257,8 @@ pub enum DiffScope {
     Logging,
     BfdProfiles,
     SbfdReflector,
+    SpanningTree,
+    StpPortProfiles,
 }
 
 /// The `FieldDiff` label `nos-watchdogd` keys on to decide whether a routing
@@ -314,6 +331,28 @@ mod tests {
         assert_eq!(field.old.as_deref(), Some("router-a"));
         assert_eq!(field.new.as_deref(), Some("router-b"));
         assert_eq!(diff.bgp_instances, []);
+    }
+
+    #[test]
+    fn spanning_tree_and_port_profile_changes_have_their_own_scopes() {
+        use crate::schema::{StpMode, StpPortProfile};
+        let base = Config::default();
+        let mut candidate = Config::default();
+        candidate.spanning_tree.mode = StpMode::Mstp;
+        candidate.stp_port_profiles = vec![StpPortProfile {
+            name: "edge".into(),
+            ..Default::default()
+        }];
+        let diff = diff_configs(&base, &candidate);
+        assert_eq!(diff.spanning_tree.len(), 1);
+        assert_eq!(diff.stp_port_profiles.len(), 1);
+        let only_tree = diff.scoped(&[DiffScope::SpanningTree]);
+        assert!(!only_tree.spanning_tree.is_empty() && only_tree.stp_port_profiles.is_empty());
+        let only_profiles = diff.scoped(&[DiffScope::StpPortProfiles]);
+        assert!(
+            only_profiles.spanning_tree.is_empty() && !only_profiles.stp_port_profiles.is_empty()
+        );
+        assert!(diff.scoped(&[DiffScope::Hostname]).is_empty());
     }
 
     #[test]

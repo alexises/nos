@@ -899,6 +899,7 @@ mod tests {
             lldp_receive: false,
             lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -947,6 +948,7 @@ mod tests {
                 arp_redistribute: None,
                 connected_redistribute: None,
                 neigh_suppress: false,
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -1001,6 +1003,7 @@ mod tests {
                 arp_redistribute: None,
                 connected_redistribute: None,
                 neigh_suppress: false,
+                ..Default::default()
             }],
             ..Default::default()
         };
