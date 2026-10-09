@@ -1537,6 +1537,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the BFD Echo interval.",
             "Milliseconds between Echo packets, 10 to 4294967, and the Required Min Echo RX Interval advertised to the peer. The interval used is the larger of this and the peer's advertised value; the session goes down after that interval times the detect multiplier without a returned packet.",
         ),
+        Topic::BfdProfilePaddedPduSize => (
+            "Pad BFD Control packets to a size.",
+            "RFC 9764: the UDP payload of every Control packet is padded with zeros to this many bytes, 24 to 9000, to test that the path carries packets that large (a path MTU, not the link MTU). The packet is never smaller than a bare Control packet. Set it on both ends to test both directions; a peer that cannot receive such packets drops them and the session goes down by detection time. Packets that do not fit are sent with the don't-fragment bit, so the session also goes down when the path cannot carry them. Unset sends the bare packet.",
+        ),
         Topic::BfdReference => (
             "Run BFD with a BFD profile.",
             "The name of a `bfd-profile` whose parameters apply to the sessions of this peer-group, OSPF or OSPFv3 profile, or static route. The commit is refused when the profile does not exist. Unset runs no BFD.",

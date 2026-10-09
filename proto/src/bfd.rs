@@ -160,6 +160,8 @@ pub struct BfdSessionView {
     pub echo_interval_us: u32,
     /// RFC 9747 unaffiliated Echo: no Control traffic at all.
     pub echo_only: bool,
+    /// RFC 9764: the UDP payload size Control packets are padded to, 0 when not padded.
+    pub tx_pdu_bytes: u32,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

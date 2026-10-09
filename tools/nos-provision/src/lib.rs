@@ -542,6 +542,9 @@ pub struct Args {
     /// `echo-interval` of `bfd-profile fast`, milliseconds.
     #[arg(long)]
     pub bfd_echo_interval: Option<u32>,
+    /// `padded-pdu-size` of `bfd-profile fast` (RFC 9764), bytes.
+    #[arg(long)]
+    pub bfd_padded_pdu_size: Option<u16>,
 
     #[arg(long)]
     pub save: bool,
@@ -1574,6 +1577,9 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     if let Some(ms) = args.bfd_echo_interval {
         v.push((profile("echo-interval"), Some(ms.to_string())));
     }
+    if let Some(n) = args.bfd_padded_pdu_size {
+        v.push((profile("padded-pdu-size"), Some(n.to_string())));
+    }
     for subnet in args.static_route.iter().filter(|_| args.bfd_static) {
         v.push((
             vec![
@@ -1679,6 +1685,9 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
         }
         if let Some(ms) = args.bfd_echo_interval {
             p.echo_interval = ms;
+        }
+        if let Some(n) = args.bfd_padded_pdu_size {
+            p.padded_pdu_size = Some(n);
         }
     }
     for i in config
@@ -4280,6 +4289,8 @@ mod tests {
             "affiliated",
             "--bfd-echo-interval",
             "70",
+            "--bfd-padded-pdu-size",
+            "1500",
         ])
         .unwrap();
         let edits = bfd_paths(&args);
@@ -4291,6 +4302,7 @@ mod tests {
         };
         assert_eq!(get("echo-mode").as_deref(), Some("\"Affiliated\""));
         assert_eq!(get("echo-interval").as_deref(), Some("70"));
+        assert_eq!(get("padded-pdu-size").as_deref(), Some("1500"));
         assert_eq!(
             parse_echo_mode("unaffiliated"),
             Ok(nos_proto::schema::EchoMode::Unaffiliated)

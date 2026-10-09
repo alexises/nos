@@ -97,6 +97,7 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 ## Check it by hand
 
 - `nos show bfd sessions` or `GET /v1/bfd/sessions` lists what the daemon holds.
+- `cargo run -p nos-e2e -- bfd-padded` proves 1400-byte packets between the routers, the `EMSGSIZE` warning and the peer's detection-time Down when router-a's MTU drops to 1300, recovery, and FRR `bfdd` accepting padded packets.
 - `cargo run -p nos-e2e -- bfd-auth` proves matching and wrong keys, a live key and method change without a flap, and the unauthenticated FRR staying down.
 - `cargo run -p nos-e2e -- bfd-echo-unaffiliated` proves a BFD-less forwarding gateway (router-b with `ip_forward`) brings the session and the guarded route up from looped packets, `echo-function-failed` and route withdrawal when UDP 3785 is dropped, and recovery.
 - `cargo run -p nos-e2e -- bfd-echo` proves Echo active on both ends with Control slowed to 1 s, `echo-function-failed` when only UDP 3785 is dropped, recovery, and an FRR `bfdd` (`echo receive-interval 50`) with Echo running.

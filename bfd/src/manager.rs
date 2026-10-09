@@ -395,6 +395,7 @@ impl Manager {
                     echo_active: s.echo_active,
                     echo_interval_us: s.echo_interval_us,
                     echo_only: s.echo_only,
+                    tx_pdu_bytes: s.tx_pdu_bytes,
                 }
             })
             .collect();
