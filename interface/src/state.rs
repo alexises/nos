@@ -526,6 +526,7 @@ mod tests {
             lldp_receive: false,
             lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -752,6 +753,7 @@ mod tests {
             members: vec![nos_proto::SwitchingProfileMember {
                 broadcast_domain: "bd1".to_string(),
                 tag: VlanTag::Dot1q(100),
+                ..Default::default()
             }],
         }];
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
@@ -796,6 +798,7 @@ mod tests {
                 arp_redistribute: None,
                 connected_redistribute: None,
                 neigh_suppress: false,
+                ..Default::default()
             },
             nos_proto::BroadcastDomain {
                 name: "bd2".to_string(),
@@ -812,6 +815,7 @@ mod tests {
                 arp_redistribute: None,
                 connected_redistribute: None,
                 neigh_suppress: false,
+                ..Default::default()
             },
         ];
         build_from_config(&config, &driver, &Interfaces::new()).await;
@@ -847,6 +851,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            ..Default::default()
         }];
         build_from_config(&config, &driver, &Interfaces::new()).await;
         let calls = driver.calls.lock().unwrap().clone();
@@ -881,6 +886,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            ..Default::default()
         }];
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
         let domain = interfaces.get_domain("bd1").unwrap();
@@ -914,6 +920,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            ..Default::default()
         }];
         let previous = build_from_config(&config_with_domain, &driver, &Interfaces::new()).await;
 
@@ -939,6 +946,7 @@ mod tests {
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1005,6 +1013,7 @@ mod tests {
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
+            ..Default::default()
         }];
         config
     }

@@ -24,8 +24,8 @@ use nos_proto::{
     OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp,
     Redistribute, RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp,
-    SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
-    SyslogFacility, SyslogTransport, UserOp, VlanTag,
+    SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp,
+    SwitchingProfileOp, SyslogFacility, SyslogTransport, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -1511,6 +1511,11 @@ fn parse_echo_mode(s: &str) -> Result<nos_proto::schema::EchoMode, String> {
 /// The profile `--bfd-static` creates and references.
 pub const BFD_PROFILE: &str = "fast";
 
+/// The `stp-port-profile` `--port-aggregate-esi` creates (`edge-port admin`,
+/// `bpdu-guard`) and attaches to the aggregate: a commit with an ESI
+/// aggregate is refused without one (#317) unless spanning tree is disabled.
+pub const STP_GUARD_PROFILE: &str = "esi-guard";
+
 /// The S-BFD initiator profile `--sbfd-static-route` creates and references.
 pub const SBFD_PROFILE: &str = "sb";
 
@@ -1519,6 +1524,27 @@ pub const SBFD_PROFILE: &str = "sb";
 /// through the generic path edit after the ops.
 pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     let mut v = Vec::new();
+    if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
+        let guard = |field: &str| {
+            vec![
+                "stp-port-profile".to_string(),
+                STP_GUARD_PROFILE.to_string(),
+                field.to_string(),
+            ]
+        };
+        v.extend([
+            (guard("edge-port"), Some("\"Admin\"".to_string())),
+            (guard("bpdu-guard"), Some("true".to_string())),
+            (
+                vec![
+                    "port-aggregate".to_string(),
+                    agg.clone(),
+                    "stp-port-profile".to_string(),
+                ],
+                Some(format!("\"{STP_GUARD_PROFILE}\"")),
+            ),
+        ]);
+    }
     if args.bfd_bgp || args.no_bfd_bgp {
         v.push((
             vec![
@@ -1665,6 +1691,19 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
 /// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
+    if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
+        for p in config
+            .stp_port_profiles
+            .iter_mut()
+            .filter(|p| p.name == STP_GUARD_PROFILE)
+        {
+            p.edge_port = nos_proto::schema::EdgePort::Admin;
+            p.bpdu_guard = true;
+        }
+        for a in config.port_aggregates.iter_mut().filter(|a| &a.name == agg) {
+            a.stp_port_profile = Some(STP_GUARD_PROFILE.to_string());
+        }
+    }
     for i in config
         .bgp_instances
         .iter_mut()
@@ -2598,6 +2637,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             ));
         }
         if let Some(esi) = args.port_aggregate_esi.clone() {
+            ops.push(ConfigOp::StpPortProfile(StpPortProfileOp::Ensure {
+                name: STP_GUARD_PROFILE.to_string(),
+            }));
             ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetEsi {
                 name: name.clone(),
                 esi,
@@ -4471,6 +4513,71 @@ mod tests {
         assert_eq!(
             cfg.static_routing_instances[0].routes[0].bfd.as_deref(),
             Some("sb")
+        );
+    }
+
+    #[test]
+    fn esi_aggregate_gets_the_stp_guard_profile() {
+        let args = Args::try_parse_from([
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "1",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "2",
+            "--peer",
+            "10.0.0.2",
+            "--port-aggregate",
+            "bond1",
+            "--port-aggregate-esi",
+            "00:11:22:33:44:55:66:77:88:99",
+        ])
+        .unwrap();
+        let edits = bfd_paths(&args);
+        let get = |p: &[&str]| {
+            edits
+                .iter()
+                .find(|(path, _)| path == p)
+                .and_then(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            get(&["stp-port-profile", "esi-guard", "edge-port"]).as_deref(),
+            Some("\"Admin\"")
+        );
+        assert_eq!(
+            get(&["stp-port-profile", "esi-guard", "bpdu-guard"]).as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            get(&["port-aggregate", "bond1", "stp-port-profile"]).as_deref(),
+            Some("\"esi-guard\"")
+        );
+        // Applied to a local Config (the e2e seed):
+        let mut cfg = nos_proto::Config::default();
+        for op in build_ops(&args).unwrap() {
+            op.apply(&mut cfg).unwrap();
+        }
+        apply_bfd(&args, &mut cfg);
+        assert!(
+            cfg.stp_port_profiles[0].bpdu_guard
+                && cfg.port_aggregates[0].stp_port_profile.is_some()
+        );
+        // ... and the same edits, replayed as path writes, give the same config.
+        let mut via_paths = nos_proto::Config::default();
+        for op in build_ops(&args).unwrap() {
+            op.apply(&mut via_paths).unwrap();
+        }
+        let mut doc = serde_json::to_value(&via_paths).unwrap();
+        for (path, value) in &edits {
+            let v = value.as_deref().map(|v| serde_json::from_str(v).unwrap());
+            nos_proto::config_path::set(&mut doc, path, v.unwrap()).unwrap();
+        }
+        assert_eq!(
+            serde_json::from_value::<nos_proto::Config>(doc).unwrap(),
+            cfg
         );
     }
 

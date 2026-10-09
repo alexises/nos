@@ -518,3 +518,38 @@ fn aggregate_address_list() {
         }]
     );
 }
+
+/// STP 1/7 (#317): the spanning-tree singleton, its MST instance list and the
+/// port profile, driven through the same grammar as everything else.
+#[test]
+fn spanning_tree_and_port_profile() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let run = |line: &str, doc: &mut Value| {
+        let edit = config_grammar::parse(line, &[], doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set(doc, &path, value).unwrap();
+        }
+    };
+    run("set spanning-tree mode rapid-pvst", &mut doc);
+    run("set spanning-tree priority 4096", &mut doc);
+    run("set spanning-tree region name lab", &mut doc);
+    run("set spanning-tree mst-instance 5 priority 8192", &mut doc);
+    run("set stp-port-profile edge edge-port admin", &mut doc);
+    run("set stp-port-profile edge bpdu-guard", &mut doc);
+    run(
+        "set stp-port-profile edge mst-instance 5 cost 100",
+        &mut doc,
+    );
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    let st = &cfg.spanning_tree;
+    assert_eq!(st.mode, nos_proto::schema::StpMode::RapidPvst);
+    assert_eq!((st.priority, st.region.name.as_str()), (4096, "lab"));
+    assert_eq!(
+        (st.mst_instances[0].id, st.mst_instances[0].priority),
+        (5, 8192)
+    );
+    let p = &cfg.stp_port_profiles[0];
+    assert_eq!(p.edge_port, nos_proto::schema::EdgePort::Admin);
+    assert!(p.bpdu_guard);
+    assert_eq!(p.mst_instances[0].cost, Some(100));
+}

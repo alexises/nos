@@ -6,6 +6,7 @@ use crate::validators::{
     unique_addresses, unique_in,
 };
 
+use super::spanning_tree::{valid_bridge_priority, valid_timers};
 use super::{Config, InterfaceAddress, SourceAddress};
 use nos_proto_derive::Cli;
 
@@ -115,6 +116,35 @@ pub struct BroadcastDomain {
     #[garde(skip)]
     #[cli(topic = BroadcastDomainNeighSuppress, words = "neigh-suppress")]
     pub neigh_suppress: bool,
+
+    /// The MST instance (`spanning-tree mst-instance`) this domain's VLAN
+    /// belongs to under `mode mstp`. `None`: the CIST. Inert until `nos-stpd`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BroadcastDomainStpInstance, words = "stp-instance")]
+    pub stp_instance: Option<u16>,
+
+    /// Per-VLAN bridge priority under `mode rapid-pvst`; `None` inherits
+    /// `spanning-tree priority`. A multiple of 4096.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BroadcastDomainStpPriority, words = "stp-priority")]
+    pub stp_priority: Option<u16>,
+
+    /// Per-VLAN timers under `mode rapid-pvst`; `None` inherits the global
+    /// one. The 802.1Q 13.25 relations are checked on the effective set.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BroadcastDomainStpHelloTime, words = "stp-hello-time")]
+    pub stp_hello_time: Option<u8>,
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BroadcastDomainStpMaxAge, words = "stp-max-age")]
+    pub stp_max_age: Option<u8>,
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BroadcastDomainStpForwardDelay, words = "stp-forward-delay")]
+    pub stp_forward_delay: Option<u8>,
 }
 
 fn valid_vni(vni: Option<u32>) -> garde::Result {
@@ -153,6 +183,33 @@ fn bgp_instance_exists(name: Option<&String>, ctx: &Config) -> garde::Result {
     }
 }
 
+/// A domain's spanning-tree settings: its MST instance must exist, its
+/// priority is a multiple of 4096, and its effective timers (its own, else
+/// the global ones) obey 802.1Q 13.25.
+fn valid_domain_stp(d: &BroadcastDomain, ctx: &Config) -> garde::Result {
+    let g = &ctx.spanning_tree;
+    if let Some(id) = d.stp_instance {
+        if !g.mst_instances.iter().any(|m| m.id == id) {
+            return Err(garde::Error::new(format!(
+                "broadcast domain {}: stp-instance {id} is not defined under spanning-tree",
+                d.name
+            )));
+        }
+    }
+    if let Some(p) = d.stp_priority {
+        valid_bridge_priority(p, "stp-priority")?;
+    }
+    if d.stp_hello_time.is_some() || d.stp_max_age.is_some() || d.stp_forward_delay.is_some() {
+        valid_timers(
+            d.stp_hello_time.unwrap_or(g.hello_time),
+            d.stp_max_age.unwrap_or(g.max_age),
+            d.stp_forward_delay.unwrap_or(g.forward_delay),
+            &format!("broadcast domain {}", d.name),
+        )?;
+    }
+    Ok(())
+}
+
 /// `ospf_profile`/`ospfv3_profile`, if set, require `routing_table` also set
 /// on the same domain — mirrors `interface::valid_addressing_split`'s
 /// equivalent check. Wired one level up on `Config.broadcast_domains`
@@ -160,6 +217,7 @@ fn bgp_instance_exists(name: Option<&String>, ctx: &Config) -> garde::Result {
 pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain], ctx: &Config) -> garde::Result {
     for d in domains {
         symmetric_irb_instance(d, ctx)?;
+        valid_domain_stp(d, ctx)?;
         if d.ospf_profile.is_some() && d.routing_table.is_none() {
             return Err(garde::Error::new(
                 "ospf profile requires a routing-table on the same broadcast domain",
@@ -248,6 +306,11 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            stp_instance: None,
+            stp_priority: None,
+            stp_hello_time: None,
+            stp_max_age: None,
+            stp_forward_delay: None,
         }
     }
 
@@ -561,5 +624,36 @@ mod tests {
             let cfg = config_with_instance(d);
             assert!(cfg.validate_with(&cfg).is_err());
         }
+    }
+
+    #[test]
+    fn domain_stp_settings_are_checked() {
+        use crate::schema::MstInstance;
+        let ok = |f: &dyn Fn(&mut BroadcastDomain), mst: bool| {
+            let mut d = domain("bd1");
+            f(&mut d);
+            let mut cfg = config_with(vec![d], vec![]);
+            if mst {
+                cfg.spanning_tree.mst_instances = vec![MstInstance {
+                    id: 5,
+                    ..Default::default()
+                }];
+            }
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(ok(&|d| d.stp_instance = Some(5), true));
+        assert!(!ok(&|d| d.stp_instance = Some(5), false));
+        assert!(ok(&|d| d.stp_priority = Some(4096), false));
+        assert!(!ok(&|d| d.stp_priority = Some(4000), false));
+        // effective timers: own max-age 30 with the global forward-delay 15
+        assert!(!ok(&|d| d.stp_max_age = Some(30), false));
+        assert!(ok(
+            &|d| {
+                d.stp_max_age = Some(30);
+                d.stp_forward_delay = Some(20);
+            },
+            false
+        ));
+        assert!(!ok(&|d| d.stp_hello_time = Some(10), false));
     }
 }

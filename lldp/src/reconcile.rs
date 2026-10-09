@@ -301,6 +301,7 @@ mod tests {
             lldp_receive: rx,
             lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -372,6 +373,7 @@ mod tests {
         let member = |bd: &str, tag| SwitchingProfileMember {
             broadcast_domain: bd.to_string(),
             tag,
+            ..Default::default()
         };
         let mut trunk = iface("eth1", true, true);
         trunk.switching_profile = Some("sp1".to_string());

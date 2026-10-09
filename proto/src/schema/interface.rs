@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::{
     bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profile_reference_valid,
-    routing_table_reference_valid, unique_addresses, unique_in,
+    routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses, unique_in,
 };
 
 use super::{Config, LldpDestination, VlanTag};
@@ -228,6 +228,13 @@ pub struct Interface {
     #[cli(topic = InterfacePortAggregate)]
     pub port_aggregate: Option<String>,
 
+    /// Names an `StpPortProfile` for this link as a spanning-tree port. Inert
+    /// until `nos-stpd`; refused on a bond member (the STP port is the bond).
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| stp_port_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceStpPortProfile, words = "stp-port-profile")]
+    pub stp_port_profile: Option<String>,
+
     /// The LACP Actor Port Priority `nos-lacpd` advertises for this link
     /// (802.1AX); `None` = 32768. Lower is higher priority. Only meaningful
     /// while `port_aggregate` names a `Lacp`-mode aggregate; ignored (not
@@ -445,6 +452,11 @@ fn valid_port_aggregate_membership(interfaces: &[Interface]) -> garde::Result {
                 "an interface in a port aggregate must not also have a switching-profile",
             ));
         }
+        if iface.stp_port_profile.is_some() {
+            return Err(garde::Error::new(
+                "an interface in a port aggregate must not have its own stp-port-profile: the spanning-tree port is the aggregate",
+            ));
+        }
         if !iface.subinterfaces.is_empty() {
             return Err(garde::Error::new(
                 "an interface in a port aggregate must not also have subinterfaces",
@@ -500,6 +512,7 @@ mod tests {
             ospf_profile: None,
             switching_profile: None,
             port_aggregate: None,
+            stp_port_profile: None,
             lacp_port_priority: None,
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
@@ -819,6 +832,7 @@ mod tests {
         crate::schema::SwitchingProfileMember {
             broadcast_domain: broadcast_domain.to_string(),
             tag,
+            ..Default::default()
         }
     }
 
@@ -834,6 +848,11 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            stp_instance: None,
+            stp_priority: None,
+            stp_hello_time: None,
+            stp_max_age: None,
+            stp_forward_delay: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -996,6 +1015,7 @@ mod tests {
             min_links: 1,
             bfd: None,
             bfd_peer: None,
+            stp_port_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -1028,6 +1048,37 @@ mod tests {
         cfg.port_aggregates = vec![aggregate("bond1")];
         cfg.switching_profiles = vec![profile("sp1", vec![])];
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn port_aggregate_member_with_stp_port_profile_fails() {
+        let mut iface = interface("eth0", &[], None);
+        iface.port_aggregate = Some("bond1".to_string());
+        let mut cfg = config_with(vec![iface], vec![]);
+        cfg.port_aggregates = vec![aggregate("bond1")];
+        cfg.stp_port_profiles = vec![crate::schema::StpPortProfile {
+            name: "edge".into(),
+            ..Default::default()
+        }];
+        cfg.validate_with(&cfg).unwrap();
+        cfg.interfaces[0].stp_port_profile = Some("edge".into());
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn stp_port_profile_reference_must_exist_and_is_inert_without_switching() {
+        let mut cfg = config_with(vec![interface("eth0", &[], None)], vec![]);
+        cfg.interfaces[0].stp_port_profile = Some("edge".into());
+        assert!(cfg.validate_with(&cfg).is_err(), "unknown profile");
+        cfg.stp_port_profiles = vec![crate::schema::StpPortProfile {
+            name: "edge".into(),
+            ..Default::default()
+        }];
+        cfg.validate_with(&cfg).unwrap();
+        // deleting the profile again fails the interface under its own path
+        cfg.stp_port_profiles.clear();
+        let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(err.contains("interfaces[0].stp_port_profile"), "{err}");
     }
 
     #[test]

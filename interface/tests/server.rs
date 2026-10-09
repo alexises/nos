@@ -42,6 +42,7 @@ async fn sample_interfaces() -> Interfaces {
                     routing_table: Some("rt1".to_string()),
                     ospf_profile: None,
                 }],
+                ..Default::default()
             },
             nos_proto::Interface {
                 ospfv3_profile: None,
@@ -58,6 +59,7 @@ async fn sample_interfaces() -> Interfaces {
                 lldp_receive: false,
                 lldp_destination: nos_proto::LldpDestination::default(),
                 subinterfaces: vec![],
+                ..Default::default()
             },
         ],
         ..Default::default()

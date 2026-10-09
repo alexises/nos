@@ -419,6 +419,76 @@ topics! {
     SbfdReflectorAllowFrom,
     /// The `bfd` reference on a peer-group, OSPF/OSPFv3 profile or static route
     BfdReference,
+    /// `Config.spanning_tree`
+    SpanningTree,
+    /// `SpanningTree.mode`
+    SpanningTreeMode,
+    /// `SpanningTree.priority`
+    SpanningTreePriority,
+    /// `SpanningTree.hello_time`
+    SpanningTreeHelloTime,
+    /// `SpanningTree.max_age`
+    SpanningTreeMaxAge,
+    /// `SpanningTree.forward_delay`
+    SpanningTreeForwardDelay,
+    /// `SpanningTree.tx_hold_count`
+    SpanningTreeTxHoldCount,
+    /// `SpanningTree.max_hops`
+    SpanningTreeMaxHops,
+    /// `SpanningTree.force_version`
+    SpanningTreeForceVersion,
+    /// `SpanningTree.region`
+    SpanningTreeRegion,
+    /// `SpanningTree.mst_instances`
+    SpanningTreeMstInstance,
+    /// `MstInstance.priority`
+    SpanningTreeMstInstancePriority,
+    /// `Config.stp_port_profiles`
+    StpPortProfile,
+    /// `StpPortProfile.edge_port`
+    StpPortProfileEdgePort,
+    /// `StpPortProfile.link_type`
+    StpPortProfileLinkType,
+    /// `StpPortProfile.cost`
+    StpPortProfileCost,
+    /// `StpPortProfile.priority`
+    StpPortProfilePriority,
+    /// `StpPortProfile.bpdu_guard`
+    StpPortProfileBpduGuard,
+    /// `StpPortProfile.bpdu_guard_recovery`
+    StpPortProfileBpduGuardRecovery,
+    /// `StpPortProfile.bpdu_filter`
+    StpPortProfileBpduFilter,
+    /// `StpPortProfile.root_guard`
+    StpPortProfileRootGuard,
+    /// `StpPortProfile.loop_guard`
+    StpPortProfileLoopGuard,
+    /// `StpPortProfile.restricted_tcn`
+    StpPortProfileRestrictedTcn,
+    /// `StpPortProfile.mst_instances`
+    StpPortProfileMstInstance,
+    /// `StpPortMstInstance.cost`
+    StpPortProfileMstInstanceCost,
+    /// `StpPortMstInstance.priority`
+    StpPortProfileMstInstancePriority,
+    /// `Interface.stp_port_profile`
+    InterfaceStpPortProfile,
+    /// `PortAggregate.stp_port_profile`
+    PortAggregateStpPortProfile,
+    /// `BroadcastDomain.stp_instance`
+    BroadcastDomainStpInstance,
+    /// `BroadcastDomain.stp_priority`
+    BroadcastDomainStpPriority,
+    /// `BroadcastDomain.stp_hello_time`
+    BroadcastDomainStpHelloTime,
+    /// `BroadcastDomain.stp_max_age`
+    BroadcastDomainStpMaxAge,
+    /// `BroadcastDomain.stp_forward_delay`
+    BroadcastDomainStpForwardDelay,
+    /// `SwitchingProfileMember.stp_cost`
+    SwitchingProfileMemberStpCost,
+    /// `SwitchingProfileMember.stp_priority`
+    SwitchingProfileMemberStpPriority,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

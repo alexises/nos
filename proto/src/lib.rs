@@ -59,7 +59,8 @@ pub use ops::{
     CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp, LoggingOp, OpError,
     OspfAreaOp, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateOp, PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp,
-    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp,
+    StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp,
+    UserOp,
 };
 pub use ospf::{
     LinkInterfaceState, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest,

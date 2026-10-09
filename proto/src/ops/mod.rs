@@ -22,6 +22,7 @@ pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
+pub mod stp_port_profile;
 pub mod subinterface;
 pub mod switching_profile;
 pub mod user;
@@ -50,6 +51,7 @@ pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
 pub use static_route::StaticRouteOp;
 pub use static_routing_instance::StaticRoutingInstanceOp;
+pub use stp_port_profile::StpPortProfileOp;
 pub use subinterface::SubinterfaceOp;
 pub use switching_profile::SwitchingProfileOp;
 pub use user::UserOp;
@@ -100,6 +102,7 @@ pub enum ConfigOp {
     User(UserOp),
     Logging(LoggingOp),
     BfdProfile(BfdProfileOp),
+    StpPortProfile(StpPortProfileOp),
 }
 
 impl ConfigOp {
@@ -139,6 +142,7 @@ impl ConfigOp {
             ConfigOp::User(op) => op.apply(config),
             ConfigOp::Logging(op) => op.apply(config),
             ConfigOp::BfdProfile(op) => op.apply(config),
+            ConfigOp::StpPortProfile(op) => op.apply(config),
         }
     }
 }
@@ -178,6 +182,8 @@ pub enum OpError {
     UserNotFound(String),
     #[error("bfd profile '{0}' not found")]
     BfdProfileNotFound(String),
+    #[error("stp port profile '{0}' not found")]
+    StpPortProfileNotFound(String),
     #[error("community alias '{0}' not found")]
     CommunityAliasNotFound(String),
     #[error("community group '{0}' not found")]

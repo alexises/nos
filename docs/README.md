@@ -37,6 +37,7 @@ Per-protocol guides:
 - [L2 switching: broadcast domains, switching profiles and SVIs](protocols/l2-switching.md)
 - [Port aggregation and LACP](protocols/port-aggregation-lacp.md)
 - [LLDP](protocols/lldp.md)
+- [Spanning tree](protocols/stp.md): bridge settings, port profiles, MSTP and Rapid PVST mapping (configuration only, no daemon yet)
 - [BFD profiles](protocols/bfd.md): the `bfd-profile` section and the `bfd` reference on peer-groups, OSPF/OSPFv3 profiles and static routes (declaration only, no daemon yet)
 - [EVPN/VXLAN, including multi-homing](protocols/evpn-vxlan.md)
 - [System: hostname, users, the REST API and logs](protocols/system.md)

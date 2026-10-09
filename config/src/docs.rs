@@ -1569,6 +1569,146 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Run BFD with a BFD profile.",
             "The name of a `bfd-profile` whose parameters apply to the sessions of this peer-group, OSPF or OSPFv3 profile, or static route. The commit is refused when the profile does not exist. Unset runs no BFD.",
         ),
+        Topic::SpanningTree => (
+            "Configure spanning tree.",
+            "The bridge-wide IEEE 802.1Q spanning-tree parameters. The default mode is `rstp`. Nothing reads them yet: the spanning-tree daemon is not built, so they have no effect on traffic, but an ESI port aggregate already needs a guard profile (see `stp-port-profile`) unless `mode disabled`.",
+        ),
+        Topic::SpanningTreeMode => (
+            "Choose the spanning-tree protocol.",
+            "`rstp` (default): one tree for the bridge. `mstp`: VLANs map to `mst-instance`s through each broadcast domain's `stp-instance`. `rapid-pvst`: one RSTP tree per VLAN. `disabled`: no spanning tree. With `mstp` or `rapid-pvst` every broadcast domain in use must have exactly one VLAN (an untagged-only membership is VLAN 1) and no two domains may share one.",
+        ),
+        Topic::SpanningTreePriority => (
+            "Set the bridge priority.",
+            "A multiple of 4096 from 0 to 61440, default 32768. The lowest priority wins the root election; ties go to the lowest MAC address.",
+        ),
+        Topic::SpanningTreeHelloTime => (
+            "Set the hello time.",
+            "Seconds between BPDUs from the root, 1 to 10, default 2. Must satisfy max-age >= 2 * (hello-time + 1).",
+        ),
+        Topic::SpanningTreeMaxAge => (
+            "Set the maximum age.",
+            "Seconds a BPDU is kept before it is aged out, 6 to 40, default 20. Must satisfy 2 * (forward-delay - 1) >= max-age >= 2 * (hello-time + 1) (IEEE 802.1Q 13.25).",
+        ),
+        Topic::SpanningTreeForwardDelay => (
+            "Set the forward delay.",
+            "Seconds spent in each of the listening and learning states of legacy STP, 4 to 30, default 15. Must satisfy 2 * (forward-delay - 1) >= max-age.",
+        ),
+        Topic::SpanningTreeTxHoldCount => (
+            "Set the transmit hold count.",
+            "The most BPDUs a port may send per second, 1 to 10, default 6.",
+        ),
+        Topic::SpanningTreeMaxHops => (
+            "Set the MSTP hop budget.",
+            "How many bridges an MSTP BPDU crosses before it is discarded, 6 to 40, default 20.",
+        ),
+        Topic::SpanningTreeForceVersion => (
+            "Force a protocol version.",
+            "`stp` or `rstp` forces every port to that compatibility mode (IEEE 802.1Q 13.7 ForceProtocolVersion). Unset negotiates per port. Accepted with `mstp` and `rapid-pvst`; the daemon decides what it means.",
+        ),
+        Topic::SpanningTreeRegion => (
+            "Set the MST region identity.",
+            "A `name` (at most 32 bytes) and a `revision` number. Bridges share MST instance trees only when both are equal. Used with `mode mstp`.",
+        ),
+        Topic::SpanningTreeMstInstance => (
+            "Define an MST instance.",
+            "An instance id from 1 to 4094, at most 64 of them. `edit` creates it with the default priority; `delete` removes it, and the commit is refused while a broadcast domain or port profile still references it.",
+        ),
+        Topic::SpanningTreeMstInstancePriority => (
+            "Set this bridge's priority in the instance.",
+            "A multiple of 4096 from 0 to 61440, default 32768.",
+        ),
+        Topic::StpPortProfile => (
+            "Create or delete a spanning-tree port profile.",
+            "A named set of spanning-tree port settings. An interface or port aggregate attaches one with `stp-port-profile <name>`. `edit` creates it with defaults (edge-port auto, link-type auto, automatic cost, priority 128); `delete` removes it, and the commit is refused while anything still references it. Nothing reads it yet, so attaching one has no effect on traffic.",
+        ),
+        Topic::StpPortProfileEdgePort => (
+            "Set the edge-port behaviour.",
+            "`admin`: always an edge port (forwards at once) until a BPDU arrives. `auto` (default): becomes one after three hello times without a BPDU. `disabled`: never.",
+        ),
+        Topic::StpPortProfileLinkType => (
+            "Set the link type.",
+            "`point-to-point` allows rapid transitions, `shared` does not, `auto` (default) follows the link's duplex.",
+        ),
+        Topic::StpPortProfileCost => (
+            "Set the port path cost.",
+            "1 to 200000000. Unset derives it from the link speed (IEEE 802.1Q Table 13-4).",
+        ),
+        Topic::StpPortProfilePriority => (
+            "Set the port priority.",
+            "A multiple of 16 from 0 to 240, default 128. The lower value wins ties between ports of one bridge.",
+        ),
+        Topic::StpPortProfileBpduGuard => (
+            "Shut the port when a BPDU arrives.",
+            "The port goes err-disabled on receiving any BPDU. Use it on edge ports. `delete bpdu-guard` turns it off.",
+        ),
+        Topic::StpPortProfileBpduGuardRecovery => (
+            "Bring an err-disabled port back.",
+            "Seconds after which a port shut by `bpdu-guard` is re-enabled, at least 1. Unset: it stays down until cleared by hand.",
+        ),
+        Topic::StpPortProfileBpduFilter => (
+            "Neither send nor process BPDUs.",
+            "The port takes no part in spanning tree. A loop through it is not detected. `delete bpdu-filter` turns it off.",
+        ),
+        Topic::StpPortProfileRootGuard => (
+            "Never become the root port.",
+            "A superior BPDU received on the port blocks it instead of changing the root. `delete root-guard` turns it off.",
+        ),
+        Topic::StpPortProfileLoopGuard => (
+            "Block the port when BPDUs stop.",
+            "A port that stops receiving BPDUs goes to a loop-inconsistent state instead of forwarding. `delete loop-guard` turns it off.",
+        ),
+        Topic::StpPortProfileRestrictedTcn => (
+            "Do not propagate topology changes from this port.",
+            "A topology change received on the port is not passed on to the other ports (IEEE 802.1Q restrictedTcn). `delete restricted-tcn` turns it off.",
+        ),
+        Topic::StpPortProfileMstInstance => (
+            "Tune the port in an MST instance.",
+            "The instance must exist under `spanning-tree mst-instance`; the commit is refused otherwise.",
+        ),
+        Topic::StpPortProfileMstInstanceCost => (
+            "Set the port cost in the instance.",
+            "1 to 200000000. Unset derives it from the link speed.",
+        ),
+        Topic::StpPortProfileMstInstancePriority => (
+            "Set the port priority in the instance.",
+            "A multiple of 16 from 0 to 240, default 128.",
+        ),
+        Topic::InterfaceStpPortProfile => (
+            "Attach a spanning-tree port profile.",
+            "The name of a `stp-port-profile`. The commit is refused when it does not exist, and on an interface that is a member of a port aggregate (the spanning-tree port is the aggregate). Only an interface with a switching profile is a spanning-tree port; on another one the setting is kept but unused.",
+        ),
+        Topic::PortAggregateStpPortProfile => (
+            "Attach a spanning-tree port profile.",
+            "The name of a `stp-port-profile`. The commit is refused when it does not exist. An aggregate with an `esi` needs a profile with `edge-port admin` and `bpdu-guard` while spanning tree is not `disabled`, so a BPDU from the other PE or the customer cannot block the segment.",
+        ),
+        Topic::BroadcastDomainStpInstance => (
+            "Map the domain's VLAN to an MST instance.",
+            "An id defined under `spanning-tree mst-instance`; the commit is refused otherwise. Unset leaves the VLAN in the CIST. Used with `mode mstp`.",
+        ),
+        Topic::BroadcastDomainStpPriority => (
+            "Set the per-VLAN bridge priority.",
+            "A multiple of 4096 from 0 to 61440. Unset inherits `spanning-tree priority`. Used with `mode rapid-pvst`.",
+        ),
+        Topic::BroadcastDomainStpHelloTime => (
+            "Set the per-VLAN hello time.",
+            "Seconds, 1 to 10. Unset inherits the global value. The timer relations of `spanning-tree max-age` are checked on the effective values.",
+        ),
+        Topic::BroadcastDomainStpMaxAge => (
+            "Set the per-VLAN maximum age.",
+            "Seconds, 6 to 40. Unset inherits the global value.",
+        ),
+        Topic::BroadcastDomainStpForwardDelay => (
+            "Set the per-VLAN forward delay.",
+            "Seconds, 4 to 30. Unset inherits the global value.",
+        ),
+        Topic::SwitchingProfileMemberStpCost => (
+            "Set the spanning-tree port cost.",
+            "1 to 200000000, for the ports using this membership. Unset: automatic.",
+        ),
+        Topic::SwitchingProfileMemberStpPriority => (
+            "Set the spanning-tree port priority.",
+            "A multiple of 16 from 0 to 240. Unset: the port profile's, else 128.",
+        ),
     };
     CommandDoc {
         topic,
