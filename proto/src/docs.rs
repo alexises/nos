@@ -165,6 +165,8 @@ topics! {
     InterfaceOspfProfile,
     /// `Interface.ospfv3_profile` (also a subinterface's and a broadcast domain's)
     InterfaceOspfv3Profile,
+    /// `Subinterface.bfd_unsolicited`
+    InterfaceBfdUnsolicited,
     /// `Interface.switching_profile` (also a port aggregate's)
     InterfaceSwitchingProfile,
     /// `Interface.port_aggregate`

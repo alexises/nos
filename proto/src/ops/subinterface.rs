@@ -68,6 +68,16 @@ pub enum SubinterfaceOp {
         interface: String,
         tag: u16,
     },
+    /// RFC 9468 unsolicited BFD under the named `BfdProfile`.
+    SetBfdUnsolicited {
+        interface: String,
+        tag: u16,
+        bfd_unsolicited: String,
+    },
+    ClearBfdUnsolicited {
+        interface: String,
+        tag: u16,
+    },
     Delete {
         interface: String,
         tag: u16,
@@ -153,6 +163,19 @@ impl SubinterfaceOp {
                 find_subinterface_mut(config, interface, *tag)?.ospfv3_profile = None;
                 Ok(())
             }
+            SubinterfaceOp::SetBfdUnsolicited {
+                interface,
+                tag,
+                bfd_unsolicited,
+            } => {
+                ensure_subinterface_mut(config, interface, *tag)?.bfd_unsolicited =
+                    Some(bfd_unsolicited.clone());
+                Ok(())
+            }
+            SubinterfaceOp::ClearBfdUnsolicited { interface, tag } => {
+                find_subinterface_mut(config, interface, *tag)?.bfd_unsolicited = None;
+                Ok(())
+            }
             SubinterfaceOp::Delete { interface, tag } => {
                 let iface = find_interface_mut(config, interface)?;
                 let before = iface.subinterfaces.len();
@@ -217,6 +240,7 @@ fn ensure_subinterface_mut<'a>(
             routing_table: None,
             ospf_profile: None,
             ospfv3_profile: None,
+            bfd_unsolicited: None,
         });
     }
     Ok(iface
@@ -300,6 +324,7 @@ mod tests {
                     routing_table: None,
                     ospf_profile: None,
                     ospfv3_profile: None,
+                    bfd_unsolicited: None,
                 }],
             )],
             ..Default::default()
@@ -516,6 +541,7 @@ mod tests {
                         routing_table: None,
                         ospf_profile: None,
                         ospfv3_profile: None,
+                        bfd_unsolicited: None,
                     },
                     Subinterface {
                         tag: 100,
@@ -523,6 +549,7 @@ mod tests {
                         routing_table: None,
                         ospf_profile: None,
                         ospfv3_profile: None,
+                        bfd_unsolicited: None,
                     },
                 ],
             )],

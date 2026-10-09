@@ -174,6 +174,8 @@ pub enum BfdSessionKind {
     #[default]
     Classical,
     SbfdInitiator,
+    /// RFC 9468: created by an unsolicited packet, owned by no client.
+    Unsolicited,
 }
 
 impl fmt::Display for BfdSessionKind {
@@ -181,6 +183,7 @@ impl fmt::Display for BfdSessionKind {
         f.write_str(match self {
             BfdSessionKind::Classical => "classical",
             BfdSessionKind::SbfdInitiator => "sbfd-initiator",
+            BfdSessionKind::Unsolicited => "unsolicited",
         })
     }
 }

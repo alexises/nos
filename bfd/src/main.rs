@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     // RFC 7130 micro-BFD: the only config this daemon follows. Its sessions
     // go through the same manager; their Up sets go to nos-interfaced.
     let (push_tx, push_rx) = mpsc::channel(16);
+    let sweep_task = tokio::spawn(nos_bfd::manager::sweep_loop(manager.clone()));
     let micro = Micro::new(manager.clone(), push_tx);
     let reflector = Arc::new(ReflectorNet::new(
         args.watchdog_socket.clone(),
@@ -93,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
     info!("shutdown signal received");
     let _ = shutdown_tx.send(true);
     server_task.abort();
+    sweep_task.abort();
     let _ = tokio::join!(micro_task, interface_task);
     info!("shutting down");
     Ok(())

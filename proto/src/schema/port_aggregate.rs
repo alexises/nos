@@ -471,6 +471,7 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             ospfv3_profile: None,
+            bfd_unsolicited: None,
         }];
         let mut cfg = config_with(vec![agg]);
         cfg.routing_tables = vec![crate::schema::RoutingTable {
@@ -500,6 +501,7 @@ mod tests {
                 routing_table: None,
                 ospf_profile: None,
                 ospfv3_profile: None,
+                bfd_unsolicited: None,
             }];
         }
         let mut cfg = config_with(vec![a]);

@@ -906,6 +906,13 @@ impl Net for UdpNet {
         Ok(Arc::new(tx_socket(device, &vrf, key, port(key.multihop))?))
     }
 
+    async fn listen(&self, table: &str, v6: bool) -> io::Result<()> {
+        let vrf = watchdog_client::vrf_name(&self.watchdog_socket, table)
+            .await
+            .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
+        self.ensure_rx(table, &vrf, v6, false)
+    }
+
     async fn open_sbfd(&self, key: &SessionKey) -> io::Result<SbfdPath> {
         let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
             .await

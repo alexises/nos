@@ -3,8 +3,8 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::{
-    ospf_profile_reference_valid, ospfv3_profile_reference_valid, routing_table_reference_valid,
-    unique_addresses, unique_in,
+    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profile_reference_valid,
+    routing_table_reference_valid, unique_addresses, unique_in,
 };
 
 use super::{Config, LldpDestination, VlanTag};
@@ -86,6 +86,15 @@ pub struct Subinterface {
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profile: Option<String>,
+
+    /// RFC 9468: names a `BfdProfile` for the passive sessions created by
+    /// unsolicited BFD Control packets (Your Discriminator 0) on this
+    /// subinterface. Requires `routing_table` on the same subinterface: the
+    /// VRF decides the socket.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| bfd_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceBfdUnsolicited, words = "bfd-unsolicited")]
+    pub bfd_unsolicited: Option<String>,
 }
 
 fn valid_subinterface_tag(tag: u16) -> garde::Result {
@@ -129,6 +138,11 @@ fn valid_subinterface_ospf_profile_requires_routing_table(
         if sub.ospfv3_profile.is_some() && sub.routing_table.is_none() {
             return Err(garde::Error::new(
                 "ospfv3 profile requires a routing-table on the same subinterface",
+            ));
+        }
+        if sub.bfd_unsolicited.is_some() && sub.routing_table.is_none() {
+            return Err(garde::Error::new(
+                "bfd unsolicited requires a routing-table on the same subinterface",
             ));
         }
     }
@@ -503,6 +517,7 @@ mod tests {
         let mut iface = interface(name, &[], None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 0,
             addresses: addresses
                 .iter()
@@ -676,6 +691,7 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 0,
             addresses: vec![
                 InterfaceAddress {
@@ -699,6 +715,7 @@ mod tests {
         let mut iface = interface("loopback-rt1", &[], None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
@@ -729,6 +746,7 @@ mod tests {
         iface.subinterfaces = vec![
             Subinterface {
                 ospfv3_profile: None,
+                bfd_unsolicited: None,
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: None,
@@ -736,6 +754,7 @@ mod tests {
             },
             Subinterface {
                 ospfv3_profile: None,
+                bfd_unsolicited: None,
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: None,
@@ -751,6 +770,7 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
             ospfv3_profile: None,
+            bfd_unsolicited: None,
             tag: 4095,
             addresses: Vec::new(),
             routing_table: None,
@@ -766,6 +786,7 @@ mod tests {
         iface.subinterfaces = vec![
             Subinterface {
                 ospfv3_profile: None,
+                bfd_unsolicited: None,
                 tag: 0,
                 addresses: Vec::new(),
                 routing_table: None,
@@ -773,6 +794,7 @@ mod tests {
             },
             Subinterface {
                 ospfv3_profile: None,
+                bfd_unsolicited: None,
                 tag: 4094,
                 addresses: Vec::new(),
                 routing_table: None,
@@ -1043,5 +1065,36 @@ mod tests {
         let mut cfg = config_with(vec![iface], vec![table("rt1")]);
         cfg.port_aggregates = vec![aggregate("bond1")];
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn bfd_unsolicited_needs_a_profile_and_a_routing_table() {
+        let sub = |rt: Option<&str>| Subinterface {
+            routing_table: rt.map(str::to_string),
+            bfd_unsolicited: Some("fast".into()),
+            ..Subinterface::default()
+        };
+        let build = |rt: Option<&str>, profile: bool| {
+            let mut iface = interface("eth0", &[], None);
+            iface.subinterfaces = vec![sub(rt)];
+            let mut cfg = config_with(vec![iface], vec![table("rt1")]);
+            if profile {
+                cfg.bfd_profiles = vec![crate::schema::BfdProfile {
+                    name: "fast".into(),
+                    ..Default::default()
+                }];
+            }
+            cfg
+        };
+        let ok = build(Some("rt1"), true);
+        assert!(ok.validate_with(&ok).is_ok());
+        let no_table = build(None, true);
+        assert!(no_table.validate_with(&no_table).is_err());
+        let no_profile = build(Some("rt1"), false);
+        let err = no_profile
+            .validate_with(&no_profile)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bfd profile 'fast' does not exist"), "{err}");
     }
 }

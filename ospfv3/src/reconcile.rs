@@ -920,6 +920,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             ospfv3_profile: Some("p1".to_string()),
+            bfd_unsolicited: None,
         }];
         let cfg = Config {
             interfaces: vec![iface],
@@ -970,6 +971,7 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             ospfv3_profile: Some("p1".to_string()),
+            bfd_unsolicited: None,
         }];
         let cfg = Config {
             interfaces: vec![iface],
@@ -1134,6 +1136,7 @@ mod tests {
             routing_table: Some("rt1".into()),
             ospf_profile: None,
             ospfv3_profile: Some("p1".into()),
+            bfd_unsolicited: None,
         };
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![sub(0, vec![addr]), sub(1, vec![v4])];

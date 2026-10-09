@@ -272,6 +272,8 @@ async fn resync(config_socket: &Path, micro: &mut Micro, reflector: &ReflectorNe
             let wanted = wanted(&cfg);
             debug!(sessions = wanted.len(), "reconciling micro-bfd sessions");
             micro.apply(wanted).await;
+            micro.mgr.set_unsolicited(crate::unsolicited::wanted(&cfg));
+            micro.mgr.listen_unsolicited().await;
             reflector.configure(&cfg).await;
         }
         Err(e) => warn!(error = %e, "failed to fetch running config, keeping previous state"),

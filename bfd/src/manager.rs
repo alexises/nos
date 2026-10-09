@@ -7,11 +7,11 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use nos_proto::schema::{BfdMode, BfdProfile, EchoMode};
-use nos_proto::{BfdSessionView, SessionKey};
+use nos_proto::{BfdSessionKind, BfdSessionView, BfdState, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -21,6 +21,7 @@ use crate::packet::{self, Packet};
 use crate::reflector::Reflector;
 use crate::sbfd::{self, Initiator, SbfdPath};
 use crate::session::{self, Core, EchoPath, Status, Tx};
+use crate::unsolicited::{self, Decision};
 
 /// How long a session waits before retrying a failed `Net::open` (the VRF
 /// not known to `nos-ribd` yet, no route to the peer, ...).
@@ -39,6 +40,13 @@ pub trait Net: Send + Sync {
     /// traffic ever resolves the neighbour, so the transport must).
     /// RFC 7881 §2: the transport of an S-BFD initiator, a socket of its own
     /// (source port other than 7784) that the reflections come back to.
+    /// Makes sure `table`'s single-hop receive socket runs, though no session
+    /// opened it (RFC 9468: the first packet of an unsolicited peer must be
+    /// heard).
+    async fn listen(&self, _table: &str, _v6: bool) -> io::Result<()> {
+        Ok(())
+    }
+
     async fn open_sbfd(&self, _key: &SessionKey) -> io::Result<SbfdPath> {
         Err(io::Error::other("no S-BFD transport"))
     }
@@ -83,8 +91,13 @@ pub fn ttl_ok(multihop: bool, ttl: Option<u8>, min_ttl: u8) -> bool {
     }
 }
 
+/// Called for a single-hop packet with Your Discriminator 0 that no session
+/// claims (table, source, TTL, packet): whether it made a session (RFC 9468).
+type Unsolicited = Arc<dyn Fn(&str, IpAddr, Option<u8>, &Packet) -> bool + Send + Sync>;
+
 #[derive(Default)]
 struct Tables {
+    unsolicited: Option<Unsolicited>,
     by_disc: HashMap<u32, Slot>,
     /// Packets with Your Discriminator 0 (§6.8.6: found by source address
     /// and table, plus the port the packet came in on). ponytail: no
@@ -175,7 +188,19 @@ impl Demux {
                 return false;
             }
         };
-        let t = self.0.lock().unwrap();
+        let mut t = self.0.lock().unwrap();
+        if p.your_discriminator == 0
+            && !multihop
+            && member.is_none()
+            && !t.by_peer.contains_key(&(table.to_string(), src, multihop))
+        {
+            if let Some(hook) = t.unsolicited.clone() {
+                drop(t);
+                // The hook registers a session (taking this lock): look again.
+                hook(table, src, ttl, &p);
+                t = self.0.lock().unwrap();
+            }
+        }
         let session = if p.your_discriminator == 0 {
             t.by_peer.get(&(table.to_string(), src, multihop))
         } else {
@@ -195,6 +220,11 @@ impl Demux {
 
 struct Entry {
     clients: HashSet<u64>,
+    /// RFC 9468: created by a packet, no client holds it; a client that
+    /// registers the key adopts it.
+    unsolicited: bool,
+    /// Since when an unsolicited session has not been Up (`unsolicited::age_step`).
+    idle_since: Option<Instant>,
     profile: BfdProfile,
     disc: u32,
     cmd: mpsc::Sender<BfdProfile>,
@@ -209,11 +239,14 @@ pub struct Manager {
     next_disc: AtomicU32,
     next_client: AtomicU64,
     reflector: Arc<Reflector>,
+    /// The subinterfaces that answer unsolicited BFD (`set_unsolicited`).
+    rules: Mutex<Vec<unsolicited::Rule>>,
+    last_cap_warn: Mutex<Option<Instant>>,
 }
 
 impl Manager {
     pub fn new(net: Arc<dyn Net>, demux: Demux) -> Arc<Self> {
-        Arc::new(Manager {
+        let m = Arc::new(Manager {
             net,
             demux,
             sessions: Mutex::default(),
@@ -221,7 +254,15 @@ impl Manager {
             next_disc: AtomicU32::new(session::rand_u32() | 1),
             next_client: AtomicU64::new(1),
             reflector: Arc::default(),
-        })
+            rules: Mutex::default(),
+            last_cap_warn: Mutex::default(),
+        });
+        let weak = Arc::downgrade(&m);
+        m.demux.0.lock().unwrap().unsolicited = Some(Arc::new(move |table, src, ttl, p| {
+            weak.upgrade()
+                .is_some_and(|m| m.unsolicited_rx(table, src, ttl, p))
+        }));
+        m
     }
 
     /// The S-BFD reflector's state: the socket side feeds it, `GetReflector`
@@ -256,6 +297,31 @@ impl Manager {
         profile: &BfdProfile,
     ) -> watch::Receiver<Status> {
         let mut sessions = self.sessions.lock().unwrap();
+        self.start(&mut sessions, Some(client), key, profile, false)
+    }
+
+    fn start(
+        &self,
+        sessions: &mut HashMap<SessionKey, Entry>,
+        client: Option<u64>,
+        key: &SessionKey,
+        profile: &BfdProfile,
+        unsolicited: bool,
+    ) -> watch::Receiver<Status> {
+        if client.is_some() {
+            // A client takes over an unsolicited session of the same peer: the
+            // very key adopts it below, another one (different interface) goes.
+            let stale: Vec<SessionKey> = sessions
+                .iter()
+                .filter(|(k, e)| {
+                    e.unsolicited && k.table == key.table && k.peer == key.peer && *k != key
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in stale {
+                self.release_all(sessions, &k);
+            }
+        }
         // The mode decides what the session is made of (a Control socket and
         // demux slot, or Echo alone): switching it starts a fresh session.
         // ponytail: the old one's clients are not carried over, they re-register.
@@ -265,10 +331,14 @@ impl Manager {
             (e.profile.echo_mode == EchoMode::Unaffiliated) != echo_only
                 || (e.profile.mode == BfdMode::Sbfd) != sbfd
         }) {
-            self.release_all(&mut sessions, key);
+            self.release_all(sessions, key);
         }
         if let Some(e) = sessions.get_mut(key) {
-            e.clients.insert(client);
+            if let Some(c) = client {
+                e.clients.insert(c);
+                e.unsolicited = false;
+                e.idle_since = None;
+            }
             if e.profile != *profile {
                 e.profile = profile.clone();
                 self.demux.set_min_ttl(e.disc, key, profile.minimum_ttl);
@@ -276,7 +346,7 @@ impl Manager {
             }
             return e.status.clone();
         }
-        let disc = self.alloc_disc(&sessions);
+        let disc = self.alloc_disc(sessions);
         let core = Core::new(
             profile.clone(),
             disc,
@@ -377,7 +447,9 @@ impl Manager {
         sessions.insert(
             key.clone(),
             Entry {
-                clients: HashSet::from([client]),
+                clients: client.into_iter().collect(),
+                unsolicited,
+                idle_since: None,
                 profile: profile.clone(),
                 disc,
                 cmd: cmd_tx,
@@ -408,6 +480,9 @@ impl Manager {
         let Some(e) = sessions.get_mut(key) else {
             return;
         };
+        if e.unsolicited {
+            return;
+        }
         e.clients.remove(&client);
         if e.clients.is_empty() {
             let e = sessions.remove(key).expect("just seen");
@@ -435,6 +510,115 @@ impl Manager {
         }
     }
 
+    /// RFC 9468: a packet that matched no session. Creates a passive session
+    /// when a rule of `table` covers `src` and `unsolicited::decide` agrees.
+    fn unsolicited_rx(&self, table: &str, src: IpAddr, ttl: Option<u8>, p: &Packet) -> bool {
+        let Some(rule) = unsolicited::rule_for(&self.rules.lock().unwrap(), table, src).cloned()
+        else {
+            return false;
+        };
+        let mut sessions = self.sessions.lock().unwrap();
+        let existing = sessions
+            .iter()
+            .filter(|(k, e)| {
+                e.unsolicited && k.table == table && k.interface.as_deref() == Some(&rule.interface)
+            })
+            .count();
+        match unsolicited::decide(p, src, ttl, &rule, existing) {
+            Decision::Ignore => false,
+            Decision::Capped => {
+                let mut last = self.last_cap_warn.lock().unwrap();
+                if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(10)) {
+                    *last = Some(Instant::now());
+                    warn!(interface = %rule.interface, table = %table, cap = unsolicited::MAX_PER_INTERFACE, "bfd unsolicited session limit reached, packet dropped");
+                }
+                false
+            }
+            Decision::Create => {
+                let key = SessionKey {
+                    aggregate: None,
+                    table: table.to_string(),
+                    peer: src,
+                    local: None,
+                    interface: Some(rule.interface.clone()),
+                    multihop: false,
+                };
+                info!(peer = %src, table = %table, interface = %rule.interface, "bfd unsolicited session created");
+                self.start(&mut sessions, None, &key, &rule.profile, true);
+                true
+            }
+        }
+    }
+
+    /// The running config's unsolicited rules. Sessions of a gone rule (or
+    /// whose peer left its subnet) are dropped, a changed profile runs
+    /// Poll/Final.
+    pub fn set_unsolicited(&self, rules: Vec<unsolicited::Rule>) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let keys: Vec<SessionKey> = sessions
+            .iter()
+            .filter(|(_, e)| e.unsolicited)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys {
+            let rule = rules.iter().find(|r| {
+                r.table == key.table
+                    && key.interface.as_deref() == Some(&r.interface)
+                    && r.subnets.iter().any(|n| n.contains(&key.peer))
+            });
+            match rule {
+                None => {
+                    info!(peer = %key.peer, table = %key.table, "bfd unsolicited session removed: no longer configured");
+                    self.release_all(&mut sessions, &key);
+                }
+                Some(r) => {
+                    let e = sessions.get_mut(&key).expect("just listed");
+                    if e.profile != r.profile {
+                        e.profile = r.profile.clone();
+                        self.demux.set_min_ttl(e.disc, &key, r.profile.minimum_ttl);
+                        let _ = e.cmd.try_send(r.profile.clone());
+                    }
+                }
+            }
+        }
+        *self.rules.lock().unwrap() = rules;
+    }
+
+    /// Opens (or re-checks) the receive socket of every table that has an
+    /// unsolicited rule; the config resync repeats it, so a VRF that
+    /// appears or is recreated is picked up.
+    pub async fn listen_unsolicited(&self) {
+        let rules = self.rules.lock().unwrap().clone();
+        for r in &rules {
+            for v6 in [false, true] {
+                if r.subnets.iter().any(|n| n.addr().is_ipv6() == v6) {
+                    if let Err(e) = self.net.listen(&r.table, v6).await {
+                        debug!(table = %r.table, error = %e, "bfd unsolicited listener not ready");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Deletes the unsolicited sessions that have not been Up for
+    /// `unsolicited::AGE`. Called every second by `sweep_loop`.
+    pub fn sweep(&self, now: Instant) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut gone = Vec::new();
+        for (k, e) in sessions.iter_mut().filter(|(_, e)| e.unsolicited) {
+            let up = e.status.borrow().state == BfdState::Up;
+            let (since, expired) = unsolicited::age_step(up, e.idle_since, now);
+            e.idle_since = since;
+            if expired {
+                gone.push(k.clone());
+            }
+        }
+        for k in gone {
+            info!(peer = %k.peer, table = %k.table, interface = ?k.interface, "bfd unsolicited session aged out");
+            self.release_all(&mut sessions, &k);
+        }
+    }
+
     /// Every session (or the ones to `peer`), ordered by table then peer.
     pub fn sessions(&self, peer: Option<IpAddr>) -> Vec<BfdSessionView> {
         let sessions = self.sessions.lock().unwrap();
@@ -458,7 +642,11 @@ impl Manager {
                     echo_interval_us: s.echo_interval_us,
                     echo_only: s.echo_only,
                     tx_pdu_bytes: s.tx_pdu_bytes,
-                    kind: s.kind,
+                    kind: if e.unsolicited {
+                        BfdSessionKind::Unsolicited
+                    } else {
+                        s.kind
+                    },
                 }
             })
             .collect();
@@ -470,6 +658,15 @@ impl Manager {
             ))
         });
         all
+    }
+}
+
+/// Runs `Manager::sweep` once a second for the daemon's lifetime.
+pub async fn sweep_loop(m: Arc<Manager>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        m.sweep(Instant::now());
     }
 }
 
@@ -852,5 +1049,94 @@ pub(crate) mod tests {
         })
         .await
         .expect("session went admin-down");
+    }
+
+    fn rule() -> unsolicited::Rule {
+        unsolicited::tests::rule()
+    }
+
+    fn unsolicited_key(peer: &str) -> SessionKey {
+        SessionKey {
+            interface: Some("eth1".into()),
+            ..key(peer)
+        }
+    }
+
+    #[tokio::test]
+    async fn unsolicited_packet_makes_a_passive_session_only_where_asked() {
+        let (m, _, demux) = mgr(false);
+        let p = unsolicited::tests::pkt(BfdState::Down, 0).encode();
+        let peer: IpAddr = "10.0.0.2".parse().unwrap();
+        // No rule: dropped as before.
+        assert!(!demux.route("rt1", peer, false, Some(255), &p));
+        assert_eq!(m.sessions(None).len(), 0);
+
+        m.set_unsolicited(vec![rule()]);
+        assert!(!demux.route("rt1", peer, false, Some(254), &p), "GTSM");
+        assert!(!demux.route("rt1", peer, true, Some(255), &p), "multihop");
+        assert!(
+            !demux.route("rt2", peer, false, Some(255), &p),
+            "other table"
+        );
+        assert!(!demux.route("rt1", "10.1.0.2".parse().unwrap(), false, Some(255), &p));
+        assert_eq!(m.sessions(None).len(), 0);
+
+        assert!(demux.route("rt1", peer, false, Some(255), &p));
+        let s = m.sessions(None);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].key, unsolicited_key("10.0.0.2"));
+        assert_eq!(s[0].kind, BfdSessionKind::Unsolicited);
+        // The same peer again reaches that session, no second one.
+        assert!(demux.route("rt1", peer, false, Some(255), &p));
+        assert_eq!(m.sessions(None).len(), 1);
+
+        // The rule going away takes its sessions with it.
+        m.set_unsolicited(vec![]);
+        assert_eq!(m.sessions(None).len(), 0);
+        assert!(demux.0.lock().unwrap().by_peer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsolicited_sessions_are_capped_per_interface() {
+        let (m, _, demux) = mgr(false);
+        let mut r = rule();
+        r.subnets = vec!["10.0.0.0/16".parse().unwrap()];
+        m.set_unsolicited(vec![r]);
+        let p = unsolicited::tests::pkt(BfdState::Down, 0).encode();
+        for i in 0..=unsolicited::MAX_PER_INTERFACE {
+            let a = IpAddr::from([
+                10,
+                0,
+                u8::try_from(i / 250).unwrap(),
+                u8::try_from(i % 250 + 1).unwrap(),
+            ]);
+            let ok = demux.route("rt1", a, false, Some(255), &p);
+            assert_eq!(ok, i < unsolicited::MAX_PER_INTERFACE, "{i}");
+        }
+        assert_eq!(m.sessions(None).len(), unsolicited::MAX_PER_INTERFACE);
+    }
+
+    #[tokio::test]
+    async fn unsolicited_session_ages_out_unless_adopted() {
+        let (m, _, demux) = mgr(false);
+        m.set_unsolicited(vec![rule()]);
+        let p = unsolicited::tests::pkt(BfdState::Down, 0).encode();
+        for peer in ["10.0.0.2", "10.0.0.3"] {
+            assert!(demux.route("rt1", peer.parse().unwrap(), false, Some(255), &p));
+        }
+        // A client registering the very key adopts the session.
+        let c = m.new_client();
+        m.register(c, &unsolicited_key("10.0.0.3"), &BfdProfile::default());
+        let t0 = Instant::now();
+        m.sweep(t0);
+        m.sweep(t0 + Duration::from_secs(59));
+        assert_eq!(m.sessions(None).len(), 2);
+        m.sweep(t0 + unsolicited::AGE);
+        let s = m.sessions(None);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].key.peer, "10.0.0.3".parse::<IpAddr>().unwrap());
+        assert_eq!(s[0].kind, BfdSessionKind::Classical);
+        m.deregister(c, &unsolicited_key("10.0.0.3"));
+        assert_eq!(m.sessions(None).len(), 0);
     }
 }

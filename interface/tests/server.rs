@@ -36,6 +36,7 @@ async fn sample_interfaces() -> Interfaces {
                 lldp_destination: nos_proto::LldpDestination::default(),
                 subinterfaces: vec![nos_proto::Subinterface {
                     ospfv3_profile: None,
+                    bfd_unsolicited: None,
                     tag: 0,
                     addresses: vec![sample_address()],
                     routing_table: Some("rt1".to_string()),

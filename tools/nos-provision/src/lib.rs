@@ -509,6 +509,13 @@ pub struct Args {
     pub bfd_static: bool,
     #[arg(long, default_value_t = 100)]
     pub bfd_interval_ms: u32,
+    /// RFC 9468: `bfd-unsolicited fast` (same profile, `--bfd-interval-ms`
+    /// intervals) on the subinterface `--interface`/`--subinterface-tag`.
+    #[arg(long)]
+    pub bfd_unsolicited: bool,
+    /// Removes that subinterface's `bfd-unsolicited` again (the profile stays).
+    #[arg(long)]
+    pub no_bfd_unsolicited: bool,
     /// Sets `bfd fast` (same profile, `--bfd-interval-ms` intervals) on
     /// `--peer-group` of `--bgp-instance`.
     #[arg(long)]
@@ -1227,6 +1234,7 @@ impl Args {
     /// Whether any flag needs `bfd-profile fast` (with `--bfd-interval-ms`).
     fn wants_bfd_profile(&self) -> bool {
         self.bfd_static
+            || self.bfd_unsolicited
             || self.bfd_bgp
             || self.ospf_bfd
             || self.ospfv3_bfd
@@ -3272,6 +3280,22 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }
     } else if args.ospfv3_profile.is_some() {
         bail!("--ospfv3-profile requires --ospfv3-area to also be set");
+    }
+
+    if args.bfd_unsolicited {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetBfdUnsolicited {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+            bfd_unsolicited: BFD_PROFILE.to_string(),
+        }));
+    }
+    if args.no_bfd_unsolicited {
+        ops.push(ConfigOp::Subinterface(
+            SubinterfaceOp::ClearBfdUnsolicited {
+                interface: args.interface.clone(),
+                tag: args.subinterface_tag,
+            },
+        ));
     }
 
     if let Some(profile) = args.ospfv3_interface_profile.clone() {

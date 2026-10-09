@@ -523,3 +523,98 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
     w.dock.container_remove("router-f").await;
     Ok(())
 }
+
+/// `bfd-unsolicited`, self-contained (RFC 9468, #295). Router-a has no BFD
+/// client at all, only `bfd-unsolicited fast` (100 ms x 3) on its eth0
+/// subinterface; router-b guards a static route via router-a. Router-b's first
+/// packet (Your Discriminator 0) makes router-a log `bfd unsolicited session
+/// created`, both reach Up, the route is added and REST on router-a lists the
+/// session as `Unsolicited`; a real FRR `bfdd` (`router-f`) as the active end
+/// gets its own session. Dropping UDP 3784 on router-a (`tc`) takes it Down
+/// and, after the 60 s aging time, `bfd unsolicited session aged out`; lifting
+/// the filter lets router-b's next packet create a fresh one. Removing
+/// `bfd-unsolicited` drops the session (`removed: no longer configured`) and
+/// router-b's packets get no answer and create nothing.
+pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
+    let mut fa = A.base_flags();
+    fa.push("--bfd-unsolicited".to_string());
+    let mut fb = B.base_flags();
+    fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
+    w.start(A, Some(fa), &[]).await?;
+    w.start(B, Some(fb), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+
+    let created = |p: &str| format!("bfd unsolicited session created peer={p}");
+    let up_a = |p: &str| format!("bfd session up peer={p}");
+    let up_b = format!("bfd session up peer={IP_A}");
+    let added = format!("added route prefix={BFD_PREFIX_A} gateway={IP_A}");
+
+    log("router-b's packets create a passive session on router-a, route added on router-b");
+    a.wait(&created(IP_B)).await?;
+    a.wait(&up_a(IP_B)).await?;
+    b.wait(&up_b).await?;
+    b.wait(&added).await?;
+    session_is(a, IP_B, "Up", None, 5).await?;
+    let body = a
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bfd/sessions?peer={IP_B}"),
+            None,
+            200,
+        )
+        .await?;
+    anyhow::ensure!(
+        body.contains("\"kind\":\"Unsolicited\""),
+        "expected an unsolicited session: {body}"
+    );
+
+    log("interop: FRR bfdd as the active end");
+    start_frr_bfd(w).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.wait(&created(IP_G)).await?;
+    a.wait(&up_a(IP_G)).await?;
+    session_is(a, IP_G, "Up", None, 5).await?;
+    w.dock.container_remove("router-f").await;
+
+    log("UDP 3784 dropped on router-a: Down, then aged out after the aging time");
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    let aged = format!("bfd unsolicited session aged out peer={IP_B}");
+    let (n_aged, n_created) = (a.count(&aged), a.count(&created(IP_B)));
+    tc(&w.dock, &["qdisc", "add", "dev", "eth0", "clsact"]).await?;
+    let dropped = tc(
+        &w.dock,
+        &[
+            "filter", "add", "dev", "eth0", "ingress", "protocol", "ip", "u32", "match", "ip",
+            "protocol", "17", "0xff", "match", "ip", "dport", "3784", "0xffff", "action", "drop",
+        ],
+    )
+    .await;
+    let result = async {
+        dropped?;
+        a.wait_new(&aged, n_aged, 100).await
+    }
+    .await;
+    let lifted = tc(&w.dock, &["qdisc", "del", "dev", "eth0", "clsact"]).await;
+    result?;
+    lifted?;
+
+    log("filter lifted: router-b's next packet creates a fresh session");
+    a.wait_new(&created(IP_B), n_created, 30).await?;
+    session_is(a, IP_B, "Up", None, 30).await?;
+
+    log("bfd-unsolicited removed: session dropped, no answer, nothing created");
+    let gone = format!("bfd unsolicited session removed: no longer configured peer={IP_B}");
+    let (n_gone, n_created, n_up_b) = (a.count(&gone), a.count(&created(IP_B)), b.count(&up_b));
+    a.provision(&["--no-bfd-unsolicited"]).await?;
+    a.wait_new(&gone, n_gone, 30).await?;
+    a.assert_quiet(&created(IP_B), n_created, 8).await?;
+    b.assert_quiet(&up_b, n_up_b, 0).await?;
+    let sessions = a
+        .rest_expect(Method::GET, "/v1/bfd/sessions", None, 200)
+        .await?;
+    anyhow::ensure!(
+        sessions.trim() == "[]",
+        "router-a holds no session without bfd-unsolicited: {sessions}"
+    );
+    Ok(())
+}

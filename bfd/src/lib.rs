@@ -19,4 +19,5 @@ pub mod server;
 pub mod session;
 pub mod socket;
 pub mod timers;
+pub mod unsolicited;
 pub mod watchdog_client;
