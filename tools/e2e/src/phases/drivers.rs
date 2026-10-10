@@ -1792,19 +1792,23 @@ async fn mstp_provision(r: &Router, revision: u16) -> anyhow::Result<()> {
 pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     const MATCH: &str = "mst region match port=eth1";
     const BOUNDARY: &str = "mst boundary port port=eth1 reason=revision";
+    const RAISED: &str = "brought parent link up for vlan sub-interfaces interface=eth1";
+    const APPLY_FAILED: &str = "failed to apply interface configuration.*Network is down";
     let (a, b) = (w.a()?, w.b()?);
     let routers = [a, b];
     let matched = routers.map(|r| r.count(MATCH));
 
     w.link_veths().await?;
-    // A tagged trunk needs its parent up before `nos-interfaced` can bring the
-    // `ethX.<tag>` sub-links up (it fails with ENETDOWN otherwise), and the
-    // fresh veths start down.
-    for router in ["router-a", "router-b"] {
-        for iface in ["eth1", "eth2"] {
-            w.set_link(router, iface, true).await?;
-        }
+    // router-a's fresh veths stay admin-down: `nos-interfaced` must raise the
+    // parent itself before the `ethX.<tag>` sub-links (#338). router-b's are
+    // raised here so router-a's ports have carrier the moment they come up (a
+    // carrierless bridge port is DISABLED, so the kernel forwards on carrier
+    // with no state write to log until the next resync).
+    for iface in ["eth1", "eth2"] {
+        w.set_link("router-b", iface, true).await?;
     }
+    let raised = a.count(RAISED);
+    let enetdown = routers.map(|r| r.count(APPLY_FAILED));
     for r in routers {
         r.provision(&[
             "--link-interface",
@@ -1820,10 +1824,15 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
         mstp_provision(r, 1).await?;
     }
 
+    a.wait_new(RAISED, raised, 40).await?;
     log("waiting for both routers to join one MST region");
     for (r, base) in routers.iter().zip(matched) {
         r.wait_new(MATCH, base, 40).await?;
         r.wait("mst configuration name=lab revision=1").await?;
+    }
+    // One REAPPLY tick later: no ENETDOWN retry loop on the admin-down parents.
+    for (r, base) in routers.iter().zip(enetdown) {
+        r.assert_quiet(APPLY_FAILED, base, 20).await?;
     }
     let (ca, cb) = (mst_config(a).await?, mst_config(b).await?);
     if ca.digest != cb.digest || ca.digest == "ac36177f50283cd4b83821d8ab26de62" {
