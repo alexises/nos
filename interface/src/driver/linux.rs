@@ -13,8 +13,8 @@ use nos_proto::{
 };
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use rtnetlink::packet_route::link::{
-    BondMode, InfoBridgePort, InfoKind, InfoPortData, InfoPortKind, LinkAttribute, LinkInfo,
-    LinkMessage, LinkProtoInfoBridge,
+    BondMode, InfoBridgePort, InfoKind, InfoPortData, InfoPortKind, LinkAttribute, LinkFlags,
+    LinkInfo, LinkMessage, LinkProtoInfoBridge,
 };
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{Handle, LinkBond, LinkBridge, LinkDummy, LinkUnspec, LinkVlan, MulticastGroup};
@@ -304,9 +304,7 @@ impl LinuxInterfaceDriver {
             .set_port_attr(index, DefaultNla::new(IFLA_BRPORT_STATE, vec![kernel]))
             .await
         {
-            Err(DriverError::Netlink(rtnetlink::Error::NetlinkError(e)))
-                if e.raw_code() == -ENETDOWN =>
-            {
+            Err(DriverError::Netlink(e)) if is_enetdown(&e) => {
                 debug!(interface = %name, "bridge port is down, state left for the next resync");
                 return Ok(());
             }
@@ -665,6 +663,19 @@ impl LinuxInterfaceDriver {
         let prefix = format!("{interface}.");
         let desired_tags: Vec<u16> = desired.iter().map(|(tag, _)| *tag).collect();
 
+        if !desired.is_empty() {
+            if let Some(parent) = self.find_link(interface).await? {
+                if parent_needs_up(parent.header.flags, stp.err_disabled) {
+                    self.handle
+                        .link()
+                        .set(LinkUnspec::new_with_index(physical_index).up().build())
+                        .execute()
+                        .await?;
+                    info!(interface = %interface, "brought parent link up for vlan sub-interfaces");
+                }
+            }
+        }
+
         let mut links = self.handle.link().get().execute();
         while let Some(link) = links.try_next().await? {
             let Some(name) = link_name(&link) else {
@@ -731,7 +742,8 @@ impl LinuxInterfaceDriver {
                 }
             }
 
-            self.handle
+            match self
+                .handle
                 .link()
                 .set(
                     LinkUnspec::new_with_index(sub_link.header.index)
@@ -739,7 +751,15 @@ impl LinuxInterfaceDriver {
                         .build(),
                 )
                 .execute()
-                .await?;
+                .await
+            {
+                // An err-disabled parent stays down: leave the sub-link for
+                // the next resync instead of failing `apply` every tick.
+                Err(e) if is_enetdown(&e) => {
+                    debug!(interface = %interface, sub_interface = %subname, "parent link is down, sub-interface left for the next resync");
+                }
+                r => r?,
+            }
             // Up means the kernel opened the port: close it again at once.
             let domain = match master {
                 TaggedMaster::Bridge(domain) => Some(domain.as_str()),
@@ -851,6 +871,17 @@ impl LinuxInterfaceDriver {
             .await?;
         Ok(())
     }
+}
+
+/// The kernel refuses to open a VLAN device over a down lower device, so an
+/// admin-down parent must be raised before its sub-links, unless BPDU guard
+/// is holding it down on purpose.
+fn parent_needs_up(flags: LinkFlags, err_disabled: bool) -> bool {
+    !flags.contains(LinkFlags::Up) && !err_disabled
+}
+
+fn is_enetdown(e: &rtnetlink::Error) -> bool {
+    matches!(e, rtnetlink::Error::NetlinkError(m) if m.raw_code() == -ENETDOWN)
 }
 
 /// The domain a link is an `Untagged` member of, if any.
@@ -1240,6 +1271,28 @@ fn diff_addresses(observed: &[IpNet], desired: &[IpNet]) -> (Vec<IpNet>, Vec<IpN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_is_raised_only_when_down_and_not_err_disabled() {
+        assert!(parent_needs_up(LinkFlags::empty(), false));
+        assert!(!parent_needs_up(LinkFlags::empty(), true));
+        assert!(!parent_needs_up(LinkFlags::Up, false));
+        assert!(!parent_needs_up(LinkFlags::Up, true));
+    }
+
+    #[test]
+    fn enetdown_is_recognised_only_for_that_netlink_errno() {
+        use netlink_packet_core::ErrorMessage;
+        use std::num::NonZeroI32;
+        let nl = |code: i32| {
+            let mut m = ErrorMessage::default();
+            m.code = NonZeroI32::new(code);
+            rtnetlink::Error::NetlinkError(m)
+        };
+        assert!(is_enetdown(&nl(-ENETDOWN)));
+        assert!(!is_enetdown(&nl(-ENODEV)));
+        assert!(!is_enetdown(&rtnetlink::Error::RequestFailed));
+    }
 
     #[test]
     fn mtu_change_only_when_the_link_differs() {
