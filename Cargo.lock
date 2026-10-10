@@ -2214,6 +2214,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-test-support"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "ipnet",
+ "nos-pki",
+ "nos-proto",
+ "nos-test-support",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "nos-watchdog"
 version = "0.1.0"
 dependencies = [

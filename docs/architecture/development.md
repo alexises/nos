@@ -22,6 +22,15 @@ The release `Dockerfile` floats on `rust:1-slim-bookworm`, harmless since releas
 
 `watchdog/tests/system.rs` is the unprivileged whole-stack smoke test: the real `nos-watchdogd` supervising every real daemon (`--driver noop`, every socket and state file under a temp dir — `--run-dir` moves the per-instance `<prefix>-<name>.sock` sockets off `/run/nos`), provisioned by the real `nos-provision`, reconfigured, then stopped with SIGTERM. It needs every daemon binary built next to `nos-watchdogd`, which is why each daemon crate has at least one integration test (`tests/bin.rs` where nothing else existed); a single-package run without them skips.
 
+**Fake IPC servers for tests** (`nos-test-support`, #347):
+
+- Use it instead of a per-crate `serve_once`: `FakeConfigd`, `FakeWatchdog`, `FakeRibd`, `FakeInterfaced`, or `Fakes::start(&[Fake::Configd(cfg), Fake::Watchdog, Fake::Ribd("rt1".into()), Fake::Interfaced])` for a whole set with one watchdog pre-filled for exactly the started services.
+- A service left out of `Fakes::start` has no socket and the watchdog answers `NotAvailable` for it: that is how a test reaches a daemon's "unreachable" branch.
+- Every fake loops on accept and speaks real mutual TLS. The client must dial the fake's identity: configd, watchdog and interfaced use the empty name, ribd uses the routing-table name (`nos_pki::connect(path, "ribd", "rt1")`).
+- Resync tests: `connections()` counts accepted dials, `close_connections()` (`close_stream()` on configd) forces a redial, `FakeConfigd::push_diff` feeds `SubscribeDiff` subscribers, `FakeInterfaced::push_link` feeds `SubscribeLinks`.
+- Fire-and-forget requests (`Push*`, `SetStpPortStates`, `FlushFdb`, `SetErrDisabled`) are recorded: `take_pushed()` drains them. `serve` + `Reply` builds a one-off fake for any other protocol.
+- Dev-dependency only, with the feature: `nos-test-support = { workspace = true, features = ["fakes"] }`. Without `fakes` the crate is empty, so `cargo build --workspace` never turns on `nos-pki/testing` for the daemons.
+
 Containerized test environment:
 
 ```bash
