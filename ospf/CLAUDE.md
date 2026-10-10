@@ -56,5 +56,6 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 - `config_client`, `watchdog_client`, `rib_client`, `interface_client` and `link_client` are reimplemented here, not shared (star dependency graph).
 - `nos-watchdogd` gives each instance `--listen-socket` (`/run/nos/ospf-<name>.sock`, `EndpointKind::OspfInstance`); `server.rs` serves `GetNeighbors`/`GetDatabase` and takes `ribd`'s fire-and-forget `RedistributeRoutes` (`docs/architecture/endpoint-broker.md`).
+- `reconcile_tests.rs` drives `resync`/`run` against `nos-test-support`'s fake configd/watchdog/ribd/interfaced (`Fakes::start`) and a real `LinkManager` over `link::tests::wire` (#342); a service left out of `Fakes::start` is the "unreachable" branch.
 - `link::tests` run whole `LinkManager`s over an in-memory wire under `start_paused = true`; `socket.rs` is excluded from coverage (`nos-e2e` is its test). Verify kernel, IPC or wire changes with the matching `nos-e2e` phase.
 - Mark a deliberate corner-cut with a `ponytail:` comment naming its ceiling; ones that cut an RFC feature also go on the "not supported" list in `docs/protocols/ospf.md`.

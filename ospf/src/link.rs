@@ -3099,6 +3099,12 @@ impl LinkManager {
         }
     }
 
+    /// The loopback stub networks of the last `reconcile` (tests).
+    #[cfg(test)]
+    pub(crate) async fn stub_networks(&self) -> HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>> {
+        self.stub_networks.lock().await.clone()
+    }
+
     /// The config a running link was started with (`None` once stopped), so
     /// `reconcile` can keep a link whose VRF/address lookup fails this pass.
     pub async fn running_config(&self, attach_point: &str) -> Option<LinkConfig> {
@@ -3896,7 +3902,7 @@ impl Host for LinkManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
