@@ -12,7 +12,7 @@ Reference for `nos-stp` (IEEE 802.1Q-2022). User-facing configuration: [Spanning
 | Offset | Size | Field |
 |--------|------|-------|
 | 0 | 2 | Protocol identifier, always 0 |
-| 2 | 1 | Version: 0 Config, 2 RST (3 is MSTP, decoded as RST) |
+| 2 | 1 | Version: 0 Config, 2 RST, 3 MSTP |
 | 3 | 1 | Type: `0x00` Config, `0x02` RST, `0x80` TCN |
 | 4 | 1 | Flags |
 | 5 | 8 | Root bridge identifier |
@@ -22,9 +22,28 @@ Reference for `nos-stp` (IEEE 802.1Q-2022). User-facing configuration: [Spanning
 | 27 | 2 each | Message age, max age, hello time, forward delay (1/256 s) |
 | 35 | 1 | RST only: Version 1 Length, 0 |
 
-- Lengths: Config 35, RST 36, TCN 4 (header only).
+- Lengths: Config 35, RST 36, TCN 4 (header only), MST 102 plus 16 per MSTI message.
 - Flags: bit 0 TC, 1 Proposal, 2-3 Port Role (0 unknown, 1 alternate/backup, 2 root, 3 designated), 4 Learning, 5 Forwarding, 6 Agreement, 7 TC Ack. A Config BPDU uses only TC and TC Ack.
 - Bridge identifier: first u16 is priority (4 bits, steps of 4096) over system id extension (12 bits), then the MAC. Port identifier: priority (4 bits, steps of 16) over number (12 bits).
+
+## MST BPDU (version 3, 14.6)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0-35 | 36 | As an RST BPDU, with version 3; offset 5 is the CIST root, 13 the CIST external root path cost, 17 the CIST regional root |
+| 36 | 2 | Version 3 Length: 64 plus 16 per MSTI message (at most 64 messages) |
+| 38 | 1 | Format selector, 0 |
+| 39 | 32 | Region name, NUL padded |
+| 71 | 2 | Revision |
+| 73 | 16 | Configuration digest |
+| 89 | 4 | CIST internal root path cost |
+| 93 | 8 | CIST bridge identifier |
+| 101 | 1 | CIST remaining hops |
+| 102 | 16 each | MSTI message |
+
+- MSTI message: flags (as RST, bit 7 is Master), regional root id (priority plus the MSTID as extension, 8), internal root path cost (4), bridge priority (1, high nibble), port priority (1, high nibble), remaining hops (1).
+- A bad Version 3 Length (below 64, not 64 plus a multiple of 16, over 64 messages) is rejected. `bpdu::decode` still reads a version 3 BPDU as its RST part; `decode_any` keeps the MST part.
+- The Configuration Digest is HMAC-MD5 with the key `13AC06A62E47FD51F95D2BA243CD0346` over 4096 big-endian 16-bit MSTIDs, entry `i` for VLAN `i`. An empty table gives `AC36177F50283CD4B83821D8AB26DE62`.
 
 ## Priority vector
 
@@ -105,6 +124,19 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
   - `Log(Event)`: role and root changes, plain data for the host to log.
 - Port protections (#320): `set_protections(port, Protections)`; `restrictedRole`/`restrictedTcn` are `root_guard`/`restricted_tcn`. `Action::ErrDisable`/`ErrRecover` ask the host to take a link down or up; `Event::{RootInconsistent, LoopInconsistent}` are plain facts. `mcheck` and `rstp_version` (#319), CIST only (#321).
 
+## MSTP (`nos-stp::mst`, #321)
+
+- Model: each MSTI is a second [`Bridge`] with bridge id = MSTI priority + MSTID as system id extension, so the clause 13 machines run unchanged per tree. The CIST bridge is instance 0.
+- Remaining hops: an MSTI bridge uses `max_age = MaxHops` and a received message's "message age" is `MaxHops - remainingHops`, so PRX's aged-BPDU drop and `rcvdInfoWhile` are the remaining-hops rules. A sender's remaining hops is `MaxHops` minus its `designatedTimes.messageAge`.
+- Wire: one MST BPDU per port carries the CIST and every enabled MSTI message. The CIST bridge's transmit is the pace; an MSTI's Transmit action only triggers a send (so a burst can exceed the CIST's `txHoldCount` by the number of MSTIs).
+- Region check on receive: `mismatch(name, revision, digest)`. Same region: the MSTI messages are delivered to the instances by the MSTID in the regional root. Else (or a plain BPDU) the port is `Edge::Boundary`, its MSTI bridges are disabled and the kernel state of every tree is the CIST's.
+- Kernel states: `Engine::diff_states` pushes every `(tree, port)` whose effective state changed; a tree's assignments cover the domains whose `stp-instance` is that tree (0 for none). `FlushFdb` of an MSTI flushes only its domains.
+- Deviations: the CIST is a flat 5-component vector (external and internal root path costs summed, the regional root is the CIST root, internal cost 0 on send); `rcvdInternal`/`infoInternal` and the Master port role are not modelled, a boundary port follows the CIST instead; port protections other than `bpdu-filter`/err-disable act on the CIST only.
+- The BPDU socket's receive buffer is 1536 bytes (an MST BPDU with 64 MSTI messages is 1143 bytes plus the frame header); at the old 128 bytes every v3 BPDU with MSTIs was dropped as truncated.
+- Every 10 s the daemon re-pushes every `(port, domain)` state (`Engine::all_states`): `nos-interfaced` only writes states that differ, and a resync running at the same time as a plan rebuild was seen to overwrite a pushed Blocking with the previous Forwarding.
+- Known limit of `nos-interfaced`, not of MSTP: a tagged trunk over a parent link that is administratively down fails to bring `ethX.<tag>` up (ENETDOWN) and is retried forever; bring the parent up first (the `stp-mstp` phase does).
+- Tests: `stp/src/mst/` (digest oracle, VLAN map, region mismatch, a two-engine run with two trees blocking different links) and the `stp-mstp` e2e phase.
+
 ## Deviations from the standard's text
 
 - `setSyncTree` also clears `synced`. With `sync && synced` already true, a Designated port neither discards nor clears `sync` (both need `!synced`) and stalls forever; found by the random-graph test.
@@ -144,7 +176,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 ## Daemon (`nos-stpd`, #327)
 
 - One fixed process, supervised like `nos-lldpd`; `--listen-socket` serves the status query (below).
-- Ports: a physical `Interface` or a `PortAggregate` (the bond, never a member) with a `switching_profile`; loopbacks, VXLAN and L3-only interfaces are not ports. Only mode `rstp` runs; `disabled`, `mstp` and `rapid-pvst` leave the daemon idle.
+- Ports: a physical `Interface` or a `PortAggregate` (the bond, never a member) with a `switching_profile`; loopbacks, VXLAN and L3-only interfaces are not ports. Modes `rstp` and `mstp` run; `disabled` and `rapid-pvst` leave the daemon idle.
 - Task layout, all in `stp/src/daemon.rs`: one actor owns the bridge core and every BPDU socket; a reader task per port, the link table, plan changes and a 1 s tick are events to it. A changed plan rebuilds the bridge (the protocol restarts, sockets of ports that stay are kept).
 - The BPDU socket (`L2Socket::open_bpdu`) is `ETH_P_ALL` with a classic BPF for the group MAC plus LLC `42 42 03`. A protocol-bound socket runs after tc ingress and the bridge `rx_handler`, where the trap from #326 drops the frame; the tap runs before. It sees its own outgoing frames, so the source MAC is filtered.
 - Inputs to the core per port:
@@ -153,7 +185,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
   - `operPointToPoint`: profile `link-type`, else full duplex (unknown counts as full). Re-read on every carrier change.
   - Edge: `edge-port admin` is admin edge, `auto` (the default) is the core's own BPDU-absence detection, `disabled` neither.
 - Bridge identifier: configured priority, extension 0, MAC derived from hostname + machine-id (locally administered); port number is the index in the name-sorted port list plus one.
-- Output: the core's `SetPortState` becomes one `SetStpPortStates` assignment per domain in the port's switching profile (`Discarding` is `Blocking`); `FlushFdb` becomes one `FlushFdb` per domain. The push is fire-and-forget; the cache is resent on every reconnect.
+- Output: the state of a tree on a port becomes one `SetStpPortStates` assignment per domain of that tree in the port's switching profile (`Discarding` is `Blocking`; in `rstp` every domain is the CIST's); `FlushFdb` becomes one `FlushFdb` per domain of the tree. The push is fire-and-forget; the cache is resent on every reconnect.
 - Logs (the e2e anchors; `Debug` renders roles and states capitalised):
 
 | Line | Fields |
@@ -163,14 +195,18 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 | `root bridge changed` | `root` (`8000.02:aa:bb:cc:dd:ee`) |
 | `port carrier up` / `port carrier lost` | `port` |
 | `bpdu rx` | `port`, `count` received in the last 10 s, every 10 s per enabled port |
+| `mst configuration` | `name`, `revision`, `digest`, `instances`; once per start in `mstp` |
+| `mst region match` / `mst boundary port` | `port` (+ `digest`) / `port`, `reason` (`plain-bpdu`, `name`, `revision`, `digest`); on change |
+| `msti port role changed` | `port`, `msti`, `role` |
+| `msti port state changed` | `port`, `msti`, `state`, `domains` (comma list of the tree's domains on the port); the effective state, a boundary port shows the CIST's |
 
 ## Status query (#328)
 
 - Path: `nos show spanning-tree` / `GET /v1/spanning-tree` resolve `ServiceRef::Stp` through the watchdog, then send `StpRequest::GetSummary`; the reply is one `StpEvent::Summary(StpSummary)`.
-- `stp/src/server.rs` answers from an `Arc<RwLock<StpSummary>>` snapshot. The daemon actor rewrites it after every event (plan change, BPDU, link change, tick) from `Engine::summary()`; no engine (mode not `rstp`) publishes the default, `enabled: false`.
+- `stp/src/server.rs` answers from an `Arc<RwLock<StpSummary>>` snapshot. The daemon actor rewrites it after every event (plan change, BPDU, link change, tick) from `Engine::summary()`; no engine (mode neither `rstp` nor `mstp`) publishes the default, `enabled: false`.
 - `stp/src/authz.rs`: `allowed(role, &StpRequest)` lists `User` and `Restd`, no wildcard arm; any other role is disconnected with a `warn!`.
 - Roles and states are the `StpRole`/`StpState` enums, so the CLI and REST print the same words. Bridge and port ids are display strings (`8000.02:aa:bb:cc:dd:ee`, `128.1`).
 - Root path cost is the root port's received cost plus its own; the timers are the root's (`rootTimes`), what the bridge actually runs.
-- `StpSummary` only grows by appended fields (per-instance MSTP views come with #323).
+- `StpSummary` only grows by appended fields; `mst` (#321) holds the region and every instance's root and ports, which `show spanning-tree instance`/`mst-config` and the two `GET /v1/spanning-tree/...` routes render, so MSTP added no request variant.
 - Read the state of a running lab: `cargo run -p nos-e2e -- logs 200` and look at the last `port state changed` per port.
 - Limits: no in-place update of priority, timers or cost (a config change restarts the protocol); a link whose speed changes without a carrier change keeps its old cost.

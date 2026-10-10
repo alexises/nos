@@ -3,7 +3,7 @@
 //! One module per machine. Each exposes `step(&mut Bridge, port) -> bool` (one
 //! transition, `true` if anything changed) and `enter`/`begin` for state entry.
 //! The shared per-port variables (13.27) and procedures (13.30) live here.
-//! MSTI machinery (#321) is absent: every variable is the CIST's.
+//! A [`Bridge`] is one tree: the CIST, or an MSTI (`crate::mst`).
 #![allow(clippy::struct_excessive_bools)] // 13.27 is a list of booleans
 
 pub mod bdm;
@@ -459,11 +459,8 @@ pub(crate) enum Tx {
     Tcn,
 }
 
-/// 13.30 `txConfig` / `txRstp` / `txTcn`.
-pub(crate) fn transmit(b: &mut Bridge, i: usize, kind: Tx) {
-    if b.ports[i].prot.bpdu_filter {
-        return;
-    }
+/// The BPDU `txConfig` / `txRstp` / `txTcn` would send on port `i` now.
+pub(crate) fn build(b: &Bridge, i: usize, kind: Tx) -> Bpdu {
     let id: BridgeId = b.id;
     let p = &b.ports[i];
     let dt = p.designated_times;
@@ -479,7 +476,7 @@ pub(crate) fn transmit(b: &mut Bridge, i: usize, kind: Tx) {
         hello_time: raw_secs(dt.hello),
         forward_delay: raw_secs(dt.forward_delay),
     };
-    let bpdu = match kind {
+    match kind {
         Tx::Tcn => Bpdu::Tcn,
         Tx::Config => Bpdu::Config(params(tc.with(Flags::TC_ACK, p.tc_ack))),
         Tx::Rst => {
@@ -497,7 +494,15 @@ pub(crate) fn transmit(b: &mut Bridge, i: usize, kind: Tx) {
                     .with(Flags::AGREEMENT, p.agree),
             ))
         }
-    };
+    }
+}
+
+/// 13.30 `txConfig` / `txRstp` / `txTcn`.
+pub(crate) fn transmit(b: &mut Bridge, i: usize, kind: Tx) {
+    if b.ports[i].prot.bpdu_filter {
+        return;
+    }
+    let bpdu = build(b, i, kind);
     b.actions.push(Action::Transmit { port: i, bpdu });
 }
 

@@ -59,6 +59,8 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::lldp_neighbors))
         .routes(routes!(show::lldp_statistics))
         .routes(routes!(show::spanning_tree))
+        .routes(routes!(show::spanning_tree_instance))
+        .routes(routes!(show::spanning_tree_mst_config))
         .routes(routes!(show::bfd_sessions))
         .routes(routes!(show::bfd_reflector))
         .routes(routes!(show::logs))

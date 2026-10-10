@@ -740,6 +740,57 @@ async fn show_spanning_tree_serves_the_summary_and_503s_without_stpd() {
 }
 
 #[tokio::test]
+async fn show_spanning_tree_mst_views_404_outside_mstp() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rstp, mstp) = (dir.path().join("rstp.sock"), dir.path().join("mstp.sock"));
+    serve(&rstp, ("stpd", ""), |_: nos_proto::StpRequest| {
+        nos_proto::StpEvent::Summary(nos_proto::StpSummary::default())
+    });
+    serve(&mstp, ("stpd", ""), |_: nos_proto::StpRequest| {
+        nos_proto::StpEvent::Summary(nos_proto::StpSummary {
+            enabled: true,
+            mst: Some(nos_proto::StpMst {
+                region_name: "lab".into(),
+                revision: 2,
+                digest: "00".repeat(16),
+                max_hops: 20,
+                instances: vec![nos_proto::StpInstance {
+                    id: 1,
+                    vlans: "10".into(),
+                    ..nos_proto::StpInstance::default()
+                }],
+            }),
+            ..nos_proto::StpSummary::default()
+        })
+    });
+    let off = fixture(vec![(ServiceRef::Stp, rstp)]).await;
+    for path in [
+        "/v1/spanning-tree/instance/1",
+        "/v1/spanning-tree/mst-config",
+    ] {
+        assert_eq!(
+            send(&off.app, Method::GET, path, None).await.0,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let on = fixture(vec![(ServiceRef::Stp, mstp)]).await;
+    let (s, v) = send(&on.app, Method::GET, "/v1/spanning-tree/instance/1", None).await;
+    assert_eq!((s, v["vlans"].as_str()), (StatusCode::OK, Some("10")));
+    let (s, v) = send(&on.app, Method::GET, "/v1/spanning-tree/mst-config", None).await;
+    assert_eq!(
+        (s, v["region_name"].as_str()),
+        (StatusCode::OK, Some("lab"))
+    );
+    assert_eq!(
+        send(&on.app, Method::GET, "/v1/spanning-tree/instance/7", None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let f = fixture(vec![]).await;
     let app = &f.app;

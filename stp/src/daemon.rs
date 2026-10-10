@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::bpdu::{decode_frame, encode_frame};
+use crate::bpdu::{decode_frame_any, encode_frame, encode_mst_frame};
 use crate::engine::{Engine, Out};
 use crate::identity;
 use crate::interface_client::Push;
@@ -27,6 +27,8 @@ use crate::ports::Plan;
 use crate::server::{Cmd, Snapshot};
 
 const TICK: Duration = Duration::from_secs(1);
+/// Seconds between full re-pushes of the kernel port states.
+const RESYNC_EVERY: u32 = 10;
 /// Seconds between the per-port BPDU receive summaries.
 const SUMMARY_EVERY: u32 = 10;
 
@@ -177,7 +179,7 @@ impl Daemon {
                 Err(e) => error!(error = %e, "cannot build the spanning tree bridge"),
             }
         } else {
-            info!("spanning tree idle (mode is not rstp)");
+            info!("spanning tree idle (mode is not rstp or mstp)");
         }
         let release = |port: String| Out::ErrDisabled {
             port,
@@ -283,9 +285,9 @@ impl Daemon {
             return;
         };
         self.rt[i].rx += 1;
-        match decode_frame(frame) {
-            Ok((_, bpdu)) => {
-                let out = engine.receive(i, bpdu);
+        match decode_frame_any(frame) {
+            Ok((_, rx)) => {
+                let out = engine.receive_rx(i, rx);
                 self.emit(out).await;
             }
             Err(e) => debug!(port = %name, error = %e, "dropping malformed bpdu"),
@@ -323,6 +325,15 @@ impl Daemon {
         let out = engine.tick();
         self.emit(out).await;
         self.ticks += 1;
+        // ponytail: a full re-push every RESYNC_EVERY seconds heals a state
+        // that a concurrent `nos-interfaced` resync overwrote with a stale one
+        // (seen after a plan rebuild); upgrade path is an ack from interfaced.
+        if self.ticks.is_multiple_of(RESYNC_EVERY) {
+            if let Some(e) = &self.engine {
+                let out = e.all_states();
+                self.emit(out).await;
+            }
+        }
         if self.ticks.is_multiple_of(SUMMARY_EVERY) {
             if let Some(e) = &self.engine {
                 for (p, rt) in e.ports().iter().zip(self.rt.iter_mut()) {
@@ -349,6 +360,23 @@ impl Daemon {
                         .name;
                     if let Some(io) = self.io.get(name) {
                         let frame = encode_frame(io.socket.own_hw_addr(), &bpdu);
+                        match io.socket.send_frame(&frame) {
+                            Err(e) if !nos_l2_socket::is_link_down(&e) => {
+                                warn!(port = %name, error = %e, "bpdu send failed");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Out::TxMst { port, bpdu } => {
+                    let name = &self
+                        .engine
+                        .as_ref()
+                        .expect("outputs imply an engine")
+                        .ports()[port]
+                        .name;
+                    if let Some(io) = self.io.get(name) {
+                        let frame = encode_mst_frame(io.socket.own_hw_addr(), &bpdu);
                         match io.socket.send_frame(&frame) {
                             Err(e) if !nos_l2_socket::is_link_down(&e) => {
                                 warn!(port = %name, error = %e, "bpdu send failed");

@@ -2,7 +2,7 @@
 
 Spanning tree (IEEE 802.1Q clause 13) keeps an L2 topology loop-free.
 
-- **Only `mode rstp` runs today.** `nos-stpd` speaks RSTP on every physical interface or port aggregate that has a `switching-profile`. `mstp` and `rapid-pvst` are accepted and checked but the daemon stays idle for them (and for `disabled`).
+- **`mode rstp` and `mode mstp` run today.** `nos-stpd` speaks them on every physical interface or port aggregate that has a `switching-profile`. `rapid-pvst` is accepted and checked but the daemon stays idle for it (and for `disabled`).
 - **Fail-safe:** with a mode other than `disabled`, a new bridge port starts blocked and BPDUs are trapped until `nos-stpd` pushes a state (see [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326)). Set `spanning-tree mode disabled` to forward without spanning tree.
 - Everything is checked at commit time.
 - A port aggregate with an `esi` needs a guard profile (see [ESI port aggregates](#esi-port-aggregates)).
@@ -25,8 +25,8 @@ show spanning-tree
 ```
 
 - Prints the bridge id, the root id (and the root port and path cost, or "this bridge is the root"), the timers, then one row per port: `Name Role State Cost Prio Designated`.
-- REST: `GET /v1/spanning-tree` (same data as JSON; `enabled: false` and no ports when the mode is not `rstp`).
-- `nos-stpd is not running` means the daemon is down; `spanning-tree is disabled` means the mode is not `rstp`.
+- REST: `GET /v1/spanning-tree` (same data as JSON; `enabled: false` and no ports when the mode is neither `rstp` nor `mstp`).
+- `nos-stpd is not running` means the daemon is down; `spanning-tree is disabled` means the mode is neither `rstp` nor `mstp`.
 
 | Role | Meaning |
 |------|---------|
@@ -117,7 +117,46 @@ set stp-port-profile edge mst-instance 5 cost 100
 ```
 
 - An instance must exist under `spanning-tree mst-instance` before a broadcast domain or a port profile names it. At most 64 instances, ids 1-4094.
-- A domain with no `stp-instance` stays in the CIST.
+- A domain with no `stp-instance` stays in the CIST (instance 0).
+- Every switch of one region needs the same `region name`, `region revision` and VLAN to instance map, or its ports toward the others are boundary ports (below).
+
+### Map domains to instances
+
+- A domain's VLAN is the dot1q tag of its switching-profile membership; a domain that is only untagged is VLAN 1. The instance is its `stp-instance`.
+- `nos-stpd` derives the 4096-entry VLAN to instance table from that and hashes it into the MST configuration digest (802.1Q 13.8). Two switches share instances only when name, revision and digest all match.
+- Every VLAN no domain uses maps to the CIST. A peer that maps extra VLANs to an instance gets a different digest; there is no explicit VLAN-range override, so give such a peer the same domains.
+- Changing a domain's tag or `stp-instance` changes the digest and restarts the protocol, which is a region change for the peers: change every switch of the region in the same maintenance window.
+
+### Read it and compare with a peer
+
+```
+show spanning-tree mst-config
+show spanning-tree instance 5
+```
+
+- `mst-config` prints the region name, revision, digest (32 hex digits) and, per instance, the VLANs and domains. Compare the digest with the peer's: equal digests and equal name and revision mean one region.
+- `instance <n>` prints the instance's bridge id, root (and root port and cost) and one row per port with role and state; a `Boundary` mark means the peer is outside the region and the port follows the CIST. `instance 0` is the CIST.
+- REST: `GET /v1/spanning-tree/instance/<n>` and `GET /v1/spanning-tree/mst-config` (`404` when the mode is not `mstp` or the instance does not exist). `GET /v1/spanning-tree` also carries the `mst` object.
+- Logs: `mst configuration` (once per start), `mst region match port=<if>` and `mst boundary port port=<if> reason=<plain-bpdu|name|revision|digest>` (once per change), `msti port role changed` and `msti port state changed port=<if> msti=<n> state=<s> domains=<list>`.
+
+### What the kernel gets
+
+- The state of a domain's bridge port is the state of the tree its `stp-instance` names. Instance 5 blocking `eth1` blocks `eth1.<tag>` of the domains in instance 5 and leaves the other domains on `eth1` forwarding, so two parallel links can each carry different VLANs.
+- Domains without an instance, and untagged-only domains in the CIST, follow the CIST state of the physical link or bond.
+- A topology change in an instance flushes only that instance's domains.
+
+### Boundary ports
+
+- A port is a boundary port when its peer is an RSTP or STP bridge, or an MST bridge of another region (name, revision or digest differs). The instances do not run there: every instance takes the CIST state of the port.
+- Toward an RSTP peer `nos-stpd` still sends a version 3 BPDU, which RSTP reads as its CIST part; toward a legacy 802.1D peer the port migrates to STP as in [Interoperate with an 802.1D switch](#interoperate-with-an-8021d-switch) and sends Config BPDUs.
+- A port leaves the boundary state when a BPDU of the same region arrives, or when the link goes down.
+
+### Limits
+
+- The CIST is one flat tree across regions: the external and internal root path costs are summed and the regional root is not tracked. Two NOS bridges, or one region of NOS bridges behind an RSTP core, behave correctly; mixing with another vendor's MSTP regions can pick a different root port than a full 802.1Q implementation would.
+- `restricted-tcn`, root guard, loop guard and BPDU guard act on the CIST only; BPDU filter silences all instances.
+- A per-instance port cost defaults to the CIST cost of the port (profile `cost`, else the link speed); `mst-instance <n> cost` overrides it for that instance.
+- `max-hops` (default 20) is the remaining-hops budget of an instance's information; an instance's information from a bridge `max-hops` away is discarded.
 
 ## Use Rapid PVST
 

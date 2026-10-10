@@ -35,6 +35,8 @@ pub enum BpduError {
     LengthField(usize),
     #[error("LLC header is not 42 42 03")]
     BadLlc,
+    #[error("MST BPDU with Version 3 Length {0} (need 64 plus a multiple of 16, at most 64 MSTI messages)")]
+    BadVersion3Length(usize),
 }
 
 /// Role carried in an RST BPDU's flags (bits 2-3).
@@ -195,7 +197,10 @@ pub fn encode(bpdu: &Bpdu) -> Vec<u8> {
 
 /// A full 802.3 frame: group address, `src_mac`, length field, LLC, body.
 pub fn encode_frame(src_mac: [u8; 6], bpdu: &Bpdu) -> Vec<u8> {
-    let body = encode(bpdu);
+    frame(src_mac, &encode(bpdu))
+}
+
+fn frame(src_mac: [u8; 6], body: &[u8]) -> Vec<u8> {
     let mut f = Vec::with_capacity(17 + body.len());
     f.extend_from_slice(&STP_GROUP_MAC);
     f.extend_from_slice(&src_mac);
@@ -205,13 +210,13 @@ pub fn encode_frame(src_mac: [u8; 6], bpdu: &Bpdu) -> Vec<u8> {
             .to_be_bytes(),
     );
     f.extend_from_slice(&LLC);
-    f.extend_from_slice(&body);
+    f.extend_from_slice(body);
     f
 }
 
-/// Decode a frame as received (padding past the length field is ignored).
-/// Returns the source MAC and the BPDU.
-pub fn decode_frame(f: &[u8]) -> Result<([u8; 6], Bpdu), BpduError> {
+/// The BPDU body of a frame as received (padding past the length field is
+/// ignored) and its source MAC.
+fn unframe(f: &[u8]) -> Result<([u8; 6], &[u8]), BpduError> {
     if f.len() < 14 {
         return Err(BpduError::Truncated {
             need: 14,
@@ -241,10 +246,158 @@ pub fn decode_frame(f: &[u8]) -> Result<([u8; 6], Bpdu), BpduError> {
     if payload[..3] != LLC {
         return Err(BpduError::BadLlc);
     }
-    Ok((
-        f[6..12].try_into().expect("6 bytes"),
-        decode(&payload[3..])?,
-    ))
+    Ok((f[6..12].try_into().expect("6 bytes"), &payload[3..]))
+}
+
+/// Decode a frame as received. Returns the source MAC and the BPDU (an MST
+/// BPDU reads as its CIST part, see [`decode`]; [`decode_frame_any`] keeps
+/// the MSTI messages).
+pub fn decode_frame(f: &[u8]) -> Result<([u8; 6], Bpdu), BpduError> {
+    let (src, body) = unframe(f)?;
+    Ok((src, decode(body)?))
+}
+
+// ---- MST BPDU, 802.1Q 14.6 (version 3) ----
+
+pub const MST_FIXED_LEN: usize = 102;
+pub const MSTI_LEN: usize = 16;
+pub const MST_MAX_MSTIS: usize = 64;
+/// Version 3 Length with no MSTI message: format selector, name, revision,
+/// digest, CIST internal root path cost, bridge id, remaining hops.
+const V3_BASE: usize = 64;
+
+/// MST Configuration Identifier (13.8): bridges share MSTIs only when all of
+/// name, revision and digest are equal. Format selector is always 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MstConfigId {
+    /// NUL padded.
+    pub name: [u8; 32],
+    pub revision: u16,
+    pub digest: [u8; 16],
+}
+
+/// One MSTI Configuration Message (14.6.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MstiMsg {
+    /// Same bit layout as [`Flags`]; bit 7 is Master, not TC Ack.
+    pub flags: Flags,
+    /// Priority and MSTID (system id extension) of the MSTI's regional root.
+    pub regional_root: BridgeId,
+    pub internal_cost: u32,
+    /// The designated bridge's priority in this MSTI (high nibble).
+    pub bridge_priority: u8,
+    pub port_priority: u8,
+    pub remaining_hops: u8,
+}
+
+/// A version 3 BPDU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MstBpdu {
+    /// CIST fields; `params.bridge` is the CIST *regional* root (offset 17).
+    pub params: Params,
+    pub config: MstConfigId,
+    pub internal_cost: u32,
+    /// The sender's CIST bridge identifier.
+    pub bridge: BridgeId,
+    pub remaining_hops: u8,
+    pub mstis: Vec<MstiMsg>,
+}
+
+/// What a frame carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rx {
+    Plain(Bpdu),
+    Mst(MstBpdu),
+}
+
+/// Like [`decode`], keeping the MST part of a version 3 RST BPDU.
+pub fn decode_any(b: &[u8]) -> Result<Rx, BpduError> {
+    if b.len() < 4 || b[3] != TYPE_RST || b[2] < 3 || be16(b, 0) != 0 {
+        return decode(b).map(Rx::Plain);
+    }
+    if b.len() < MST_FIXED_LEN {
+        return Err(BpduError::Truncated {
+            need: MST_FIXED_LEN,
+            got: b.len(),
+        });
+    }
+    let v3len = usize::from(be16(b, 36));
+    if v3len < V3_BASE || !(v3len - V3_BASE).is_multiple_of(MSTI_LEN) {
+        return Err(BpduError::BadVersion3Length(v3len));
+    }
+    let n = (v3len - V3_BASE) / MSTI_LEN;
+    if n > MST_MAX_MSTIS {
+        return Err(BpduError::BadVersion3Length(v3len));
+    }
+    let need = 38 + v3len;
+    if b.len() < need {
+        return Err(BpduError::Truncated { need, got: b.len() });
+    }
+    let mstis = (0..n)
+        .map(|k| {
+            let m = &b[MST_FIXED_LEN + k * MSTI_LEN..][..MSTI_LEN];
+            MstiMsg {
+                flags: Flags(m[0]),
+                regional_root: bridge_at(m, 1),
+                internal_cost: u32::from_be_bytes([m[9], m[10], m[11], m[12]]),
+                bridge_priority: m[13],
+                port_priority: m[14],
+                remaining_hops: m[15],
+            }
+        })
+        .collect();
+    Ok(Rx::Mst(MstBpdu {
+        params: params(b),
+        config: MstConfigId {
+            name: b[39..71].try_into().expect("32 bytes"),
+            revision: be16(b, 71),
+            digest: b[73..89].try_into().expect("16 bytes"),
+        },
+        internal_cost: u32::from_be_bytes([b[89], b[90], b[91], b[92]]),
+        bridge: bridge_at(b, 93),
+        remaining_hops: b[101],
+        mstis,
+    }))
+}
+
+pub fn encode_mst(m: &MstBpdu) -> Vec<u8> {
+    let p = &m.params;
+    let mut v = Vec::with_capacity(MST_FIXED_LEN + MSTI_LEN * m.mstis.len());
+    v.extend_from_slice(&[0, 0, 3, TYPE_RST, p.flags.0]);
+    v.extend_from_slice(&p.root.to_bytes());
+    v.extend_from_slice(&p.root_path_cost.to_be_bytes());
+    v.extend_from_slice(&p.bridge.to_bytes());
+    v.extend_from_slice(&p.port.to_u16().to_be_bytes());
+    for t in [p.message_age, p.max_age, p.hello_time, p.forward_delay] {
+        v.extend_from_slice(&t.to_be_bytes());
+    }
+    v.push(0); // Version 1 Length
+    let v3len = V3_BASE + MSTI_LEN * m.mstis.len();
+    v.extend_from_slice(&u16::try_from(v3len).expect("<= 64 messages").to_be_bytes());
+    v.push(0); // format selector
+    v.extend_from_slice(&m.config.name);
+    v.extend_from_slice(&m.config.revision.to_be_bytes());
+    v.extend_from_slice(&m.config.digest);
+    v.extend_from_slice(&m.internal_cost.to_be_bytes());
+    v.extend_from_slice(&m.bridge.to_bytes());
+    v.push(m.remaining_hops);
+    for i in &m.mstis {
+        v.push(i.flags.0);
+        v.extend_from_slice(&i.regional_root.to_bytes());
+        v.extend_from_slice(&i.internal_cost.to_be_bytes());
+        v.extend_from_slice(&[i.bridge_priority, i.port_priority, i.remaining_hops]);
+    }
+    v
+}
+
+pub fn encode_mst_frame(src_mac: [u8; 6], m: &MstBpdu) -> Vec<u8> {
+    frame(src_mac, &encode_mst(m))
+}
+
+/// [`decode_frame`] keeping the MST part of a version 3 BPDU.
+pub fn decode_frame_any(f: &[u8]) -> Result<([u8; 6], Rx), BpduError> {
+    let (src, body) = unframe(f)?;
+    Ok((src, decode_any(body)?))
 }
 
 #[cfg(test)]
@@ -456,5 +609,96 @@ mod tests {
             decode_frame(&g),
             Err(BpduError::Truncated { need: 3, got: 2 })
         ));
+    }
+
+    fn mst(n: usize) -> MstBpdu {
+        MstBpdu {
+            params: params(),
+            config: MstConfigId {
+                name: *b"lab\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+                revision: 0x0102,
+                digest: [0xab; 16],
+            },
+            internal_cost: 77,
+            bridge: BridgeId::new(8192, 0, [9; 6]).unwrap(),
+            remaining_hops: 19,
+            mstis: (0..n)
+                .map(|k| MstiMsg {
+                    flags: Flags(0x3c),
+                    regional_root: BridgeId::new(4096, u16::try_from(k).unwrap() + 1, [3; 6])
+                        .unwrap(),
+                    internal_cost: 1000 + u32::try_from(k).unwrap(),
+                    bridge_priority: 0x80,
+                    port_priority: 0x90,
+                    remaining_hops: 18,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn mst_bpdu_round_trips_with_zero_one_and_64_msti_messages() {
+        for n in [0, 1, MST_MAX_MSTIS] {
+            let m = mst(n);
+            let body = encode_mst(&m);
+            assert_eq!(body.len(), MST_FIXED_LEN + MSTI_LEN * n);
+            assert_eq!(decode_any(&body), Ok(Rx::Mst(m.clone())), "{n}");
+            let f = encode_mst_frame([1, 2, 3, 4, 5, 6], &m);
+            assert_eq!(decode_frame_any(&f), Ok(([1, 2, 3, 4, 5, 6], Rx::Mst(m))));
+        }
+    }
+
+    #[test]
+    fn mst_layout_is_clause_14_6() {
+        // Built from the layout of 14.6: version 3, Version 1 Length 0, Version 3
+        // Length 64 + 16n at offset 36, format selector 0, 32-byte name,
+        // revision, 16-byte digest, internal cost, bridge id, remaining hops.
+        let body = encode_mst(&mst(1));
+        assert_eq!(&body[..4], [0, 0, 3, 2]);
+        assert_eq!(body[35], 0);
+        assert_eq!(be16(&body, 36), 80);
+        assert_eq!(body[38], 0);
+        assert_eq!(&body[39..42], b"lab");
+        assert_eq!(be16(&body, 71), 0x0102);
+        assert_eq!(&body[73..89], [0xab; 16]);
+        assert_eq!(&body[89..93], 77u32.to_be_bytes());
+        assert_eq!(body[101], 19);
+        assert_eq!(
+            &body[102..],
+            [0x3c, 0x10, 0x01, 3, 3, 3, 3, 3, 3, 0, 0, 3, 0xe8, 0x80, 0x90, 18]
+        );
+    }
+
+    #[test]
+    fn mst_decode_rejects_bad_lengths_and_plain_versions_stay_plain() {
+        let good = encode_mst(&mst(2));
+        for bad in [63, 65, 64 + 16 * 65] {
+            let mut b = good.clone();
+            b[36..38].copy_from_slice(&u16::try_from(bad).unwrap().to_be_bytes());
+            assert_eq!(
+                decode_any(&b),
+                Err(BpduError::BadVersion3Length(bad)),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            decode_any(&good[..good.len() - 1]),
+            Err(BpduError::Truncated { .. })
+        ));
+        assert!(matches!(
+            decode_any(&good[..60]),
+            Err(BpduError::Truncated { .. })
+        ));
+        // An RSTP (version 2) and a Config BPDU are not MST BPDUs.
+        let rst = encode(&Bpdu::Rst(params()));
+        assert_eq!(decode_any(&rst), Ok(Rx::Plain(Bpdu::Rst(params()))));
+        let cfg = encode(&Bpdu::Config(params()));
+        assert_eq!(decode_any(&cfg), Ok(Rx::Plain(Bpdu::Config(params()))));
+        // decode() still reads a v3 BPDU as its CIST part (RSTP-only bridges).
+        assert!(matches!(decode(&good), Ok(Bpdu::Rst(_))));
+        // Trailing bytes past the version 3 length are ignored.
+        let mut padded = good.clone();
+        padded.extend_from_slice(&[0; 9]);
+        assert_eq!(decode_any(&padded), decode_any(&good));
     }
 }

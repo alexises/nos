@@ -21,6 +21,8 @@ nos-log-client     = { workspace = true }
 nos-l2-socket      = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
+hmac               = { workspace = true }
+md-5               = { workspace = true }
 
 [[bin]]
 name = "nos-stpd"

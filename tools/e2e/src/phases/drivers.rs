@@ -1620,6 +1620,296 @@ pub async fn stp_protections(w: &mut World) -> anyhow::Result<()> {
     b.established().await
 }
 
+/// `GET /v1/spanning-tree/instance/<id>`.
+async fn mst_instance(r: &Router, id: u16) -> anyhow::Result<nos_proto::StpInstance> {
+    let body = r
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/spanning-tree/instance/{id}"),
+            None,
+            200,
+        )
+        .await?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// Polls instance `id` on `r` until `want` holds twice in a row (a state that
+/// merely passes through is not settled).
+async fn mst_wait(
+    r: &Router,
+    id: u16,
+    secs: u64,
+    want: impl Fn(&nos_proto::StpInstance) -> bool,
+) -> anyhow::Result<nos_proto::StpInstance> {
+    let mut last = String::new();
+    let mut stable = 0;
+    for _ in 0..secs {
+        if let Ok(i) = mst_instance(r, id).await {
+            if want(&i) {
+                stable += 1;
+                if stable >= 2 {
+                    return Ok(i);
+                }
+            } else {
+                stable = 0;
+            }
+            last = format!("{i:?}");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: instance {id} never settled as wanted in {secs}s: {last}",
+        r.name()
+    )
+}
+
+/// `GET /v1/spanning-tree/mst-config`.
+async fn mst_config(r: &Router) -> anyhow::Result<nos_proto::StpMst> {
+    let body = r
+        .rest_expect(Method::GET, "/v1/spanning-tree/mst-config", None, 200)
+        .await?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// The state `nos-interfaced` last wrote to bridge port `link` on `r`:
+/// `None` when it never wrote one (the port is still in its blocking
+/// failsafe).
+fn kernel_port_state(r: &Router, link: &str) -> Option<String> {
+    last_value(
+        r,
+        &format!("bridge port state set interface={link} state="),
+        "state",
+    )
+}
+
+/// Waits until `link` is blocked (`blocked`) or forwarding on `r`.
+async fn kernel_wait(r: &Router, link: &str, blocked: bool, secs: u64) -> anyhow::Result<()> {
+    let mut last = None;
+    for _ in 0..secs {
+        last = kernel_port_state(r, link);
+        let ok = if blocked {
+            last.as_deref().is_none_or(|s| s == "Blocking")
+        } else {
+            last.as_deref() == Some("Forwarding")
+        };
+        if ok {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: {link} should be {} in the kernel, last write {last:?}",
+        r.name(),
+        if blocked { "blocking" } else { "forwarding" }
+    )
+}
+
+/// One `stp-mstp` provision of `eth1` on `r`: region `lab` at `revision`, the
+/// trunk `mstp-sp1` into `mst-d1` (VLAN 10, MSTI 1) and `mst-d2` (VLAN 20,
+/// MSTI 2). Router-a is the CIST root and the root of MSTI 1, router-b the
+/// root of MSTI 2; the other router's `eth1` is expensive in the tree it is
+/// not the root of, so MSTI 1 blocks router-b's `eth1` and MSTI 2 router-a's.
+async fn mstp_provision(r: &Router, revision: u16) -> anyhow::Result<()> {
+    let a = r.name() == "router-a";
+    let args = strings(&[
+        "--link-interface",
+        "eth1",
+        "--switching-profile",
+        "mstp-sp1",
+        "--switching-profile-member",
+        "mst-d1:10",
+        "--switching-profile-member",
+        "mst-d2:20",
+        "--stp-mode",
+        "mstp",
+        "--stp-priority",
+        if a { "4096" } else { "32768" },
+        "--stp-region",
+        &format!("lab:{revision}"),
+        "--stp-mst-instance",
+        if a { "1:4096" } else { "1:32768" },
+        "--stp-mst-instance",
+        if a { "2:32768" } else { "2:4096" },
+        "--stp-domain-instance",
+        "mst-d1:1",
+        "--stp-domain-instance",
+        "mst-d2:2",
+        "--stp-profile-interface",
+        "eth1",
+        "--stp-profile-mst-cost",
+        if a { "2:100000" } else { "1:100000" },
+    ]);
+    r.provision(&args).await
+}
+
+/// #321: MSTP over the two parallel veth links of the `stp` phase, two
+/// domains (VLAN 10 in MSTI 1, VLAN 20 in MSTI 2). Both routers must compute
+/// the same MST configuration digest and join one region; MSTI 1 then blocks
+/// router-b's `eth1` and MSTI 2 router-a's, each only on its own domain's
+/// `ethX.<tag>` bridge port in the kernel. A different `revision` on
+/// router-b makes the ports boundary ports with a single CIST (the second
+/// link blocked for both domains), restoring it rejoins the region.
+pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
+    const MATCH: &str = "mst region match port=eth1";
+    const BOUNDARY: &str = "mst boundary port port=eth1 reason=revision";
+    let (a, b) = (w.a()?, w.b()?);
+    let routers = [a, b];
+    let matched = routers.map(|r| r.count(MATCH));
+
+    w.link_veths().await?;
+    // A tagged trunk needs its parent up before `nos-interfaced` can bring the
+    // `ethX.<tag>` sub-links up (it fails with ENETDOWN otherwise), and the
+    // fresh veths start down.
+    for router in ["router-a", "router-b"] {
+        for iface in ["eth1", "eth2"] {
+            w.set_link(router, iface, true).await?;
+        }
+    }
+    for r in routers {
+        r.provision(&[
+            "--link-interface",
+            "eth2",
+            "--switching-profile",
+            "mstp-sp2",
+            "--switching-profile-member",
+            "mst-d1:10",
+            "--switching-profile-member",
+            "mst-d2:20",
+        ])
+        .await?;
+        mstp_provision(r, 1).await?;
+    }
+
+    log("waiting for both routers to join one MST region");
+    for (r, base) in routers.iter().zip(matched) {
+        r.wait_new(MATCH, base, 40).await?;
+        r.wait("mst configuration name=lab revision=1").await?;
+    }
+    let (ca, cb) = (mst_config(a).await?, mst_config(b).await?);
+    if ca.digest != cb.digest || ca.digest == "ac36177f50283cd4b83821d8ab26de62" {
+        bail!("the routers must compute the same non-default digest: {ca:?} vs {cb:?}");
+    }
+    let vlans = |c: &nos_proto::StpMst, id: u16| {
+        c.instances
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.vlans.clone())
+    };
+    if (vlans(&ca, 1), vlans(&ca, 2)) != (Some("10".into()), Some("20".into())) {
+        bail!("instance to VLAN map is wrong: {ca:?}");
+    }
+
+    log("waiting for MSTI 1 to block router-b eth1 and MSTI 2 router-a eth1");
+    let blocked = |name: &str| {
+        let name = name.to_string();
+        move |i: &nos_proto::StpInstance| {
+            i.ports.iter().all(|p| !p.boundary)
+                && i.ports.iter().any(|p| {
+                    p.name == name
+                        && p.role == StpRole::Alternate
+                        && p.state == StpState::Discarding
+                })
+                && i.ports
+                    .iter()
+                    .any(|p| p.name != name && p.state == StpState::Forwarding)
+        }
+    };
+    let b1 = mst_wait(b, 1, 90, blocked("eth1")).await?;
+    let a2 = mst_wait(a, 2, 90, blocked("eth1")).await?;
+    // Each router is the root of the other tree, and forwards everywhere there.
+    let a1 = mst_wait(a, 1, 30, |i| i.root_port.is_none()).await?;
+    let b2 = mst_wait(b, 2, 30, |i| i.root_port.is_none()).await?;
+    if a1.root_id != a1.bridge_id
+        || b2.root_id != b2.bridge_id
+        || b1.root_port.as_deref() != Some("eth2")
+        || a2.root_port.as_deref() != Some("eth2")
+    {
+        bail!("wrong MSTI roots: {a1:?} {b1:?} {a2:?} {b2:?}");
+    }
+    if a1
+        .ports
+        .iter()
+        .chain(&b2.ports)
+        .any(|p| p.state != StpState::Forwarding)
+    {
+        bail!("the root of an instance forwards on every port: {a1:?} {b2:?}");
+    }
+
+    // The logs name the tree and domain, and the kernel state is per
+    // domain-bridge port: MSTI 1's block is on VLAN 10 only.
+    b.wait("msti port state changed port=eth1 msti=1 state=Discarding domains=mst-d1")
+        .await?;
+    a.wait("msti port state changed port=eth1 msti=2 state=Discarding domains=mst-d2")
+        .await?;
+    kernel_wait(b, "eth1.10", true, 30).await?;
+    kernel_wait(b, "eth1.20", false, 30).await?;
+    kernel_wait(b, "eth2.10", false, 30).await?;
+    kernel_wait(a, "eth1.20", true, 30).await?;
+    kernel_wait(a, "eth1.10", false, 30).await?;
+    kernel_wait(a, "eth2.20", false, 30).await?;
+
+    // The CIST still has one root (router-a) and a root port on router-b.
+    let (sa, sb) = (stp_summary(a).await?, stp_summary(b).await?);
+    if sa.root_id != sa.bridge_id || sa.root_id != sb.root_id || sb.root_port.is_none() {
+        bail!("the CIST must be rooted at router-a: {sa:?} vs {sb:?}");
+    }
+
+    // A different revision splits the region: every MSTI port is a boundary
+    // port following the CIST, which blocks router-b's second link for both
+    // domains.
+    log("revision 2 on router-b: boundary ports, one CIST");
+    let boundary = routers.map(|r| r.count(BOUNDARY));
+    mstp_provision(b, 2).await?;
+    for (r, base) in routers.iter().zip(boundary) {
+        r.wait_new(BOUNDARY, base, 40).await?;
+    }
+    for r in routers {
+        for id in [1, 2] {
+            mst_wait(r, id, 40, |i| {
+                !i.ports.is_empty() && i.ports.iter().all(|p| p.boundary)
+            })
+            .await?;
+        }
+    }
+    kernel_wait(b, "eth1.10", false, 40).await?;
+    kernel_wait(b, "eth1.20", false, 40).await?;
+    kernel_wait(b, "eth2.10", true, 40).await?;
+    kernel_wait(b, "eth2.20", true, 40).await?;
+    kernel_wait(a, "eth1.20", false, 40).await?;
+
+    // Restoring the revision rejoins the region and the per-tree blocking.
+    log("revision 1 again: the region is back");
+    let matched = routers.map(|r| r.count(MATCH));
+    mstp_provision(b, 1).await?;
+    for (r, base) in routers.iter().zip(matched) {
+        r.wait_new(MATCH, base, 40).await?;
+    }
+    mst_wait(b, 1, 90, blocked("eth1")).await?;
+    mst_wait(a, 2, 90, blocked("eth1")).await?;
+    kernel_wait(b, "eth1.10", true, 30).await?;
+    kernel_wait(a, "eth1.20", true, 30).await?;
+
+    for r in routers {
+        for iface in ["eth1", "eth2"] {
+            r.provision(&["--link-interface", iface, "--delete-switching-profile"])
+                .await?;
+        }
+    }
+    for r in routers {
+        r.provision(&[
+            "--stp-profile-interface",
+            "eth1",
+            "--stp-profile-detach",
+            "--stp-priority",
+            "32768",
+        ])
+        .await?;
+    }
+    w.unlink_veths().await;
+    a.established().await?;
+    b.established().await
+}
+
 pub async fn svi(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&[
