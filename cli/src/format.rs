@@ -634,6 +634,135 @@ pub fn render_stp_instance(s: &nos_proto::StpSummary, id: u16) -> String {
     lines.join("\n")
 }
 
+/// `last change 12s ago via eth1 (received)`, or `no change yet`.
+fn stp_topology_line(t: &nos_proto::StpTopology) -> String {
+    let last = match (t.last_secs_ago, &t.last_port, t.last_cause) {
+        (Some(ago), Some(port), Some(cause)) => format!(
+            "last change {ago}s ago via {port} ({})",
+            match cause {
+                nos_proto::StpTcCause::Local => "local",
+                nos_proto::StpTcCause::Received => "received",
+            }
+        ),
+        _ => "no change yet".to_string(),
+    };
+    format!("topology changes {}, {last}", t.count)
+}
+
+/// One port's detail block: operational status, then the RFC 4318 counters.
+fn stp_port_detail(
+    name: &str,
+    edge: bool,
+    p2p: bool,
+    extra: &str,
+    c: &nos_proto::StpPortCounters,
+) -> Vec<String> {
+    let extra = if extra.is_empty() {
+        String::new()
+    } else {
+        format!(", {extra}")
+    };
+    vec![
+        format!(
+            "{name}: edge {}, point-to-point {}{extra}",
+            yes_no(edge),
+            yes_no(p2p)
+        ),
+        format!(
+            "  in:  config {}, tcn {}, rstp {}, mst {}",
+            c.in_config_bpdu, c.in_tcn_bpdu, c.in_rstp_bpdu, c.in_mst_bpdu
+        ),
+        format!(
+            "  out: config {}, tcn {}, rstp {}, mst {}",
+            c.out_config_bpdu, c.out_tcn_bpdu, c.out_rstp_bpdu, c.out_mst_bpdu
+        ),
+        format!(
+            "  topology-change sent {}, received {}; protocol-migration {}; invalid-bpdu {}; forward-transitions {}",
+            c.tc_sent, c.tc_received, c.protocol_migration, c.invalid_bpdu, c.forward_transitions
+        ),
+    ]
+}
+
+/// The detail block of one tree, behind a blank line (and a title when
+/// several trees follow each other).
+fn stp_instance_detail(i: &nos_proto::StpInstance, title: bool) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    if title {
+        lines.push(format!("domain {}", i.domains.join(",")));
+    }
+    lines.push(stp_topology_line(&i.topology));
+    for p in &i.ports {
+        let extra: Vec<&str> = [
+            (p.boundary, "boundary"),
+            (p.compat, "compat"),
+            (p.inconsistent, "pvid-inconsistent"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        lines.extend(stp_port_detail(
+            &p.name,
+            p.edge,
+            p.point_to_point,
+            &extra.join(", "),
+            &p.counters,
+        ));
+    }
+    lines
+}
+
+/// `show spanning-tree [instance <id> | domain <bd>] detail`: the same tables
+/// as without `detail`, then the topology changes and the counters.
+pub fn render_stp_detail(
+    s: &nos_proto::StpSummary,
+    instance: Option<u16>,
+    domain: Option<&str>,
+) -> String {
+    let mut out = if let Some(d) = domain {
+        render_stp_domain(s, d)
+    } else if let Some(id) = instance {
+        render_stp_instance(s, id)
+    } else {
+        render_spanning_tree(s)
+    };
+    let mut tail = Vec::new();
+    if let Some(id) = instance {
+        for i in s
+            .mst
+            .iter()
+            .flat_map(|m| &m.instances)
+            .filter(|i| i.id == id)
+        {
+            tail.extend(stp_instance_detail(i, false));
+        }
+    } else if let Some(d) = domain {
+        for i in s.pvst.iter().filter(|i| i.domains.iter().any(|n| n == d)) {
+            tail.extend(stp_instance_detail(i, false));
+        }
+    } else if s.mode == nos_proto::StpMode::RapidPvst {
+        for i in &s.pvst {
+            tail.extend(stp_instance_detail(i, true));
+        }
+    } else if s.enabled {
+        tail.push(String::new());
+        tail.push(stp_topology_line(&s.topology));
+        for p in &s.ports {
+            tail.extend(stp_port_detail(
+                &p.name,
+                p.edge,
+                p.point_to_point,
+                &stp_flags(p),
+                &p.counters,
+            ));
+        }
+    }
+    for line in tail {
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
 /// The port-protection column of `show spanning-tree` (#320): what is
 /// configured, then what is holding the port right now.
 fn stp_flags(p: &nos_proto::StpPortInfo) -> String {
@@ -2861,5 +2990,107 @@ mod mst_tests {
         let all = render_spanning_tree(&s);
         assert!(all.starts_with("mode rapid-pvst"));
         assert!(all.contains("bd1") && all.contains("100a.02:00:00:00:00:02"));
+    }
+}
+
+#[cfg(test)]
+mod stp_detail_tests {
+    use super::render_stp_detail;
+    use nos_proto::{
+        StpInstance, StpInstancePort, StpMode, StpMst, StpPortCounters, StpPortInfo, StpSummary,
+        StpTcCause, StpTopology,
+    };
+
+    fn counters() -> StpPortCounters {
+        StpPortCounters {
+            in_rstp_bpdu: 7,
+            out_rstp_bpdu: 9,
+            tc_received: 2,
+            forward_transitions: 1,
+            ..StpPortCounters::default()
+        }
+    }
+
+    fn topology() -> StpTopology {
+        StpTopology {
+            count: 3,
+            last_secs_ago: Some(12),
+            last_port: Some("eth1".into()),
+            last_cause: Some(StpTcCause::Received),
+        }
+    }
+
+    fn tree(id: u16) -> StpInstance {
+        StpInstance {
+            id,
+            domains: vec![format!("bd{id}")],
+            topology: topology(),
+            ports: vec![StpInstancePort {
+                name: "eth1".into(),
+                boundary: true,
+                point_to_point: true,
+                counters: counters(),
+                ..StpInstancePort::default()
+            }],
+            ..StpInstance::default()
+        }
+    }
+
+    #[test]
+    fn cist_detail_follows_the_table() {
+        let s = StpSummary {
+            enabled: true,
+            topology: topology(),
+            ports: vec![StpPortInfo {
+                name: "eth1".into(),
+                edge: true,
+                root_guard: true,
+                counters: counters(),
+                ..StpPortInfo::default()
+            }],
+            ..StpSummary::default()
+        };
+        let out = render_stp_detail(&s, None, None);
+        assert!(out.contains("topology changes 3, last change 12s ago via eth1 (received)"));
+        assert!(out.contains("eth1: edge yes, point-to-point no, Edge,RootGuard"));
+        assert!(out.contains("  in:  config 0, tcn 0, rstp 7, mst 0"));
+        assert!(out.contains("  out: config 0, tcn 0, rstp 9, mst 0"));
+        assert!(out.contains("topology-change sent 0, received 2; protocol-migration 0; invalid-bpdu 0; forward-transitions 1"));
+        let mut quiet = s;
+        quiet.topology = StpTopology::default();
+        assert!(render_stp_detail(&quiet, None, None).contains("topology changes 0, no change yet"));
+        assert_eq!(
+            render_stp_detail(&StpSummary::default(), None, None),
+            "spanning-tree is disabled"
+        );
+    }
+
+    #[test]
+    fn instance_and_domain_detail_pick_their_tree() {
+        let s = StpSummary {
+            enabled: true,
+            mode: StpMode::Mstp,
+            mst: Some(StpMst {
+                instances: vec![tree(0), tree(5)],
+                ..StpMst::default()
+            }),
+            ..StpSummary::default()
+        };
+        let out = render_stp_detail(&s, Some(5), None);
+        assert!(out.starts_with("instance 5 (MSTI)"));
+        assert!(out.contains("eth1: edge no, point-to-point yes, boundary"));
+        assert!(render_stp_detail(&s, Some(9), None).ends_with("no spanning-tree instance 9"));
+
+        let p = StpSummary {
+            enabled: true,
+            mode: StpMode::RapidPvst,
+            pvst: vec![tree(10), tree(20)],
+            ..StpSummary::default()
+        };
+        let one = render_stp_detail(&p, None, Some("bd20"));
+        assert!(one.starts_with("domain    bd20"));
+        assert!(!one.contains("bd10") && one.contains("point-to-point yes"));
+        let all = render_stp_detail(&p, None, None);
+        assert!(all.contains("\ndomain bd10\n") && all.contains("\ndomain bd20\n"));
     }
 }

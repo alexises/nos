@@ -21,6 +21,7 @@ pub mod authz;
 pub mod config_client;
 pub mod daemon;
 pub mod engine;
+pub mod events;
 pub mod identity;
 pub mod interface_client;
 pub mod link;

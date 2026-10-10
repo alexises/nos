@@ -3,6 +3,7 @@
 Spanning tree (IEEE 802.1Q clause 13) keeps an L2 topology loop-free.
 
 - **`mode rstp`, `mode mstp` and `mode rapid-pvst` run.** `nos-stpd` speaks them on every physical interface or port aggregate that has a `switching-profile`; `disabled` leaves the daemon idle.
+- Pick the mode by the network: `rstp` for one tree, `mstp` for a few trees shared with other vendors, `rapid-pvst` to meet Cisco switches that run a tree per VLAN. All three need the same mode on both ends.
 - **Fail-safe:** with a mode other than `disabled`, a new bridge port starts blocked and BPDUs are trapped until `nos-stpd` pushes a state (see [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326)). Set `spanning-tree mode disabled` to forward without spanning tree.
 - Everything is checked at commit time.
 - A port aggregate with an `esi` needs a guard profile (see [ESI port aggregates](#esi-port-aggregates)).
@@ -25,7 +26,7 @@ show spanning-tree
 ```
 
 - Prints the bridge id, the root id (and the root port and path cost, or "this bridge is the root"), the timers, then one row per port: `Name Role State Cost Prio Designated`.
-- REST: `GET /v1/spanning-tree` (same data as JSON; `enabled: false` and no ports when the mode is neither `rstp` nor `mstp`).
+- REST: `GET /v1/spanning-tree` (same data as JSON; `enabled: false` and no ports when the mode is neither `rstp` nor `mstp`). Add `detail` for counters and topology changes (below).
 - `nos-stpd is not running` means the daemon is down; `spanning-tree is disabled` means the mode is neither `rstp` nor `mstp`.
 
 | Role | Meaning |
@@ -44,6 +45,59 @@ show spanning-tree
 
 - `Designated` is the bridge id and port id (`priority.number`) the segment is led by; `-` for a disabled port.
 - A port is discarding right after start-up or a topology change, until the handshake with its neighbour finishes (about a second between RSTP switches, up to `2 * forward-delay` toward a legacy STP one).
+
+## Read the detail
+
+```
+show spanning-tree detail
+show spanning-tree instance 5 detail
+show spanning-tree domain bd5 detail
+```
+
+- Each prints the table of the plain command, then `topology changes <n>, last change <s>s ago via <port> (local|received)` (or `no change yet`) and one block per port: `edge` and `point-to-point` as the protocol sees them now, the port's flags, and the counters below. In `rapid-pvst`, `show spanning-tree detail` lists every tree.
+- REST: `GET /v1/spanning-tree` (and the `instance`/`domain` paths) already carry `topology` (`count`, `last_secs_ago`, `last_port`, `last_cause`) and, per port, `edge`, `point_to_point` and `counters`. `GET /v1/spanning-tree/counters` is the flat form for scripts: one row `{tree, port, counters}` per port, `tree` being `cist` or, in `rapid-pvst`, the domain name.
+- Counters start at zero when `nos-stpd` builds the bridge (start, or any spanning-tree config change) and are per port: in `mstp` the MSTIs share the CIST's, since one BPDU carries them all.
+- A topology change is counted once per episode: a neighbour repeats the flag in every hello for a while, and that is one change. `local` means a port of this bridge started forwarding; `received` means a neighbour's TC flag or TCN BPDU came in on `last_port`.
+
+| Counter (`counters`) | RFC 4318 object | Counts |
+|---|---|---|
+| `in_config_bpdu`, `out_config_bpdu` | `dot1dStpPortInConfigBpdu`, `...OutConfigBpdu` | 802.1D Config BPDUs received, sent |
+| `in_tcn_bpdu`, `out_tcn_bpdu` | `...InTcnBpdu`, `...OutTcnBpdu` | 802.1D TCN BPDUs |
+| `in_rstp_bpdu`, `out_rstp_bpdu` | `...InRstpBpdu`, `...OutRstpBpdu` | RST BPDUs (version 2) |
+| `in_mst_bpdu`, `out_mst_bpdu` | `...InMstBpdu`, `...OutMstBpdu` | MST BPDUs (version 3) |
+| `tc_sent`, `tc_received` | `...TcSent`, `...TcReceived` | BPDUs with the topology-change flag, plus TCNs |
+| `protocol_migration` | `...ProtocolMigration` | Switches between 802.1D and RSTP |
+| `invalid_bpdu` | `...InvalidBpdu` | Frames dropped as malformed |
+| `forward_transitions` | `...ForwardTransitions` | Times the port entered forwarding |
+
+## Log lines
+
+Field values follow the message in the order shown. The strings are frozen by a unit test (`stp/src/events.rs`); change one only together with the e2e phase.
+
+| Message | Fields | Meaning |
+|---|---|---|
+| `root bridge changed` | `root` | The root of the CIST changed; also logged once at start with this bridge as root |
+| `port role changed` / `port state changed` | `port`, `role` / `state` | The CIST role or state of a port |
+| `topology change` | `port`, `cause=local\|received` (`msti=<n>` or `domain=<bd>` first in a tree other than the CIST) | A topology change, see above; `port` is where it came in or started |
+| `port migrated to STP` / `to RSTP` | `port` | The port speaks 802.1D / RSTP to its peer |
+| `port err-disabled` / `port err-disabled recovered` | `port`, `reason=bpdu-guard` | BPDU guard shut the link, or it came back |
+| `port root-inconsistent` / `port root-consistent`, `port loop-inconsistent` / `port loop-consistent` | `port` | Root guard or loop guard holds the port discarding, or released it |
+| `mst configuration`, `mst region match`, `mst boundary port` | see [Use MSTP](#read-it-and-compare-with-a-peer) | MST region identity and boundary changes |
+| `msti port role changed`, `msti port state changed`, `msti root bridge changed` | `msti`, `port`, ... | The same per MSTI |
+| `pvst port role changed`, `pvst port state changed`, `pvst root bridge changed`, `pvst port migrated to ...` | `domain`, ... | The same per Rapid-PVST+ tree |
+| `pvid inconsistent` / `pvid consistent` | `domain`, `port`, ... | A tree's port is blocked for a BPDU of another VLAN, or released |
+| `spanning tree state machines did not reach quiescence` | (error) | A bug in the state machines; report it |
+
+## Troubleshoot
+
+- **A port is discarding but should forward.** `show spanning-tree detail`: if `Flags` says `Root-inconsistent` or `Loop-inconsistent`, a guard holds it; read `Designated` to see which bridge outranks this one on the segment. A port with `Err-disabled` needs `clear spanning-tree err-disabled <if>`. Otherwise it is an alternate or backup port on purpose: the other link of a loop.
+- **Topology changes keep coming.** Watch `topology change` lines: `cause=local` on a port that flaps means the link or the host behind it flaps, so make a host port `edge-port admin` (edge ports never cause a change); `cause=received` on the same `port` means the cause is behind that neighbour. `restricted-tcn` stops a neighbour's changes at that port.
+- **MAC tables flush all the time.** Same cause: each change flushes the learned MACs of the affected ports (of the affected domains in `mstp` and `rapid-pvst`).
+- **Two switches do not share MST instances.** Compare `show spanning-tree mst-config` on both: name, revision and digest must be equal; `mst boundary port ... reason=` names the first difference.
+- **Rapid-PVST+ port blocked in one VLAN only.** `pvid inconsistent` in the log: the peer's trunk names another VLAN for that tag, or the native VLAN differs.
+- **A port sticks to 802.1D.** `show spanning-tree detail` shows `in: config` growing: a legacy peer or a bridge forcing STP is on the segment. After it is fixed, `clear spanning-tree detected-protocols`.
+- **No BPDUs at all.** `in: ...` stays zero: the link is down, the port has no `switching-profile`, or the peer filters BPDUs (`bpdu-filter`).
+- **An ESI aggregate must be an edge port with a guard.** A VXLAN device is never a spanning-tree port, only physical interfaces and port aggregates are; see [ESI port aggregates](#esi-port-aggregates).
 
 ## Configure the bridge
 
@@ -259,7 +313,7 @@ A multi-homed segment must never become a root or transit port of the spanning t
 ## Verify
 
 - `show config` prints what is set; the transaction diff shows what a commit would change.
-- `show spanning-tree` shows what the daemon computed (above).
+- `show spanning-tree` shows what the daemon computed (above); `show spanning-tree detail` adds the topology changes and counters.
 - The bounds come from the 802.1Q-2022 tables for the bridge and port parameters (Table 13-5 for the timers and counters); the standard is paywalled and was not available while writing this page, so re-check the ranges against it.
 
 Related: [L2 switching](l2-switching.md), [Port aggregation and LACP](port-aggregation-lacp.md), [EVPN/VXLAN](evpn-vxlan.md).

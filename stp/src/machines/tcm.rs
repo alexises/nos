@@ -5,7 +5,7 @@
 //! handshake with PST; a host that flushes slowly must queue it itself).
 
 use super::{new_tc_while, set_tc_prop_tree, Role};
-use crate::actions::Action;
+use crate::actions::{Action, Event};
 use crate::bridge::Bridge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,7 @@ fn flush(b: &mut Bridge, i: usize) {
 }
 
 pub fn enter(b: &mut Bridge, i: usize, s: State) {
-    b.ports[i].tcm = s;
+    let from = std::mem::replace(&mut b.ports[i].tcm, s);
     match s {
         State::Inactive => {
             flush(b, i);
@@ -42,13 +42,30 @@ pub fn enter(b: &mut Bridge, i: usize, s: State) {
             p.tc_prop = false;
         }
         State::Detected => {
+            b.actions.push(Action::Log(Event::TopologyChange {
+                port: i,
+                received: false,
+            }));
             new_tc_while(b, i);
             set_tc_prop_tree(b, i);
             b.ports[i].new_info = true;
         }
         State::Active => {}
-        State::NotifiedTcn => new_tc_while(b, i),
+        State::NotifiedTcn => {
+            b.actions.push(Action::Log(Event::TopologyChange {
+                port: i,
+                received: true,
+            }));
+            new_tc_while(b, i);
+        }
         State::NotifiedTc => {
+            // NotifiedTcn chains here: one TCN is one change.
+            if from != State::NotifiedTcn {
+                b.actions.push(Action::Log(Event::TopologyChange {
+                    port: i,
+                    received: true,
+                }));
+            }
             let p = &mut b.ports[i];
             p.rcvd_tcn = false;
             p.rcvd_tc = false;
@@ -179,6 +196,30 @@ mod tests {
         assert!(b.ports[1].tc_prop);
         assert!(step(&mut b, 0));
         assert_eq!(b.ports[0].tcm, State::Active);
+    }
+
+    #[test]
+    fn topology_change_events() {
+        let tcs = |b: &mut Bridge| {
+            b.take_actions()
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::Log(Event::TopologyChange { port, received }) => Some((port, received)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut b = bridge(1);
+        b.take_actions();
+        b.ports[0].role = Role::Designated;
+        enter(&mut b, 0, State::Detected);
+        assert_eq!(tcs(&mut b), [(0, false)]);
+        enter(&mut b, 0, State::NotifiedTc);
+        assert_eq!(tcs(&mut b), [(0, true)]);
+        b.ports[0].rcvd_tcn = true;
+        enter(&mut b, 0, State::NotifiedTcn);
+        enter(&mut b, 0, State::NotifiedTc);
+        assert_eq!(tcs(&mut b), [(0, true)], "a TCN is one change");
     }
 
     #[test]

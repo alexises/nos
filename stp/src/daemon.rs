@@ -417,12 +417,18 @@ impl Daemon {
         let (bpdu, pvid, wire) = if frame.starts_with(&sstp::SSTP_GROUP_MAC) {
             match sstp::decode_frame(frame) {
                 Ok((_, s)) => (s.bpdu, s.pvid, Wire::Sstp),
-                Err(e) => return debug!(port = %name, error = %e, "dropping malformed sstp bpdu"),
+                Err(e) => {
+                    pv.note_invalid(t, j);
+                    return debug!(port = %name, error = %e, "dropping malformed sstp bpdu");
+                }
             }
         } else {
             match crate::bpdu::decode_frame(frame) {
                 Ok((_, b)) => (b, None, Wire::Ieee),
-                Err(e) => return debug!(port = %name, error = %e, "dropping malformed bpdu"),
+                Err(e) => {
+                    pv.note_invalid(t, j);
+                    return debug!(port = %name, error = %e, "dropping malformed bpdu");
+                }
             }
         };
         if !pvst::accepts(tag, wire) {
@@ -449,7 +455,10 @@ impl Daemon {
                 let out = engine.receive_rx(i, rx);
                 self.emit(out).await;
             }
-            Err(e) => debug!(port = %name, error = %e, "dropping malformed bpdu"),
+            Err(e) => {
+                engine.note_invalid(i);
+                debug!(port = %name, error = %e, "dropping malformed bpdu");
+            }
         }
     }
 

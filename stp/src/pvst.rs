@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 use crate::bpdu::Bpdu;
 use crate::engine::{Engine, Out};
+use crate::events;
 use crate::identity;
 use crate::ports::{self, Plan};
 use crate::vector::{BridgeId, IdError};
@@ -89,7 +90,7 @@ impl Tree {
 
     fn unblock(&mut self, j: usize, why: &str) -> Out {
         self.blocked[j] = false;
-        info!(domain = %self.domain, port = %self.engine.ports()[j].name, reason = %why, "pvid consistent");
+        info!(domain = %self.domain, port = %self.engine.ports()[j].name, reason = %why, "{}", events::PVID_CONSISTENT);
         Out::States(vec![self.assignment(j)])
     }
 }
@@ -132,6 +133,11 @@ impl Pvst {
 
     pub fn trees(&self) -> &[Tree] {
         &self.trees
+    }
+
+    /// A frame of port `j` of tree `t` that did not decode.
+    pub fn note_invalid(&mut self, t: usize, j: usize) {
+        self.trees[t].engine.note_invalid(j);
     }
 
     /// Port `j` of tree `t` by name, if it is a member.
@@ -186,7 +192,8 @@ impl Pvst {
                     port = %tree.engine.ports()[j].name,
                     expected = tree.vid,
                     got,
-                    "pvid inconsistent"
+                    "{}",
+                    events::PVID_INCONSISTENT
                 );
                 outs.push(Out::States(vec![tree.assignment(j)]));
             }

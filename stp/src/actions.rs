@@ -39,6 +39,12 @@ pub enum Event {
         port: usize,
         on: bool,
     },
+    /// TCM saw a topology change: `received` from a neighbour's TC/TCN, else
+    /// `port` itself started forwarding (a non-edge root/designated port).
+    TopologyChange {
+        port: usize,
+        received: bool,
+    },
     /// `run` hit its pass cap: a machine bug, the state is left as it was.
     NotQuiescent,
 }

@@ -828,6 +828,72 @@ async fn show_spanning_tree_domain_serves_a_pvst_tree_and_404s_otherwise() {
 }
 
 #[tokio::test]
+async fn show_spanning_tree_counters_lists_one_row_per_port_and_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rstp, pvst) = (dir.path().join("rstp.sock"), dir.path().join("pvst.sock"));
+    let counters = nos_proto::StpPortCounters {
+        in_rstp_bpdu: 4,
+        ..nos_proto::StpPortCounters::default()
+    };
+    serve(&rstp, ("stpd", ""), move |_: nos_proto::StpRequest| {
+        nos_proto::StpEvent::Summary(nos_proto::StpSummary {
+            enabled: true,
+            ports: vec![nos_proto::StpPortInfo {
+                name: "eth1".into(),
+                counters,
+                ..nos_proto::StpPortInfo::default()
+            }],
+            topology: nos_proto::StpTopology {
+                count: 2,
+                ..nos_proto::StpTopology::default()
+            },
+            ..nos_proto::StpSummary::default()
+        })
+    });
+    serve(&pvst, ("stpd", ""), move |_: nos_proto::StpRequest| {
+        nos_proto::StpEvent::Summary(nos_proto::StpSummary {
+            enabled: true,
+            pvst: vec![nos_proto::StpInstance {
+                domains: vec!["bd1".into()],
+                ports: vec![nos_proto::StpInstancePort {
+                    name: "eth2".into(),
+                    counters,
+                    ..nos_proto::StpInstancePort::default()
+                }],
+                ..nos_proto::StpInstance::default()
+            }],
+            ..nos_proto::StpSummary::default()
+        })
+    });
+    let f = fixture(vec![(ServiceRef::Stp, rstp)]).await;
+    let (s, v) = send(&f.app, Method::GET, "/v1/spanning-tree/counters", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        (
+            &v[0]["tree"],
+            &v[0]["port"],
+            &v[0]["counters"]["in_rstp_bpdu"]
+        ),
+        (&json!("cist"), &json!("eth1"), &json!(4))
+    );
+    let (_, v) = send(&f.app, Method::GET, "/v1/spanning-tree", None).await;
+    assert_eq!(v["topology"]["count"], 2);
+    let p = fixture(vec![(ServiceRef::Stp, pvst)]).await;
+    let (_, v) = send(&p.app, Method::GET, "/v1/spanning-tree/counters", None).await;
+    assert_eq!(
+        (&v[0]["tree"], &v[0]["port"]),
+        (&json!("bd1"), &json!("eth2"))
+    );
+    let none = fixture(vec![]).await;
+    assert_eq!(
+        send(&none.app, Method::GET, "/v1/spanning-tree/counters", None)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
 async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let f = fixture(vec![]).await;
     let app = &f.app;

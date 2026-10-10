@@ -1155,6 +1155,19 @@ async fn stp_summary(r: &Router) -> anyhow::Result<nos_proto::StpSummary> {
     Ok(serde_json::from_str(&body)?)
 }
 
+/// `GET /v1/spanning-tree/counters` (#323): the CIST row of `port`.
+async fn stp_counters(r: &Router, port: &str) -> anyhow::Result<nos_proto::StpPortCounters> {
+    let body = r
+        .rest_expect(Method::GET, "/v1/spanning-tree/counters", None, 200)
+        .await?;
+    let rows: serde_json::Value = serde_json::from_str(&body)?;
+    let row = rows
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["tree"] == "cist" && r["port"] == port))
+        .ok_or_else(|| anyhow::anyhow!("no counters row for {port}: {body}"))?;
+    Ok(serde_json::from_value(row["counters"].clone())?)
+}
+
 /// `key`'s value on the latest line matching `pattern`.
 fn last_value(r: &Router, pattern: &str, key: &str) -> Option<String> {
     let line = r.logs.last(pattern)?;
@@ -1295,6 +1308,11 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     };
     let takeover = format!("{}Forwarding", state(alt_if));
     let base_takeover = b.count(&takeover);
+    // #323: the change shows in the logs of both routers, and in the counters.
+    let tc = "topology change port=";
+    let tc_rx = "topology change port=.*cause=received";
+    let (tc_b, tc_a) = (b.count(tc), a.count(tc_rx));
+    let counters_before = stp_counters(b, alt_if).await?;
     log(format!(
         "cutting router-b {root_if}; {alt_if} must take over"
     ));
@@ -1313,6 +1331,28 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     {
         bail!("router-b's {alt_if} should be the forwarding root port: {sb:?}");
     }
+
+    // #323: topology-change tracking, RFC 4318 counters and the REST paths.
+    b.wait_new(tc, tc_b, 15).await?;
+    a.wait_new(tc_rx, tc_a, 15).await?;
+    let sb = stp_summary(b).await?;
+    if sb.topology.count == 0 || sb.topology.last_port.is_none() || sb.topology.last_cause.is_none()
+    {
+        bail!(
+            "router-b logged a topology change but reports none: {:?}",
+            sb.topology
+        );
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let counters_after = stp_counters(b, alt_if).await?;
+    if counters_after.in_rstp_bpdu <= counters_before.in_rstp_bpdu
+        || counters_after.out_rstp_bpdu <= counters_before.out_rstp_bpdu
+        || counters_after.forward_transitions <= counters_before.forward_transitions
+    {
+        bail!("router-b {alt_if} counters did not grow: {counters_before:?} -> {counters_after:?}");
+    }
+    b.rest_expect(Method::GET, "/v1/spanning-tree/instance/999", None, 404)
+        .await?;
 
     // The link comes back: reconverge to exactly one blocking port.
     w.set_link("router-b", root_if, true).await?;

@@ -95,6 +95,6 @@ pub use schema::{
     REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
 };
 pub use stp::{
-    StpEvent, StpInstance, StpInstancePort, StpMst, StpPortInfo, StpRequest, StpRole, StpState,
-    StpSummary,
+    StpEvent, StpInstance, StpInstancePort, StpMst, StpPortCounters, StpPortInfo, StpRequest,
+    StpRole, StpState, StpSummary, StpTcCause, StpTopology,
 };

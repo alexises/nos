@@ -9,14 +9,15 @@
 use std::collections::HashMap;
 
 use nos_proto::{
-    StpInstance, StpInstancePort, StpMode, StpMst, StpPortAssignment, StpPortInfo, StpRole,
-    StpState, StpSummary,
+    StpInstance, StpInstancePort, StpMode, StpMst, StpPortAssignment, StpPortCounters, StpPortInfo,
+    StpRole, StpState, StpSummary, StpTcCause, StpTopology,
 };
 use tracing::{error, info, warn};
 
 use crate::actions::{Action, Event, PortState};
-use crate::bpdu::{Bpdu, MstBpdu, Rx};
+use crate::bpdu::{Bpdu, Flags, MstBpdu, Rx};
 use crate::bridge::{Bridge, PortParams};
+use crate::events;
 use crate::identity;
 use crate::machines::{build, Role, Tx};
 use crate::mst::{self, digest, vidmap, Edge, Mst, PortMst};
@@ -47,7 +48,30 @@ pub struct Engine {
     mst: Option<Mst>,
     /// The last state pushed per `(tree, port)`.
     pushed: HashMap<(u16, usize), PortState>,
+    /// Per port, shared by the CIST and the MSTIs (one BPDU carries them all).
+    counters: Vec<StpPortCounters>,
+    /// Seconds since the engine was built: the clock of `tc` (one `tick` each).
+    uptime: u64,
+    /// Topology changes per tree (0: the CIST).
+    tc: HashMap<u16, Tc>,
 }
+
+/// One tree's topology-change record.
+#[derive(Default)]
+struct Tc {
+    count: u64,
+    /// `uptime` of the last counted change, the port it came in on or started
+    /// at, and whether a neighbour sent it.
+    last: Option<(u64, usize, StpTcCause)>,
+    /// `uptime` of the last received flag per port: a neighbour repeats the
+    /// flag every hello for a while, which is one change.
+    rx_at: HashMap<usize, u64>,
+}
+
+/// A change within this many seconds of the last one flagged on the same
+/// port is the same episode (the longest flag run is `max_age + forward_delay`
+/// for an 802.1D sender, whose hello gap is `hello`: 3 hellos of silence end it).
+const EPISODE_HELLOS: u64 = 3;
 
 fn stp_role(r: Role) -> StpRole {
     match r {
@@ -64,6 +88,48 @@ fn stp_state(s: PortState) -> StpState {
         PortState::Discarding => StpState::Discarding,
         PortState::Learning => StpState::Learning,
         PortState::Forwarding => StpState::Forwarding,
+    }
+}
+
+fn tc_of(p: &crate::bpdu::Params) -> u64 {
+    u64::from(p.flags.has(Flags::TC))
+}
+
+fn count_rx(c: &mut StpPortCounters, rx: &Rx) {
+    match rx {
+        Rx::Plain(Bpdu::Config(p)) => {
+            c.in_config_bpdu += 1;
+            c.tc_received += tc_of(p);
+        }
+        Rx::Plain(Bpdu::Rst(p)) => {
+            c.in_rstp_bpdu += 1;
+            c.tc_received += tc_of(p);
+        }
+        Rx::Plain(Bpdu::Tcn) => {
+            c.in_tcn_bpdu += 1;
+            c.tc_received += 1;
+        }
+        Rx::Mst(m) => {
+            c.in_mst_bpdu += 1;
+            c.tc_received += tc_of(&m.params);
+        }
+    }
+}
+
+fn count_tx(c: &mut StpPortCounters, bpdu: &Bpdu) {
+    match bpdu {
+        Bpdu::Config(p) => {
+            c.out_config_bpdu += 1;
+            c.tc_sent += tc_of(p);
+        }
+        Bpdu::Rst(p) => {
+            c.out_rstp_bpdu += 1;
+            c.tc_sent += tc_of(p);
+        }
+        Bpdu::Tcn => {
+            c.out_tcn_bpdu += 1;
+            c.tc_sent += 1;
+        }
     }
 }
 
@@ -118,7 +184,8 @@ impl Engine {
                     revision = m.revision,
                     digest = %digest::hex(&m.digest),
                     instances = m.instances.len(),
-                    "mst configuration"
+                    "{}",
+                    events::MST_CONFIGURATION
                 );
                 Some(mst)
             }
@@ -130,6 +197,9 @@ impl Engine {
             ports: plan.ports.clone(),
             mst,
             pushed: HashMap::new(),
+            counters: vec![StpPortCounters::default(); plan.ports.len()],
+            uptime: 0,
+            tc: HashMap::new(),
         };
         // A fresh bridge is its own root; the core only reports changes.
         e.log_root(e.bridge.root_id);
@@ -186,6 +256,54 @@ impl Engine {
         (was, self.drain())
     }
 
+    /// A frame on `port` that did not decode as a BPDU.
+    pub fn note_invalid(&mut self, port: usize) {
+        self.counters[port].invalid_bpdu += 1;
+    }
+
+    /// A topology change of `tree` seen on `port`: counted once per episode
+    /// when a neighbour sent it (see [`EPISODE_HELLOS`]).
+    fn note_tc(&mut self, tree: u16, port: usize, received: bool) {
+        let window = EPISODE_HELLOS * u64::from(self.bridge.root_times.hello.max(1));
+        let now = self.uptime;
+        let tc = self.tc.entry(tree).or_default();
+        if received
+            && tc
+                .rx_at
+                .insert(port, now)
+                .is_some_and(|t| now - t <= window)
+        {
+            return;
+        }
+        tc.count += 1;
+        let cause = if received {
+            StpTcCause::Received
+        } else {
+            StpTcCause::Local
+        };
+        tc.last = Some((now, port, cause));
+        let name = &self.ports[port].name;
+        let cause = if received { "received" } else { "local" };
+        let msg = events::TOPOLOGY_CHANGE;
+        match (&self.domain, tree) {
+            (Some(d), _) => info!(domain = %d, port = %name, cause = %cause, "{}", msg),
+            (None, 0) => info!(port = %name, cause = %cause, "{}", msg),
+            (None, t) => info!(msti = t, port = %name, cause = %cause, "{}", msg),
+        }
+    }
+
+    fn topology(&self, tree: u16) -> StpTopology {
+        let Some(tc) = self.tc.get(&tree) else {
+            return StpTopology::default();
+        };
+        StpTopology {
+            count: tc.count,
+            last_secs_ago: tc.last.map(|(at, ..)| self.uptime - at),
+            last_port: tc.last.map(|(_, p, _)| self.ports[p].name.clone()),
+            last_cause: tc.last.map(|(.., c)| c),
+        }
+    }
+
     pub fn ports(&self) -> &[PortCfg] {
         &self.ports
     }
@@ -197,27 +315,27 @@ impl Engine {
 
     fn log_root(&self, root: BridgeId) {
         if let Some(d) = &self.domain {
-            info!(domain = %d, root = %identity::show_ext(&root), "pvst root bridge changed");
+            info!(domain = %d, root = %identity::show_ext(&root), "{}", events::PVST_ROOT_CHANGED);
         } else {
-            info!(root = %identity::show(&root), "root bridge changed");
+            info!(root = %identity::show(&root), "{}", events::ROOT_CHANGED);
         }
     }
 
     fn log_state(&self, port: usize, state: PortState) {
         let name = &self.ports[port].name;
         if let Some(d) = &self.domain {
-            info!(domain = %d, port = %name, state = ?state, "pvst port state changed");
+            info!(domain = %d, port = %name, state = ?state, "{}", events::PVST_PORT_STATE_CHANGED);
         } else {
-            info!(port = %name, state = ?state, "port state changed");
+            info!(port = %name, state = ?state, "{}", events::PORT_STATE_CHANGED);
         }
     }
 
     fn log_role(&self, port: usize, role: Role) {
         let name = &self.ports[port].name;
         if let Some(d) = &self.domain {
-            info!(domain = %d, port = %name, role = ?role, "pvst port role changed");
+            info!(domain = %d, port = %name, role = ?role, "{}", events::PVST_PORT_ROLE_CHANGED);
         } else {
-            info!(port = %name, role = ?role, "port role changed");
+            info!(port = %name, role = ?role, "{}", events::PORT_ROLE_CHANGED);
         }
     }
 
@@ -264,9 +382,13 @@ impl Engine {
                         priority: p.port_id.priority(),
                         designated_bridge,
                         designated_port,
+                        edge: p.oper_edge,
+                        point_to_point: p.oper_point_to_point,
+                        counters: self.counters[i],
                     }
                 })
                 .collect(),
+            topology: self.topology(0),
         }
     }
 
@@ -353,9 +475,13 @@ impl Engine {
                         priority: b.ports[i].port_id.priority(),
                         designated_bridge,
                         designated_port,
+                        edge: p.oper_edge,
+                        point_to_point: b.ports[i].oper_point_to_point,
+                        counters: self.counters[i],
                     }
                 })
                 .collect(),
+            topology: self.topology(tree),
         }
     }
 
@@ -415,10 +541,13 @@ impl Engine {
                         loop_inconsistent: p.loop_inconsistent,
                         err_disabled: p.err_disabled,
                         err_recovery_secs: p.err_remaining,
+                        point_to_point: p.oper_point_to_point,
+                        counters: self.counters[i],
                     }
                 })
                 .collect(),
             pvst: Vec::new(),
+            topology: self.topology(0),
             mst: self.mst.as_ref().map(|m| {
                 let ids = std::iter::once(0).chain(m.instances.iter().map(|i| i.id));
                 StpMst {
@@ -440,6 +569,7 @@ impl Engine {
     /// same region also feeds the MSTIs; anything else makes the port a
     /// boundary port.
     pub fn receive_rx(&mut self, port: usize, rx: Rx) -> Vec<Out> {
+        count_rx(&mut self.counters[port], &rx);
         let p = &self.bridge.ports[port];
         let ignored = p.prot.bpdu_filter || p.err_disabled;
         let (cist, msti) = match rx {
@@ -478,9 +608,11 @@ impl Engine {
         m.edge[port] = edge;
         let name = &self.ports[port].name;
         match edge {
-            Edge::Boundary(reason) => info!(port = %name, reason = %reason, "mst boundary port"),
+            Edge::Boundary(reason) => {
+                info!(port = %name, reason = %reason, "{}", events::MST_BOUNDARY_PORT);
+            }
             Edge::Internal => {
-                info!(port = %name, digest = %digest::hex(&m.id.digest), "mst region match");
+                info!(port = %name, digest = %digest::hex(&m.id.digest), "{}", events::MST_REGION_MATCH);
             }
             Edge::Unknown => {}
         }
@@ -504,6 +636,7 @@ impl Engine {
 
     /// One second elapsed.
     pub fn tick(&mut self) -> Vec<Out> {
+        self.uptime += 1;
         self.bridge.tick();
         if let Some(m) = self.mst.as_mut() {
             m.instances.iter_mut().for_each(|i| i.bridge.tick());
@@ -524,9 +657,17 @@ impl Engine {
                     Bpdu::Rst(p) if self.mst.is_some() => {
                         cist_tx.insert(port, p);
                     }
-                    bpdu => out.push(Out::Tx { port, bpdu }),
+                    bpdu => {
+                        count_tx(&mut self.counters[port], &bpdu);
+                        out.push(Out::Tx { port, bpdu });
+                    }
                 },
-                Action::SetPortState { port, state } => self.log_state(port, state),
+                Action::SetPortState { port, state } => {
+                    if state == PortState::Forwarding {
+                        self.counters[port].forward_transitions += 1;
+                    }
+                    self.log_state(port, state);
+                }
                 Action::FlushFdb { port } => {
                     let f = ports::flushes(&self.ports[port], self.mst_plan(), 0);
                     out.push(Out::Flush(f));
@@ -534,21 +675,25 @@ impl Engine {
                 Action::Log(Event::RoleChanged { port, to, .. }) => self.log_role(port, to),
                 Action::Log(Event::ProtocolMigrated { port, rstp }) => {
                     let name = &self.ports[port].name;
+                    self.counters[port].protocol_migration += 1;
                     match (&self.domain, rstp) {
                         (Some(d), true) => {
-                            info!(domain = %d, port = %name, "pvst port migrated to RSTP");
+                            info!(domain = %d, port = %name, "{}", events::PVST_PORT_MIGRATED_RSTP);
                         }
                         (Some(d), false) => {
-                            info!(domain = %d, port = %name, "pvst port migrated to STP");
+                            info!(domain = %d, port = %name, "{}", events::PVST_PORT_MIGRATED_STP);
                         }
-                        (None, true) => info!(port = %name, "port migrated to RSTP"),
-                        (None, false) => info!(port = %name, "port migrated to STP"),
+                        (None, true) => info!(port = %name, "{}", events::PORT_MIGRATED_RSTP),
+                        (None, false) => info!(port = %name, "{}", events::PORT_MIGRATED_STP),
                     }
                 }
                 Action::Log(Event::RootChanged { root, .. }) => self.log_root(root),
+                Action::Log(Event::TopologyChange { port, received }) => {
+                    self.note_tc(0, port, received);
+                }
                 Action::ErrDisable { port } => {
                     let name = self.ports[port].name.clone();
-                    warn!(port = %name, reason = %"bpdu-guard", "port err-disabled");
+                    warn!(port = %name, reason = %"bpdu-guard", "{}", events::PORT_ERR_DISABLED);
                     out.push(Out::ErrDisabled {
                         port: name,
                         disabled: true,
@@ -556,7 +701,7 @@ impl Engine {
                 }
                 Action::ErrRecover { port } => {
                     let name = self.ports[port].name.clone();
-                    info!(port = %name, "port err-disabled recovered");
+                    info!(port = %name, "{}", events::PORT_ERR_RECOVERED);
                     out.push(Out::ErrDisabled {
                         port: name,
                         disabled: false,
@@ -565,21 +710,21 @@ impl Engine {
                 Action::Log(Event::RootInconsistent { port, on }) => {
                     let name = &self.ports[port].name;
                     if on {
-                        warn!(port = %name, "port root-inconsistent");
+                        warn!(port = %name, "{}", events::PORT_ROOT_INCONSISTENT);
                     } else {
-                        info!(port = %name, "port root-consistent");
+                        info!(port = %name, "{}", events::PORT_ROOT_CONSISTENT);
                     }
                 }
                 Action::Log(Event::LoopInconsistent { port, on }) => {
                     let name = &self.ports[port].name;
                     if on {
-                        warn!(port = %name, "port loop-inconsistent");
+                        warn!(port = %name, "{}", events::PORT_LOOP_INCONSISTENT);
                     } else {
-                        info!(port = %name, "port loop-consistent");
+                        info!(port = %name, "{}", events::PORT_LOOP_CONSISTENT);
                     }
                 }
                 Action::Log(Event::NotQuiescent) => {
-                    error!("spanning tree state machines did not reach quiescence");
+                    error!("{}", events::NOT_QUIESCENT);
                 }
             }
         }
@@ -597,6 +742,7 @@ impl Engine {
     fn drain_mst(&mut self, out: &mut Vec<Out>, mut cist_tx: HashMap<usize, crate::bpdu::Params>) {
         let Some(m) = self.mst.as_mut() else { return };
         let mut triggers = Vec::new();
+        let mut changes = Vec::new();
         for inst in &mut m.instances {
             for action in inst.bridge.take_actions() {
                 match action {
@@ -608,21 +754,25 @@ impl Engine {
                         }
                     }
                     Action::Log(Event::RoleChanged { port, to, .. }) => {
-                        info!(port = %self.ports[port].name, msti = inst.id, role = ?to, "msti port role changed");
+                        info!(port = %self.ports[port].name, msti = inst.id, role = ?to, "{}", events::MSTI_PORT_ROLE_CHANGED);
                     }
                     Action::Log(Event::RootChanged { root, .. }) => {
-                        info!(msti = inst.id, root = %identity::show(&root), "msti root bridge changed");
+                        info!(msti = inst.id, root = %identity::show(&root), "{}", events::MSTI_ROOT_CHANGED);
+                    }
+                    Action::Log(Event::TopologyChange { port, received }) => {
+                        changes.push((inst.id, port, received));
                     }
                     Action::Log(Event::NotQuiescent) => {
-                        error!(
-                            msti = inst.id,
-                            "spanning tree state machines did not reach quiescence"
-                        );
+                        error!(msti = inst.id, "{}", events::NOT_QUIESCENT);
                     }
                     _ => {}
                 }
             }
         }
+        for (tree, port, received) in changes {
+            self.note_tc(tree, port, received);
+        }
+        let Some(m) = self.mst.as_mut() else { return };
         for port in triggers {
             let p = &self.bridge.ports[port];
             if p.send_rstp && p.port_enabled && !p.prot.bpdu_filter {
@@ -635,6 +785,9 @@ impl Engine {
         sends.sort_by_key(|&(port, _)| port);
         for (port, params) in sends {
             let bpdu = Box::new(m.tx(port, &params, self.bridge.id));
+            let c = &mut self.counters[port];
+            c.out_mst_bpdu += 1;
+            c.tc_sent += tc_of(&bpdu.params);
             out.push(Out::TxMst { port, bpdu });
         }
     }
@@ -687,7 +840,8 @@ impl Engine {
                         msti = tree,
                         state = ?now,
                         domains = %domains.join(","),
-                        "msti port state changed"
+                        "{}",
+                        events::MSTI_PORT_STATE_CHANGED
                     );
                 }
                 states.extend(a);
@@ -851,6 +1005,122 @@ mod tests {
         assert!(s
             .iter()
             .all(|a| a.state == nos_proto::StpPortState::Blocking));
+    }
+
+    fn peer(flags: u8) -> Rx {
+        use crate::bpdu::PortRole;
+        Rx::Plain(crate::machines::tests::msg(
+            0,
+            0,
+            0,
+            1,
+            PortRole::Designated,
+            flags,
+        ))
+    }
+
+    /// Port 0 up under a better root that hellos every 2 s, until forwarding.
+    fn follower() -> Engine {
+        let (mut e, _) = Engine::new(&plan(), [2, 0, 0, 0, 0, 1]).unwrap();
+        e.set_link(0, true, true, 20_000);
+        for t in 0..40 {
+            if t % 2 == 0 {
+                e.receive_rx(0, peer(0));
+            }
+            e.tick();
+        }
+        e
+    }
+
+    #[test]
+    fn counters_count_each_bpdu_kind_and_event() {
+        let mut e = follower();
+        let c = e.summary().ports[0].counters;
+        assert_eq!(c.in_rstp_bpdu, 20);
+        assert_eq!(c.forward_transitions, 1);
+        assert_eq!(c.tc_received, 0);
+        assert_eq!(e.summary().ports[1].counters, StpPortCounters::default());
+        e.receive_rx(0, peer(crate::bpdu::Flags::TC));
+        let Rx::Plain(Bpdu::Rst(p)) = peer(0) else {
+            unreachable!()
+        };
+        e.receive(0, Bpdu::Config(p));
+        e.receive(0, Bpdu::Tcn);
+        e.note_invalid(0);
+        let mst = Rx::Mst(MstBpdu {
+            params: p,
+            config: crate::bpdu::MstConfigId {
+                name: [0; 32],
+                revision: 0,
+                digest: [0; 16],
+            },
+            internal_cost: 0,
+            bridge: p.bridge,
+            remaining_hops: 20,
+            mstis: Vec::new(),
+        });
+        e.receive_rx(0, mst);
+        let c = e.summary().ports[0].counters;
+        assert_eq!(
+            (
+                c.in_rstp_bpdu,
+                c.in_config_bpdu,
+                c.in_tcn_bpdu,
+                c.in_mst_bpdu
+            ),
+            (21, 1, 1, 1)
+        );
+        assert_eq!((c.tc_received, c.invalid_bpdu), (2, 1));
+        let v = e.tree_view(10);
+        assert_eq!(v.ports[0].counters, c);
+        assert!(v.ports[0].point_to_point && !v.ports[0].edge);
+        assert_eq!(v.topology, e.summary().topology);
+        assert!(c.protocol_migration >= 1, "a Config BPDU migrates to STP");
+        let mut sent = StpPortCounters::default();
+        count_tx(&mut sent, &Bpdu::Tcn);
+        count_tx(&mut sent, &Bpdu::Config(p));
+        count_tx(&mut sent, &Bpdu::Rst(p));
+        assert_eq!(
+            (
+                sent.out_tcn_bpdu,
+                sent.out_config_bpdu,
+                sent.out_rstp_bpdu,
+                sent.tc_sent
+            ),
+            (1, 1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn topology_change_is_attributed_and_counted_once_per_episode() {
+        let mut e = follower();
+        let t = e.summary().topology;
+        assert_eq!((t.count, t.last_cause), (1, Some(StpTcCause::Local)));
+        assert_eq!(t.last_port.as_deref(), Some("eth1"));
+        e.tick();
+        e.receive_rx(0, peer(crate::bpdu::Flags::TC));
+        let t = e.summary().topology;
+        assert_eq!((t.count, t.last_cause), (2, Some(StpTcCause::Received)));
+        assert_eq!(
+            (t.last_port.as_deref(), t.last_secs_ago),
+            (Some("eth1"), Some(0))
+        );
+        // The neighbour repeats the flag every hello: still one change.
+        for _ in 0..3 {
+            e.tick();
+            e.tick();
+            e.receive_rx(0, peer(crate::bpdu::Flags::TC));
+        }
+        assert_eq!(e.summary().topology.count, 2);
+        // Silence ends the episode; the next flag is a new change.
+        for _ in 0..8 {
+            e.tick();
+        }
+        e.receive_rx(0, peer(crate::bpdu::Flags::TC));
+        let t = e.summary().topology;
+        assert_eq!(t.count, 3);
+        e.tick();
+        assert_eq!(e.summary().topology.last_secs_ago, Some(1));
     }
 
     #[test]

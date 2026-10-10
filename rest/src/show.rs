@@ -16,7 +16,7 @@ use nos_proto::{
     LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
     PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
-    StpInstance, StpMst, StpRequest, StpSummary,
+    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -209,6 +209,48 @@ pub async fn spanning_tree_domain(
         .find(|i| i.domains.contains(&name))
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("no spanning-tree tree for domain {name}")))
+}
+
+/// One row of `GET /v1/spanning-tree/counters`: a port's RFC 4318 counters
+/// in one tree. Outside Rapid-PVST+ the counters belong to the port (the
+/// CIST and every MSTI share them), so `tree` is `cist`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StpCounterRow {
+    /// `cist`, or the broadcast domain's name in `mode rapid-pvst`.
+    pub tree: String,
+    pub port: String,
+    pub counters: StpPortCounters,
+}
+
+fn stp_counter_rows(s: &StpSummary) -> Vec<StpCounterRow> {
+    let row = |tree: &str, port: &str, counters| StpCounterRow {
+        tree: tree.into(),
+        port: port.into(),
+        counters,
+    };
+    let mut rows: Vec<_> = s
+        .ports
+        .iter()
+        .map(|p| row("cist", &p.name, p.counters))
+        .collect();
+    for t in &s.pvst {
+        rows.extend(
+            t.ports
+                .iter()
+                .map(|p| row(&t.domains.join(","), &p.name, p.counters)),
+        );
+    }
+    rows
+}
+
+#[utoipa::path(get, path = "/v1/spanning-tree/counters", tag = "show", summary = "Every spanning-tree port's BPDU and topology-change counters (RFC 4318 names), one row per port and tree", responses((status = 200, body = Vec<StpCounterRow>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn spanning_tree_counters(
+    State(d): State<Daemons>,
+) -> ApiResult<Json<Vec<StpCounterRow>>> {
+    stp_summary(&d)
+        .await
+        .map(|s| stp_counter_rows(&s))
+        .map(Json)
 }
 
 #[utoipa::path(get, path = "/v1/spanning-tree/mst-config", tag = "show", summary = "The MST region name, revision, digest and the instance to VLAN map", responses((status = 200, body = StpMst), (status = 404, body = ErrorBody, description = "spanning tree is not in mode mstp"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]

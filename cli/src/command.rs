@@ -51,6 +51,12 @@ pub enum Command {
     ShowSpanningTreeDomain {
         domain: String,
     },
+    /// `show spanning-tree [instance <id> | domain <bd>] detail` — the tables
+    /// plus topology changes and the RFC 4318 counters of every port.
+    ShowSpanningTreeDetail {
+        instance: Option<u16>,
+        domain: Option<String>,
+    },
     /// `show bfd sessions [<peer>]` — every BFD session `nos-bfdd` holds, or
     /// only those to one peer address.
     ShowBfdSessions {
@@ -263,6 +269,31 @@ mod tests {
             Command::parse("show spanning-tree domain bd1"),
             Command::ShowSpanningTreeDomain {
                 domain: "bd1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn show_spanning_tree_detail() {
+        assert_eq!(
+            Command::parse("show spanning-tree detail"),
+            Command::ShowSpanningTreeDetail {
+                instance: None,
+                domain: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show spanning-tree instance 3 detail"),
+            Command::ShowSpanningTreeDetail {
+                instance: Some(3),
+                domain: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show spanning-tree domain bd1 detail"),
+            Command::ShowSpanningTreeDetail {
+                instance: None,
+                domain: Some("bd1".into())
             }
         );
     }
