@@ -108,8 +108,9 @@ fn open_raw(ifindex: i32, ethertype: u16) -> io::Result<Socket> {
 /// The STP/RSTP BPDU group (IEEE 802.1D bridge group address).
 pub const BPDU_GROUP: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x00];
 const ETH_P_ALL: u16 = 0x0003;
-/// An 802.3 header, LLC and a BPDU (at most 38 bytes), generously rounded up.
-const BPDU_RECV_BUF_LEN: usize = 128;
+/// An 802.3 header, LLC and a BPDU: an MST BPDU with 64 MSTI messages is the
+/// longest (14 + 3 + 102 + 64 * 16 = 1143 bytes); 1500 is the 802.3 maximum.
+const BPDU_RECV_BUF_LEN: usize = 1536;
 
 /// A raw L2 socket for one ethertype and one multicast group on one interface.
 pub struct L2Socket {

@@ -113,6 +113,12 @@ pub enum Resolved {
     ShowLldpStatistics,
     /// `show spanning-tree` — data-plane, valid in any mode.
     ShowSpanningTree,
+    /// `show spanning-tree instance <id>` — data-plane, valid in any mode.
+    ShowSpanningTreeInstance {
+        id: u16,
+    },
+    /// `show spanning-tree mst-config` — data-plane, valid in any mode.
+    ShowSpanningTreeMstConfig,
     /// `show bfd sessions [<peer>]` — data-plane, valid in any mode.
     ShowBfdSessions {
         peer: Option<std::net::IpAddr>,
@@ -218,6 +224,8 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowLldpNeighbors { detail } => Resolved::ShowLldpNeighbors { detail },
         Command::ShowLldpStatistics => Resolved::ShowLldpStatistics,
         Command::ShowSpanningTree => Resolved::ShowSpanningTree,
+        Command::ShowSpanningTreeInstance { id } => Resolved::ShowSpanningTreeInstance { id },
+        Command::ShowSpanningTreeMstConfig => Resolved::ShowSpanningTreeMstConfig,
         Command::ShowBfdSessions { peer } => Resolved::ShowBfdSessions { peer },
         Command::ShowBfdReflector => Resolved::ShowBfdReflector,
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
@@ -321,6 +329,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowLldpNeighbors { .. }
         | Command::ShowLldpStatistics
         | Command::ShowSpanningTree
+        | Command::ShowSpanningTreeInstance { .. }
+        | Command::ShowSpanningTreeMstConfig
         | Command::ShowBfdSessions { .. }
         | Command::ShowBfdReflector
         | Command::ShowLog { .. }

@@ -4203,6 +4203,107 @@
         ],
         "type": "string"
       },
+      "StpInstance": {
+        "description": "One tree of an MST region: instance 0 is the CIST.",
+        "properties": {
+          "bridge_id": {
+            "type": "string"
+          },
+          "domains": {
+            "description": "The broadcast domains running in this instance.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ports": {
+            "items": {
+              "$ref": "#/components/schemas/StpInstancePort"
+            },
+            "type": "array"
+          },
+          "root_id": {
+            "type": "string"
+          },
+          "root_path_cost": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "root_port": {
+            "description": "`None` when this bridge is the root of the instance.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vlans": {
+            "description": "The VIDs mapped to this instance (`10,20-30`), derived from the\nbroadcast domains' tags.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "vlans",
+          "domains",
+          "bridge_id",
+          "root_id",
+          "root_path_cost",
+          "ports"
+        ],
+        "type": "object"
+      },
+      "StpInstancePort": {
+        "description": "One port in one spanning-tree instance of an MST region (#321).",
+        "properties": {
+          "boundary": {
+            "description": "The peer is outside the region: the instance follows the CIST here.",
+            "type": "boolean"
+          },
+          "cost": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "designated_bridge": {
+            "type": "string"
+          },
+          "designated_port": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "$ref": "#/components/schemas/StpRole"
+          },
+          "state": {
+            "$ref": "#/components/schemas/StpState",
+            "description": "The state the kernel is given for this tree's domains (a boundary\nport's is the CIST's)."
+          }
+        },
+        "required": [
+          "name",
+          "role",
+          "state",
+          "boundary",
+          "cost",
+          "priority",
+          "designated_bridge",
+          "designated_port"
+        ],
+        "type": "object"
+      },
       "StpMode": {
         "description": "Which protocol the bridge runs. `Rstp` is the default (one tree);\n`Mstp` maps VLANs to `mst-instances`; `RapidPvst` runs one RSTP tree per\nVLAN of a `BroadcastDomain`; `Disabled` turns spanning tree off.",
         "enum": [
@@ -4212,6 +4313,43 @@
           "Disabled"
         ],
         "type": "string"
+      },
+      "StpMst": {
+        "description": "The MST region and its trees (`mode mstp`).",
+        "properties": {
+          "digest": {
+            "description": "The MST configuration digest, 32 hex digits.",
+            "type": "string"
+          },
+          "instances": {
+            "description": "Instance 0 (the CIST) first, then every configured MSTI.",
+            "items": {
+              "$ref": "#/components/schemas/StpInstance"
+            },
+            "type": "array"
+          },
+          "max_hops": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "region_name": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "region_name",
+          "revision",
+          "digest",
+          "max_hops",
+          "instances"
+        ],
+        "type": "object"
       },
       "StpPortInfo": {
         "description": "One spanning-tree port. Bridge and port ids are display strings\n(`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.",
@@ -4425,7 +4563,7 @@
         "type": "string"
       },
       "StpSummary": {
-        "description": "`show spanning-tree`. `enabled: false` (mode not `rstp`) leaves the rest at\nits default.\n\nFields are only ever appended (MSTI views, #323, extend it).",
+        "description": "`show spanning-tree`. `enabled: false` (mode neither `rstp` nor `mstp`)\nleaves the rest at its default.\n\nFields are only ever appended.",
         "properties": {
           "bridge_id": {
             "type": "string"
@@ -4450,6 +4588,17 @@
           },
           "mode": {
             "$ref": "#/components/schemas/StpMode"
+          },
+          "mst": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StpMst",
+                "description": "The MST region and its trees; `None` outside `mode mstp` (#321)."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ports": {
             "items": {
@@ -6050,7 +6199,61 @@
             "description": "a daemon this query needs is not running"
           }
         },
-        "summary": "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is not rstp)",
+        "summary": "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is neither rstp nor mstp)",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/spanning-tree/instance/{id}": {
+      "get": {
+        "operationId": "spanning_tree_instance",
+        "parameters": [
+          {
+            "description": "MST instance id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StpInstance"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "spanning tree is not in mode mstp, or no such instance"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "One spanning-tree instance of the MST region (0 is the CIST)",
         "tags": [
           "show"
         ]
@@ -6084,6 +6287,47 @@
         "summary": "Re-probe every spanning-tree port for RSTP (mcheck)",
         "tags": [
           "clear"
+        ]
+      }
+    },
+    "/v1/spanning-tree/mst-config": {
+      "get": {
+        "operationId": "spanning_tree_mst_config",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StpMst"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "spanning tree is not in mode mstp"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "The MST region name, revision, digest and the instance to VLAN map",
+        "tags": [
+          "show"
         ]
       }
     },

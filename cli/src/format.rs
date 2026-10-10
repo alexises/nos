@@ -425,7 +425,7 @@ pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
         None => "this bridge is the root".to_string(),
     };
     let mut lines = vec![
-        "mode rstp".to_string(),
+        format!("mode {}", mode_word(s.mode)),
         format!("bridge id {}", s.bridge_id),
         format!("root id   {} ({root})", s.root_id),
         format!(
@@ -467,6 +467,89 @@ pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
             } else {
                 format!("  {flags}")
             }
+        ));
+    }
+    lines.join("\n")
+}
+
+fn mode_word(m: nos_proto::StpMode) -> &'static str {
+    match m {
+        nos_proto::StpMode::Mstp => "mstp",
+        _ => "rstp",
+    }
+}
+
+const NOT_MSTP: &str = "spanning-tree is not in mode mstp";
+
+/// `show spanning-tree mst-config`: the region identity, then the VLAN map.
+pub fn render_mst_config(s: &nos_proto::StpSummary) -> String {
+    let Some(m) = &s.mst else {
+        return NOT_MSTP.to_string();
+    };
+    let mut lines = vec![
+        format!("name     {}", m.region_name),
+        format!("revision {}", m.revision),
+        format!("digest   {}", m.digest),
+        format!("max hops {}", m.max_hops),
+        String::new(),
+        format!("{:<9} {:<20} Domains", "Instance", "VLANs"),
+    ];
+    for i in &m.instances {
+        let vlans = if i.vlans.is_empty() { "-" } else { &i.vlans };
+        let domains = if i.domains.is_empty() {
+            "-".to_string()
+        } else {
+            i.domains.join(",")
+        };
+        lines.push(format!("{:<9} {vlans:<20} {domains}", i.id));
+    }
+    lines.join("\n")
+}
+
+/// `show spanning-tree instance <id>`: one tree's root and ports.
+pub fn render_stp_instance(s: &nos_proto::StpSummary, id: u16) -> String {
+    let Some(m) = &s.mst else {
+        return NOT_MSTP.to_string();
+    };
+    let Some(i) = m.instances.iter().find(|i| i.id == id) else {
+        return format!("no spanning-tree instance {id}");
+    };
+    let root = match &i.root_port {
+        Some(p) => format!("root port {p}, cost {}", i.root_path_cost),
+        None => "this bridge is the root".to_string(),
+    };
+    let mut lines = vec![
+        format!(
+            "instance {} ({})",
+            i.id,
+            if i.id == 0 { "CIST" } else { "MSTI" }
+        ),
+        format!(
+            "vlans     {}",
+            if i.vlans.is_empty() { "-" } else { &i.vlans }
+        ),
+        format!("bridge id {}", i.bridge_id),
+        format!("root id   {} ({root})", i.root_id),
+        String::new(),
+        format!(
+            "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated",
+            "Name", "Role", "State", "Cost", "Prio"
+        ),
+    ];
+    for p in &i.ports {
+        let designated = if p.designated_bridge.is_empty() {
+            "-".to_string()
+        } else {
+            format!("{} {}", p.designated_bridge, p.designated_port)
+        };
+        lines.push(format!(
+            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}{}",
+            p.name,
+            p.role.as_str(),
+            p.state.as_str(),
+            p.cost,
+            p.priority,
+            if p.boundary { "  Boundary" } else { "" }
         ));
     }
     lines.join("\n")
@@ -2589,5 +2672,71 @@ mod tests {
             ]}]
         }));
         assert_eq!(render_config(&cfg), "broadcast domain bd1\nswitching-profile sp1\n  broadcast-domain bd1\n    tag dot1q 100");
+    }
+}
+
+#[cfg(test)]
+mod mst_tests {
+    use super::{render_mst_config, render_stp_instance};
+    use nos_proto::{StpInstance, StpInstancePort, StpMst, StpState, StpSummary};
+
+    fn summary() -> StpSummary {
+        let port = |name: &str, boundary| StpInstancePort {
+            name: name.into(),
+            state: StpState::Forwarding,
+            boundary,
+            cost: 2000,
+            priority: 128,
+            ..StpInstancePort::default()
+        };
+        StpSummary {
+            enabled: true,
+            mst: Some(StpMst {
+                region_name: "lab".into(),
+                revision: 7,
+                digest: "9357ebb7a8d74dd5fef4f2bab50531aa".into(),
+                max_hops: 20,
+                instances: vec![
+                    StpInstance::default(),
+                    StpInstance {
+                        id: 1,
+                        vlans: "10,20-30".into(),
+                        domains: vec!["bd1".into(), "bd2".into()],
+                        bridge_id: "1000.02:00:00:00:00:01".into(),
+                        root_id: "1000.02:00:00:00:00:01".into(),
+                        ports: vec![port("eth1", false), port("eth2", true)],
+                        ..StpInstance::default()
+                    },
+                ],
+            }),
+            ..StpSummary::default()
+        }
+    }
+
+    #[test]
+    fn mst_config_lists_region_and_vlan_map() {
+        let out = render_mst_config(&summary());
+        assert!(out.contains("name     lab"));
+        assert!(out.contains("digest   9357ebb7a8d74dd5fef4f2bab50531aa"));
+        assert!(out.contains("1         10,20-30             bd1,bd2"));
+        assert!(out.contains("0         -                    -"));
+        assert_eq!(
+            render_mst_config(&StpSummary::default()),
+            "spanning-tree is not in mode mstp"
+        );
+    }
+
+    #[test]
+    fn instance_shows_ports_and_boundary() {
+        let out = render_stp_instance(&summary(), 1);
+        assert!(out.starts_with("instance 1 (MSTI)"));
+        assert!(out.contains("this bridge is the root"));
+        assert!(out.contains("eth2"));
+        assert!(out.lines().last().unwrap().ends_with("  Boundary"));
+        assert!(render_stp_instance(&summary(), 0).starts_with("instance 0 (CIST)"));
+        assert_eq!(
+            render_stp_instance(&summary(), 9),
+            "no spanning-tree instance 9"
+        );
     }
 }

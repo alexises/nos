@@ -16,7 +16,7 @@ use nos_proto::{
     LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
     PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
-    StpRequest, StpSummary,
+    StpInstance, StpMst, StpRequest, StpSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -170,14 +170,40 @@ pub async fn lldp_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Vec<Lldp
     }
 }
 
-#[utoipa::path(get, path = "/v1/spanning-tree", tag = "show", summary = "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is not rstp)", responses((status = 200, body = StpSummary), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+#[utoipa::path(get, path = "/v1/spanning-tree", tag = "show", summary = "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is neither rstp nor mstp)", responses((status = 200, body = StpSummary), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn spanning_tree(State(d): State<Daemons>) -> ApiResult<Json<StpSummary>> {
+    stp_summary(&d).await.map(Json)
+}
+
+async fn stp_summary(d: &Daemons) -> ApiResult<StpSummary> {
     match d.service(ServiceRef::Stp, StpRequest::GetSummary).await? {
-        StpEvent::Summary(s) => Ok(Json(s)),
+        StpEvent::Summary(s) => Ok(s),
         other @ (StpEvent::Mcheck { .. } | StpEvent::ErrDisabledCleared { .. }) => {
             Err(crate::ipc::unexpected("nos-stpd", &other))
         }
     }
+}
+
+#[utoipa::path(get, path = "/v1/spanning-tree/instance/{id}", tag = "show", summary = "One spanning-tree instance of the MST region (0 is the CIST)", params(("id" = u16, Path, description = "MST instance id")), responses((status = 200, body = StpInstance), (status = 404, body = ErrorBody, description = "spanning tree is not in mode mstp, or no such instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn spanning_tree_instance(
+    State(d): State<Daemons>,
+    Path(id): Path<u16>,
+) -> ApiResult<Json<StpInstance>> {
+    stp_summary(&d)
+        .await?
+        .mst
+        .and_then(|m| m.instances.into_iter().find(|i| i.id == id))
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("no spanning-tree instance {id}")))
+}
+
+#[utoipa::path(get, path = "/v1/spanning-tree/mst-config", tag = "show", summary = "The MST region name, revision, digest and the instance to VLAN map", responses((status = 200, body = StpMst), (status = 404, body = ErrorBody, description = "spanning tree is not in mode mstp"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn spanning_tree_mst_config(State(d): State<Daemons>) -> ApiResult<Json<StpMst>> {
+    stp_summary(&d)
+        .await?
+        .mst
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound("spanning tree is not in mode mstp".into()))
 }
 
 #[utoipa::path(get, path = "/v1/lldp/statistics", tag = "show", summary = "Every LLDP-enabled interface's IEEE 802.1AB counters", responses((status = 200, body = Vec<LldpLinkStats>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]

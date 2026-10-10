@@ -94,4 +94,7 @@ pub use schema::{
     HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
     REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
 };
-pub use stp::{StpEvent, StpPortInfo, StpRequest, StpRole, StpState, StpSummary};
+pub use stp::{
+    StpEvent, StpInstance, StpInstancePort, StpMst, StpPortInfo, StpRequest, StpRole, StpState,
+    StpSummary,
+};

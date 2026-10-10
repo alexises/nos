@@ -32,6 +32,7 @@ use nos_proto::{
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum StpModeArg {
     Rstp,
+    Mstp,
     Disabled,
 }
 
@@ -39,6 +40,7 @@ impl From<StpModeArg> for nos_proto::StpMode {
     fn from(mode: StpModeArg) -> Self {
         match mode {
             StpModeArg::Rstp => nos_proto::StpMode::Rstp,
+            StpModeArg::Mstp => nos_proto::StpMode::Mstp,
             StpModeArg::Disabled => nos_proto::StpMode::Disabled,
         }
     }
@@ -894,6 +896,23 @@ pub struct Args {
     #[arg(long)]
     pub stp_profile_detach: bool,
 
+    /// `spanning-tree region` as `NAME:REVISION` (MSTP, #321).
+    #[arg(long)]
+    pub stp_region: Option<String>,
+
+    /// `spanning-tree mst-instance` as `ID:PRIORITY`. Repeatable.
+    #[arg(long)]
+    pub stp_mst_instance: Vec<String>,
+
+    /// `broadcast-domain <BD> stp-instance <ID>` as `BD:ID`. Repeatable.
+    #[arg(long)]
+    pub stp_domain_instance: Vec<String>,
+
+    /// `mst-instance <ID> cost <COST>` of [`STP_PROT_PROFILE`] as `ID:COST`
+    /// (needs `--stp-profile-interface`). Repeatable.
+    #[arg(long)]
+    pub stp_profile_mst_cost: Vec<String>,
+
     /// If set (requires `--port-aggregate`), sets the aggregate's Ethernet
     /// Segment DF election algorithm (`PortAggregateOp::SetDfAlgorithm`);
     /// needs an ESI at commit time. `modulo` resets it.
@@ -1605,6 +1624,7 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             Some(format!("\"{f:?}\"")),
         ));
     }
+    v.extend(mst_paths(args));
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         let guard = |field: &str| {
             vec![
@@ -1636,6 +1656,22 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
                     field.to_string(),
                 ],
                 (!value.is_empty()).then(|| value.to_string()),
+            ));
+        }
+        for (id, cost) in args
+            .stp_profile_mst_cost
+            .iter()
+            .filter_map(|f| f.split_once(':'))
+        {
+            v.push((
+                vec![
+                    "stp-port-profile".to_string(),
+                    STP_PROT_PROFILE.to_string(),
+                    "mst-instance".to_string(),
+                    id.to_string(),
+                    "cost".to_string(),
+                ],
+                Some(cost.to_string()),
             ));
         }
         v.push((
@@ -1790,6 +1826,45 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     v
 }
 
+/// The path edits of `--stp-region`, `--stp-mst-instance` and
+/// `--stp-domain-instance` (flags are `A:B`; a malformed one is skipped).
+fn mst_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    let st = |rest: &[&str]| -> Vec<String> {
+        std::iter::once("spanning-tree")
+            .chain(rest.iter().copied())
+            .map(str::to_string)
+            .collect()
+    };
+    let mut v = Vec::new();
+    if let Some((name, rev)) = args.stp_region.as_deref().and_then(|r| r.rsplit_once(':')) {
+        v.push((st(&["region", "name"]), Some(format!("\"{name}\""))));
+        v.push((st(&["region", "revision"]), Some(rev.to_string())));
+    }
+    for (id, prio) in args
+        .stp_mst_instance
+        .iter()
+        .filter_map(|f| f.split_once(':'))
+    {
+        v.push((
+            st(&["mst-instance", id, "priority"]),
+            Some(prio.to_string()),
+        ));
+    }
+    for (bd, id) in args
+        .stp_domain_instance
+        .iter()
+        .filter_map(|f| f.split_once(':'))
+    {
+        v.push((
+            ["broadcast-domain", bd, "stp-instance"]
+                .map(str::to_string)
+                .to_vec(),
+            Some(id.to_string()),
+        ));
+    }
+    v
+}
+
 /// `--stp-mode`, `disabled` when unset (see `Args::stp_mode`).
 fn stp_mode(args: &Args) -> nos_proto::StpMode {
     args.stp_mode
@@ -1810,6 +1885,39 @@ fn set_profile_field(p: &mut nos_proto::schema::StpPortProfile, flag: &str) {
     *p = serde_json::from_value(json).expect("profile field has the right type");
 }
 
+/// [`mst_paths`] applied straight to a local `Config`.
+fn apply_mst(args: &Args, config: &mut nos_proto::Config) {
+    let st = &mut config.spanning_tree;
+    if let Some((name, rev)) = args.stp_region.as_deref().and_then(|r| r.rsplit_once(':')) {
+        st.region.name = name.to_string();
+        st.region.revision = rev.parse().unwrap_or_default();
+    }
+    for (id, prio) in args
+        .stp_mst_instance
+        .iter()
+        .filter_map(|f| f.split_once(':'))
+    {
+        let (Ok(id), Ok(priority)) = (id.parse(), prio.parse()) else {
+            continue;
+        };
+        match st.mst_instances.iter_mut().find(|m| m.id == id) {
+            Some(m) => m.priority = priority,
+            None => st
+                .mst_instances
+                .push(nos_proto::schema::MstInstance { id, priority }),
+        }
+    }
+    for (bd, id) in args
+        .stp_domain_instance
+        .iter()
+        .filter_map(|f| f.split_once(':'))
+    {
+        for d in config.broadcast_domains.iter_mut().filter(|d| d.name == bd) {
+            d.stp_instance = id.parse().ok();
+        }
+    }
+}
+
 /// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
@@ -1820,6 +1928,7 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     if let Some(f) = args.stp_force_version {
         config.spanning_tree.force_version = Some(f.into());
     }
+    apply_mst(args, config);
     if let (Some(agg), Some(_)) = (&args.port_aggregate, &args.port_aggregate_esi) {
         for p in config
             .stp_port_profiles
@@ -1841,6 +1950,23 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
         {
             for f in &args.stp_profile_field {
                 set_profile_field(p, f);
+            }
+            for (id, cost) in args
+                .stp_profile_mst_cost
+                .iter()
+                .filter_map(|f| f.split_once(':'))
+            {
+                let (Ok(id), Ok(cost)) = (id.parse(), cost.parse()) else {
+                    continue;
+                };
+                match p.mst_instances.iter_mut().find(|m| m.id == id) {
+                    Some(m) => m.cost = Some(cost),
+                    None => p.mst_instances.push(nos_proto::schema::StpPortMstInstance {
+                        id,
+                        cost: Some(cost),
+                        ..Default::default()
+                    }),
+                }
             }
         }
         for i in config.interfaces.iter_mut().filter(|i| &i.name == iface) {
@@ -4767,5 +4893,90 @@ mod tests {
             Ok(nos_proto::schema::EchoMode::Unaffiliated)
         );
         assert!(parse_echo_mode("bogus").is_err());
+    }
+
+    #[test]
+    fn mstp_flags_become_path_edits_and_the_same_local_config() {
+        let args = Args::try_parse_from([
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "1",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "2",
+            "--peer",
+            "10.0.0.2",
+            "--stp-mode",
+            "mstp",
+            "--stp-region",
+            "lab:3",
+            "--stp-mst-instance",
+            "1:4096",
+            "--stp-domain-instance",
+            "bd1:1",
+            "--stp-profile-interface",
+            "eth1",
+            "--stp-profile-mst-cost",
+            "1:100000",
+        ])
+        .unwrap();
+        let edits = bfd_paths(&args);
+        let get = |p: &[&str]| {
+            edits
+                .iter()
+                .find(|(path, _)| path == p)
+                .and_then(|(_, v)| v.clone())
+        };
+        assert_eq!(get(&["spanning-tree", "mode"]).as_deref(), Some("\"Mstp\""));
+        assert_eq!(
+            get(&["spanning-tree", "region", "name"]).as_deref(),
+            Some("\"lab\"")
+        );
+        assert_eq!(
+            get(&["spanning-tree", "region", "revision"]).as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            get(&["spanning-tree", "mst-instance", "1", "priority"]).as_deref(),
+            Some("4096")
+        );
+        assert_eq!(
+            get(&["broadcast-domain", "bd1", "stp-instance"]).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            get(&[
+                "stp-port-profile",
+                STP_PROT_PROFILE,
+                "mst-instance",
+                "1",
+                "cost"
+            ])
+            .as_deref(),
+            Some("100000")
+        );
+
+        let mut cfg = nos_proto::Config::default();
+        cfg.broadcast_domains.push(nos_proto::BroadcastDomain {
+            name: "bd1".into(),
+            ..Default::default()
+        });
+        cfg.stp_port_profiles
+            .push(nos_proto::schema::StpPortProfile {
+                name: STP_PROT_PROFILE.into(),
+                ..Default::default()
+            });
+        apply_bfd(&args, &mut cfg);
+        assert_eq!(cfg.spanning_tree.region.name, "lab");
+        assert_eq!(cfg.spanning_tree.region.revision, 3);
+        assert_eq!(cfg.spanning_tree.mst_instances[0].priority, 4096);
+        assert_eq!(cfg.broadcast_domains[0].stp_instance, Some(1));
+        assert_eq!(
+            cfg.stp_port_profiles[0].mst_instances[0].cost,
+            Some(100_000)
+        );
     }
 }

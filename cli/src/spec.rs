@@ -457,6 +457,30 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowSpanningTree),
+    cmd!(["show" "spanning-tree" "instance" (id: Number)],
+        Doc::Local {
+            summary: "Show one spanning-tree instance of the MST region.",
+            detail: "Queries nos-stpd for instance <id> (0 is the CIST): the VLANs and broadcast \
+                     domains mapped to it, this bridge's id in the instance, its root and root \
+                     port, and every port's role and state in it. A port whose peer is outside \
+                     the region is a boundary port and follows the CIST. Only in 'spanning-tree \
+                     mode mstp'.",
+        },
+        Always,
+        |id| Command::ShowSpanningTreeInstance {
+            id: id.parse().ok()?,
+        }),
+    cmd!(["show" "spanning-tree" "mst-config"],
+        Doc::Local {
+            summary: "Show the MST region identity and the instance to VLAN map.",
+            detail: "Queries nos-stpd for the MST region name, revision and configuration \
+                     digest (the value a peer must match to share MSTIs with this bridge), and \
+                     the VLANs and broadcast domains of every instance. The VLAN of a domain is \
+                     its dot1q tag (VLAN 1 when it is only untagged). Only in 'spanning-tree \
+                     mode mstp'.",
+        },
+        Always,
+        Command::ShowSpanningTreeMstConfig),
     cmd!(["show" "bfd" "sessions"],
         Doc::Local {
             summary: "Show every BFD session.",

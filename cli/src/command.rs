@@ -41,6 +41,12 @@ pub enum Command {
     ShowLldpStatistics,
     /// `show spanning-tree` — the bridge and every port's role/state.
     ShowSpanningTree,
+    /// `show spanning-tree instance <id>` — one MST instance (0: the CIST).
+    ShowSpanningTreeInstance {
+        id: u16,
+    },
+    /// `show spanning-tree mst-config` — region name, revision, digest, VLAN map.
+    ShowSpanningTreeMstConfig,
     /// `show bfd sessions [<peer>]` — every BFD session `nos-bfdd` holds, or
     /// only those to one peer address.
     ShowBfdSessions {
@@ -240,6 +246,14 @@ mod tests {
         assert_eq!(
             Command::parse("show spanning-tree"),
             Command::ShowSpanningTree
+        );
+        assert_eq!(
+            Command::parse("show spanning-tree instance 12"),
+            Command::ShowSpanningTreeInstance { id: 12 }
+        );
+        assert_eq!(
+            Command::parse("show spanning-tree mst-config"),
+            Command::ShowSpanningTreeMstConfig
         );
     }
 

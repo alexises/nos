@@ -6,6 +6,7 @@ use nos_proto::{Config, StpMode, StpPortAssignment, StpPortState, LOOPBACK_PREFI
 
 use crate::actions::PortState;
 use crate::machines::Protections;
+use crate::mst::{digest, vidmap, MstPlan, PortMst};
 use crate::timers::Timers;
 
 /// One STP port: a physical `Interface` or a `PortAggregate` (the bond, never
@@ -23,6 +24,8 @@ pub struct PortCfg {
     pub edge: EdgePort,
     pub link_type: LinkType,
     pub prot: Protections,
+    /// The port's `mst-instance` settings (MSTP only).
+    pub mst: Vec<PortMst>,
 }
 
 /// Everything the engine is built from; a changed plan rebuilds the bridge.
@@ -34,13 +37,34 @@ pub struct Plan {
     pub timers: Timers,
     /// Sorted by name: a port's number is its index plus one.
     pub ports: Vec<PortCfg>,
+    /// `Some` in mode `mstp`.
+    pub mst: Option<MstPlan>,
+}
+
+fn mst_plan(cfg: &Config) -> MstPlan {
+    let st = &cfg.spanning_tree;
+    let domains = vidmap::domains(cfg);
+    let mut instances: Vec<(u16, u16)> = st
+        .mst_instances
+        .iter()
+        .map(|m| (m.id, m.priority))
+        .collect();
+    instances.sort_unstable();
+    MstPlan {
+        name: st.region.name.clone(),
+        revision: st.region.revision,
+        digest: digest::digest(&vidmap::table(&domains)),
+        max_hops: st.max_hops,
+        instances,
+        domains,
+    }
 }
 
 /// `None` while spanning tree has nothing to do here: mode `disabled`, or a
-/// mode this daemon does not run yet (MSTP, Rapid-PVST: later sub-issues).
+/// mode this daemon does not run yet (Rapid-PVST: a later sub-issue).
 pub fn plan(cfg: &Config) -> Option<Plan> {
     let st: &SpanningTree = &cfg.spanning_tree;
-    if st.mode != StpMode::Rstp {
+    if !matches!(st.mode, StpMode::Rstp | StpMode::Mstp) {
         return None;
     }
     let mut ports: Vec<PortCfg> = cfg
@@ -76,6 +100,7 @@ pub fn plan(cfg: &Config) -> Option<Plan> {
             ..Timers::default()
         },
         ports,
+        mst: (st.mode == StpMode::Mstp).then(|| mst_plan(cfg)),
     })
 }
 
@@ -110,6 +135,16 @@ fn port(
             loop_guard: p.loop_guard,
             restricted_tcn: p.restricted_tcn,
         }),
+        mst: prof.map_or_else(Vec::new, |p| {
+            p.mst_instances
+                .iter()
+                .map(|m| PortMst {
+                    id: m.id,
+                    cost: m.cost,
+                    priority: m.priority,
+                })
+                .collect()
+        }),
     })
 }
 
@@ -122,10 +157,26 @@ pub fn kernel_state(s: PortState) -> StpPortState {
     }
 }
 
-/// The CIST state of `port` as one assignment per domain it is a member of.
-pub fn assignments(port: &PortCfg, s: PortState) -> Vec<StpPortAssignment> {
+/// The domains of `port` that run in `tree` (0: the CIST, which also owns
+/// every domain when there is no MST plan).
+pub fn tree_domains<'a>(
+    port: &'a PortCfg,
+    mst: Option<&'a MstPlan>,
+    tree: u16,
+) -> impl Iterator<Item = &'a String> {
     port.domains
         .iter()
+        .filter(move |d| mst.map_or(0, |m| m.tree_of(d)) == tree)
+}
+
+/// The state of `port` in `tree` as one assignment per domain it is a member of.
+pub fn assignments(
+    port: &PortCfg,
+    mst: Option<&MstPlan>,
+    tree: u16,
+    s: PortState,
+) -> Vec<StpPortAssignment> {
+    tree_domains(port, mst, tree)
         .map(|d| StpPortAssignment {
             port: port.name.clone(),
             domain: d.clone(),
@@ -134,10 +185,9 @@ pub fn assignments(port: &PortCfg, s: PortState) -> Vec<StpPortAssignment> {
         .collect()
 }
 
-/// `(port, domain)` pairs whose learned MACs to flush.
-pub fn flushes(port: &PortCfg) -> Vec<(String, String)> {
-    port.domains
-        .iter()
+/// `(port, domain)` pairs of `tree` whose learned MACs to flush.
+pub fn flushes(port: &PortCfg, mst: Option<&MstPlan>, tree: u16) -> Vec<(String, String)> {
+    tree_domains(port, mst, tree)
         .map(|d| (port.name.clone(), d.clone()))
         .collect()
 }
@@ -215,12 +265,66 @@ mod tests {
     }
 
     #[test]
-    fn only_rstp_mode_has_a_plan() {
-        for mode in [StpMode::Disabled, StpMode::Mstp, StpMode::RapidPvst] {
+    fn only_rstp_and_mstp_have_a_plan() {
+        for mode in [StpMode::Disabled, StpMode::RapidPvst] {
             let mut c = cfg();
             c.spanning_tree.mode = mode;
             assert_eq!(plan(&c), None, "{mode:?}");
         }
+        assert_eq!(plan(&cfg()).unwrap().mst, None);
+    }
+
+    #[test]
+    fn mstp_plan_carries_the_region_and_the_vid_map() {
+        use nos_proto::schema::{MstInstance, StpPortMstInstance, StpRegion};
+        use nos_proto::{BroadcastDomain, VlanTag};
+        let mut c = cfg();
+        c.spanning_tree.mode = StpMode::Mstp;
+        c.spanning_tree.region = StpRegion {
+            name: "lab".into(),
+            revision: 3,
+        };
+        c.spanning_tree.mst_instances = vec![MstInstance {
+            id: 1,
+            priority: 4096,
+        }];
+        for sp in &mut c.switching_profiles {
+            sp.members[0].tag = VlanTag::Dot1q(10);
+            sp.members[1].tag = VlanTag::Dot1q(20);
+        }
+        c.broadcast_domains = vec![
+            BroadcastDomain {
+                name: "d1".into(),
+                stp_instance: Some(1),
+                ..Default::default()
+            },
+            BroadcastDomain {
+                name: "d2".into(),
+                ..Default::default()
+            },
+        ];
+        c.stp_port_profiles[0].mst_instances = vec![StpPortMstInstance {
+            id: 1,
+            cost: Some(500),
+            priority: 32,
+        }];
+        let p = plan(&c).unwrap();
+        let m = p.mst.unwrap();
+        assert_eq!((m.name.as_str(), m.revision, m.max_hops), ("lab", 3, 20));
+        assert_eq!(m.instances, [(1, 4096)]);
+        assert_eq!(m.tree_of("d1"), 1);
+        assert_eq!(m.tree_of("d2"), 0);
+        assert_eq!(m.tree_of("nowhere"), 0);
+        assert_ne!(m.digest, digest::digest(&[0; 4096]));
+        assert_eq!(
+            p.ports[2].mst,
+            [PortMst {
+                id: 1,
+                cost: Some(500),
+                priority: 32
+            }]
+        );
+        assert_eq!(p.ports[1].mst, Vec::<PortMst>::new());
     }
 
     #[test]
@@ -243,22 +347,47 @@ mod tests {
     #[test]
     fn state_expands_to_every_domain() {
         let p = plan(&cfg()).unwrap();
-        let a = assignments(&p.ports[1], PortState::Discarding);
+        let a = assignments(&p.ports[1], None, 0, PortState::Discarding);
         assert_eq!(a.len(), 2);
         assert_eq!(a[1].port, "eth1");
         assert_eq!(a[1].domain, "d2");
         assert_eq!(a[1].state, StpPortState::Blocking);
         assert_eq!(
-            assignments(&p.ports[1], PortState::Forwarding)[0].state,
+            assignments(&p.ports[1], None, 0, PortState::Forwarding)[0].state,
             StpPortState::Forwarding
         );
         assert_eq!(
-            assignments(&p.ports[1], PortState::Learning)[0].state,
+            assignments(&p.ports[1], None, 0, PortState::Learning)[0].state,
             StpPortState::Learning
         );
         assert_eq!(
-            flushes(&p.ports[1]),
+            flushes(&p.ports[1], None, 0),
             [("eth1".into(), "d1".into()), ("eth1".into(), "d2".into())]
+        );
+    }
+
+    #[test]
+    fn a_tree_only_owns_its_domains() {
+        let p = plan(&cfg()).unwrap();
+        let m = MstPlan {
+            name: String::new(),
+            revision: 0,
+            digest: [0; 16],
+            max_hops: 20,
+            instances: vec![(1, 32768)],
+            domains: vec![("d1".into(), 10, 1), ("d2".into(), 20, 0)],
+        };
+        let doms = |tree| {
+            assignments(&p.ports[1], Some(&m), tree, PortState::Forwarding)
+                .into_iter()
+                .map(|a| a.domain)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(doms(0), ["d2"]);
+        assert_eq!(doms(1), ["d1"]);
+        assert_eq!(
+            flushes(&p.ports[1], Some(&m), 1),
+            [("eth1".into(), "d1".into())]
         );
     }
 }

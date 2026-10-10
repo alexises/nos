@@ -10,6 +10,7 @@ pub mod bpdu;
 pub mod bridge;
 pub mod cost;
 pub mod machines;
+pub mod mst;
 pub mod timers;
 pub mod vector;
 

@@ -99,10 +99,58 @@ pub struct StpPortInfo {
     pub err_recovery_secs: Option<u32>,
 }
 
-/// `show spanning-tree`. `enabled: false` (mode not `rstp`) leaves the rest at
-/// its default.
+/// One port in one spanning-tree instance of an MST region (#321).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StpInstancePort {
+    pub name: String,
+    pub role: StpRole,
+    /// The state the kernel is given for this tree's domains (a boundary
+    /// port's is the CIST's).
+    pub state: StpState,
+    /// The peer is outside the region: the instance follows the CIST here.
+    pub boundary: bool,
+    pub cost: u32,
+    pub priority: u8,
+    pub designated_bridge: String,
+    pub designated_port: String,
+}
+
+/// One tree of an MST region: instance 0 is the CIST.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StpInstance {
+    pub id: u16,
+    /// The VIDs mapped to this instance (`10,20-30`), derived from the
+    /// broadcast domains' tags.
+    pub vlans: String,
+    /// The broadcast domains running in this instance.
+    pub domains: Vec<String>,
+    pub bridge_id: String,
+    pub root_id: String,
+    pub root_path_cost: u32,
+    /// `None` when this bridge is the root of the instance.
+    pub root_port: Option<String>,
+    pub ports: Vec<StpInstancePort>,
+}
+
+/// The MST region and its trees (`mode mstp`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StpMst {
+    pub region_name: String,
+    pub revision: u16,
+    /// The MST configuration digest, 32 hex digits.
+    pub digest: String,
+    pub max_hops: u8,
+    /// Instance 0 (the CIST) first, then every configured MSTI.
+    pub instances: Vec<StpInstance>,
+}
+
+/// `show spanning-tree`. `enabled: false` (mode neither `rstp` nor `mstp`)
+/// leaves the rest at its default.
 ///
-/// Fields are only ever appended (MSTI views, #323, extend it).
+/// Fields are only ever appended.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpSummary {
@@ -117,6 +165,9 @@ pub struct StpSummary {
     pub max_age_secs: u8,
     pub forward_delay_secs: u8,
     pub ports: Vec<StpPortInfo>,
+    /// The MST region and its trees; `None` outside `mode mstp` (#321).
+    #[serde(default)]
+    pub mst: Option<StpMst>,
 }
 
 impl Default for StpSummary {
@@ -132,6 +183,7 @@ impl Default for StpSummary {
             max_age_secs: 0,
             forward_delay_secs: 0,
             ports: Vec::new(),
+            mst: None,
         }
     }
 }

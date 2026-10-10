@@ -215,7 +215,15 @@ pub async fn handle_action(
             Outcome::Continue(mode)
         }
         Resolved::ShowSpanningTree => {
-            show_spanning_tree(watchdog_socket).await;
+            show_spanning_tree(watchdog_socket, SpanningTreeView::Summary).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowSpanningTreeInstance { id } => {
+            show_spanning_tree(watchdog_socket, SpanningTreeView::Instance(id)).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowSpanningTreeMstConfig => {
+            show_spanning_tree(watchdog_socket, SpanningTreeView::MstConfig).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBfdReflector => {
@@ -642,7 +650,14 @@ async fn clear_stp_err_disabled(watchdog_socket: &Path, interface: String) {
     }
 }
 
-async fn show_spanning_tree(watchdog_socket: &Path) {
+/// Which rendering of `nos-stpd`'s summary a `show spanning-tree ...` prints.
+enum SpanningTreeView {
+    Summary,
+    Instance(u16),
+    MstConfig,
+}
+
+async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
     let socket = match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Stp).await {
         Ok(Some(path)) => path,
         Ok(None) => {
@@ -655,7 +670,14 @@ async fn show_spanning_tree(watchdog_socket: &Path) {
         }
     };
     match stp_client::get_summary(&socket).await {
-        Ok(s) => println!("{}", format::render_spanning_tree(&s)),
+        Ok(s) => println!(
+            "{}",
+            match view {
+                SpanningTreeView::Summary => format::render_spanning_tree(&s),
+                SpanningTreeView::Instance(id) => format::render_stp_instance(&s, id),
+                SpanningTreeView::MstConfig => format::render_mst_config(&s),
+            }
+        ),
         Err(e) => eprintln!("error: {e}"),
     }
 }

@@ -2190,6 +2190,8 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "hmac",
+ "md-5",
  "nos-l2-socket",
  "nos-log-client",
  "nos-pki",
