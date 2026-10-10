@@ -230,6 +230,14 @@ pub async fn handle_action(
             show_spanning_tree(watchdog_socket, SpanningTreeView::Domain(domain)).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowSpanningTreeDetail { instance, domain } => {
+            show_spanning_tree(
+                watchdog_socket,
+                SpanningTreeView::Detail { instance, domain },
+            )
+            .await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowBfdReflector => {
             show_bfd_reflector(watchdog_socket).await;
             Outcome::Continue(mode)
@@ -660,6 +668,10 @@ enum SpanningTreeView {
     Instance(u16),
     MstConfig,
     Domain(String),
+    Detail {
+        instance: Option<u16>,
+        domain: Option<String>,
+    },
 }
 
 async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
@@ -682,6 +694,8 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
                 SpanningTreeView::Instance(id) => format::render_stp_instance(&s, id),
                 SpanningTreeView::MstConfig => format::render_mst_config(&s),
                 SpanningTreeView::Domain(d) => format::render_stp_domain(&s, &d),
+                SpanningTreeView::Detail { instance, domain } =>
+                    format::render_stp_detail(&s, instance, domain.as_deref()),
             }
         ),
         Err(e) => eprintln!("error: {e}"),

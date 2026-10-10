@@ -146,6 +146,7 @@ All are `GET`, and each returns the same data as the matching shell command, as 
 - `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.
 - `/v1/port-aggregates[/{name}]` and `/v1/lacp[/{name}]`: bonds, their members and LACP state.
 - `/v1/lldp/neighbors`: LLDP neighbours. `/v1/lldp/statistics`: each LLDP-enabled interface's IEEE 802.1AB counters.
+- `/v1/spanning-tree` (bridge, ports, `topology`, per-port `counters`), `/v1/spanning-tree/instance/{id}`, `/domain/{name}`, `/mst-config`, and `/v1/spanning-tree/counters` (one `{tree, port, counters}` row per port and tree, RFC 4318 names): `404` for an instance or domain the mode does not have, `503` when `nos-stpd` is not running. See [Spanning tree](protocols/stp.md#read-the-detail).
 - `/v1/bfd/reflector`: the Seamless BFD reflector (`discriminators` as 32-bit numbers, `received`, `replied`, and `discarded` with a counter per reason); `nos-bfdd` not running is `503`.
 - `/v1/bfd/sessions[?peer=<ip>]`: every BFD session (`state`, `diag`, discriminators, `tx_interval_us`, `detection_time_us`, and a `key` with `table` and `peer`; a micro-BFD session of a port aggregate has `key.aggregate` and `key.interface` (the member) and an empty `table`); an unparseable `peer` is `400`, `nos-bfdd` not running is `503`.
 - `/v1/bgp/summary`, `/v1/bgp/evpn` and `/v1/bgp/rpki`: BGP peers, received EVPN routes and RPKI cache sessions, per instance.

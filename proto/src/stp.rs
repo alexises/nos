@@ -53,6 +53,55 @@ impl StpState {
     }
 }
 
+/// Per-port BPDU and event counters, named after RFC 4318 (`dot1dStpPort*`).
+/// They count since the bridge was last (re)built; in `mode mstp` the MSTIs
+/// share the CIST's counters (one BPDU carries them all).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StpPortCounters {
+    pub in_config_bpdu: u64,
+    pub in_tcn_bpdu: u64,
+    pub in_rstp_bpdu: u64,
+    pub in_mst_bpdu: u64,
+    pub out_config_bpdu: u64,
+    pub out_tcn_bpdu: u64,
+    pub out_rstp_bpdu: u64,
+    pub out_mst_bpdu: u64,
+    /// Times the port switched between 802.1D and RSTP.
+    pub protocol_migration: u64,
+    /// Frames dropped as malformed BPDUs.
+    pub invalid_bpdu: u64,
+    /// BPDUs sent with the topology-change flag, and TCN BPDUs.
+    pub tc_sent: u64,
+    /// BPDUs received with the topology-change flag, and TCN BPDUs.
+    pub tc_received: u64,
+    /// Times the port entered forwarding.
+    pub forward_transitions: u64,
+}
+
+/// What started a topology change.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StpTcCause {
+    /// A port of this bridge started forwarding or stopped being edge.
+    Local,
+    /// A neighbour flagged one (a TC or TCN BPDU).
+    Received,
+}
+
+/// Topology changes of one tree (RFC 4318 `TopChanges`, `TimeSinceTopologyChange`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StpTopology {
+    pub count: u64,
+    /// Seconds since the last change; `None` before the first.
+    pub last_secs_ago: Option<u64>,
+    /// The port the last change came in on, or started at.
+    pub last_port: Option<String>,
+    pub last_cause: Option<StpTcCause>,
+}
+
 /// One spanning-tree port. Bridge and port ids are display strings
 /// (`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -97,10 +146,19 @@ pub struct StpPortInfo {
     /// Seconds until an `err_disabled` port recovers; `None`: manual `clear`.
     #[serde(default)]
     pub err_recovery_secs: Option<u32>,
+    /// `operPointToPointMAC`.
+    #[serde(default)]
+    pub point_to_point: bool,
+    #[serde(default)]
+    pub counters: StpPortCounters,
 }
 
 /// One port in one spanning-tree instance of an MST region (#321).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one independent flag per fact, reported as-is"
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpInstancePort {
     pub name: String,
@@ -121,6 +179,14 @@ pub struct StpInstancePort {
     pub priority: u8,
     pub designated_bridge: String,
     pub designated_port: String,
+    /// `operEdge`.
+    #[serde(default)]
+    pub edge: bool,
+    /// `operPointToPointMAC`.
+    #[serde(default)]
+    pub point_to_point: bool,
+    #[serde(default)]
+    pub counters: StpPortCounters,
 }
 
 /// One tree of an MST region: instance 0 is the CIST.
@@ -139,6 +205,8 @@ pub struct StpInstance {
     /// `None` when this bridge is the root of the instance.
     pub root_port: Option<String>,
     pub ports: Vec<StpInstancePort>,
+    #[serde(default)]
+    pub topology: StpTopology,
 }
 
 /// The MST region and its trees (`mode mstp`).
@@ -179,6 +247,9 @@ pub struct StpSummary {
     /// domain's VLAN. Empty in the other modes.
     #[serde(default)]
     pub pvst: Vec<StpInstance>,
+    /// The CIST's topology changes (`rstp`/`mstp`).
+    #[serde(default)]
+    pub topology: StpTopology,
 }
 
 impl Default for StpSummary {
@@ -196,6 +267,7 @@ impl Default for StpSummary {
             ports: Vec::new(),
             mst: None,
             pvst: Vec::new(),
+            topology: StpTopology::default(),
         }
     }
 }

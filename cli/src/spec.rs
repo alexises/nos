@@ -495,6 +495,42 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         |domain| Command::ShowSpanningTreeDomain {
             domain: domain.to_string(),
         }),
+    cmd!(["show" "spanning-tree" "detail"],
+        Doc::Local {
+            summary: "Show the spanning tree with topology changes and per-port counters.",
+            detail: "Like show spanning-tree, plus when and where the last topology change \
+                     came from and, per port, the operational edge and point-to-point status \
+                     and the RFC 4318 counters: BPDUs received and sent by kind (config, tcn, \
+                     rstp, mst), topology-change flags, protocol migrations, invalid BPDUs and \
+                     forward transitions. In 'spanning-tree mode rapid-pvst' every tree is \
+                     listed.",
+        },
+        Always,
+        Command::ShowSpanningTreeDetail { instance: None, domain: None }),
+    cmd!(["show" "spanning-tree" "instance" (id: Number) "detail"],
+        Doc::Local {
+            summary: "Show one MST instance with topology changes and per-port counters.",
+            detail: "Like show spanning-tree instance, plus the instance's topology changes \
+                     and every port's operational status and counters (the counters are the \
+                     port's, shared by every instance). Only in 'spanning-tree mode mstp'.",
+        },
+        Always,
+        |id| Command::ShowSpanningTreeDetail {
+            instance: Some(id.parse().ok()?),
+            domain: None,
+        }),
+    cmd!(["show" "spanning-tree" "domain" (domain: BroadcastDomainName) "detail"],
+        Doc::Local {
+            summary: "Show one Rapid-PVST+ tree with topology changes and per-port counters.",
+            detail: "Like show spanning-tree domain, plus the tree's topology changes and \
+                     every member port's operational status and counters in this VLAN's tree. \
+                     Only in 'spanning-tree mode rapid-pvst'.",
+        },
+        Always,
+        |domain| Command::ShowSpanningTreeDetail {
+            instance: None,
+            domain: Some(domain.to_string()),
+        }),
     cmd!(["show" "bfd" "sessions"],
         Doc::Local {
             summary: "Show every BFD session.",

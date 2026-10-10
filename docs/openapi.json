@@ -4195,6 +4195,27 @@
         ],
         "type": "object"
       },
+      "StpCounterRow": {
+        "description": "One row of `GET /v1/spanning-tree/counters`: a port's RFC 4318 counters\nin one tree. Outside Rapid-PVST+ the counters belong to the port (the\nCIST and every MSTI share them), so `tree` is `cist`.",
+        "properties": {
+          "counters": {
+            "$ref": "#/components/schemas/StpPortCounters"
+          },
+          "port": {
+            "type": "string"
+          },
+          "tree": {
+            "description": "`cist`, or the broadcast domain's name in `mode rapid-pvst`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tree",
+          "port",
+          "counters"
+        ],
+        "type": "object"
+      },
       "StpForceVersion": {
         "description": "Compatibility mode forced on every port (802.1Q 13.7 `ForceProtocolVersion`).",
         "enum": [
@@ -4242,6 +4263,9 @@
               "null"
             ]
           },
+          "topology": {
+            "$ref": "#/components/schemas/StpTopology"
+          },
           "vlans": {
             "description": "The VIDs mapped to this instance (`10,20-30`), derived from the\nbroadcast domains' tags.",
             "type": "string"
@@ -4274,11 +4298,18 @@
             "minimum": 0,
             "type": "integer"
           },
+          "counters": {
+            "$ref": "#/components/schemas/StpPortCounters"
+          },
           "designated_bridge": {
             "type": "string"
           },
           "designated_port": {
             "type": "string"
+          },
+          "edge": {
+            "description": "`operEdge`.",
+            "type": "boolean"
           },
           "inconsistent": {
             "description": "Rapid-PVST+: a BPDU named another VLAN than this tree's (PVID\ninconsistency); the port is blocked in this tree (#322).",
@@ -4286,6 +4317,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "point_to_point": {
+            "description": "`operPointToPointMAC`.",
+            "type": "boolean"
           },
           "priority": {
             "format": "int32",
@@ -4359,6 +4394,97 @@
         ],
         "type": "object"
       },
+      "StpPortCounters": {
+        "description": "Per-port BPDU and event counters, named after RFC 4318 (`dot1dStpPort*`).\nThey count since the bridge was last (re)built; in `mode mstp` the MSTIs\nshare the CIST's counters (one BPDU carries them all).",
+        "properties": {
+          "forward_transitions": {
+            "description": "Times the port entered forwarding.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "in_config_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "in_mst_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "in_rstp_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "in_tcn_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "invalid_bpdu": {
+            "description": "Frames dropped as malformed BPDUs.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "out_config_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "out_mst_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "out_rstp_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "out_tcn_bpdu": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_migration": {
+            "description": "Times the port switched between 802.1D and RSTP.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tc_received": {
+            "description": "BPDUs received with the topology-change flag, and TCN BPDUs.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tc_sent": {
+            "description": "BPDUs sent with the topology-change flag, and TCN BPDUs.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "in_config_bpdu",
+          "in_tcn_bpdu",
+          "in_rstp_bpdu",
+          "in_mst_bpdu",
+          "out_config_bpdu",
+          "out_tcn_bpdu",
+          "out_rstp_bpdu",
+          "out_mst_bpdu",
+          "protocol_migration",
+          "invalid_bpdu",
+          "tc_sent",
+          "tc_received",
+          "forward_transitions"
+        ],
+        "type": "object"
+      },
       "StpPortInfo": {
         "description": "One spanning-tree port. Bridge and port ids are display strings\n(`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.",
         "properties": {
@@ -4374,6 +4500,9 @@
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "counters": {
+            "$ref": "#/components/schemas/StpPortCounters"
           },
           "designated_bridge": {
             "description": "The designated bridge/port on this port's segment.",
@@ -4408,6 +4537,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "point_to_point": {
+            "description": "`operPointToPointMAC`.",
+            "type": "boolean"
           },
           "priority": {
             "format": "int32",
@@ -4635,6 +4768,10 @@
               "string",
               "null"
             ]
+          },
+          "topology": {
+            "$ref": "#/components/schemas/StpTopology",
+            "description": "The CIST's topology changes (`rstp`/`mstp`)."
           }
         },
         "required": [
@@ -4647,6 +4784,54 @@
           "max_age_secs",
           "forward_delay_secs",
           "ports"
+        ],
+        "type": "object"
+      },
+      "StpTcCause": {
+        "description": "What started a topology change.",
+        "enum": [
+          "local",
+          "received"
+        ],
+        "type": "string"
+      },
+      "StpTopology": {
+        "description": "Topology changes of one tree (RFC 4318 `TopChanges`, `TimeSinceTopologyChange`).",
+        "properties": {
+          "count": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_cause": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StpTcCause"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_port": {
+            "description": "The port the last change came in on, or started at.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_secs_ago": {
+            "description": "Seconds since the last change; `None` before the first.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "count"
         ],
         "type": "object"
       },
@@ -6215,6 +6400,40 @@
           }
         },
         "summary": "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is neither rstp nor mstp)",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/spanning-tree/counters": {
+      "get": {
+        "operationId": "spanning_tree_counters",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/StpCounterRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Every spanning-tree port's BPDU and topology-change counters (RFC 4318 names), one row per port and tree",
         "tags": [
           "show"
         ]
