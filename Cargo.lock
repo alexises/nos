@@ -1998,6 +1998,7 @@ dependencies = [
  "nos-pki",
  "nos-proto",
  "nos-rpl",
+ "nos-test-support",
  "serde",
  "sha1",
  "sha2",
