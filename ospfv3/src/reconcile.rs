@@ -871,6 +871,10 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 }
 
 #[cfg(test)]
+#[path = "reconcile_tests.rs"]
+mod resync_tests;
+
+#[cfg(test)]
 mod tests {
     use nos_proto::{BroadcastDomain, Config, Interface, Subinterface};
 
