@@ -11,6 +11,8 @@ pub mod bridge;
 pub mod cost;
 pub mod machines;
 pub mod mst;
+pub mod pvst;
+pub mod sstp;
 pub mod timers;
 pub mod vector;
 

@@ -107,6 +107,8 @@ fn open_raw(ifindex: i32, ethertype: u16) -> io::Result<Socket> {
 
 /// The STP/RSTP BPDU group (IEEE 802.1D bridge group address).
 pub const BPDU_GROUP: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x00];
+/// Cisco's PVST+/Rapid-PVST+ group (SSTP, #322).
+pub const SSTP_GROUP: [u8; 6] = [0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCD];
 const ETH_P_ALL: u16 = 0x0003;
 /// An 802.3 header, LLC and a BPDU: an MST BPDU with 64 MSTI messages is the
 /// longest (14 + 3 + 102 + 64 * 16 = 1143 bytes); 1500 is the 802.3 maximum.
@@ -159,18 +161,37 @@ impl L2Socket {
     /// nothing). Use [`Self::send_frame`]/[`Self::recv_frame`]: the frame
     /// carries a length field, not an ethertype.
     pub fn open_bpdu(interface: &str) -> io::Result<Self> {
+        Self::open_stp(interface, true, false)
+    }
+
+    /// Rapid-PVST+ (#322): the SSTP group (802.3 + LLC/SNAP `AA AA 03`, OUI
+    /// `00:00:0c`, PID `0x010b`) and, when `ieee` (the native VLAN), also the
+    /// IEEE BPDU group. Like [`Self::open_bpdu`] otherwise.
+    pub fn open_pvst(interface: &str, ieee: bool) -> io::Result<Self> {
+        Self::open_stp(interface, ieee, true)
+    }
+
+    fn open_stp(interface: &str, ieee: bool, sstp: bool) -> io::Result<Self> {
         let own_hw_addr = read_hw_addr(interface)?;
         let ifindex = if_index(interface)?;
         let socket = open_raw(ifindex, ETH_P_ALL)?;
-        join_multicast(&socket, ifindex, BPDU_GROUP)?;
-        attach_filter(&socket, &mut bpdu_program())?;
+        let mut blocks = Vec::new();
+        if ieee {
+            join_multicast(&socket, ifindex, BPDU_GROUP)?;
+            blocks.push((BPDU_GROUP, [0x42, 0x42, 0x03]));
+        }
+        if sstp {
+            join_multicast(&socket, ifindex, SSTP_GROUP)?;
+            blocks.push((SSTP_GROUP, [0xAA, 0xAA, 0x03]));
+        }
+        attach_filter(&socket, &mut bpdu_program(&blocks, sstp))?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,
             own_hw_addr,
             ifindex,
             ethertype: ETH_P_ALL,
-            group: BPDU_GROUP,
+            group: if sstp { SSTP_GROUP } else { BPDU_GROUP },
             recv_buf_len: BPDU_RECV_BUF_LEN,
             accept_own_unicast: false,
         })
@@ -373,24 +394,41 @@ fn udp_port_program(ethertype: u16, port: u16) -> Option<Vec<libc::sock_filter>>
     }
 }
 
-/// Classic BPF accepting only frames to [`BPDU_GROUP`] whose first three
-/// bytes after the 802.3 length field are the LLC `42 42 03`.
-fn bpdu_program() -> Vec<libc::sock_filter> {
+/// Classic BPF accepting a frame to one of the `(group, llc)` pairs whose
+/// first three bytes after the 802.3 length field are that LLC. Each block
+/// is 11 instructions and a mismatch jumps to its end (the next block, or
+/// the final drop). With `untagged` a frame that carried an 802.1Q tag is
+/// dropped first: a tag in the skb metadata (veth, offloading NICs) is not in
+/// the bytes a raw socket reads, so the tagged BPDUs of a VLAN would pass for
+/// the untagged (native) ones of the link. A VLAN sub-link's own socket sees
+/// the tag already removed.
+fn bpdu_program(blocks: &[([u8; 6], [u8; 3])], untagged: bool) -> Vec<libc::sock_filter> {
+    /// `SKF_AD_OFF + SKF_AD_VLAN_TAG_PRESENT` (`linux/filter.h`).
+    const VLAN_TAG_PRESENT: u32 = 0xFFFF_F030;
     let ins = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
-    vec![
-        ins(0x20, 0, 0, 0),           // ld  [0]
-        ins(0x15, 0, 9, 0x0180_c200), // jeq group[..4]
-        ins(0x28, 0, 0, 4),           // ldh [4]
-        ins(0x15, 0, 7, 0x0000),      // jeq group[4..]
-        ins(0x30, 0, 0, 14),          // ldb [14]
-        ins(0x15, 0, 5, 0x42),
-        ins(0x30, 0, 0, 15),
-        ins(0x15, 0, 3, 0x42),
-        ins(0x30, 0, 0, 16),
-        ins(0x15, 0, 1, 0x03),
-        ins(0x06, 0, 0, 0xffff), // accept
-        ins(0x06, 0, 0, 0),      // drop
-    ]
+    let mut p = Vec::new();
+    if untagged {
+        let skip = u8::try_from(11 * blocks.len()).expect("a few blocks");
+        p.push(ins(0x20, 0, 0, VLAN_TAG_PRESENT)); // ld  vlan_tag_present
+        p.push(ins(0x15, 0, skip, 0)); // jeq 0, else drop
+    }
+    for (g, llc) in blocks {
+        p.extend([
+            ins(0x20, 0, 0, 0), // ld  [0]
+            ins(0x15, 0, 9, u32::from_be_bytes([g[0], g[1], g[2], g[3]])),
+            ins(0x28, 0, 0, 4), // ldh [4]
+            ins(0x15, 0, 7, u32::from(u16::from_be_bytes([g[4], g[5]]))),
+            ins(0x30, 0, 0, 14), // ldb [14]
+            ins(0x15, 0, 5, u32::from(llc[0])),
+            ins(0x30, 0, 0, 15),
+            ins(0x15, 0, 3, u32::from(llc[1])),
+            ins(0x30, 0, 0, 16),
+            ins(0x15, 0, 1, u32::from(llc[2])),
+            ins(0x06, 0, 0, 0xffff), // accept
+        ]);
+    }
+    p.push(ins(0x06, 0, 0, 0)); // drop
+    p
 }
 
 fn attach_udp_port_filter(socket: &Socket, ethertype: u16, port: u16) -> io::Result<()> {
@@ -647,15 +685,23 @@ mod tests {
         assert_eq!(payload_of_unicast_frame(&f[..13], own), None);
     }
 
+    const IEEE_BLOCK: ([u8; 6], [u8; 3]) = (BPDU_GROUP, [0x42, 0x42, 0x03]);
+    const SSTP_BLOCK: ([u8; 6], [u8; 3]) = (SSTP_GROUP, [0xAA, 0xAA, 0x03]);
+
     /// Interprets `bpdu_program` over a frame (only the ops it uses).
     fn bpf_accepts(frame: &[u8]) -> bool {
-        let prog = bpdu_program();
+        bpf_runs(&bpdu_program(&[IEEE_BLOCK], false), frame, false)
+    }
+
+    /// `tagged`: the frame carried a VLAN tag in its metadata.
+    fn bpf_runs(prog: &[libc::sock_filter], frame: &[u8], tagged: bool) -> bool {
         let (mut pc, mut a) = (0usize, 0u32);
         loop {
             let i = &prog[pc];
             let k = i.k as usize;
             let get = |n: usize| frame.get(k..k + n);
             match i.code {
+                0x20 if i.k == 0xFFFF_F030 => a = u32::from(tagged),
                 0x20 => a = get(4).map_or(u32::MAX, |b| u32::from_be_bytes(b.try_into().unwrap())),
                 0x28 => {
                     a = get(2).map_or(u32::MAX, |b| {
@@ -683,6 +729,49 @@ mod tests {
         other_llc[16] = 0x04;
         assert!(!bpf_accepts(&other_llc));
         assert!(!bpf_accepts(&f[..10]), "a runt never matches");
+    }
+
+    #[test]
+    fn pvst_filter_takes_either_group_with_its_own_llc() {
+        let prog = bpdu_program(&[SSTP_BLOCK, IEEE_BLOCK], true);
+        let frame = |g: [u8; 6], llc: [u8; 3]| {
+            let mut f = g.to_vec();
+            f.extend_from_slice(&[2, 0, 0, 0, 0, 1, 0, 38]);
+            f.extend_from_slice(&llc);
+            f
+        };
+        assert!(bpf_runs(
+            &prog,
+            &frame(SSTP_GROUP, [0xAA, 0xAA, 0x03]),
+            false
+        ));
+        assert!(bpf_runs(
+            &prog,
+            &frame(BPDU_GROUP, [0x42, 0x42, 0x03]),
+            false
+        ));
+        assert!(!bpf_runs(
+            &prog,
+            &frame(SSTP_GROUP, [0x42, 0x42, 0x03]),
+            false
+        ));
+        assert!(!bpf_runs(
+            &prog,
+            &frame(BPDU_GROUP, [0xAA, 0xAA, 0x03]),
+            false
+        ));
+        // an SSTP-only socket (a tagged sub-link) drops the IEEE group
+        let sstp_only = bpdu_program(&[SSTP_BLOCK], true);
+        assert!(!bpf_runs(
+            &sstp_only,
+            &frame(BPDU_GROUP, [0x42, 0x42, 0x03]),
+            false
+        ));
+        // a frame whose VLAN tag sits in the metadata is another VLAN's BPDU
+        let sstp = frame(SSTP_GROUP, [0xAA, 0xAA, 0x03]);
+        assert!(bpf_runs(&sstp_only, &sstp, false));
+        assert!(!bpf_runs(&sstp_only, &sstp, true));
+        assert!(!bpf_runs(&prog, &sstp, true));
     }
 
     #[test]

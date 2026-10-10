@@ -197,6 +197,20 @@ pub async fn spanning_tree_instance(
         .ok_or_else(|| ApiError::NotFound(format!("no spanning-tree instance {id}")))
 }
 
+#[utoipa::path(get, path = "/v1/spanning-tree/domain/{name}", tag = "show", summary = "One broadcast domain's Rapid-PVST+ tree", params(("name" = String, Path, description = "Broadcast domain name")), responses((status = 200, body = StpInstance), (status = 404, body = ErrorBody, description = "spanning tree is not in mode rapid-pvst, or the domain has no tree"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn spanning_tree_domain(
+    State(d): State<Daemons>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<StpInstance>> {
+    stp_summary(&d)
+        .await?
+        .pvst
+        .into_iter()
+        .find(|i| i.domains.contains(&name))
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("no spanning-tree tree for domain {name}")))
+}
+
 #[utoipa::path(get, path = "/v1/spanning-tree/mst-config", tag = "show", summary = "The MST region name, revision, digest and the instance to VLAN map", responses((status = 200, body = StpMst), (status = 404, body = ErrorBody, description = "spanning tree is not in mode mstp"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn spanning_tree_mst_config(State(d): State<Daemons>) -> ApiResult<Json<StpMst>> {
     stp_summary(&d)

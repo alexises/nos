@@ -1,7 +1,7 @@
 //! Raw `RTM_NEWQDISC` / `RTM_NEWTFILTER` / `RTM_DELTFILTER` for the STP BPDU
 //! trap (`docs/internals/stp.md`): a `BR_NO_STP` bridge floods the BPDU group
 //! MAC, so every bridge port gets an ingress `flower dst_mac <group> action
-//! drop`. The drop happens after the `ETH_P_ALL` packet tap, so `nos-stpd`
+//! drop` (protocol 802.2, i.e. untagged LLC frames). The drop happens after the `ETH_P_ALL` packet tap, so `nos-stpd`
 //! (#327) still sees every BPDU. `netlink-packet-route` types `flower` but not
 //! `gact`, so — like `nos-fdbd`'s `tc.rs`, which this is a trimmed per-crate
 //! copy of — the messages are hand-built and sent on a plain `NETLINK_ROUTE`
@@ -24,8 +24,12 @@ const NLM_F_CREATE: u16 = 0x400;
 /// `TC_H_CLSACT` and its ingress hook.
 const CLSACT: u32 = 0xFFFF_FFF1;
 const HOOK_INGRESS: u32 = 0xFFFF_FFF2;
-/// `htons(ETH_P_ALL)`, in the low half of `tcm_info` (the high half is the priority).
-const ETH_P_ALL_BE: u32 = 0x0300;
+/// `htons(ETH_P_802_2)`, in the low half of `tcm_info` (the high half is the
+/// priority). Every BPDU (IEEE or SSTP) is an 802.3 frame with an LLC header,
+/// and a frame carrying a VLAN tag reads as `ETH_P_8021Q` to the classifier,
+/// so the trap never drops the tagged SSTP of a trunk's sub-links on their
+/// parent port (#322); the sub-link itself sees the tag already removed.
+const ETH_P_802_2_BE: u32 = 0x0400;
 
 const TCA_KIND: u16 = 1;
 const TCA_OPTIONS: u16 = 2;
@@ -132,7 +136,7 @@ pub fn encode(tc: &Tc, seq: u32) -> Vec<u8> {
     };
     let info = match tc {
         Tc::Clsact { .. } => 0,
-        _ => (u32::from(prio) << 16) | ETH_P_ALL_BE,
+        _ => (u32::from(prio) << 16) | ETH_P_802_2_BE,
     };
     let mut body = Vec::new();
     body.extend_from_slice(&[0u8; 4]);
@@ -241,7 +245,7 @@ mod tests {
         assert_eq!(u32_at(&m, 20), 9);
         assert_eq!(u32_at(&m, 24), 2, "handle");
         assert_eq!(u32_at(&m, 28), HOOK_INGRESS);
-        assert_eq!(u32_at(&m, 32), (1 << 16) | 0x0300, "prio 1, protocol all");
+        assert_eq!(u32_at(&m, 32), (1 << 16) | 0x0400, "prio 1, protocol 802.2");
         let top = attrs(&m[36..]);
         assert_eq!(top[0], (TCA_KIND, &b"flower\0"[..]));
         let opts = attrs(top[1].1);
@@ -270,7 +274,7 @@ mod tests {
         assert_eq!(u16_at(&m, 6), NLM_F_REQUEST | NLM_F_ACK);
         assert_eq!(u32_at(&m, 24), 1);
         assert_eq!(u32_at(&m, 28), HOOK_INGRESS);
-        assert_eq!(u32_at(&m, 32), (1 << 16) | 0x0300);
+        assert_eq!(u32_at(&m, 32), (1 << 16) | 0x0400);
         assert_eq!(m.len(), 36);
     }
 }

@@ -791,6 +791,43 @@ async fn show_spanning_tree_mst_views_404_outside_mstp() {
 }
 
 #[tokio::test]
+async fn show_spanning_tree_domain_serves_a_pvst_tree_and_404s_otherwise() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rstp, pvst) = (dir.path().join("rstp.sock"), dir.path().join("pvst.sock"));
+    serve(&rstp, ("stpd", ""), |_: nos_proto::StpRequest| {
+        nos_proto::StpEvent::Summary(nos_proto::StpSummary::default())
+    });
+    serve(&pvst, ("stpd", ""), |_: nos_proto::StpRequest| {
+        nos_proto::StpEvent::Summary(nos_proto::StpSummary {
+            enabled: true,
+            pvst: vec![nos_proto::StpInstance {
+                id: 10,
+                vlans: "10".into(),
+                domains: vec!["bd1".into()],
+                ..nos_proto::StpInstance::default()
+            }],
+            ..nos_proto::StpSummary::default()
+        })
+    });
+    let off = fixture(vec![(ServiceRef::Stp, rstp)]).await;
+    assert_eq!(
+        send(&off.app, Method::GET, "/v1/spanning-tree/domain/bd1", None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let on = fixture(vec![(ServiceRef::Stp, pvst)]).await;
+    let (s, v) = send(&on.app, Method::GET, "/v1/spanning-tree/domain/bd1", None).await;
+    assert_eq!((s, v["id"].as_u64()), (StatusCode::OK, Some(10)));
+    assert_eq!(
+        send(&on.app, Method::GET, "/v1/spanning-tree/domain/nope", None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let f = fixture(vec![]).await;
     let app = &f.app;

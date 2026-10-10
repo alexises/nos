@@ -21,7 +21,7 @@ use crate::identity;
 use crate::machines::{build, Role, Tx};
 use crate::mst::{self, digest, vidmap, Edge, Mst, PortMst};
 use crate::ports::{self, Plan, PortCfg};
-use crate::vector::{IdError, PortId};
+use crate::vector::{BridgeId, IdError, PortId};
 use nos_proto::schema::EdgePort;
 
 /// What the daemon must do after a call into the engine.
@@ -40,6 +40,8 @@ pub enum Out {
 }
 
 pub struct Engine {
+    /// The Rapid-PVST+ tree this engine runs (labels its log lines).
+    domain: Option<String>,
     bridge: Bridge,
     ports: Vec<PortCfg>,
     mst: Option<Mst>,
@@ -99,7 +101,7 @@ impl Engine {
             })
             .collect::<Result<Vec<_>, IdError>>()?;
         let mut bridge = Bridge::new(
-            identity::bridge_id(plan.priority, mac)?,
+            BridgeId::new(plan.priority, plan.ext, mac)?,
             plan.timers,
             &params,
         );
@@ -123,13 +125,14 @@ impl Engine {
             None => None,
         };
         let mut e = Engine {
+            domain: plan.domain.clone(),
             bridge,
             ports: plan.ports.clone(),
             mst,
             pushed: HashMap::new(),
         };
         // A fresh bridge is its own root; the core only reports changes.
-        info!(root = %identity::show(&e.bridge.root_id), "root bridge changed");
+        e.log_root(e.bridge.root_id);
         let out = e.drain();
         Ok((e, out))
     }
@@ -185,6 +188,86 @@ impl Engine {
 
     pub fn ports(&self) -> &[PortCfg] {
         &self.ports
+    }
+
+    /// The CIST state of `port` (a Rapid-PVST+ tree's only state).
+    pub fn port_state(&self, port: usize) -> PortState {
+        self.bridge.port_state(port)
+    }
+
+    fn log_root(&self, root: BridgeId) {
+        if let Some(d) = &self.domain {
+            info!(domain = %d, root = %identity::show_ext(&root), "pvst root bridge changed");
+        } else {
+            info!(root = %identity::show(&root), "root bridge changed");
+        }
+    }
+
+    fn log_state(&self, port: usize, state: PortState) {
+        let name = &self.ports[port].name;
+        if let Some(d) = &self.domain {
+            info!(domain = %d, port = %name, state = ?state, "pvst port state changed");
+        } else {
+            info!(port = %name, state = ?state, "port state changed");
+        }
+    }
+
+    fn log_role(&self, port: usize, role: Role) {
+        let name = &self.ports[port].name;
+        if let Some(d) = &self.domain {
+            info!(domain = %d, port = %name, role = ?role, "pvst port role changed");
+        } else {
+            info!(port = %name, role = ?role, "port role changed");
+        }
+    }
+
+    /// The bridge as one Rapid-PVST+ tree of `show spanning-tree domain`.
+    pub fn tree_view(&self, vid: u16) -> StpInstance {
+        let b = &self.bridge;
+        let root_cost = b.root_port.map_or(0, |i| {
+            b.ports[i]
+                .port_priority
+                .root_path_cost
+                .saturating_add(b.ports[i].path_cost)
+        });
+        StpInstance {
+            id: vid,
+            vlans: vid.to_string(),
+            domains: self.domain.iter().cloned().collect(),
+            bridge_id: identity::show_ext(&b.id),
+            root_id: identity::show_ext(&b.root_id),
+            root_path_cost: root_cost,
+            root_port: b.root_port.map(|i| self.ports[i].name.clone()),
+            ports: self
+                .ports
+                .iter()
+                .enumerate()
+                .map(|(i, cfg)| {
+                    let p = &b.ports[i];
+                    let (designated_bridge, designated_port) = if p.role == Role::Disabled {
+                        (String::new(), String::new())
+                    } else {
+                        let dp = p.port_priority.designated_port;
+                        (
+                            identity::show_ext(&p.port_priority.designated_bridge),
+                            format!("{}.{}", dp.priority(), dp.number()),
+                        )
+                    };
+                    StpInstancePort {
+                        name: cfg.name.clone(),
+                        role: stp_role(p.role),
+                        state: stp_state(b.port_state(i)),
+                        boundary: false,
+                        inconsistent: false,
+                        compat: p.port_enabled && !p.send_rstp,
+                        cost: p.path_cost,
+                        priority: p.port_id.priority(),
+                        designated_bridge,
+                        designated_port,
+                    }
+                })
+                .collect(),
+        }
     }
 
     fn mst_plan(&self) -> Option<&mst::MstPlan> {
@@ -264,6 +347,8 @@ impl Engine {
                         role: stp_role(p.role),
                         state: stp_state(self.effective(tree, i)),
                         boundary,
+                        inconsistent: false,
+                        compat: false,
                         cost: b.ports[i].path_cost,
                         priority: b.ports[i].port_id.priority(),
                         designated_bridge,
@@ -333,6 +418,7 @@ impl Engine {
                     }
                 })
                 .collect(),
+            pvst: Vec::new(),
             mst: self.mst.as_ref().map(|m| {
                 let ids = std::iter::once(0).chain(m.instances.iter().map(|i| i.id));
                 StpMst {
@@ -440,27 +526,26 @@ impl Engine {
                     }
                     bpdu => out.push(Out::Tx { port, bpdu }),
                 },
-                Action::SetPortState { port, state } => {
-                    info!(port = %self.ports[port].name, state = ?state, "port state changed");
-                }
+                Action::SetPortState { port, state } => self.log_state(port, state),
                 Action::FlushFdb { port } => {
                     let f = ports::flushes(&self.ports[port], self.mst_plan(), 0);
                     out.push(Out::Flush(f));
                 }
-                Action::Log(Event::RoleChanged { port, to, .. }) => {
-                    info!(port = %self.ports[port].name, role = ?to, "port role changed");
-                }
+                Action::Log(Event::RoleChanged { port, to, .. }) => self.log_role(port, to),
                 Action::Log(Event::ProtocolMigrated { port, rstp }) => {
                     let name = &self.ports[port].name;
-                    if rstp {
-                        info!(port = %name, "port migrated to RSTP");
-                    } else {
-                        info!(port = %name, "port migrated to STP");
+                    match (&self.domain, rstp) {
+                        (Some(d), true) => {
+                            info!(domain = %d, port = %name, "pvst port migrated to RSTP");
+                        }
+                        (Some(d), false) => {
+                            info!(domain = %d, port = %name, "pvst port migrated to STP");
+                        }
+                        (None, true) => info!(port = %name, "port migrated to RSTP"),
+                        (None, false) => info!(port = %name, "port migrated to STP"),
                     }
                 }
-                Action::Log(Event::RootChanged { root, .. }) => {
-                    info!(root = %identity::show(&root), "root bridge changed");
-                }
+                Action::Log(Event::RootChanged { root, .. }) => self.log_root(root),
                 Action::ErrDisable { port } => {
                     let name = self.ports[port].name.clone();
                     warn!(port = %name, reason = %"bpdu-guard", "port err-disabled");
@@ -627,6 +712,7 @@ mod tests {
             link_type: nos_proto::schema::LinkType::Auto,
             prot: crate::machines::Protections::default(),
             mst: Vec::new(),
+            members: Vec::new(),
         };
         Plan {
             priority: 32768,
@@ -634,6 +720,9 @@ mod tests {
             timers: Timers::default(),
             ports: vec![port("eth1"), port("eth2")],
             mst: None,
+            ext: 0,
+            domain: None,
+            pvst: None,
         }
     }
 

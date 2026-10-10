@@ -33,6 +33,7 @@ use nos_proto::{
 pub enum StpModeArg {
     Rstp,
     Mstp,
+    RapidPvst,
     Disabled,
 }
 
@@ -41,6 +42,7 @@ impl From<StpModeArg> for nos_proto::StpMode {
         match mode {
             StpModeArg::Rstp => nos_proto::StpMode::Rstp,
             StpModeArg::Mstp => nos_proto::StpMode::Mstp,
+            StpModeArg::RapidPvst => nos_proto::StpMode::RapidPvst,
             StpModeArg::Disabled => nos_proto::StpMode::Disabled,
         }
     }
@@ -907,6 +909,16 @@ pub struct Args {
     /// `broadcast-domain <BD> stp-instance <ID>` as `BD:ID`. Repeatable.
     #[arg(long)]
     pub stp_domain_instance: Vec<String>,
+
+    /// `broadcast-domain <BD> stp-priority <PRIO>` as `BD:PRIO` (Rapid-PVST+,
+    /// #322). Repeatable.
+    #[arg(long)]
+    pub stp_domain_priority: Vec<String>,
+
+    /// `switching-profile <SP> member <BD> stp-cost <COST>` as `SP:BD:COST`
+    /// (Rapid-PVST+, #322). Repeatable.
+    #[arg(long)]
+    pub stp_member_cost: Vec<String>,
 
     /// `mst-instance <ID> cost <COST>` of [`STP_PROT_PROFILE`] as `ID:COST`
     /// (needs `--stp-profile-interface`). Repeatable.
@@ -1862,6 +1874,29 @@ fn mst_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             Some(id.to_string()),
         ));
     }
+    for (bd, prio) in args
+        .stp_domain_priority
+        .iter()
+        .filter_map(|f| f.split_once(':'))
+    {
+        v.push((
+            ["broadcast-domain", bd, "stp-priority"]
+                .map(str::to_string)
+                .to_vec(),
+            Some(prio.to_string()),
+        ));
+    }
+    for f in &args.stp_member_cost {
+        let mut it = f.splitn(3, ':');
+        if let (Some(sp), Some(bd), Some(cost)) = (it.next(), it.next(), it.next()) {
+            v.push((
+                ["switching-profile", sp, "member", bd, "stp-cost"]
+                    .map(str::to_string)
+                    .to_vec(),
+                Some(cost.to_string()),
+            ));
+        }
+    }
     v
 }
 
@@ -1914,6 +1949,29 @@ fn apply_mst(args: &Args, config: &mut nos_proto::Config) {
     {
         for d in config.broadcast_domains.iter_mut().filter(|d| d.name == bd) {
             d.stp_instance = id.parse().ok();
+        }
+    }
+    for (bd, prio) in args
+        .stp_domain_priority
+        .iter()
+        .filter_map(|f| f.split_once(':'))
+    {
+        for d in config.broadcast_domains.iter_mut().filter(|d| d.name == bd) {
+            d.stp_priority = prio.parse().ok();
+        }
+    }
+    for f in &args.stp_member_cost {
+        let mut it = f.splitn(3, ':');
+        if let (Some(sp), Some(bd), Some(cost)) = (it.next(), it.next(), it.next()) {
+            for p in config
+                .switching_profiles
+                .iter_mut()
+                .filter(|p| p.name == sp)
+            {
+                for m in p.members.iter_mut().filter(|m| m.broadcast_domain == bd) {
+                    m.stp_cost = cost.parse().ok();
+                }
+            }
         }
     }
 }
@@ -4978,5 +5036,64 @@ mod tests {
             cfg.stp_port_profiles[0].mst_instances[0].cost,
             Some(100_000)
         );
+    }
+
+    #[test]
+    fn rapid_pvst_flags_become_path_edits_and_the_same_local_config() {
+        let args = Args::try_parse_from([
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "1",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "2",
+            "--peer",
+            "10.0.0.2",
+            "--stp-mode",
+            "rapid-pvst",
+            "--stp-domain-priority",
+            "bd1:4096",
+            "--stp-member-cost",
+            "sp1:bd1:100000",
+        ])
+        .unwrap();
+        let edits = bfd_paths(&args);
+        let get = |p: &[&str]| {
+            edits
+                .iter()
+                .find(|(path, _)| path == p)
+                .and_then(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            get(&["spanning-tree", "mode"]).as_deref(),
+            Some("\"RapidPvst\"")
+        );
+        assert_eq!(
+            get(&["broadcast-domain", "bd1", "stp-priority"]).as_deref(),
+            Some("4096")
+        );
+        assert_eq!(
+            get(&["switching-profile", "sp1", "member", "bd1", "stp-cost"]).as_deref(),
+            Some("100000")
+        );
+
+        let mut cfg = nos_proto::Config::default();
+        cfg.broadcast_domains.push(nos_proto::BroadcastDomain {
+            name: "bd1".into(),
+            ..Default::default()
+        });
+        cfg.switching_profiles.push(nos_proto::SwitchingProfile {
+            name: "sp1".into(),
+            members: vec![nos_proto::SwitchingProfileMember {
+                broadcast_domain: "bd1".into(),
+                ..Default::default()
+            }],
+        });
+        apply_bfd(&args, &mut cfg);
+        assert_eq!(cfg.broadcast_domains[0].stp_priority, Some(4096));
+        assert_eq!(cfg.switching_profiles[0].members[0].stp_cost, Some(100_000));
     }
 }

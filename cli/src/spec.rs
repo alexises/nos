@@ -481,6 +481,20 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowSpanningTreeMstConfig),
+    cmd!(["show" "spanning-tree" "domain" (domain: BroadcastDomainName)],
+        Doc::Local {
+            summary: "Show one broadcast domain's Rapid-PVST+ tree.",
+            detail: "Queries nos-stpd for the spanning tree of the domain's VLAN: this bridge's \
+                     id in the tree (priority plus VLAN), its root and root port, and every \
+                     member port's role and state. A port marked 'PVID-inconsistent' received a \
+                     BPDU for another VLAN and is blocked in this tree; 'Compat' means its peer \
+                     speaks plain PVST+ (802.1D) in this VLAN. Only in 'spanning-tree mode \
+                     rapid-pvst'.",
+        },
+        Always,
+        |domain| Command::ShowSpanningTreeDomain {
+            domain: domain.to_string(),
+        }),
     cmd!(["show" "bfd" "sessions"],
         Doc::Local {
             summary: "Show every BFD session.",

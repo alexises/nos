@@ -79,6 +79,7 @@ How the bridge ports are made safe before `nos-stpd` exists. Spike results, on k
 
 - **BR_NO_STP floods the group MAC.** A Linux bridge with `stp_state 0` treats `01:80:c2:00:00:00` as ordinary traffic and forwards it. Every bridge port therefore gets an ingress `flower dst_mac <group> action drop` filter (the BPDU group, plus Cisco SSTP `01:00:0c:cc:cc:cd`) under a `clsact` qdisc: the BPDU never reaches the bridge.
 - **The tap still sees it.** An `ETH_P_ALL` `AF_PACKET` socket taps before tc ingress and before the bridge `rx_handler`, so it receives the frames the filter drops. A protocol-bound socket (`ETH_P_802_2`) runs after them and gets nothing. `nos-stpd` (#327) must capture with `ETH_P_ALL`.
+- **The trap matches untagged LLC frames only** (tc protocol `802.2`, #322). A frame carrying a VLAN tag classifies as `802.1Q`, and tc ingress of a trunk's parent port runs before `vlan_do_receive`; a trap on every protocol dropped the tagged SSTP of the `ethX.<tag>` sub-links as soon as the parent itself was a bridge port (the native VLAN). The sub-link sees the tag already removed and still traps.
 - **BLOCKING does not stick.** With STP off the kernel's `br_port_state_selection` turns a blocking port back into forwarding at once (every port is designated). Only DISABLED survives, written through `RTM_SETLINK` in the `AF_BRIDGE` family with `IFLA_PROTINFO` (`bridge link set dev <port> state 0`); the `RTM_NEWLINK` slave-data path ignores it. So `StpPortState::Blocking` is kernel DISABLED, which neither learns nor forwards. `Learning` is 2, `Forwarding` 3, both through the same path.
 - **A down device refuses** a state write (`ENETDOWN`) but is already DISABLED. The kernel opens a port when its link goes up, so the driver reconciles again right after every `up`.
 
@@ -176,7 +177,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 ## Daemon (`nos-stpd`, #327)
 
 - One fixed process, supervised like `nos-lldpd`; `--listen-socket` serves the status query (below).
-- Ports: a physical `Interface` or a `PortAggregate` (the bond, never a member) with a `switching_profile`; loopbacks, VXLAN and L3-only interfaces are not ports. Modes `rstp` and `mstp` run; `disabled` and `rapid-pvst` leave the daemon idle.
+- Ports: a physical `Interface` or a `PortAggregate` (the bond, never a member) with a `switching_profile`; loopbacks, VXLAN and L3-only interfaces are not ports. Modes `rstp`, `mstp` and `rapid-pvst` run; `disabled` leaves the daemon idle.
 - Task layout, all in `stp/src/daemon.rs`: one actor owns the bridge core and every BPDU socket; a reader task per port, the link table, plan changes and a 1 s tick are events to it. A changed plan rebuilds the bridge (the protocol restarts, sockets of ports that stay are kept).
 - The BPDU socket (`L2Socket::open_bpdu`) is `ETH_P_ALL` with a classic BPF for the group MAC plus LLC `42 42 03`. A protocol-bound socket runs after tc ingress and the bridge `rx_handler`, where the trap from #326 drops the frame; the tap runs before. It sees its own outgoing frames, so the source MAC is filtered.
 - Inputs to the core per port:
@@ -200,13 +201,33 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 | `msti port role changed` | `port`, `msti`, `role` |
 | `msti port state changed` | `port`, `msti`, `state`, `domains` (comma list of the tree's domains on the port); the effective state, a boundary port shows the CIST's |
 
+## Rapid-PVST+ (`nos-stp::pvst`, `sstp`, #322)
+
+- Model: `Plan.pvst` holds one `TreePlan` per domain of the switching profiles, each a complete `Plan` of its own (`ext` = the domain's VLAN as bridge-id system id extension, the domain's `stp-priority` and timers over the global ones, only the ports that are members, with the member's `stp-cost`/`stp-priority` over the port profile's). `pvst::Pvst` runs one `Engine` per tree, so the clause 13 machines, protections, `force-version` and legacy migration work per tree unchanged. Port numbers differ between trees (index in the tree's port list); they are only compared within a tree.
+- Frames: `sstp.rs` is the Cisco framing (802.3, LLC/SNAP `AA AA 03 00 00 0C 01 0B`, the IEEE BPDU body, then the Originating VLAN TLV: type 0, length 2, VLAN id). A frame without the TLV is accepted (`pvid: None`). Layout from Wireshark's `packet-stp.c`; the test vectors are assembled from it, not captured.
+- Links: a tagged member's BPDUs use the sub-link `<port>.<tag>` (the kernel adds the tag), an untagged member's the port itself. `L2Socket::open_pvst(link, ieee)` is an `ETH_P_ALL` socket with a BPF of either group; the SSTP group is always joined, the IEEE one only for the untagged member (the native rule: `pvst::tx_wires` sends both forms, `pvst::accepts` ignores an IEEE BPDU elsewhere). Carrier is read per link, so a sub-link that is down disables only its tree.
+- PVID inconsistency: `Pvst::receive` compares the TLV with the tree's VLAN; a mismatch forces the `(port, domain)` kernel state to Blocking (`Pvst::wrap` rewrites the engine's pushes) and keeps the BPDU out of the machines. It clears on a consistent BPDU or after 3 hellos without any.
+- Kernel states: each tree pushes `SetStpPortStates` for its own domain only (the sub-link of a tagged member), and a `FlushFdb` flushes that domain only.
+- Logs (the e2e anchors; roles and states capitalised):
+
+| Line | Fields |
+|------|--------|
+| `pvst port role changed` | `domain`, `port`, `role` |
+| `pvst port state changed` | `domain`, `port`, `state` |
+| `pvst root bridge changed` | `domain`, `root` (`100a.02:aa:bb:cc:dd:ee`: priority plus VLAN) |
+| `pvst port migrated to STP` / `pvst port migrated to RSTP` | `domain`, `port` |
+| `pvid inconsistent` | `domain`, `port`, `expected`, `got`; `pvid consistent` with `domain`, `port`, `reason` (`bpdu`, `silence`) |
+
+- Limits: `clear spanning-tree detected-protocols` and `clear spanning-tree err-disabled` act on `rstp`/`mstp` only; a bond's sockets use the config name like the other modes. A changed plan rebuilds every tree.
+- Tests: `stp/src/sstp.rs` (layout, round trips, rejects), `stp/src/pvst.rs` (two bridges, two trees blocking different links; PVID block; per-tree fallback; native rule), `ports.rs` (tree plans) and the `stp-pvst` e2e phase.
+
 ## Status query (#328)
 
 - Path: `nos show spanning-tree` / `GET /v1/spanning-tree` resolve `ServiceRef::Stp` through the watchdog, then send `StpRequest::GetSummary`; the reply is one `StpEvent::Summary(StpSummary)`.
-- `stp/src/server.rs` answers from an `Arc<RwLock<StpSummary>>` snapshot. The daemon actor rewrites it after every event (plan change, BPDU, link change, tick) from `Engine::summary()`; no engine (mode neither `rstp` nor `mstp`) publishes the default, `enabled: false`.
+- `stp/src/server.rs` answers from an `Arc<RwLock<StpSummary>>` snapshot. The daemon actor rewrites it after every event (plan change, BPDU, link change, tick) from `Engine::summary()`; no engine (mode `disabled`) publishes the default, `enabled: false`.
 - `stp/src/authz.rs`: `allowed(role, &StpRequest)` lists `User` and `Restd`, no wildcard arm; any other role is disconnected with a `warn!`.
 - Roles and states are the `StpRole`/`StpState` enums, so the CLI and REST print the same words. Bridge and port ids are display strings (`8000.02:aa:bb:cc:dd:ee`, `128.1`).
 - Root path cost is the root port's received cost plus its own; the timers are the root's (`rootTimes`), what the bridge actually runs.
-- `StpSummary` only grows by appended fields; `mst` (#321) holds the region and every instance's root and ports, which `show spanning-tree instance`/`mst-config` and the two `GET /v1/spanning-tree/...` routes render, so MSTP added no request variant.
+- `StpSummary` only grows by appended fields; `mst` (#321) holds the region and every instance's root and ports, which `show spanning-tree instance`/`mst-config` and the two `GET /v1/spanning-tree/...` routes render, so MSTP added no request variant. `pvst` (#322) is one `StpInstance` per Rapid-PVST+ tree (`id` is the VLAN; ports carry `inconsistent` and `compat`), served by `show spanning-tree domain` and `GET /v1/spanning-tree/domain/<bd>`; its top-level ports are empty.
 - Read the state of a running lab: `cargo run -p nos-e2e -- logs 200` and look at the last `port state changed` per port.
 - Limits: no in-place update of priority, timers or cost (a config change restarts the protocol); a link whose speed changes without a carrier change keeps its old cost.

@@ -31,16 +31,20 @@ pub fn bridge_id(priority: u16, mac: [u8; 6]) -> Result<BridgeId, IdError> {
 
 /// `8000.02:aa:bb:cc:dd:ee`, for logs.
 pub fn show(id: &BridgeId) -> String {
+    show_with(id.priority(), id)
+}
+
+/// Like [`show`] with the system id extension in the low 12 bits, the way a
+/// Rapid-PVST+ bridge id is written (`800a.` is priority 32768, VLAN 10).
+pub fn show_ext(id: &BridgeId) -> String {
+    show_with(id.priority() | id.ext(), id)
+}
+
+fn show_with(first: u16, id: &BridgeId) -> String {
     let m = id.mac();
     format!(
-        "{:04x}.{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        id.priority(),
-        m[0],
-        m[1],
-        m[2],
-        m[3],
-        m[4],
-        m[5]
+        "{first:04x}.{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        m[0], m[1], m[2], m[3], m[4], m[5]
     )
 }
 
@@ -62,5 +66,8 @@ mod tests {
         let id = bridge_id(4096, [2, 0, 0, 0, 0, 0xab]).unwrap();
         assert_eq!(show(&id), "1000.02:00:00:00:00:ab");
         assert!(bridge_id(100, [2; 6]).is_err());
+        let vlan = BridgeId::new(4096, 10, [2, 0, 0, 0, 0, 0xab]).unwrap();
+        assert_eq!(show(&vlan), "1000.02:00:00:00:00:ab");
+        assert_eq!(show_ext(&vlan), "100a.02:00:00:00:00:ab");
     }
 }

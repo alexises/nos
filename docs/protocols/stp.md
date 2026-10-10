@@ -2,7 +2,7 @@
 
 Spanning tree (IEEE 802.1Q clause 13) keeps an L2 topology loop-free.
 
-- **`mode rstp` and `mode mstp` run today.** `nos-stpd` speaks them on every physical interface or port aggregate that has a `switching-profile`. `rapid-pvst` is accepted and checked but the daemon stays idle for it (and for `disabled`).
+- **`mode rstp`, `mode mstp` and `mode rapid-pvst` run.** `nos-stpd` speaks them on every physical interface or port aggregate that has a `switching-profile`; `disabled` leaves the daemon idle.
 - **Fail-safe:** with a mode other than `disabled`, a new bridge port starts blocked and BPDUs are trapped until `nos-stpd` pushes a state (see [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326)). Set `spanning-tree mode disabled` to forward without spanning tree.
 - Everything is checked at commit time.
 - A port aggregate with an `esi` needs a guard profile (see [ESI port aggregates](#esi-port-aggregates)).
@@ -158,16 +158,50 @@ show spanning-tree instance 5
 - A per-instance port cost defaults to the CIST cost of the port (profile `cost`, else the link speed); `mst-instance <n> cost` overrides it for that instance.
 - `max-hops` (default 20) is the remaining-hops budget of an instance's information; an instance's information from a bridge `max-hops` away is discarded.
 
-## Use Rapid PVST
+## Use Rapid-PVST+
 
 ```
 set spanning-tree mode rapid-pvst
 set broadcast domain bd5 stp-priority 4096
 set broadcast domain bd5 stp-hello-time 1
+set switching-profile trunk member bd5 stp-cost 200
 ```
 
-- `stp-priority`, `stp-hello-time`, `stp-max-age` and `stp-forward-delay` on a domain override the global value for that VLAN; unset inherits.
-- Per switching profile member, `set switching-profile <sp> broadcast-domain <bd> stp-cost <n>` and `stp-priority <n>` tune the port.
+- Every broadcast domain used by a switching profile is its own spanning tree (one RSTP instance per VLAN), so each VLAN can have another root and block another link. Its VLAN is the dot1q tag of the member; a domain that is only untagged is VLAN 1.
+- `stp-priority`, `stp-hello-time`, `stp-max-age` and `stp-forward-delay` on a domain override the global value for that VLAN; unset inherits. The bridge id of a tree is the priority plus the VLAN (priority 4096, VLAN 10 is `100a`).
+- Per switching profile member, `stp-cost <n>` and `stp-priority <n>` tune the port in that VLAN only; unset falls back to the port's `stp-port-profile`, then the link speed. Use the cost on the non-root side to choose which link a VLAN blocks.
+- `stp-port-profile` settings (edge, guards, link type) apply to the port in every tree. Port protections act per tree: a BPDU guard fires on the first BPDU of any VLAN.
+- A port takes part in a tree only if the domain is a member of its switching profile. The kernel gets each tree's state on that domain's own bridge port, so VLAN 10 can block `eth1.10` while `eth1.20` forwards.
+- A topology change in one VLAN flushes only that domain's learned MACs.
+
+### Native VLAN
+
+- The domain that is untagged on a port is its native VLAN. Its BPDUs travel on the link itself, in the Cisco SSTP form and also in the IEEE form (`01:80:c2:00:00:00`), which is what a plain 802.1Q neighbour understands.
+- Tagged domains send SSTP on `ethX.<tag>` only, and an IEEE BPDU received there is ignored.
+
+### PVID inconsistency
+
+- An SSTP BPDU carries the sender's VLAN. When it names another VLAN than the tree it arrived in, the port is blocked in that tree and the daemon logs `pvid inconsistent domain=<bd> port=<if> expected=<vid> got=<vid>` once.
+- The block is lifted by the next consistent BPDU, or after three hellos without any BPDU (log `pvid consistent`). The BPDU is not given to the tree's state machines meanwhile.
+- `show spanning-tree domain <bd>` marks such a port `PVID-inconsistent`.
+
+### Read it
+
+```
+show spanning-tree
+show spanning-tree domain bd5
+```
+
+- `show spanning-tree` lists one row per tree: domain, VLAN, root id and root port.
+- `show spanning-tree domain <bd>` prints the tree's bridge id, root and one row per member port with role and state; `Compat` marks a port that talks 802.1D to its peer in this VLAN.
+- REST: `GET /v1/spanning-tree/domain/<bd>` (`404` when the mode is not `rapid-pvst` or the domain has no tree); `GET /v1/spanning-tree` carries them all in `pvst`.
+- Logs: `pvst port role changed domain=<bd> port=<if> role=<role>`, `pvst port state changed ...`, `pvst root bridge changed domain=<bd> root=<id>`.
+
+### Interoperate with Cisco
+
+- Peers running Rapid-PVST+ are met on `01:00:0c:cc:cc:cd` (SNAP PID `0x010b`) per VLAN. The trunk must carry the same VLAN tags and the same native VLAN on both ends.
+- A peer running plain PVST+ (non-rapid) in some VLAN sends Config BPDUs: the port migrates to 802.1D in that VLAN only, after Migrate Time, as in [Interoperate with an 802.1D switch](#interoperate-with-an-8021d-switch); other VLANs on the port stay RSTP. `clear spanning-tree detected-protocols` does not apply to Rapid-PVST+ yet.
+- Limits: the lab has no Cisco switch, so the SSTP framing is checked against the layout of Wireshark's `packet-stp.c`, not against live traffic. The VLAN of a tree is always the dot1q tag (no separate native VLAN setting). A tagged member needs its `ethX.<tag>` sub-link up, so bring the parent link up first. Every tree sends its own hello on every member port, so CPU grows with domains times ports.
 
 ## Interoperate with an 802.1D switch
 
