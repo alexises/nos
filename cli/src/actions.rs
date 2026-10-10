@@ -226,6 +226,10 @@ pub async fn handle_action(
             show_spanning_tree(watchdog_socket, SpanningTreeView::MstConfig).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowSpanningTreeDomain { domain } => {
+            show_spanning_tree(watchdog_socket, SpanningTreeView::Domain(domain)).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowBfdReflector => {
             show_bfd_reflector(watchdog_socket).await;
             Outcome::Continue(mode)
@@ -655,6 +659,7 @@ enum SpanningTreeView {
     Summary,
     Instance(u16),
     MstConfig,
+    Domain(String),
 }
 
 async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
@@ -676,6 +681,7 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
                 SpanningTreeView::Summary => format::render_spanning_tree(&s),
                 SpanningTreeView::Instance(id) => format::render_stp_instance(&s, id),
                 SpanningTreeView::MstConfig => format::render_mst_config(&s),
+                SpanningTreeView::Domain(d) => format::render_stp_domain(&s, &d),
             }
         ),
         Err(e) => eprintln!("error: {e}"),

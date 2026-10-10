@@ -4265,6 +4265,10 @@
             "description": "The peer is outside the region: the instance follows the CIST here.",
             "type": "boolean"
           },
+          "compat": {
+            "description": "Rapid-PVST+: the port talks 802.1D (PVST+) to its peer in this tree (#322).",
+            "type": "boolean"
+          },
           "cost": {
             "format": "int32",
             "minimum": 0,
@@ -4275,6 +4279,10 @@
           },
           "designated_port": {
             "type": "string"
+          },
+          "inconsistent": {
+            "description": "Rapid-PVST+: a BPDU named another VLAN than this tree's (PVID\ninconsistency); the port is blocked in this tree (#322).",
+            "type": "boolean"
           },
           "name": {
             "type": "string"
@@ -4603,6 +4611,13 @@
           "ports": {
             "items": {
               "$ref": "#/components/schemas/StpPortInfo"
+            },
+            "type": "array"
+          },
+          "pvst": {
+            "description": "One tree per broadcast domain in `mode rapid-pvst` (#322); `id` is the\ndomain's VLAN. Empty in the other modes.",
+            "items": {
+              "$ref": "#/components/schemas/StpInstance"
             },
             "type": "array"
           },
@@ -6200,6 +6215,58 @@
           }
         },
         "summary": "The spanning-tree bridge and every port's role and state (`enabled: false` when the mode is neither rstp nor mstp)",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/spanning-tree/domain/{name}": {
+      "get": {
+        "operationId": "spanning_tree_domain",
+        "parameters": [
+          {
+            "description": "Broadcast domain name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StpInstance"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "spanning tree is not in mode rapid-pvst, or the domain has no tree"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "One broadcast domain's Rapid-PVST+ tree",
         "tags": [
           "show"
         ]

@@ -420,6 +420,32 @@ pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
     if !s.enabled {
         return "spanning-tree is disabled".to_string();
     }
+    if s.mode == nos_proto::StpMode::RapidPvst {
+        let mut lines = vec![
+            format!("mode {}", mode_word(s.mode)),
+            format!(
+                "bridge id {} (priority; each VLAN adds its id)",
+                s.bridge_id
+            ),
+            String::new(),
+            format!(
+                "{:<16} {:>4}  {:<24} Root port",
+                "Domain", "VLAN", "Root id"
+            ),
+        ];
+        for t in &s.pvst {
+            lines.push(format!(
+                "{:<16} {:>4}  {:<24} {}",
+                t.domains.join(","),
+                t.id,
+                t.root_id,
+                t.root_port
+                    .as_deref()
+                    .unwrap_or("(this bridge is the root)")
+            ));
+        }
+        return lines.join("\n");
+    }
     let root = match &s.root_port {
         Some(p) => format!("root port {p}, cost {}", s.root_path_cost),
         None => "this bridge is the root".to_string(),
@@ -475,11 +501,64 @@ pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
 fn mode_word(m: nos_proto::StpMode) -> &'static str {
     match m {
         nos_proto::StpMode::Mstp => "mstp",
+        nos_proto::StpMode::RapidPvst => "rapid-pvst",
         _ => "rstp",
     }
 }
 
 const NOT_MSTP: &str = "spanning-tree is not in mode mstp";
+
+/// `show spanning-tree domain <bd>`: one Rapid-PVST+ tree.
+pub fn render_stp_domain(s: &nos_proto::StpSummary, domain: &str) -> String {
+    if s.mode != nos_proto::StpMode::RapidPvst {
+        return "spanning-tree is not in mode rapid-pvst".to_string();
+    }
+    let Some(i) = s
+        .pvst
+        .iter()
+        .find(|i| i.domains.iter().any(|d| d == domain))
+    else {
+        return format!("no spanning-tree tree for domain {domain}");
+    };
+    let root = match &i.root_port {
+        Some(p) => format!("root port {p}, cost {}", i.root_path_cost),
+        None => "this bridge is the root".to_string(),
+    };
+    let mut lines = vec![
+        format!("domain    {domain}"),
+        format!("vlan      {}", i.vlans),
+        format!("bridge id {}", i.bridge_id),
+        format!("root id   {} ({root})", i.root_id),
+        String::new(),
+        format!(
+            "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated",
+            "Name", "Role", "State", "Cost", "Prio"
+        ),
+    ];
+    for p in &i.ports {
+        let designated = if p.designated_bridge.is_empty() {
+            "-".to_string()
+        } else {
+            format!("{} {}", p.designated_bridge, p.designated_port)
+        };
+        let mut flags = String::new();
+        if p.compat {
+            flags.push_str("  Compat");
+        }
+        if p.inconsistent {
+            flags.push_str("  PVID-inconsistent");
+        }
+        lines.push(format!(
+            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}{flags}",
+            p.name,
+            p.role.as_str(),
+            p.state.as_str(),
+            p.cost,
+            p.priority,
+        ));
+    }
+    lines.join("\n")
+}
 
 /// `show spanning-tree mst-config`: the region identity, then the VLAN map.
 pub fn render_mst_config(s: &nos_proto::StpSummary) -> String {
@@ -2677,7 +2756,7 @@ mod tests {
 
 #[cfg(test)]
 mod mst_tests {
-    use super::{render_mst_config, render_stp_instance};
+    use super::{render_mst_config, render_spanning_tree, render_stp_domain, render_stp_instance};
     use nos_proto::{StpInstance, StpInstancePort, StpMst, StpState, StpSummary};
 
     fn summary() -> StpSummary {
@@ -2738,5 +2817,49 @@ mod mst_tests {
             render_stp_instance(&summary(), 9),
             "no spanning-tree instance 9"
         );
+    }
+
+    #[test]
+    fn domain_view_flags_compat_and_pvid_inconsistent_ports() {
+        let port = |name: &str, compat, inconsistent| StpInstancePort {
+            name: name.into(),
+            state: StpState::Discarding,
+            compat,
+            inconsistent,
+            ..StpInstancePort::default()
+        };
+        let s = StpSummary {
+            enabled: true,
+            mode: nos_proto::StpMode::RapidPvst,
+            bridge_id: "8000.02:00:00:00:00:01".into(),
+            pvst: vec![StpInstance {
+                id: 10,
+                vlans: "10".into(),
+                domains: vec!["bd1".into()],
+                bridge_id: "800a.02:00:00:00:00:01".into(),
+                root_id: "100a.02:00:00:00:00:02".into(),
+                root_port: Some("eth1".into()),
+                ports: vec![port("eth1", true, false), port("eth2", false, true)],
+                ..StpInstance::default()
+            }],
+            ..StpSummary::default()
+        };
+        let out = render_stp_domain(&s, "bd1");
+        assert!(out.contains("vlan      10"));
+        assert!(out.contains("root port eth1"));
+        let rows: Vec<_> = out.lines().skip(6).collect();
+        assert!(rows[0].ends_with("  Compat"), "{out}");
+        assert!(rows[1].ends_with("  PVID-inconsistent"), "{out}");
+        assert_eq!(
+            render_stp_domain(&s, "bd9"),
+            "no spanning-tree tree for domain bd9"
+        );
+        assert_eq!(
+            render_stp_domain(&StpSummary::default(), "bd1"),
+            "spanning-tree is not in mode rapid-pvst"
+        );
+        let all = render_spanning_tree(&s);
+        assert!(all.starts_with("mode rapid-pvst"));
+        assert!(all.contains("bd1") && all.contains("100a.02:00:00:00:00:02"));
     }
 }

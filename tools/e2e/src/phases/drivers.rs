@@ -1910,6 +1910,228 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     b.established().await
 }
 
+/// `GET /v1/spanning-tree/domain/<bd>`.
+async fn pvst_domain(r: &Router, bd: &str) -> anyhow::Result<nos_proto::StpInstance> {
+    let body = r
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/spanning-tree/domain/{bd}"),
+            None,
+            200,
+        )
+        .await?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// Polls domain `bd` on `r` until `want` holds twice in a row.
+async fn pvst_wait(
+    r: &Router,
+    bd: &str,
+    secs: u64,
+    want: impl Fn(&nos_proto::StpInstance) -> bool,
+) -> anyhow::Result<nos_proto::StpInstance> {
+    let mut last = String::new();
+    let mut stable = 0;
+    for _ in 0..secs {
+        if let Ok(i) = pvst_domain(r, bd).await {
+            if want(&i) {
+                stable += 1;
+                if stable >= 2 {
+                    return Ok(i);
+                }
+            } else {
+                stable = 0;
+            }
+            last = format!("{i:?}");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: domain {bd} never settled as wanted in {secs}s: {last}",
+        r.name()
+    )
+}
+
+/// Provisions `iface` of `r` for `stp-pvst`: the trunk `profile` into
+/// `pv-d1` (VLAN 110), `pv-d2` (VLAN 120) and the untagged `pv-nat`. With
+/// `rapid` it also turns `rapid-pvst` on (an unset `--stp-mode` means
+/// disabled): router-a roots `pv-d1`, router-b `pv-d2`, and the other
+/// router's member of the tree it does not root is expensive on one link, so
+/// `pv-d1` blocks router-b's `eth1` and `pv-d2` router-a's `eth2`.
+async fn pvst_provision(r: &Router, iface: &str, profile: &str, rapid: bool) -> anyhow::Result<()> {
+    let a = r.name() == "router-a";
+    let mut args = strings(&[
+        "--link-interface",
+        iface,
+        "--switching-profile",
+        profile,
+        "--switching-profile-member",
+        "pv-d1:110",
+        "--switching-profile-member",
+        "pv-d2:120",
+        "--switching-profile-member",
+        "pv-nat:untagged",
+    ]);
+    let expensive = match (a, iface) {
+        (false, "eth1") => Some("pv-d1"),
+        (true, "eth2") => Some("pv-d2"),
+        _ => None,
+    };
+    if let Some(bd) = expensive {
+        args.extend(strings(&[
+            "--stp-member-cost",
+            &format!("{profile}:{bd}:100000"),
+        ]));
+    }
+    if rapid {
+        args.extend(strings(&[
+            "--stp-mode",
+            "rapid-pvst",
+            "--stp-priority",
+            "32768",
+            "--stp-domain-priority",
+            if a { "pv-d1:4096" } else { "pv-d1:32768" },
+            "--stp-domain-priority",
+            if a { "pv-d2:32768" } else { "pv-d2:4096" },
+        ]));
+    }
+    r.provision(&args).await
+}
+
+/// #322: Rapid-PVST+ over the `stp` phase's two veth links, with two tagged
+/// domains (`pv-d1` VLAN 110, `pv-d2` VLAN 120) and an untagged one (`pv-nat`,
+/// the native VLAN) on both. Each domain is its own RSTP tree: router-a roots
+/// `pv-d1` and router-b `pv-d2`, and the per-member `stp-cost` makes `pv-d1`
+/// block router-b's `eth1` and `pv-d2` block router-a's `eth2`, each only on
+/// its own `ethX.<tag>` bridge port in the kernel. The untagged tree converges
+/// over the links themselves (SSTP plus the IEEE form). Cutting the root port
+/// of `pv-d1` moves it to the blocked link.
+pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let routers = [a, b];
+
+    w.link_veths().await?;
+    // A tagged trunk needs its parent up before `nos-interfaced` can bring the
+    // `ethX.<tag>` sub-links up (it fails with ENETDOWN otherwise).
+    for router in ["router-a", "router-b"] {
+        for iface in ["eth1", "eth2"] {
+            w.set_link(router, iface, true).await?;
+        }
+    }
+    for r in routers {
+        pvst_provision(r, "eth2", "pvst-sp2", false).await?;
+        pvst_provision(r, "eth1", "pvst-sp1", true).await?;
+    }
+
+    log("waiting for pv-d1 to block router-b eth1 and pv-d2 router-a eth2");
+    let blocked = |name: &'static str| {
+        move |i: &nos_proto::StpInstance| {
+            i.ports.iter().any(|p| {
+                p.name == name && p.role == StpRole::Alternate && p.state == StpState::Discarding
+            }) && i
+                .ports
+                .iter()
+                .any(|p| p.name != name && p.state == StpState::Forwarding)
+        }
+    };
+    let b1 = pvst_wait(b, "pv-d1", 90, blocked("eth1")).await?;
+    let a2 = pvst_wait(a, "pv-d2", 90, blocked("eth2")).await?;
+    let a1 = pvst_wait(a, "pv-d1", 30, |i| i.root_port.is_none()).await?;
+    let b2 = pvst_wait(b, "pv-d2", 30, |i| i.root_port.is_none()).await?;
+    // The VLAN rides in the bridge id: priority 4096 + VLAN 110 is 0x106e.
+    if a1.root_id != a1.bridge_id
+        || !a1.bridge_id.starts_with("106e.")
+        || b2.root_id != b2.bridge_id
+        || !b2.bridge_id.starts_with("1078.")
+        || b1.root_id != a1.bridge_id
+        || a2.root_id != b2.bridge_id
+        || b1.root_port.as_deref() != Some("eth2")
+        || a2.root_port.as_deref() != Some("eth1")
+    {
+        bail!("wrong per-VLAN roots: {a1:?} {b1:?} {a2:?} {b2:?}");
+    }
+    if a1
+        .ports
+        .iter()
+        .chain(&b2.ports)
+        .any(|p| p.state != StpState::Forwarding)
+    {
+        bail!("the root of a tree forwards on every port: {a1:?} {b2:?}");
+    }
+    if [&a1, &b1, &a2, &b2]
+        .iter()
+        .flat_map(|i| &i.ports)
+        .any(|p| p.inconsistent || p.compat)
+    {
+        bail!("two NOS bridges must not see PVID inconsistency or PVST+ peers");
+    }
+
+    // The logs name the tree, and the kernel state is per domain bridge port:
+    // pv-d1's block is on VLAN 110 only.
+    b.wait("pvst port role changed domain=pv-d1 port=eth1 role=Alternate")
+        .await?;
+    a.wait("pvst port role changed domain=pv-d2 port=eth2 role=Alternate")
+        .await?;
+    b.wait("pvst root bridge changed domain=pv-d1 root=106e")
+        .await?;
+    kernel_wait(b, "eth1.110", true, 30).await?;
+    kernel_wait(b, "eth1.120", false, 30).await?;
+    kernel_wait(b, "eth2.110", false, 30).await?;
+    kernel_wait(a, "eth2.120", true, 30).await?;
+    kernel_wait(a, "eth2.110", false, 30).await?;
+    kernel_wait(a, "eth1.120", false, 30).await?;
+
+    // The native VLAN: one tree over the links themselves, one root, one block.
+    log("waiting for the untagged pv-nat tree to converge");
+    let both = |i: &nos_proto::StpInstance| {
+        i.ports.len() == 2 && i.ports.iter().all(|p| p.role != StpRole::Disabled)
+    };
+    let (na, nb) = (
+        pvst_wait(a, "pv-nat", 90, both).await?,
+        pvst_wait(b, "pv-nat", 90, both).await?,
+    );
+    let discarding = na
+        .ports
+        .iter()
+        .chain(&nb.ports)
+        .filter(|p| p.role == StpRole::Alternate && p.state == StpState::Discarding)
+        .count();
+    if na.root_id != nb.root_id || !na.root_id.starts_with("8001.") || discarding != 1 {
+        bail!(
+            "pv-nat must have one root (8001. = priority 32768, VLAN 1) and one block: {na:?} {nb:?}"
+        );
+    }
+
+    let (sa, sb) = (stp_summary(a).await?, stp_summary(b).await?);
+    if sa.mode != nos_proto::StpMode::RapidPvst || sa.pvst.len() != 3 || sb.pvst.len() != 3 {
+        bail!("GET /v1/spanning-tree should list three trees: {sa:?} {sb:?}");
+    }
+
+    // Cut router-b's pv-d1 root port: eth1 (blocked in pv-d1) takes over.
+    log("cutting router-b eth2: pv-d1 must move to eth1");
+    w.set_link("router-b", "eth2", false).await?;
+    pvst_wait(b, "pv-d1", 30, |i| {
+        i.root_port.as_deref() == Some("eth1")
+            && i.ports
+                .iter()
+                .any(|p| p.name == "eth1" && p.state == StpState::Forwarding)
+    })
+    .await?;
+    w.set_link("router-b", "eth2", true).await?;
+    pvst_wait(b, "pv-d1", 90, blocked("eth1")).await?;
+    pvst_wait(a, "pv-d2", 90, blocked("eth2")).await?;
+
+    for r in routers {
+        for iface in ["eth1", "eth2"] {
+            r.provision(&["--link-interface", iface, "--delete-switching-profile"])
+                .await?;
+        }
+    }
+    w.unlink_veths().await;
+    a.established().await?;
+    b.established().await
+}
+
 pub async fn svi(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&[

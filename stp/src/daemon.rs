@@ -17,6 +17,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use nos_proto::schema::VlanTag;
+
 use crate::bpdu::{decode_frame_any, encode_frame, encode_mst_frame};
 use crate::engine::{Engine, Out};
 use crate::identity;
@@ -24,13 +26,19 @@ use crate::interface_client::Push;
 use crate::link;
 use crate::link_client::{gate, Gate, LinkTable};
 use crate::ports::Plan;
+use crate::pvst::{self, Outs, Pvst, Wire};
 use crate::server::{Cmd, Snapshot};
+use crate::sstp;
+use nos_proto::StpSummary;
 
 const TICK: Duration = Duration::from_secs(1);
 /// Seconds between full re-pushes of the kernel port states.
 const RESYNC_EVERY: u32 = 10;
 /// Seconds between the per-port BPDU receive summaries.
 const SUMMARY_EVERY: u32 = 10;
+
+/// A Rapid-PVST+ member: port name, tag, configured cost, link type.
+type PvstPort = (String, VlanTag, Option<u32>, nos_proto::schema::LinkType);
 
 struct Io {
     socket: Arc<L2Socket>,
@@ -52,6 +60,11 @@ struct Daemon {
     plan: Option<Plan>,
     engine: Option<Engine>,
     rt: Vec<PortRt>,
+    /// Rapid-PVST+ instead of `engine` (#322): the trees, their per-port
+    /// runtime, and which `(tree, port)` each BPDU link serves.
+    pvst: Option<Pvst>,
+    prt: Vec<Vec<PortRt>>,
+    plinks: HashMap<String, (usize, usize)>,
     io: HashMap<String, Io>,
     links: LinkTable,
     push_tx: mpsc::Sender<Push>,
@@ -75,6 +88,9 @@ pub async fn run(
         plan: None,
         engine: None,
         rt: Vec::new(),
+        pvst: None,
+        prt: Vec::new(),
+        plinks: HashMap::new(),
         io: HashMap::new(),
         links: LinkTable::default(),
         push_tx,
@@ -129,11 +145,11 @@ async fn read_loop(socket: Arc<L2Socket>, name: String, tx: mpsc::Sender<(String
 impl Daemon {
     /// Disabled mode (no engine) answers `enabled: false`.
     fn publish(&self) {
-        let s = self
-            .engine
-            .as_ref()
-            .map(Engine::summary)
-            .unwrap_or_default();
+        let s = match (&self.engine, &self.pvst) {
+            (Some(e), _) => e.summary(),
+            (None, Some(p)) => p.summary(),
+            (None, None) => StpSummary::default(),
+        };
         *self.snapshot.write().expect("snapshot lock") = s;
     }
 
@@ -141,12 +157,24 @@ impl Daemon {
         if plan == self.plan {
             return;
         }
-        let names: Vec<&str> = plan
+        let names: Vec<String> = plan
             .iter()
-            .flat_map(|p| p.ports.iter().map(|p| p.name.as_str()))
+            .flat_map(|p| match &p.pvst {
+                Some(trees) => trees
+                    .iter()
+                    .flat_map(|t| {
+                        t.plan
+                            .ports
+                            .iter()
+                            .zip(&t.tags)
+                            .map(|(p, &tag)| pvst::link_name(&p.name, tag))
+                    })
+                    .collect::<Vec<_>>(),
+                None => p.ports.iter().map(|p| p.name.clone()).collect(),
+            })
             .collect();
         self.io.retain(|name, io| {
-            let keep = names.contains(&name.as_str());
+            let keep = names.contains(name);
             if !keep {
                 io.reader.abort();
             }
@@ -162,24 +190,32 @@ impl Daemon {
             .as_ref()
             .map(Engine::err_disabled)
             .unwrap_or_default();
-        let first = self.engine.is_none();
+        let first = self.engine.is_none() && self.pvst.is_none();
         self.engine = None;
+        self.pvst = None;
+        self.prt.clear();
+        self.plinks.clear();
         let mut init = Vec::new();
+        let mut pvst_init = Vec::new();
         if let Some(p) = &plan {
             info!(
                 ports = p.ports.len(),
                 priority = p.priority,
                 "spanning tree plan applied"
             );
-            match Engine::new(p, self.mac) {
-                Ok((e, out)) => {
-                    self.engine = Some(e);
-                    init = out;
+            if p.pvst.is_some() {
+                pvst_init = self.build_pvst(p);
+            } else {
+                match Engine::new(p, self.mac) {
+                    Ok((e, out)) => {
+                        self.engine = Some(e);
+                        init = out;
+                    }
+                    Err(e) => error!(error = %e, "cannot build the spanning tree bridge"),
                 }
-                Err(e) => error!(error = %e, "cannot build the spanning tree bridge"),
             }
         } else {
-            info!("spanning tree idle (mode is not rstp or mstp)");
+            info!("spanning tree idle (mode is disabled)");
         }
         let release = |port: String| Out::ErrDisabled {
             port,
@@ -198,9 +234,10 @@ impl Daemon {
         // ponytail: a fresh start cannot know which links an earlier nos-stpd
         // left down, so it releases every guarded port once; a still-wrong
         // port is err-disabled again by its next BPDU.
-        if let (true, Some(e)) = (first, self.engine.as_ref()) {
+        if let (true, Some(p), true) = (first, &plan, self.engine.is_some() || self.pvst.is_some())
+        {
             init.extend(
-                e.ports()
+                p.ports
                     .iter()
                     .filter(|p| p.prot.bpdu_guard)
                     .map(|p| release(p.name.clone())),
@@ -208,12 +245,37 @@ impl Daemon {
         }
         self.plan = plan;
         self.emit(init).await;
+        self.emit_pvst(pvst_init).await;
         self.sync_links().await;
+    }
+
+    /// Builds the Rapid-PVST+ trees and the link table of their sockets.
+    fn build_pvst(&mut self, p: &Plan) -> Outs {
+        let (pv, out) = match Pvst::new(p, self.mac) {
+            Ok(v) => v,
+            Err(e) => {
+                error!(error = %e, "cannot build the rapid-pvst trees");
+                return Vec::new();
+            }
+        };
+        for (t, tree) in pv.trees().iter().enumerate() {
+            let ports = tree.engine().ports();
+            self.prt
+                .push(ports.iter().map(|_| PortRt::default()).collect());
+            for (j, (port, &tag)) in ports.iter().zip(&tree.tags).enumerate() {
+                self.plinks.insert(pvst::link_name(&port.name, tag), (t, j));
+            }
+        }
+        self.pvst = Some(pv);
+        out
     }
 
     /// Opens missing sockets and tells the core each port's `portEnabled`,
     /// `operPointToPoint` and cost when they changed.
     async fn sync_links(&mut self) {
+        if self.pvst.is_some() {
+            return self.sync_pvst_links().await;
+        }
         let Some(n) = self.engine.as_ref().map(|e| e.ports().len()) else {
             return;
         };
@@ -252,32 +314,129 @@ impl Daemon {
     }
 
     fn ensure_io(&mut self, i: usize, name: &str) {
+        let mut warned = self.rt[i].open_warned;
+        self.open_io(name, None, &mut warned);
+        self.rt[i].open_warned = warned;
+    }
+
+    /// Opens the BPDU socket of link `name` unless it is open: the IEEE group
+    /// only (`None`), or the SSTP group with (`Some(true)`) or without the
+    /// IEEE group. `warned` limits the failure log to once per outage.
+    fn open_io(&mut self, name: &str, pvst: Option<bool>, warned: &mut bool) {
         if self.io.get(name).is_some_and(|io| io.reader.is_finished()) {
             self.io.remove(name);
         }
         if self.io.contains_key(name) {
             return;
         }
-        match L2Socket::open_bpdu(name) {
+        let opened = match pvst {
+            None => L2Socket::open_bpdu(name),
+            Some(ieee) => L2Socket::open_pvst(name, ieee),
+        };
+        match opened {
             Ok(s) => {
                 let socket = Arc::new(s);
                 let tx = self.frames_tx.clone();
                 let (rs, n) = (socket.clone(), name.to_string());
                 let reader = tokio::spawn(read_loop(rs, n, tx));
                 self.io.insert(name.to_string(), Io { socket, reader });
-                self.rt[i].open_warned = false;
+                *warned = false;
                 info!(port = %name, "bpdu socket open");
             }
             Err(e) => {
-                if !self.rt[i].open_warned {
+                if !*warned {
                     warn!(port = %name, error = %e, "cannot open the bpdu socket, will retry");
                 }
-                self.rt[i].open_warned = true;
+                *warned = true;
             }
         }
     }
 
+    /// `sync_links` for Rapid-PVST+: every `(tree, port)` rides its own link
+    /// (the sub-link of a tagged member), so carrier is per link.
+    async fn sync_pvst_links(&mut self) {
+        let Some(pv) = self.pvst.as_ref() else { return };
+        let shape: Vec<Vec<PvstPort>> = pv
+            .trees()
+            .iter()
+            .map(|t| {
+                t.engine()
+                    .ports()
+                    .iter()
+                    .zip(&t.tags)
+                    .map(|(p, &tag)| (p.name.clone(), tag, p.cost, p.link_type))
+                    .collect()
+            })
+            .collect();
+        for (t, ports) in shape.into_iter().enumerate() {
+            for (j, (port, tag, cost, link_type)) in ports.into_iter().enumerate() {
+                let link = pvst::link_name(&port, tag);
+                let carrier = !matches!(gate(&self.links, &link), Gate::Down(_));
+                if self.prt[t][j].carrier != Some(carrier) {
+                    if carrier {
+                        info!(port = %link, "port carrier up");
+                    } else {
+                        info!(port = %link, "port carrier lost");
+                    }
+                }
+                if carrier {
+                    let mut warned = self.prt[t][j].open_warned;
+                    self.open_io(&link, Some(tag == VlanTag::Untagged), &mut warned);
+                    self.prt[t][j].open_warned = warned;
+                }
+                let enabled = carrier && self.io.contains_key(&link);
+                if self.prt[t][j].carrier == Some(carrier) && self.prt[t][j].enabled == enabled {
+                    continue;
+                }
+                self.prt[t][j].carrier = Some(carrier);
+                self.prt[t][j].enabled = enabled;
+                let info = link::read(&port);
+                if enabled && info.speed_mbps.is_none() {
+                    warn!(port = %port, fallback_mbps = link::FALLBACK_SPEED_MBPS, "link speed unknown, using the fallback cost");
+                }
+                let out = self.pvst.as_mut().expect("checked").set_link(
+                    t,
+                    j,
+                    enabled,
+                    link::point_to_point(link_type, info),
+                    link::path_cost(cost, info),
+                );
+                self.emit_pvst(out).await;
+            }
+        }
+    }
+
+    /// A frame of a Rapid-PVST+ link: SSTP (any member) or the IEEE group
+    /// (the native member only).
+    async fn receive_pvst(&mut self, name: &str, frame: &[u8]) {
+        let Some(&(t, j)) = self.plinks.get(name) else {
+            return;
+        };
+        let Some(pv) = self.pvst.as_mut() else { return };
+        let tag = pv.trees()[t].tags[j];
+        let (bpdu, pvid, wire) = if frame.starts_with(&sstp::SSTP_GROUP_MAC) {
+            match sstp::decode_frame(frame) {
+                Ok((_, s)) => (s.bpdu, s.pvid, Wire::Sstp),
+                Err(e) => return debug!(port = %name, error = %e, "dropping malformed sstp bpdu"),
+            }
+        } else {
+            match crate::bpdu::decode_frame(frame) {
+                Ok((_, b)) => (b, None, Wire::Ieee),
+                Err(e) => return debug!(port = %name, error = %e, "dropping malformed bpdu"),
+            }
+        };
+        if !pvst::accepts(tag, wire) {
+            return;
+        }
+        self.prt[t][j].rx += 1;
+        let out = pv.receive(t, j, bpdu, pvid);
+        self.emit_pvst(out).await;
+    }
+
     async fn receive(&mut self, name: &str, frame: &[u8]) {
+        if self.pvst.is_some() {
+            return self.receive_pvst(name, frame).await;
+        }
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
@@ -319,6 +478,18 @@ impl Daemon {
     }
 
     async fn on_tick(&mut self) {
+        if let Some(pv) = self.pvst.as_mut() {
+            let out = pv.tick();
+            self.emit_pvst(out).await;
+            self.ticks += 1;
+            if self.ticks.is_multiple_of(RESYNC_EVERY) {
+                if let Some(pv) = &self.pvst {
+                    let out = pv.all_states();
+                    self.emit_pvst(out).await;
+                }
+            }
+            return self.sync_links().await;
+        }
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
@@ -346,6 +517,40 @@ impl Daemon {
         }
         // Retries a failed socket open and notices a finished reader.
         self.sync_links().await;
+    }
+
+    /// The outputs of Rapid-PVST+ trees: BPDUs go out on the member's link,
+    /// the rest is tree-independent.
+    async fn emit_pvst(&mut self, outs: Outs) {
+        for (t, out) in outs {
+            match out {
+                Out::Tx { port, bpdu } => {
+                    let Some(pv) = self.pvst.as_ref() else {
+                        continue;
+                    };
+                    let tree = &pv.trees()[t];
+                    let tag = tree.tags[port];
+                    let link = pvst::link_name(&tree.engine().ports()[port].name, tag);
+                    let Some(io) = self.io.get(&link) else {
+                        continue;
+                    };
+                    let src = io.socket.own_hw_addr();
+                    for wire in pvst::tx_wires(tag) {
+                        let frame = match wire {
+                            Wire::Sstp => sstp::encode_frame(src, &bpdu, tree.vid),
+                            Wire::Ieee => encode_frame(src, &bpdu),
+                        };
+                        match io.socket.send_frame(&frame) {
+                            Err(e) if !nos_l2_socket::is_link_down(&e) => {
+                                warn!(port = %link, error = %e, "bpdu send failed");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                other => self.emit(vec![other]).await,
+            }
+        }
     }
 
     async fn emit(&mut self, outs: Vec<Out>) {

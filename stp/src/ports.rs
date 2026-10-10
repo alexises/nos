@@ -2,7 +2,7 @@
 //! which parameters (pure).
 
 use nos_proto::schema::{EdgePort, LinkType, SpanningTree, StpForceVersion};
-use nos_proto::{Config, StpMode, StpPortAssignment, StpPortState, LOOPBACK_PREFIX};
+use nos_proto::{Config, StpMode, StpPortAssignment, StpPortState, VlanTag, LOOPBACK_PREFIX};
 
 use crate::actions::PortState;
 use crate::machines::Protections;
@@ -26,6 +26,32 @@ pub struct PortCfg {
     pub prot: Protections,
     /// The port's `mst-instance` settings (MSTP only).
     pub mst: Vec<PortMst>,
+    /// The port's switching-profile memberships (Rapid-PVST+ trees).
+    pub members: Vec<Member>,
+}
+
+/// One broadcast domain on a port: its tag and the per-(port, domain) overrides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub domain: String,
+    pub tag: VlanTag,
+    pub cost: Option<u32>,
+    pub priority: Option<u8>,
+}
+
+/// One Rapid-PVST+ tree: a broadcast domain, run as an ordinary RSTP bridge
+/// over the ports that are members of the domain (#322).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreePlan {
+    pub domain: String,
+    /// The domain's VLAN: its dot1q tag, 1 when it is only untagged.
+    pub vid: u16,
+    /// `ext` is the VLAN (802.1Q 13.2 system id extension); `ports` are the
+    /// members only, with the member's cost and priority.
+    pub plan: Box<Plan>,
+    /// The tag of each of `plan.ports`: it picks the BPDU link (`ethX.<tag>`
+    /// or the link itself).
+    pub tags: Vec<VlanTag>,
 }
 
 /// Everything the engine is built from; a changed plan rebuilds the bridge.
@@ -39,6 +65,13 @@ pub struct Plan {
     pub ports: Vec<PortCfg>,
     /// `Some` in mode `mstp`.
     pub mst: Option<MstPlan>,
+    /// System id extension of the bridge id: the VLAN of a Rapid-PVST+ tree,
+    /// 0 otherwise.
+    pub ext: u16,
+    /// The domain a Rapid-PVST+ tree belongs to (it labels the tree's logs).
+    pub domain: Option<String>,
+    /// `Some` in mode `rapid-pvst`: the trees, `ports` above being all ports.
+    pub pvst: Option<Vec<TreePlan>>,
 }
 
 fn mst_plan(cfg: &Config) -> MstPlan {
@@ -60,11 +93,62 @@ fn mst_plan(cfg: &Config) -> MstPlan {
     }
 }
 
-/// `None` while spanning tree has nothing to do here: mode `disabled`, or a
-/// mode this daemon does not run yet (Rapid-PVST: a later sub-issue).
+fn pvst_trees(cfg: &Config, ports: &[PortCfg]) -> Vec<TreePlan> {
+    let st = &cfg.spanning_tree;
+    vidmap::domains(cfg)
+        .into_iter()
+        .filter_map(|(domain, vid, _)| {
+            let (mut sub, mut tags) = (Vec::new(), Vec::new());
+            for p in ports {
+                let Some(m) = p.members.iter().find(|m| m.domain == domain) else {
+                    continue;
+                };
+                tags.push(m.tag);
+                sub.push(PortCfg {
+                    domains: vec![domain.clone()],
+                    cost: m.cost.or(p.cost),
+                    priority: m.priority.unwrap_or(p.priority),
+                    mst: Vec::new(),
+                    members: vec![m.clone()],
+                    ..p.clone()
+                });
+            }
+            if sub.is_empty() {
+                return None;
+            }
+            let bd = cfg.broadcast_domains.iter().find(|d| d.name == domain);
+            let own = |f: fn(&nos_proto::BroadcastDomain) -> Option<u8>, global: u8| {
+                bd.and_then(f).unwrap_or(global)
+            };
+            Some(TreePlan {
+                vid,
+                plan: Box::new(Plan {
+                    priority: bd.and_then(|d| d.stp_priority).unwrap_or(st.priority),
+                    rstp_version: st.force_version != Some(StpForceVersion::Stp),
+                    timers: Timers {
+                        hello: own(|d| d.stp_hello_time, st.hello_time),
+                        max_age: own(|d| d.stp_max_age, st.max_age),
+                        forward_delay: own(|d| d.stp_forward_delay, st.forward_delay),
+                        tx_hold_count: st.tx_hold_count,
+                        ..Timers::default()
+                    },
+                    ports: sub,
+                    mst: None,
+                    ext: vid,
+                    domain: Some(domain.clone()),
+                    pvst: None,
+                }),
+                tags,
+                domain,
+            })
+        })
+        .collect()
+}
+
+/// `None` while spanning tree has nothing to do here: mode `disabled`.
 pub fn plan(cfg: &Config) -> Option<Plan> {
     let st: &SpanningTree = &cfg.spanning_tree;
-    if !matches!(st.mode, StpMode::Rstp | StpMode::Mstp) {
+    if st.mode == StpMode::Disabled {
         return None;
     }
     let mut ports: Vec<PortCfg> = cfg
@@ -89,6 +173,7 @@ pub fn plan(cfg: &Config) -> Option<Plan> {
         }))
         .collect();
     ports.sort_by(|a, b| a.name.cmp(&b.name));
+    let pvst = (st.mode == StpMode::RapidPvst).then(|| pvst_trees(cfg, &ports));
     Some(Plan {
         priority: st.priority,
         rstp_version: st.force_version != Some(StpForceVersion::Stp),
@@ -101,6 +186,9 @@ pub fn plan(cfg: &Config) -> Option<Plan> {
         },
         ports,
         mst: (st.mode == StpMode::Mstp).then(|| mst_plan(cfg)),
+        ext: 0,
+        domain: None,
+        pvst,
     })
 }
 
@@ -122,6 +210,16 @@ fn port(
             .members
             .iter()
             .map(|m| m.broadcast_domain.clone())
+            .collect(),
+        members: sw
+            .members
+            .iter()
+            .map(|m| Member {
+                domain: m.broadcast_domain.clone(),
+                tag: m.tag,
+                cost: m.stp_cost,
+                priority: m.stp_priority,
+            })
             .collect(),
         priority: prof.map_or(128, |p| p.priority),
         cost: prof.and_then(|p| p.cost),
@@ -265,13 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn only_rstp_and_mstp_have_a_plan() {
-        for mode in [StpMode::Disabled, StpMode::RapidPvst] {
-            let mut c = cfg();
-            c.spanning_tree.mode = mode;
-            assert_eq!(plan(&c), None, "{mode:?}");
-        }
+    fn only_disabled_has_no_plan() {
+        let mut c = cfg();
+        c.spanning_tree.mode = StpMode::Disabled;
+        assert_eq!(plan(&c), None);
         assert_eq!(plan(&cfg()).unwrap().mst, None);
+        assert_eq!(plan(&cfg()).unwrap().pvst, None);
     }
 
     #[test]
@@ -325,6 +422,50 @@ mod tests {
             }]
         );
         assert_eq!(p.ports[1].mst, Vec::<PortMst>::new());
+    }
+
+    #[test]
+    fn rapid_pvst_plans_one_tree_per_domain_with_member_overrides() {
+        use nos_proto::BroadcastDomain;
+        let mut c = cfg();
+        c.spanning_tree.mode = StpMode::RapidPvst;
+        for sp in &mut c.switching_profiles {
+            sp.members[0].tag = VlanTag::Dot1q(10);
+            sp.members[0].stp_cost = Some(500);
+            sp.members[1].stp_priority = Some(32);
+        }
+        c.broadcast_domains = vec![BroadcastDomain {
+            name: "d1".into(),
+            stp_priority: Some(4096),
+            stp_hello_time: Some(1),
+            ..Default::default()
+        }];
+        let trees = plan(&c).unwrap().pvst.unwrap();
+        // sorted by VID: the untagged-only d2 is VLAN 1
+        let [d2, d1] = &trees[..] else {
+            panic!("{trees:?}")
+        };
+        assert_eq!((d1.domain.as_str(), d1.vid), ("d1", 10));
+        assert_eq!((d1.plan.ext, d1.plan.priority), (10, 4096));
+        assert_eq!(d1.plan.timers.hello, 1);
+        assert_eq!(d1.plan.timers.max_age, 20, "inherited");
+        let names: Vec<_> = d1.plan.ports.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["bond0", "eth1", "eth2"]);
+        assert!(d1.plan.ports.iter().all(|p| p.cost == Some(500)));
+        assert_eq!(d1.tags, [VlanTag::Dot1q(10); 3]);
+        assert_eq!(d1.plan.domain.as_deref(), Some("d1"));
+        assert_eq!((d2.vid, d2.plan.ext, d2.plan.priority), (1, 1, 32768));
+        assert_eq!(d2.tags, [VlanTag::Untagged; 3]);
+        assert_eq!(
+            d2.plan.ports[2].priority, 32,
+            "member beats the profile's 64"
+        );
+        assert_eq!(
+            d2.plan.ports[2].cost,
+            Some(77),
+            "profile cost when the member has none"
+        );
+        assert_eq!(d2.plan.timers.hello, 2);
     }
 
     #[test]

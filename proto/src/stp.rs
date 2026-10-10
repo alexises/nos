@@ -110,6 +110,13 @@ pub struct StpInstancePort {
     pub state: StpState,
     /// The peer is outside the region: the instance follows the CIST here.
     pub boundary: bool,
+    /// Rapid-PVST+: a BPDU named another VLAN than this tree's (PVID
+    /// inconsistency); the port is blocked in this tree (#322).
+    #[serde(default)]
+    pub inconsistent: bool,
+    /// Rapid-PVST+: the port talks 802.1D (PVST+) to its peer in this tree (#322).
+    #[serde(default)]
+    pub compat: bool,
     pub cost: u32,
     pub priority: u8,
     pub designated_bridge: String,
@@ -168,6 +175,10 @@ pub struct StpSummary {
     /// The MST region and its trees; `None` outside `mode mstp` (#321).
     #[serde(default)]
     pub mst: Option<StpMst>,
+    /// One tree per broadcast domain in `mode rapid-pvst` (#322); `id` is the
+    /// domain's VLAN. Empty in the other modes.
+    #[serde(default)]
+    pub pvst: Vec<StpInstance>,
 }
 
 impl Default for StpSummary {
@@ -184,6 +195,7 @@ impl Default for StpSummary {
             forward_delay_secs: 0,
             ports: Vec::new(),
             mst: None,
+            pvst: Vec::new(),
         }
     }
 }
@@ -205,6 +217,10 @@ pub enum StpRequest {
 }
 
 /// Messages sent from `nos-stpd` to a query client.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one-shot reply, the summary is the point"
+)]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum StpEvent {
     Summary(StpSummary),

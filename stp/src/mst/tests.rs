@@ -20,6 +20,7 @@ fn port(name: &str, mst: Vec<PortMst>) -> PortCfg {
         link_type: LinkType::Auto,
         prot: Protections::default(),
         mst,
+        members: Vec::new(),
     }
 }
 
@@ -43,6 +44,9 @@ fn plan(priority: u16, mst: MstPlan, costs: [Vec<PortMst>; 2]) -> Plan {
         timers: Timers::default(),
         ports: vec![port("eth1", c0), port("eth2", c1)],
         mst: Some(mst),
+        ext: 0,
+        domain: None,
+        pvst: None,
     }
 }
 

@@ -47,6 +47,10 @@ pub enum Command {
     },
     /// `show spanning-tree mst-config` — region name, revision, digest, VLAN map.
     ShowSpanningTreeMstConfig,
+    /// `show spanning-tree domain <bd>` — one Rapid-PVST+ tree.
+    ShowSpanningTreeDomain {
+        domain: String,
+    },
     /// `show bfd sessions [<peer>]` — every BFD session `nos-bfdd` holds, or
     /// only those to one peer address.
     ShowBfdSessions {
@@ -254,6 +258,12 @@ mod tests {
         assert_eq!(
             Command::parse("show spanning-tree mst-config"),
             Command::ShowSpanningTreeMstConfig
+        );
+        assert_eq!(
+            Command::parse("show spanning-tree domain bd1"),
+            Command::ShowSpanningTreeDomain {
+                domain: "bd1".into()
+            }
         );
     }
 
