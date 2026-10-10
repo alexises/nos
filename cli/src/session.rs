@@ -161,6 +161,10 @@ pub enum Resolved {
     ClearStpMcheck {
         interface: Option<String>,
     },
+    /// `clear spanning-tree err-disabled <i>` — valid in any mode.
+    ClearStpErrDisabled {
+        interface: String,
+    },
     SaveRunningConfig,
     OpenTransaction {
         name: String,
@@ -227,6 +231,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
         Command::ClearBgpPeer { instance, peer } => Resolved::ClearBgpPeer { instance, peer },
         Command::ClearStpMcheck { interface } => Resolved::ClearStpMcheck { interface },
+        Command::ClearStpErrDisabled { interface } => Resolved::ClearStpErrDisabled { interface },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
         }
@@ -329,6 +334,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ClearBgpSoftIn { .. }
         | Command::ClearBgpPeer { .. }
         | Command::ClearStpMcheck { .. }
+        | Command::ClearStpErrDisabled { .. }
         | Command::Unknown(_)
         | Command::Exit
         | Command::Save => {

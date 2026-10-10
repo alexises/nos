@@ -103,7 +103,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
   - `SetPortState { port, Discarding | Learning | Forwarding }`: program the kernel port.
   - `FlushFdb { port }`: flush that port's learned MACs now (the core does not wait for completion).
   - `Log(Event)`: role and root changes, plain data for the host to log.
-- Seams, present as variables at their default: `restrictedRole`/`restrictedTcn` false (#320), `mcheck` and `rstp_version` (#319), CIST only (#321).
+- Port protections (#320): `set_protections(port, Protections)`; `restrictedRole`/`restrictedTcn` are `root_guard`/`restricted_tcn`. `Action::ErrDisable`/`ErrRecover` ask the host to take a link down or up; `Event::{RootInconsistent, LoopInconsistent}` are plain facts. `mcheck` and `rstp_version` (#319), CIST only (#321).
 
 ## Deviations from the standard's text
 
@@ -121,6 +121,18 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 - `Bridge::mcheck(port)` sets the `mcheck` variable; `Engine::mcheck(None | Some(name))` applies it and returns the port count. The actor serves it from `StpRequest::Mcheck` (`StpEvent::Mcheck { ports }`, `User` and `Restd`).
 - Port states stay discarding/learning/forwarding: legacy Listening is `Discarding` (the kernel neither learns nor forwards in it).
 - Sim scenarios: a forced-STP bridge in a triangle, an all-legacy topology change (TCN, `FlushFdb`) and the `mcheck` round trip, in `stp/src/sim.rs`.
+
+## Port protections (#320)
+
+- `Bridge::receive` is the one place BPDU guard and filter act: a filtered or err-disabled port drops the BPDU; a guarded port that is `operEdge` and enabled is err-disabled (`Action::ErrDisable`, `portEnabled` forced false) before PRX sees the frame. `transmit` returns early on a filtered port.
+- Err-disable is held in the core (`err_disabled`, `err_remaining`): `set_port_enabled(true)` is ignored while it is set, `tick` counts the recovery down, `clear_err_disabled` (`clear`, timer) emits `Action::ErrRecover`.
+- Root guard: PRS skips a `root_guard` port as a root candidate; if it would have won, `root_inconsistent` is set and the port is selected Alternate (the existing "received info worse than ours" arm). It clears when the superior info ages out.
+- Loop guard: PIM entering AGED on a Root/Alternate/Backup `loop_guard` port sets `loop_inconsistent`; PRS selects such an aged port Alternate instead of Designated, and PIM leaves AGED (via UPDATE) when a BPDU arrives. A link down clears it (PIM DISABLED).
+- Restricted TCN: TCM NOTIFIED_TC skips `setTcPropTree` on a `restricted_tcn` port (a locally detected change still propagates).
+- Daemon: the engine maps `ErrDisable`/`ErrRecover` to `Out::ErrDisabled`, pushed as `InterfaceRequest::SetErrDisabled { port, disabled }`; `nos-interfaced` keeps the set (carried over resyncs) and applies the link administratively down. `interface_client` resends the set on reconnect. A plan change rebuilds the bridge but `restore_err_disabled` keeps a port that still has `bpdu-guard` down (the new recovery value wins); the others are released and log `port err-disabled recovered`. A fresh start releases every guarded port once.
+- `clear spanning-tree err-disabled <if>` is `StpRequest::ClearErrDisabled { interface }`, answered `StpEvent::ErrDisabledCleared { cleared }` (`User`/`Restd`).
+- Logs: `port err-disabled` (`port`, `reason=bpdu-guard`), `port err-disabled recovered`, `port root-inconsistent`/`root-consistent`, `port loop-inconsistent`/`loop-consistent` (all `port`).
+- `bpdu-filter` does not turn the port into an operEdge forwarding port (the standard has no such rule); it only silences BPDUs, so a non-edge filtered port still goes through the normal handshake and ends up forwarding.
 
 ## Run and read the simulator
 

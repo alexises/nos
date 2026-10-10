@@ -118,7 +118,10 @@ impl Sim {
                             self.deliver(i, port, &bpdu);
                         }
                         Action::FlushFdb { .. } => self.flushes += 1,
-                        Action::SetPortState { .. } | Action::Log(_) => {}
+                        Action::SetPortState { .. }
+                        | Action::ErrDisable { .. }
+                        | Action::ErrRecover { .. }
+                        | Action::Log(_) => {}
                     }
                 }
             }

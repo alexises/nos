@@ -91,6 +91,11 @@ pub enum Command {
     ClearStpMcheck {
         interface: Option<String>,
     },
+    /// `clear spanning-tree err-disabled <i>` — bring a port that BPDU guard
+    /// shut down back up.
+    ClearStpErrDisabled {
+        interface: String,
+    },
     Save,
     Help,
     /// `exit` | `quit` | `end`
@@ -216,6 +221,16 @@ mod tests {
             Command::parse("clear spanning-tree detected-protocols interface eth1"),
             Command::ClearStpMcheck {
                 interface: Some("eth1".into())
+            }
+        );
+    }
+
+    #[test]
+    fn clear_spanning_tree_err_disabled() {
+        assert_eq!(
+            Command::parse("clear spanning-tree err-disabled eth1"),
+            Command::ClearStpErrDisabled {
+                interface: "eth1".into()
             }
         );
     }

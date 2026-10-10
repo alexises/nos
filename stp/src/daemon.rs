@@ -24,7 +24,7 @@ use crate::interface_client::Push;
 use crate::link;
 use crate::link_client::{gate, Gate, LinkTable};
 use crate::ports::Plan;
-use crate::server::{McheckCmd, Snapshot};
+use crate::server::{Cmd, Snapshot};
 
 const TICK: Duration = Duration::from_secs(1);
 /// Seconds between the per-port BPDU receive summaries.
@@ -64,7 +64,7 @@ pub async fn run(
     mut links_rx: watch::Receiver<LinkTable>,
     push_tx: mpsc::Sender<Push>,
     snapshot: Snapshot,
-    mut cmds: mpsc::Receiver<McheckCmd>,
+    mut cmds: mpsc::Receiver<Cmd>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let (frames_tx, mut frames_rx) = mpsc::channel(256);
@@ -95,7 +95,7 @@ pub async fn run(
                 d.sync_links().await;
             }
             Some((name, frame)) = frames_rx.recv() => d.receive(&name, &frame).await,
-            Some(cmd) = cmds.recv() => d.mcheck(cmd).await,
+            Some(cmd) = cmds.recv() => d.command(cmd).await,
             _ = tick.tick() => d.on_tick().await,
             _ = shutdown.changed() => if *shutdown.borrow() { break },
         }
@@ -154,6 +154,13 @@ impl Daemon {
             .iter()
             .flat_map(|p| p.ports.iter().map(|_| PortRt::default()))
             .collect();
+        // A rebuilt bridge must not silently recover err-disabled ports.
+        let carried = self
+            .engine
+            .as_ref()
+            .map(Engine::err_disabled)
+            .unwrap_or_default();
+        let first = self.engine.is_none();
         self.engine = None;
         let mut init = Vec::new();
         if let Some(p) = &plan {
@@ -171,6 +178,31 @@ impl Daemon {
             }
         } else {
             info!("spanning tree idle (mode is not rstp)");
+        }
+        let release = |port: String| Out::ErrDisabled {
+            port,
+            disabled: false,
+        };
+        for (port, remaining) in carried {
+            let kept = self
+                .engine
+                .as_mut()
+                .is_some_and(|e| e.restore_err_disabled(&port, remaining));
+            if !kept {
+                info!(port = %port, "port err-disabled recovered");
+                init.push(release(port));
+            }
+        }
+        // ponytail: a fresh start cannot know which links an earlier nos-stpd
+        // left down, so it releases every guarded port once; a still-wrong
+        // port is err-disabled again by its next BPDU.
+        if let (true, Some(e)) = (first, self.engine.as_ref()) {
+            init.extend(
+                e.ports()
+                    .iter()
+                    .filter(|p| p.prot.bpdu_guard)
+                    .map(|p| release(p.name.clone())),
+            );
         }
         self.plan = plan;
         self.emit(init).await;
@@ -260,15 +292,28 @@ impl Daemon {
         }
     }
 
-    async fn mcheck(&mut self, cmd: McheckCmd) {
-        let Some(engine) = self.engine.as_mut() else {
-            let _ = cmd.reply.send(0);
-            return;
-        };
-        let (ports, out) = engine.mcheck(cmd.interface.as_deref());
-        info!(ports, "mcheck requested");
-        let _ = cmd.reply.send(ports);
-        self.emit(out).await;
+    async fn command(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::Mcheck { interface, reply } => {
+                let Some(engine) = self.engine.as_mut() else {
+                    let _ = reply.send(0);
+                    return;
+                };
+                let (ports, out) = engine.mcheck(interface.as_deref());
+                info!(ports, "mcheck requested");
+                let _ = reply.send(ports);
+                self.emit(out).await;
+            }
+            Cmd::ClearErrDisabled { interface, reply } => {
+                let Some(engine) = self.engine.as_mut() else {
+                    let _ = reply.send(false);
+                    return;
+                };
+                let (cleared, out) = engine.clear_err_disabled(&interface);
+                let _ = reply.send(cleared);
+                self.emit(out).await;
+            }
+        }
     }
 
     async fn on_tick(&mut self) {
@@ -317,6 +362,12 @@ impl Daemon {
                 }
                 Out::Flush(list) => {
                     let _ = self.push_tx.send(Push::Flush(list)).await;
+                }
+                Out::ErrDisabled { port, disabled } => {
+                    let _ = self
+                        .push_tx
+                        .send(Push::ErrDisabled { port, disabled })
+                        .await;
                 }
             }
         }

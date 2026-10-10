@@ -111,9 +111,24 @@ async fn resync(
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
             let previous = interfaces.read().await.clone();
-            let new_interfaces = build_from_config(&cfg, driver, &previous).await;
+            let mut new_interfaces = build_from_config(&cfg, driver, &previous).await;
             debug!(count = cfg.interfaces.len(), "reconciled interfaces");
-            *interfaces.write().await = new_interfaces;
+            // `nos-stpd` may have (un)shut a port while the build ran: its
+            // newer set wins, and the stale `up` just written is undone.
+            let mut live = interfaces.write().await;
+            let (ifaces, aggs) = new_interfaces.adopt_err_disabled(live.err_disabled_ports());
+            *live = new_interfaces;
+            drop(live);
+            for i in ifaces {
+                if let Err(e) = driver.apply(&i).await {
+                    warn!(interface = %i.name, error = %e, "failed to re-apply err-disabled");
+                }
+            }
+            for a in aggs {
+                if let Err(e) = driver.ensure_port_aggregate(&a).await {
+                    warn!(port_aggregate = %a.name, error = %e, "failed to re-apply err-disabled");
+                }
+            }
         }
         Err(e) => {
             warn!(error = %e, "failed to fetch running config, keeping previous state");

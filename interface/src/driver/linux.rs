@@ -908,7 +908,12 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             .await?;
         }
 
-        let mut link_set = LinkUnspec::new_with_index(index).up();
+        let mut link_set = LinkUnspec::new_with_index(index);
+        link_set = if desired.stp.err_disabled {
+            link_set.down()
+        } else {
+            link_set.up()
+        };
         // Unset means 1500, enforced — except on a bond member, whose MTU the
         // bonding driver sets from its bond's.
         let want = desired
@@ -1071,7 +1076,12 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         )
         .await?;
 
-        let mut link_set = LinkUnspec::new_with_index(index).up();
+        let mut link_set = LinkUnspec::new_with_index(index);
+        link_set = if desired.stp.err_disabled {
+            link_set.down()
+        } else {
+            link_set.up()
+        };
         if let Some(mtu) = mtu_change(&link, desired.mtu.unwrap_or(DEFAULT_MTU)) {
             link_set = link_set.mtu(mtu);
             info!(port_aggregate = %desired.name, mtu, "applied port aggregate mtu");

@@ -55,7 +55,9 @@ pub fn enter(b: &mut Bridge, i: usize, s: State) {
             if p.role == Role::Designated {
                 p.tc_ack = true;
             }
-            set_tc_prop_tree(b, i);
+            if !p.prot.restricted_tcn {
+                set_tc_prop_tree(b, i);
+            }
         }
         State::Propagating => {
             new_tc_while(b, i);

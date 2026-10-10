@@ -659,6 +659,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         |name| Command::ClearStpMcheck {
             interface: Some(name.to_string()),
         }),
+    cmd!(["clear" "spanning-tree" "err-disabled" (name: InterfaceName)],
+        Doc::Local {
+            summary: "Bring a port that BPDU guard shut down back up.",
+            detail: "Lifts the err-disabled state of <name> at once, instead of waiting for its \
+                     'bpdu-guard-recovery' timer. If the cause is still there (a BPDU arrives \
+                     on the edge port again) the port is err-disabled again. Reported as an \
+                     error if <name> is not err-disabled.",
+        },
+        Always,
+        |name| Command::ClearStpErrDisabled {
+            interface: name.to_string(),
+        }),
     cmd!(["clear" "bgp" (instance: BgpInstanceName) (peer: IpAddr) "soft-in"],
         Doc::Local {
             summary: "Ask a peer to resend its routes (RFC 2918 route refresh).",

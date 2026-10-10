@@ -438,9 +438,15 @@ pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
         return lines.join("\n");
     }
     lines.push(String::new());
+    let flagged = s.ports.iter().any(|p| !stp_flags(p).is_empty());
     lines.push(format!(
-        "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated",
-        "Name", "Role", "State", "Cost", "Prio"
+        "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated{}",
+        "Name",
+        "Role",
+        "State",
+        "Cost",
+        "Prio",
+        if flagged { "  Flags" } else { "" }
     ));
     for p in &s.ports {
         let designated = if p.designated_bridge.is_empty() {
@@ -448,16 +454,49 @@ pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
         } else {
             format!("{} {}", p.designated_bridge, p.designated_port)
         };
+        let flags = stp_flags(p);
         lines.push(format!(
-            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}",
+            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}{}",
             p.name,
             p.role.as_str(),
             p.state.as_str(),
             p.cost,
             p.priority,
+            if flags.is_empty() {
+                String::new()
+            } else {
+                format!("  {flags}")
+            }
         ));
     }
     lines.join("\n")
+}
+
+/// The port-protection column of `show spanning-tree` (#320): what is
+/// configured, then what is holding the port right now.
+fn stp_flags(p: &nos_proto::StpPortInfo) -> String {
+    let mut f = Vec::new();
+    for (on, name) in [
+        (p.edge, "Edge"),
+        (p.bpdu_guard, "BpduGuard"),
+        (p.bpdu_filter, "BpduFilter"),
+        (p.root_guard, "RootGuard"),
+        (p.loop_guard, "LoopGuard"),
+        (p.restricted_tcn, "RestrictedTcn"),
+        (p.root_inconsistent, "Root-inconsistent"),
+        (p.loop_inconsistent, "Loop-inconsistent"),
+    ] {
+        if on {
+            f.push(name.to_string());
+        }
+    }
+    if p.err_disabled {
+        f.push(match p.err_recovery_secs {
+            Some(n) => format!("Err-disabled (recovers in {n}s)"),
+            None => "Err-disabled (manual clear)".to_string(),
+        });
+    }
+    f.join(",")
 }
 
 #[cfg(test)]
@@ -491,12 +530,20 @@ mod stp_tests {
                 priority: 128,
                 designated_bridge: "8000.02:00:00:00:00:01".into(),
                 designated_port: "128.1".into(),
+                ..StpPortInfo::default()
             },
             StpPortInfo {
                 name: "eth2".into(),
                 ..StpPortInfo::default()
             },
         ];
+        s.ports[1].root_guard = true;
+        s.ports[1].err_disabled = true;
+        s.ports[1].err_recovery_secs = Some(12);
+        let flagged = render_spanning_tree(&s);
+        assert!(flagged.contains("Designated  Flags"));
+        assert!(flagged.contains("RootGuard,Err-disabled (recovers in 12s)"));
+        s.ports[1] = StpPortInfo::default();
         let out = render_spanning_tree(&s);
         assert!(out.contains("root id   8000.02:00:00:00:00:01 (root port eth1, cost 20000)"));
         assert!(out.contains("eth1         root        forwarding"));

@@ -5,6 +5,7 @@ use nos_proto::schema::{EdgePort, LinkType, SpanningTree, StpForceVersion};
 use nos_proto::{Config, StpMode, StpPortAssignment, StpPortState, LOOPBACK_PREFIX};
 
 use crate::actions::PortState;
+use crate::machines::Protections;
 use crate::timers::Timers;
 
 /// One STP port: a physical `Interface` or a `PortAggregate` (the bond, never
@@ -21,6 +22,7 @@ pub struct PortCfg {
     pub cost: Option<u32>,
     pub edge: EdgePort,
     pub link_type: LinkType,
+    pub prot: Protections,
 }
 
 /// Everything the engine is built from; a changed plan rebuilds the bridge.
@@ -100,6 +102,14 @@ fn port(
         cost: prof.and_then(|p| p.cost),
         edge: prof.map_or(EdgePort::Auto, |p| p.edge_port),
         link_type: prof.map_or(LinkType::Auto, |p| p.link_type),
+        prot: prof.map_or_else(Protections::default, |p| Protections {
+            bpdu_guard: p.bpdu_guard,
+            recovery: p.bpdu_guard_recovery,
+            bpdu_filter: p.bpdu_filter,
+            root_guard: p.root_guard,
+            loop_guard: p.loop_guard,
+            restricted_tcn: p.restricted_tcn,
+        }),
     })
 }
 
@@ -158,6 +168,9 @@ mod tests {
                 edge_port: EdgePort::Admin,
                 cost: Some(77),
                 priority: 64,
+                bpdu_guard: true,
+                bpdu_guard_recovery: Some(30),
+                root_guard: true,
                 ..Default::default()
             }],
             interfaces: vec![
@@ -194,6 +207,10 @@ mod tests {
         assert_eq!(p.ports[2].priority, 64);
         assert_eq!(p.ports[2].cost, Some(77));
         assert_eq!(p.ports[2].edge, EdgePort::Admin);
+        let prot = p.ports[2].prot;
+        assert!(prot.bpdu_guard && prot.root_guard && !prot.loop_guard);
+        assert_eq!(prot.recovery, Some(30));
+        assert_eq!(p.ports[1].prot, Protections::default());
         assert_eq!(p.priority, 32768);
     }
 

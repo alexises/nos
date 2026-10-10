@@ -5,7 +5,9 @@ use nos_proto::{Role, StpRequest};
 
 pub fn allowed(role: Role, req: &StpRequest) -> bool {
     match req {
-        StpRequest::GetSummary | StpRequest::Mcheck { .. } => {
+        StpRequest::GetSummary
+        | StpRequest::Mcheck { .. }
+        | StpRequest::ClearErrDisabled { .. } => {
             matches!(role, Role::User | Role::Restd)
         }
     }

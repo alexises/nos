@@ -73,9 +73,9 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
         InterfaceRequest::SubscribeLinks => {
             matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd)
         }
-        InterfaceRequest::SetStpPortStates(_) | InterfaceRequest::FlushFdb { .. } => {
-            role == Role::Stpd
-        }
+        InterfaceRequest::SetStpPortStates(_)
+        | InterfaceRequest::FlushFdb { .. }
+        | InterfaceRequest::SetErrDisabled { .. } => role == Role::Stpd,
     }
 }
 
@@ -195,6 +195,25 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             for (port, state) in writes {
                 if let Err(e) = ctx.driver.set_bridge_port_state(&port, state).await {
                     warn!(port = ?port, error = %e, "failed to set bridge port state");
+                }
+            }
+            None
+        }
+        InterfaceRequest::SetErrDisabled { port, disabled } => {
+            let (iface, agg) = ctx
+                .interfaces
+                .write()
+                .await
+                .set_err_disabled(&port, disabled);
+            info!(port = %port, disabled, "err-disabled changed");
+            if let Some(i) = iface {
+                if let Err(e) = ctx.driver.apply(&i).await {
+                    warn!(interface = %port, error = %e, "failed to apply err-disabled");
+                }
+            }
+            if let Some(a) = agg {
+                if let Err(e) = ctx.driver.ensure_port_aggregate(&a).await {
+                    warn!(port_aggregate = %port, error = %e, "failed to apply err-disabled");
                 }
             }
             None
@@ -417,7 +436,12 @@ mod authz_tests {
             port: String::new(),
             domain: String::new(),
         };
+        let err = InterfaceRequest::SetErrDisabled {
+            port: String::new(),
+            disabled: true,
+        };
         for role in Role::ALL {
+            assert_eq!(allowed(role, &err), role == Role::Stpd, "{role:?} err");
             assert_eq!(allowed(role, &set), role == Role::Stpd, "{role:?} set");
             assert_eq!(allowed(role, &flush), role == Role::Stpd, "{role:?} flush");
         }

@@ -879,6 +879,21 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub stp_force_version: Option<StpForceVersionArg>,
 
+    /// Creates the `stp-port-profile` [`STP_PROT_PROFILE`] and attaches it to
+    /// this interface (#320); the fields come from `--stp-profile-field`.
+    #[arg(long)]
+    pub stp_profile_interface: Option<String>,
+
+    /// `field=json` edit of [`STP_PROT_PROFILE`] (`bpdu-guard=true`,
+    /// `edge-port="Admin"`); an empty value (`bpdu-guard-recovery=`) deletes
+    /// the field. Repeatable.
+    #[arg(long)]
+    pub stp_profile_field: Vec<String>,
+
+    /// Detach [`STP_PROT_PROFILE`] from `--stp-profile-interface`.
+    #[arg(long)]
+    pub stp_profile_detach: bool,
+
     /// If set (requires `--port-aggregate`), sets the aggregate's Ethernet
     /// Segment DF election algorithm (`PortAggregateOp::SetDfAlgorithm`);
     /// needs an ESI at commit time. `modulo` resets it.
@@ -1563,6 +1578,9 @@ pub const BFD_PROFILE: &str = "fast";
 /// aggregate is refused without one (#317) unless spanning tree is disabled.
 pub const STP_GUARD_PROFILE: &str = "esi-guard";
 
+/// The `stp-port-profile` `--stp-profile-interface` creates and attaches (#320).
+pub const STP_PROT_PROFILE: &str = "e2e-prot";
+
 /// The S-BFD initiator profile `--sbfd-static-route` creates and references.
 pub const SBFD_PROFILE: &str = "sb";
 
@@ -1607,6 +1625,27 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
                 Some(format!("\"{STP_GUARD_PROFILE}\"")),
             ),
         ]);
+    }
+    if let Some(iface) = &args.stp_profile_interface {
+        for f in &args.stp_profile_field {
+            let (field, value) = f.split_once('=').unwrap_or((f, ""));
+            v.push((
+                vec![
+                    "stp-port-profile".to_string(),
+                    STP_PROT_PROFILE.to_string(),
+                    field.to_string(),
+                ],
+                (!value.is_empty()).then(|| value.to_string()),
+            ));
+        }
+        v.push((
+            vec![
+                "interface".to_string(),
+                iface.clone(),
+                "stp-port-profile".to_string(),
+            ],
+            (!args.stp_profile_detach).then(|| format!("\"{STP_PROT_PROFILE}\"")),
+        ));
     }
     if args.bfd_bgp || args.no_bfd_bgp {
         v.push((
@@ -1757,6 +1796,20 @@ fn stp_mode(args: &Args) -> nos_proto::StpMode {
         .map_or(nos_proto::StpMode::Disabled, Into::into)
 }
 
+/// One `--stp-profile-field name=json` on `p`: the kebab-case name is the
+/// REST/CLI field, an empty value deletes it. Panics on a malformed flag (a
+/// test fixture).
+fn set_profile_field(p: &mut nos_proto::schema::StpPortProfile, flag: &str) {
+    let (field, value) = flag.split_once('=').unwrap_or((flag, ""));
+    let mut json = serde_json::to_value(&*p).expect("profile serializes");
+    json[field.replace('-', "_")] = if value.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(value).expect("--stp-profile-field value is JSON")
+    };
+    *p = serde_json::from_value(json).expect("profile field has the right type");
+}
+
 /// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
@@ -1778,6 +1831,20 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
         }
         for a in config.port_aggregates.iter_mut().filter(|a| &a.name == agg) {
             a.stp_port_profile = Some(STP_GUARD_PROFILE.to_string());
+        }
+    }
+    if let Some(iface) = &args.stp_profile_interface {
+        for p in config
+            .stp_port_profiles
+            .iter_mut()
+            .filter(|p| p.name == STP_PROT_PROFILE)
+        {
+            for f in &args.stp_profile_field {
+                set_profile_field(p, f);
+            }
+        }
+        for i in config.interfaces.iter_mut().filter(|i| &i.name == iface) {
+            i.stp_port_profile = (!args.stp_profile_detach).then(|| STP_PROT_PROFILE.to_string());
         }
     }
     for i in config
@@ -1928,6 +1995,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if link != &args.interface {
         ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
             name: link.clone(),
+        }));
+    }
+    if args.stp_profile_interface.is_some() {
+        ops.push(ConfigOp::StpPortProfile(StpPortProfileOp::Ensure {
+            name: STP_PROT_PROFILE.to_string(),
         }));
     }
     if let Some(mtu) = args.mtu {

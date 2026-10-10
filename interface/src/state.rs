@@ -52,6 +52,8 @@ pub struct BroadcastDomainState {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StpPorts {
     pub on: bool,
+    /// BPDU guard shut the port (`SetErrDisabled`): the link stays down.
+    pub err_disabled: bool,
     pub states: HashMap<String, StpPortState>,
 }
 
@@ -172,6 +174,9 @@ pub struct Interfaces {
     /// by `build_from_config` like `lacp_active_members`, so a resync never
     /// resets a port the daemon has opened.
     stp_port_states: HashMap<(String, String), StpPortState>,
+    /// Ports `nos-stpd` err-disabled (#320); carried forward like
+    /// `stp_port_states`, so a resync never brings such a link back up.
+    err_disabled: HashSet<String>,
 }
 
 impl Interfaces {
@@ -285,6 +290,58 @@ impl Interfaces {
         writes
     }
 
+    /// Applies a `nos-stpd` push (`InterfaceRequest::SetErrDisabled`) and
+    /// returns the updated state of the port (an interface or an aggregate)
+    /// for the caller to apply at once.
+    pub fn set_err_disabled(
+        &mut self,
+        port: &str,
+        disabled: bool,
+    ) -> (Option<InterfaceState>, Option<PortAggregateState>) {
+        if disabled {
+            self.err_disabled.insert(port.to_string());
+        } else {
+            self.err_disabled.remove(port);
+        }
+        if let Some(i) = self.by_name.get_mut(port) {
+            i.stp.err_disabled = disabled;
+            return (Some(i.clone()), None);
+        }
+        if let Some(a) = self.by_port_aggregate.get_mut(port) {
+            a.stp.err_disabled = disabled;
+            return (None, Some(a.clone()));
+        }
+        (None, None)
+    }
+
+    /// Takes over `current` (a set that changed while a resync was building
+    /// this value) and returns the ports whose flag differs, for the caller
+    /// to apply again.
+    pub fn adopt_err_disabled(
+        &mut self,
+        current: &HashSet<String>,
+    ) -> (Vec<InterfaceState>, Vec<PortAggregateState>) {
+        let changed: Vec<String> = self
+            .err_disabled
+            .symmetric_difference(current)
+            .cloned()
+            .collect();
+        let (mut ifaces, mut aggs) = (Vec::new(), Vec::new());
+        for port in changed {
+            match self.set_err_disabled(&port, current.contains(&port)) {
+                (Some(i), _) => ifaces.push(i),
+                (_, Some(a)) => aggs.push(a),
+                _ => {}
+            }
+        }
+        (ifaces, aggs)
+    }
+
+    /// The ports `nos-stpd` holds down.
+    pub fn err_disabled_ports(&self) -> &HashSet<String> {
+        &self.err_disabled
+    }
+
     /// Whether spanning tree is on (`spanning-tree mode` not `disabled`).
     pub fn stp_on(&self) -> bool {
         self.stp_on
@@ -331,6 +388,7 @@ pub async fn build_from_config(
     let stp_on = cfg.spanning_tree.mode != StpMode::Disabled;
     let port_stp = |port: &str| StpPorts {
         on: stp_on,
+        err_disabled: previous.err_disabled.contains(port),
         states: previous
             .stp_port_states
             .iter()
@@ -483,6 +541,7 @@ pub async fn build_from_config(
         bfd_up_members: previous.bfd_up_members.clone(),
         stp_on,
         stp_port_states: previous.stp_port_states.clone(),
+        err_disabled: previous.err_disabled.clone(),
     }
 }
 
@@ -1273,6 +1332,28 @@ mod tests {
         // The #317 default is rstp: an untouched config blocks new ports.
         let default = Config::default();
         assert_eq!(default.spanning_tree.mode, StpMode::Rstp);
+    }
+
+    #[tokio::test]
+    async fn err_disabled_survives_a_resync_until_lifted() {
+        let config = stp_config(StpMode::Rstp);
+        let mut interfaces =
+            build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        let (iface, agg) = interfaces.set_err_disabled("eth0", true);
+        assert!(iface.unwrap().stp.err_disabled && agg.is_none());
+        assert_eq!(interfaces.set_err_disabled("nope", true), (None, None));
+        let mut interfaces = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
+        assert!(interfaces.get("eth0").unwrap().stp.err_disabled);
+        interfaces.set_err_disabled("eth0", false);
+        let mut interfaces = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
+        assert!(!interfaces.get("eth0").unwrap().stp.err_disabled);
+        // A resync that raced a push adopts the live set and re-applies.
+        let live: HashSet<String> = ["eth0".to_string()].into();
+        let (ifaces, aggs) = interfaces.adopt_err_disabled(&live);
+        assert_eq!(ifaces.len(), 1);
+        assert!(ifaces[0].stp.err_disabled && aggs.is_empty());
+        let (again, _) = interfaces.adopt_err_disabled(&live);
+        assert_eq!(again.len(), 0);
     }
 
     #[tokio::test]

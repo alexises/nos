@@ -1528,6 +1528,18 @@
         ],
         "type": "string"
       },
+      "ErrDisabledResult": {
+        "properties": {
+          "cleared": {
+            "description": "The port was err-disabled and is being brought back up.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cleared"
+        ],
+        "type": "object"
+      },
       "ErrorBody": {
         "description": "The body of every error response: an RFC 9457 problem document.\n`instance` is omitted (optional in the RFC; a handler can't see the URI).",
         "properties": {
@@ -4204,6 +4216,13 @@
       "StpPortInfo": {
         "description": "One spanning-tree port. Bridge and port ids are display strings\n(`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.",
         "properties": {
+          "bpdu_filter": {
+            "type": "boolean"
+          },
+          "bpdu_guard": {
+            "description": "The protections configured on the port (`stp-port-profile`, #320).",
+            "type": "boolean"
+          },
           "cost": {
             "description": "Path cost this port adds to the root path.",
             "format": "int32",
@@ -4217,6 +4236,30 @@
           "designated_port": {
             "type": "string"
           },
+          "edge": {
+            "description": "`operEdge`: the port is an edge port right now.",
+            "type": "boolean"
+          },
+          "err_disabled": {
+            "description": "BPDU guard took the port down.",
+            "type": "boolean"
+          },
+          "err_recovery_secs": {
+            "description": "Seconds until an `err_disabled` port recovers; `None`: manual `clear`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "loop_guard": {
+            "type": "boolean"
+          },
+          "loop_inconsistent": {
+            "description": "Loop guard holds the port in Discarding: BPDUs stopped arriving.",
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
           },
@@ -4225,8 +4268,18 @@
             "minimum": 0,
             "type": "integer"
           },
+          "restricted_tcn": {
+            "type": "boolean"
+          },
           "role": {
             "$ref": "#/components/schemas/StpRole"
+          },
+          "root_guard": {
+            "type": "boolean"
+          },
+          "root_inconsistent": {
+            "description": "Root guard holds the port in Discarding: a superior BPDU keeps arriving.",
+            "type": "boolean"
           },
           "state": {
             "$ref": "#/components/schemas/StpState"
@@ -6029,6 +6082,58 @@
           }
         },
         "summary": "Re-probe every spanning-tree port for RSTP (mcheck)",
+        "tags": [
+          "clear"
+        ]
+      }
+    },
+    "/v1/spanning-tree/port/{interface}/err-disabled/clear": {
+      "post": {
+        "operationId": "stp_clear_err_disabled",
+        "parameters": [
+          {
+            "description": "interface or port-aggregate name",
+            "in": "path",
+            "name": "interface",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrDisabledResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "not an err-disabled spanning-tree port"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-stpd is not running"
+          }
+        },
+        "summary": "Bring a port that BPDU guard shut down back up",
         "tags": [
           "clear"
         ]

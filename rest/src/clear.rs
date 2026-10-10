@@ -166,6 +166,50 @@ async fn stp_mcheck_on(d: &Daemons, interface: Option<String>) -> ApiResult<Json
             interface.unwrap_or_default()
         ))),
         StpEvent::Mcheck { ports } => Ok(Json(McheckResult { ports })),
-        other @ StpEvent::Summary(_) => Err(unexpected("nos-stpd", &other)),
+        other @ (StpEvent::Summary(_) | StpEvent::ErrDisabledCleared { .. }) => {
+            Err(unexpected("nos-stpd", &other))
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ErrDisabledResult {
+    /// The port was err-disabled and is being brought back up.
+    cleared: bool,
+}
+
+/// `clear spanning-tree err-disabled <name>`.
+#[utoipa::path(
+    post, path = "/v1/spanning-tree/port/{interface}/err-disabled/clear", tag = "clear",
+    summary = "Bring a port that BPDU guard shut down back up",
+    params(("interface" = String, Path, description = "interface or port-aggregate name")),
+    responses(
+        (status = 200, body = ErrDisabledResult),
+        (status = 404, body = ErrorBody, description = "not an err-disabled spanning-tree port"),
+        (status = 503, body = ErrorBody, description = "nos-stpd is not running")
+    )
+)]
+pub async fn stp_clear_err_disabled(
+    State(d): State<Daemons>,
+    Path(interface): Path<String>,
+) -> ApiResult<Json<ErrDisabledResult>> {
+    match d
+        .service(
+            ServiceRef::Stp,
+            StpRequest::ClearErrDisabled {
+                interface: interface.clone(),
+            },
+        )
+        .await?
+    {
+        StpEvent::ErrDisabledCleared { cleared: true } => {
+            Ok(Json(ErrDisabledResult { cleared: true }))
+        }
+        StpEvent::ErrDisabledCleared { cleared: false } => Err(ApiError::NotFound(format!(
+            "{interface} is not err-disabled"
+        ))),
+        other @ (StpEvent::Summary(_) | StpEvent::Mcheck { .. }) => {
+            Err(unexpected("nos-stpd", &other))
+        }
     }
 }

@@ -17,6 +17,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show lldp neighbors` / `show lldp neighbors detail` | `GET /v1/lldp/neighbors` |
 | `show lldp statistics` | `GET /v1/lldp/statistics` |
 | `show spanning-tree` | `GET /v1/spanning-tree` |
+| `clear spanning-tree err-disabled <if>` | `POST /v1/spanning-tree/port/{interface}/err-disabled/clear` |
 | `clear spanning-tree detected-protocols` / `... interface <if>` | `POST /v1/spanning-tree/mcheck` / `POST /v1/spanning-tree/port/{interface}/mcheck` |
 | `show bfd sessions` / `show bfd sessions <peer>` | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` |
 | `show bfd reflector` | `GET /v1/bfd/reflector` |

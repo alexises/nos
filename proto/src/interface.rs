@@ -199,6 +199,10 @@ pub enum InterfaceRequest {
     /// Fire-and-forget, sent by `nos-stpd`: flushes the dynamic FDB entries
     /// learned on one bridge port (topology change). No reply.
     FlushFdb { port: String, domain: String },
+    /// Fire-and-forget, sent by `nos-stpd` (#320): `port` (an `Interface` or
+    /// `PortAggregate` name) is err-disabled by BPDU guard. While set, the
+    /// link is administratively down and no resync brings it back up.
+    SetErrDisabled { port: String, disabled: bool },
 }
 
 /// The kernel state `nos-stpd` wants a bridge port in.
