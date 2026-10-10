@@ -30,7 +30,7 @@ Post-quantum mutual TLS over Unix sockets for every NOS daemon connection, with 
 
 ## Testing
 
-`testing` feature (a dev-dependency feature of every crate that tests IPC): `testing::shared()` is one CA for the whole test process, and under this feature `global()` falls back to a `user/test` identity from it, so a fake server is `shared().identity("ribd", "rt1").listen(path)` and the client under test needs no setup. Production builds never enable it.
+`testing` feature (dev-dependency only): `testing::shared()` is one CA per test process, and `global()` falls back to a `user/test` identity from it, so a fake server is `shared().identity("ribd", "rt1").listen(path)`. Ready-made fakes: `nos-test-support`. Production builds never enable it.
 
 ## Known ceilings
 

@@ -1,0 +1,29 @@
+[package]
+name    = "nos-test-support"
+publish = false
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The whole library. Off by default so `cargo build --workspace` never
+# unifies `nos-pki/testing` onto the daemons; consumers enable it in
+# `[dev-dependencies]` (`features = ["fakes"]`).
+fakes = ["nos-pki/testing"]
+
+[dependencies]
+nos-proto  = { workspace = true }
+nos-pki    = { workspace = true }
+tokio      = { workspace = true }
+tokio-util = { workspace = true }
+futures    = { workspace = true }
+tempfile   = { workspace = true }
+serde      = { workspace = true }
+ipnet      = { workspace = true }
+
+[dev-dependencies]
+# Self dev-dependency: turns `fakes` on for this crate's own tests.
+nos-test-support = { path = ".", features = ["fakes"] }
