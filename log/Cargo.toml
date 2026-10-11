@@ -34,3 +34,4 @@ rcgen        = { workspace = true }
 rustls       = { workspace = true }
 tokio-rustls = { workspace = true }
 sha2         = { workspace = true }
+nos-pki = { workspace = true, features = ["testing"] }

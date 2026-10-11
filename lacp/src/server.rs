@@ -88,3 +88,47 @@ fn summaries(aggregates: &SharedAggregates) -> Vec<PortAggregateLacpSummary> {
     all.sort_by(|a, b| a.aggregate.cmp(&b.aggregate));
     all
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::*;
+    use nos_pki::PeerId;
+
+    async fn ask(path: &Path, role: Role) -> Option<LacpEvent> {
+        let id = nos_pki::testing::shared().identity(role.as_str(), "x");
+        let s = id.connect(path, &PeerId::new("lacpd", "")).await.unwrap();
+        let (r, w) = tokio::io::split(s);
+        let mut r = FramedRead::new(r, IpcCodec::<LacpEvent>::default());
+        let mut w = FramedWrite::new(w, IpcCodec::<LacpRequest>::default());
+        w.send(LacpRequest::GetSummary).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), r.next())
+            .await
+            .unwrap_or_else(|_| panic!("{role:?}: connection left open"))
+            .map(|e| e.unwrap())
+    }
+
+    #[tokio::test]
+    async fn only_people_are_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lacp.sock");
+        let aggregates: SharedAggregates = Arc::new(Mutex::new(HashMap::new()));
+        let id = nos_pki::testing::shared().identity("lacpd", "");
+        let _server = start(&path, aggregates, &id).unwrap();
+
+        for role in Role::ALL {
+            let reply = ask(&path, role).await;
+            if matches!(role, Role::User | Role::Restd) {
+                assert!(
+                    matches!(reply, Some(LacpEvent::Summary(ref s)) if s.is_empty()),
+                    "{role:?}: {reply:?}"
+                );
+            } else {
+                assert!(reply.is_none(), "{role:?} must get no reply");
+            }
+        }
+    }
+}

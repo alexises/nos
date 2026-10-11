@@ -116,3 +116,63 @@ fn all_statistics(ports: &SharedPorts) -> Vec<LldpLinkStats> {
     all.sort_by(|a, b| a.interface.cmp(&b.interface));
     all
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::link::Port;
+    use nos_pki::PeerId;
+
+    type Reader = FramedRead<tokio::io::ReadHalf<Stream>, IpcCodec<LldpEvent>>;
+    type Writer = FramedWrite<tokio::io::WriteHalf<Stream>, IpcCodec<LldpRequest>>;
+
+    async fn connect(path: &Path, role: Role) -> (Reader, Writer) {
+        let id = nos_pki::testing::shared().identity(role.as_str(), "x");
+        let s = id.connect(path, &PeerId::new("lldpd", "")).await.unwrap();
+        let (r, w) = tokio::io::split(s);
+        (
+            FramedRead::new(r, IpcCodec::default()),
+            FramedWrite::new(w, IpcCodec::default()),
+        )
+    }
+
+    /// Every role: `User`/`Restd` get real replies, any other role has the
+    /// connection closed with no frame.
+    #[tokio::test]
+    async fn only_people_are_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lldp.sock");
+        let ports: SharedPorts = Arc::new(Mutex::new(HashMap::from([(
+            "eth0".to_string(),
+            Port::default(),
+        )])));
+        let id = nos_pki::testing::shared().identity("lldpd", "");
+        let _server = start(&path, ports, &id).unwrap();
+
+        for role in Role::ALL {
+            let (mut r, mut w) = connect(&path, role).await;
+            w.send(LldpRequest::GetStatistics).await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(5), r.next())
+                .await
+                .unwrap_or_else(|_| panic!("{role:?}: connection left open"));
+            if matches!(role, Role::User | Role::Restd) {
+                let Some(Ok(LldpEvent::Statistics(s))) = reply else {
+                    panic!("{role:?}: no statistics");
+                };
+                assert_eq!(s.len(), 1, "{role:?}");
+                assert_eq!(s[0].interface, "eth0");
+                w.send(LldpRequest::GetNeighbors).await.unwrap();
+                let Some(Ok(LldpEvent::Neighbors(n))) = r.next().await else {
+                    panic!("{role:?}: no neighbors");
+                };
+                assert_eq!(n.len(), 0);
+            } else {
+                assert!(reply.is_none(), "{role:?} must get no reply");
+            }
+        }
+    }
+}
