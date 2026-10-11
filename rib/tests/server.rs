@@ -498,3 +498,214 @@ async fn route_pushes_from_the_wrong_role_are_refused() {
         "no refused push may land a route"
     );
 }
+
+// ---- live role gate (#364) -------------------------------------------------
+// Every request, every role, over real mTLS: a refused role is disconnected
+// with no reply (a bounded wait, so a broken gate fails instead of hanging),
+// an allowed one is served. The expected sets are written out here on purpose,
+// independent of `server::allowed`.
+
+use nos_proto::Role;
+
+type GateServer = (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    Arc<RwLock<Rib>>,
+    Arc<RecordingDriver>,
+    tokio::task::JoinHandle<()>,
+);
+
+fn gate_server() -> GateServer {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let driver = Arc::new(RecordingDriver::default());
+    let server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib.clone(),
+        driver.clone(),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
+    (tmp, path, rib, driver, server)
+}
+
+/// The next reply, or `None` when the server closed instead; a connection
+/// left open with no reply fails the test.
+async fn reply_or_closed(reader: &mut Reader) -> Option<RibEvent> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), reader.next())
+        .await
+        .expect("connection left open with no reply")
+        .and_then(Result::ok)
+}
+
+type Case<'a> = (
+    &'a str,
+    fn() -> RibRequest,
+    &'a [Role],
+    fn(&RibEvent) -> bool,
+);
+
+#[tokio::test]
+async fn each_query_is_served_to_its_roles_and_refused_to_the_rest() {
+    let (_tmp, path, _rib, _driver, _server) = gate_server();
+    let people = [Role::User, Role::Restd];
+    let vrf = [
+        Role::User,
+        Role::Logd,
+        Role::Restd,
+        Role::Interfaced,
+        Role::Bgpd,
+        Role::Ospfd,
+        Role::Ospfv3d,
+        Role::Ribd,
+        Role::Fdbd,
+        Role::Bfdd,
+    ];
+    let igp = [Role::User, Role::Restd, Role::Bgpd];
+    let cases: [Case; 6] = [
+        (
+            "GetRoutes",
+            || RibRequest::GetRoutes,
+            &people,
+            |e| matches!(e, RibEvent::Routes(v) if v.is_empty()),
+        ),
+        (
+            "GetVrfName",
+            || RibRequest::GetVrfName,
+            &vrf,
+            |e| matches!(e, RibEvent::VrfName(None)),
+        ),
+        (
+            "GetTableId",
+            || RibRequest::GetTableId,
+            &vrf,
+            |e| matches!(e, RibEvent::TableId(None)),
+        ),
+        (
+            "IgpCosts",
+            || RibRequest::IgpCosts,
+            &igp,
+            |e| matches!(e, RibEvent::IgpCosts(v) if v.is_empty()),
+        ),
+        (
+            "BgpRouteCount",
+            || RibRequest::BgpRouteCount,
+            &[Role::Bgpd],
+            |e| matches!(e, RibEvent::BgpRouteCount(0)),
+        ),
+        (
+            "GetEvpnIrb",
+            || RibRequest::GetEvpnIrb,
+            &[Role::Fdbd],
+            |e| matches!(e, RibEvent::EvpnIrb(None)),
+        ),
+    ];
+    for (name, make, allowed, check) in cases {
+        for role in Role::ALL {
+            let (mut r, mut w) = connect_as(&path, role.as_str(), "x").await;
+            w.send(make()).await.unwrap();
+            let reply = reply_or_closed(&mut r).await;
+            if allowed.contains(&role) {
+                assert!(
+                    reply.as_ref().is_some_and(check),
+                    "{name} as {role:?}: {reply:?}"
+                );
+            } else {
+                assert!(reply.is_none(), "{name} as {role:?} must get no reply");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ospf_pushes_land_only_from_the_ospf_daemons() {
+    let (_tmp, path, rib, driver, _server) = gate_server();
+    for (i, role) in Role::ALL.into_iter().enumerate() {
+        let prefix: nos_proto::IpNet = format!("10.{i}.0.0/24").parse().unwrap();
+        let (mut r, mut w) = connect_as(&path, role.as_str(), "x").await;
+        w.send(RibRequest::PushOspfRoutes(vec![
+            nos_proto::OspfRouteUpdate::Add(nos_proto::OspfRoute {
+                prefix,
+                next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
+                backup_next_hop: None,
+                backup_interface_id: None,
+                metric: 10,
+                discard: false,
+                backup_tunnel: None,
+            }),
+        ]))
+        .await
+        .unwrap();
+        if matches!(role, Role::Ospfd | Role::Ospfv3d) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), driver.notify.notified())
+                .await
+                .unwrap_or_else(|_| panic!("{role:?}: the OSPF push was not applied"));
+            let guard = rib.read().await;
+            assert_eq!(
+                guard.best_route(&prefix).map(|e| e.source),
+                Some(RouteSource::Ospf),
+                "{role:?}"
+            );
+        } else {
+            assert!(
+                reply_or_closed(&mut r).await.is_none(),
+                "{role:?} must be disconnected"
+            );
+            assert!(rib.read().await.best_route(&prefix).is_none(), "{role:?}");
+        }
+    }
+    // An Add/Remove programs only the touched prefix: a delta, never a full apply.
+    assert_eq!(driver.applied_delta.lock().await.len(), 2);
+    assert!(driver.applied.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn evpn_pushes_are_applied_only_for_bgpd() {
+    let (_tmp, path, _rib, driver, _server) = gate_server();
+    for role in Role::ALL {
+        let (mut r, mut w) = connect_as(&path, role.as_str(), "x").await;
+        w.send(RibRequest::PushEvpnRoutes(nos_proto::EvpnUpdate::Full(
+            vec![],
+        )))
+        .await
+        .unwrap();
+        if role == Role::Bgpd {
+            tokio::time::timeout(std::time::Duration::from_secs(5), driver.notify.notified())
+                .await
+                .expect("the EVPN push was not applied to the kernel");
+        } else {
+            assert!(
+                reply_or_closed(&mut r).await.is_none(),
+                "{role:?} must be disconnected"
+            );
+        }
+    }
+    assert_eq!(driver.applied.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn bgp_pushes_are_refused_to_every_other_role() {
+    let (_tmp, path, rib, _driver, _server) = gate_server();
+    for role in Role::ALL {
+        if role == Role::Bgpd {
+            continue;
+        }
+        let (mut r, mut w) = connect_as(&path, role.as_str(), "x").await;
+        w.send(RibRequest::PushBgpRoutes(vec![
+            nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
+                prefix: "10.9.0.0/24".parse().unwrap(),
+                next_hops: vec!["10.0.0.1".parse().unwrap()],
+                backup_next_hop: None,
+            }),
+        ]))
+        .await
+        .unwrap();
+        assert!(
+            reply_or_closed(&mut r).await.is_none(),
+            "{role:?} must be disconnected"
+        );
+    }
+    assert_eq!(rib.read().await.all_routes().len(), 0);
+}

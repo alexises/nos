@@ -1238,3 +1238,84 @@ async fn a_peer_from_another_ca_is_rejected() {
         "an outsider must not get a config back"
     );
 }
+
+/// Every role against a read, an edit and a password-hash upgrade (#364):
+/// a refused request gets `permission denied` and the connection is closed,
+/// a permitted one gets any other reply. Bounded waits, so a broken gate
+/// fails fast instead of hanging.
+#[tokio::test]
+async fn every_role_is_gated_live_for_reads_edits_and_hash_upgrades() {
+    use nos_proto::Role;
+
+    async fn next(reader: &mut Reader) -> Option<Event> {
+        tokio::time::timeout(Duration::from_secs(5), reader.next())
+            .await
+            .expect("no reply and the connection is still open")
+            .and_then(Result::ok)
+    }
+    fn denied(e: Option<&Event>) -> bool {
+        matches!(e, Some(Event::Error(m)) if m == "permission denied")
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+
+    for role in Role::ALL {
+        let people = matches!(role, Role::User | Role::Restd);
+
+        let (mut reader, mut writer) = connect_as(&path, role.as_str(), "x").await;
+        writer.send(Request::Get).await.unwrap();
+        assert!(
+            matches!(next(&mut reader).await, Some(Event::Config(_))),
+            "{role:?} must read"
+        );
+
+        writer
+            .send(Request::OpenTransaction {
+                name: format!("tx-{}", role.as_str()),
+                base: TransactionBase::Blank,
+            })
+            .await
+            .unwrap();
+        let reply = next(&mut reader).await;
+        assert_eq!(
+            denied(reply.as_ref()),
+            !people,
+            "{role:?} editing: {reply:?}"
+        );
+        assert_eq!(
+            store
+                .get_transaction(&format!("tx-{}", role.as_str()))
+                .await
+                .is_ok(),
+            people,
+            "{role:?}: the transaction must exist only if the edit was allowed"
+        );
+
+        let (mut reader, mut writer) = connect_as(&path, role.as_str(), "x").await;
+        writer
+            .send(Request::UpgradePasswordHash {
+                user: "nobody".into(),
+                old: "a".into(),
+                new: "b".into(),
+            })
+            .await
+            .unwrap();
+        let reply = next(&mut reader).await;
+        assert_eq!(
+            denied(reply.as_ref()),
+            role != Role::Watchdog,
+            "{role:?} hash upgrade: {reply:?}"
+        );
+    }
+}
+
+#[test]
+fn a_listen_address_displays_with_its_scheme() {
+    let addr = ListenAddr::Unix("/run/nos/config.sock".into());
+    assert_eq!(addr.to_string(), "unix:/run/nos/config.sock");
+}
