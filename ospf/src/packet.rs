@@ -1656,4 +1656,25 @@ mod tests {
             digest_for(b"0123456789abcdef")
         );
     }
+
+    #[test]
+    fn decode_header_boundary_length() {
+        // Exactly HEADER_LEN bytes, version 2, type 1, router 1.1.1.1, area 0.0.0.2.
+        let mut hdr = vec![VERSION, TYPE_HELLO, 0, 24, 1, 1, 1, 1, 0, 0, 0, 2];
+        hdr.resize(HEADER_LEN, 0);
+        assert_eq!(
+            decode_header(&hdr),
+            Ok((
+                TYPE_HELLO,
+                Ipv4Addr::new(1, 1, 1, 1),
+                Ipv4Addr::new(0, 0, 0, 2)
+            ))
+        );
+        assert_eq!(
+            decode_header(&hdr[..HEADER_LEN - 1]),
+            Err(PacketError::Truncated)
+        );
+        hdr[0] = 3;
+        assert_eq!(decode_header(&hdr), Err(PacketError::BadVersion(3)));
+    }
 }

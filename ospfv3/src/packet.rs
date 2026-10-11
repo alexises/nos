@@ -1124,4 +1124,61 @@ mod tests {
         short.pop();
         assert_eq!(decode_hello(&short), Err(PacketError::TruncatedBody));
     }
+
+    /// Hand-written packet: 16-byte header (declared length = real length) + `body`.
+    fn raw(ty: u8, body: &[u8]) -> Vec<u8> {
+        let len = u16::try_from(HEADER_LEN + body.len()).unwrap();
+        let mut v = vec![VERSION, ty];
+        v.extend(len.to_be_bytes());
+        v.extend([9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 0, 0]); // router, area, cksum/instance/rsvd
+        v.extend_from_slice(body);
+        v
+    }
+
+    #[test]
+    fn decode_header_boundary_length() {
+        let pkt = raw(TYPE_HELLO, &[]);
+        assert_eq!(pkt.len(), HEADER_LEN);
+        assert_eq!(decode_header(&pkt).unwrap().3, &[] as &[u8]);
+        assert_eq!(
+            decode_header(&pkt[..HEADER_LEN - 1]),
+            Err(PacketError::Truncated)
+        );
+        // Declared length below the header, and above the data.
+        let mut bad = pkt.clone();
+        bad[3] = u8::try_from(HEADER_LEN).unwrap() - 1;
+        assert_eq!(decode_header(&bad), Err(PacketError::TruncatedBody));
+        bad[3] = u8::try_from(HEADER_LEN).unwrap() + 1;
+        assert_eq!(decode_header(&bad), Err(PacketError::TruncatedBody));
+    }
+
+    #[test]
+    fn dbd_body_exact_fixed_part_and_lsa_header_multiples() {
+        let fixed = [0u8; DBD_BODY_FIXED_LEN];
+        let got = decode_dbd(&raw(TYPE_DBD, &fixed)).unwrap();
+        assert!(got.lsa_headers.is_empty());
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &fixed[..DBD_BODY_FIXED_LEN - 1])),
+            Err(PacketError::TruncatedBody)
+        );
+        let with_one = [&fixed[..], &[0u8; lsa::LSA_HEADER_LEN]].concat();
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &with_one))
+                .unwrap()
+                .lsa_headers
+                .len(),
+            1
+        );
+        // One byte short of, and one byte past, a whole LSA header.
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &with_one[..with_one.len() - 1])),
+            Err(PacketError::TruncatedBody)
+        );
+        let mut over = with_one.clone();
+        over.push(0);
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &over)),
+            Err(PacketError::TruncatedBody)
+        );
+    }
 }
