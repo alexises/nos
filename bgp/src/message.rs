@@ -3468,10 +3468,7 @@ mod shutdown_message_tests {
 
     #[test]
     fn open_fixed_part_boundary() {
-        assert!(parse_open(&open_body(&[0]))
-            .unwrap()
-            .capabilities
-            .is_empty());
+        assert_eq!(parse_open(&open_body(&[0])).unwrap().capabilities, []);
         assert!(matches!(
             parse_open(&OPEN_FIXED),
             Err(WireError::MalformedOpen)
@@ -3490,15 +3487,11 @@ mod shutdown_message_tests {
         let mut params = vec![9, 253];
         params.extend(vec![0; 253]);
         assert_eq!(params.len(), 255);
-        assert!(parse_open(&open_body(&[&[255][..], &params].concat()))
-            .unwrap()
-            .capabilities
-            .is_empty());
+        let classic = open_body(&[&[255][..], &params].concat());
+        assert_eq!(parse_open(&classic).unwrap().capabilities, []);
         // 255/255: extended, total length 0 in exactly 13 bytes; 12 is malformed.
-        assert!(parse_open(&open_body(&[255, 255, 0, 0]))
-            .unwrap()
-            .capabilities
-            .is_empty());
+        let extended = open_body(&[255, 255, 0, 0]);
+        assert_eq!(parse_open(&extended).unwrap().capabilities, []);
         assert!(matches!(
             parse_open(&open_body(&[255, 255, 0])),
             Err(WireError::MalformedOpen)
@@ -3548,6 +3541,24 @@ mod shutdown_message_tests {
             parse_capabilities(&[CAP_ROUTE_REFRESH, 0, CAP_ROUTE_REFRESH]),
             Err(WireError::Truncated)
         ));
+    }
+
+    #[test]
+    fn known_capability_with_the_wrong_length_is_skipped_not_an_error() {
+        for (code, len) in [
+            (CAP_ROLE, 2),
+            (CAP_FOUR_OCTET_ASN, 3),
+            (CAP_MULTIPROTOCOL, 3),
+            (CAP_ROUTE_REFRESH, 1),
+            (CAP_ENHANCED_ROUTE_REFRESH, 1),
+            (CAP_EXTENDED_MESSAGE, 1),
+            (CAP_EXTENDED_NEXT_HOP, 5),
+            (CAP_ADD_PATH, 5),
+        ] {
+            let mut v = vec![code, len];
+            v.extend(vec![0; usize::from(len)]);
+            assert_eq!(parse_capabilities(&v).unwrap(), [], "code {code} len {len}");
+        }
     }
 
     #[test]
@@ -3700,7 +3711,7 @@ mod shutdown_message_tests {
         let got = base(&[1, 0, 16, 10, 1]).unwrap();
         assert_eq!(got.nlri.len(), 1);
         // A 2-byte SNPA fitting exactly, then no NLRI, vs one byte short.
-        assert!(base(&[1, 2, 0xaa, 0xbb]).unwrap().nlri.is_empty());
+        assert_eq!(base(&[1, 2, 0xaa, 0xbb]).unwrap().nlri.len(), 0);
         assert!(matches!(
             base(&[1, 2, 0xaa]),
             Err(WireError::MalformedUpdate)

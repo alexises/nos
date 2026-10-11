@@ -1153,10 +1153,31 @@ mod tests {
     }
 
     #[test]
+    fn dbd_fixed_part_fields_and_flags() {
+        // rsvd, options 0x01_0203, MTU 0x0405, rsvd, flags, DD sequence 0x0a0b0c0d.
+        let body = |flags: u8| [0, 1, 2, 3, 4, 5, 0, flags, 0x0a, 0x0b, 0x0c, 0x0d];
+        let d = decode_dbd(&raw(TYPE_DBD, &body(0x07))).unwrap();
+        assert_eq!(
+            (d.options, d.interface_mtu, d.dd_sequence_number),
+            (0x01_0203, 0x0405, 0x0a0b_0c0d)
+        );
+        assert!(d.init && d.more && d.master);
+        for (flags, want) in [
+            (DBD_FLAG_INIT, (true, false, false)),
+            (DBD_FLAG_MORE, (false, true, false)),
+            (DBD_FLAG_MASTER, (false, false, true)),
+            (0, (false, false, false)),
+        ] {
+            let d = decode_dbd(&raw(TYPE_DBD, &body(flags))).unwrap();
+            assert_eq!((d.init, d.more, d.master), want, "flags {flags:#x}");
+        }
+    }
+
+    #[test]
     fn dbd_body_exact_fixed_part_and_lsa_header_multiples() {
         let fixed = [0u8; DBD_BODY_FIXED_LEN];
         let got = decode_dbd(&raw(TYPE_DBD, &fixed)).unwrap();
-        assert!(got.lsa_headers.is_empty());
+        assert_eq!(got.lsa_headers.len(), 0);
         assert_eq!(
             decode_dbd(&raw(TYPE_DBD, &fixed[..DBD_BODY_FIXED_LEN - 1])),
             Err(PacketError::TruncatedBody)
