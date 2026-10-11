@@ -2033,6 +2033,7 @@ dependencies = [
  "nos-proto",
  "nos-rpl",
  "nos-tcp-auth",
+ "nos-test-support",
  "serde",
  "sha1",
  "sha2",

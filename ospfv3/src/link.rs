@@ -1508,6 +1508,33 @@ impl LinkManager {
             .store(grace_period.unwrap_or(0), Ordering::Relaxed);
     }
 
+    /// What the last resync handed to the setters (`reconcile` tests).
+    #[cfg(test)]
+    pub(crate) fn extended_lsa(&self) -> bool {
+        self.extended_lsa.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grace_period(&self) -> u16 {
+        self.grace_period.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bfd_wanted(&self) -> HashMap<String, BfdProfile> {
+        self.bfd.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn redistribute_policy(&self) -> Arc<CompiledPolicy> {
+        Arc::clone(&*self.redistribute_policy.lock().await)
+    }
+
+    /// The loopback prefixes of the last `reconcile`, per area.
+    #[cfg(test)]
+    pub(crate) async fn loopback_prefixes(&self) -> HashMap<Ipv4Addr, Vec<(Ipv6Net, u16)>> {
+        self.loopback_prefixes.lock().await.clone()
+    }
+
     fn lsa_types(&self) -> LsaTypes {
         LsaTypes::new(self.extended_lsa.load(Ordering::Relaxed))
     }
@@ -2651,7 +2678,7 @@ impl Host for LinkManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
