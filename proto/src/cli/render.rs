@@ -275,3 +275,359 @@ fn struct_words(fields: &[Field], default: Option<&Value>, obj: &Value) -> Vec<S
     first.extend(out);
     first
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "Vec<String> == [] is ambiguous to infer"
+)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::cli::{default_json, Node, Variant};
+    use crate::Config;
+
+    const fn fld(name: &'static str, kind: fn() -> Kind) -> Field {
+        Field {
+            name,
+            topic: None,
+            hidden: false,
+            secret: false,
+            render: None,
+            key: false,
+            words: None,
+            aliases: &[],
+            sugar: &[],
+            templates: &[],
+            kind,
+        }
+    }
+
+    fn s() -> Kind {
+        Kind::Str
+    }
+    fn u() -> Kind {
+        Kind::Uint(255)
+    }
+    fn b() -> Kind {
+        Kind::Bool
+    }
+    fn opt_u() -> Kind {
+        Kind::Option(u)
+    }
+    fn list_s() -> Kind {
+        Kind::List(s)
+    }
+
+    static INNER: Node = Node {
+        fields: &[fld("x", opt_u)],
+        default: None,
+    };
+    fn k_inner() -> Kind {
+        Kind::Struct(&INNER)
+    }
+    fn k_opt_inner() -> Kind {
+        Kind::Option(k_inner)
+    }
+
+    const KEY: Field = Field {
+        key: true,
+        ..fld("name", s)
+    };
+    const HID: Field = Field {
+        hidden: true,
+        ..fld("derived", s)
+    };
+    const SEC: Field = Field {
+        secret: true,
+        ..fld("pw", s)
+    };
+
+    static ELEM: Node = Node {
+        fields: &[KEY, HID, fld("n", u), fld("on", b), fld("opt", opt_u)],
+        default: None,
+    };
+    fn k_elem() -> Kind {
+        Kind::Struct(&ELEM)
+    }
+    fn list_elem() -> Kind {
+        Kind::List(k_elem)
+    }
+
+    fn lines(fields: &[Field], default: Option<&Value>, v: &Value) -> Vec<Line> {
+        let mut out = Vec::new();
+        object(fields, default, v, 0, &mut out);
+        out
+    }
+
+    fn l(d: usize, t: &str) -> Line {
+        (d, t.to_string())
+    }
+
+    #[test]
+    fn indent_is_two_spaces_per_depth() {
+        let got = indent(&[l(0, "a"), l(1, "b"), l(2, "c")]);
+        assert_eq!(got, "a\n  b\n    c");
+    }
+
+    #[test]
+    fn object_skips_hidden_key_and_defaults() {
+        let fields: &[Field] = &[KEY, HID, fld("n", u), fld("on", b), fld("opt", opt_u)];
+        let all = json!({"name":"k","derived":"d","n":0,"on":true,"opt":3});
+        assert_eq!(
+            lines(fields, None, &all),
+            [l(0, "n 0"), l(0, "on"), l(0, "opt 3")]
+        );
+        // No default: null and false are unset.
+        let none = json!({"name":"k","derived":"d","n":7,"on":false,"opt":null});
+        assert_eq!(lines(fields, None, &none), [l(0, "n 7")]);
+        // With a default: equal is omitted, different shown, both directions.
+        let d = json!({"n":5,"on":false,"opt":null});
+        let same = json!({"n":5,"on":false,"opt":null});
+        assert!(lines(fields, Some(&d), &same).is_empty());
+        let diff = json!({"n":6,"on":true,"opt":null});
+        assert_eq!(lines(fields, Some(&d), &diff), [l(0, "n 6"), l(0, "on")]);
+        let d = json!({"n":5,"on":true,"opt":null});
+        let off = json!({"n":5,"on":false,"opt":null});
+        assert_eq!(lines(fields, Some(&d), &off), [l(0, "on")]);
+    }
+
+    #[test]
+    fn object_empty_list_is_unset_without_default() {
+        let fields: &[Field] = &[fld("tag_list", list_s)];
+        assert!(lines(fields, None, &json!({"tag_list": []})).is_empty());
+        assert_eq!(
+            lines(fields, None, &json!({"tag_list": ["a","b"]})),
+            [l(0, "tag-list a"), l(0, "tag-list b")]
+        );
+    }
+
+    #[test]
+    fn field_secret_render_and_scalar() {
+        let mut out = Vec::new();
+        field(&SEC, &json!("hunter2"), 2, &mut out);
+        assert_eq!(out, [l(2, "pw <hidden>")]);
+
+        let f = Field {
+            render: Some(|v| vec![format!("a {v}"), "b".into()]),
+            ..fld("r", s)
+        };
+        let mut out = Vec::new();
+        field(&f, &json!(1), 1, &mut out);
+        assert_eq!(out, [l(1, "a 1"), l(1, "b")]);
+
+        let mut out = Vec::new();
+        field(&fld("n", u), &json!(9), 3, &mut out);
+        assert_eq!(out, [l(3, "n 9")]);
+    }
+
+    #[test]
+    fn field_keyed_list_nests_children_one_deeper() {
+        let f = fld("elems", list_elem);
+        let v = json!([
+            {"name":"a","derived":"x","n":1,"on":false,"opt":null},
+            {"name":"b","derived":"x","n":0,"on":true,"opt":2},
+        ]);
+        let mut out = Vec::new();
+        field(&f, &v, 1, &mut out);
+        assert_eq!(
+            out,
+            [
+                l(1, "elem a"),
+                l(2, "n 1"),
+                l(1, "elem b"),
+                l(2, "n 0"),
+                l(2, "on"),
+                l(2, "opt 2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn field_unkeyed_struct_list_is_one_line_per_element() {
+        fn plain() -> Kind {
+            Kind::Struct(&INNER)
+        }
+        fn list_plain() -> Kind {
+            Kind::List(plain)
+        }
+        let mut out = Vec::new();
+        field(
+            &fld("items", list_plain),
+            &json!([{"x": 1}, {"x": 2}]),
+            1,
+            &mut out,
+        );
+        assert_eq!(out, [l(1, "item x 1"), l(1, "item x 2")]);
+    }
+
+    #[test]
+    fn field_section_optional_struct_and_text_block() {
+        let mut out = Vec::new();
+        field(&fld("sec", k_inner), &json!({"x": 4}), 1, &mut out);
+        assert_eq!(out, [l(1, "sec"), l(2, "x 4")]);
+
+        // An empty section writes nothing at all.
+        let mut out = Vec::new();
+        field(&fld("sec", k_inner), &json!({"x": null}), 1, &mut out);
+        assert!(out.is_empty());
+
+        // An optional struct is one line of words, not a section.
+        let mut out = Vec::new();
+        field(&fld("sec", k_opt_inner), &json!({"x": 4}), 0, &mut out);
+        assert_eq!(out, [l(0, "sec x 4")]);
+
+        let mut out = Vec::new();
+        field(&fld("src", s), &json!("one\ntwo"), 1, &mut out);
+        assert_eq!(out, [l(1, "src"), l(2, "one"), l(2, "two")]);
+
+        let mut out = Vec::new();
+        field(&fld("src", s), &json!("one"), 1, &mut out);
+        assert_eq!(out, [l(1, "src one")]);
+    }
+
+    #[test]
+    fn words_of_scalars_and_options() {
+        assert!(words(&Kind::Option(u), &Value::Null).is_empty());
+        assert_eq!(words(&opt_u(), &json!(3)), ["3"]);
+        assert_eq!(words(&Kind::Ipv4, &json!("1.1.1.1")), ["1.1.1.1"]);
+        assert_eq!(words(&Kind::IpNet, &json!("10.0.0.0/8")), ["10.0.0.0/8"]);
+        assert_eq!(words(&Kind::Str, &json!("a")), ["a"]);
+        assert!(words(&Kind::Bool, &json!(true)).is_empty());
+        assert!(words(&list_s(), &json!(["a"])).is_empty());
+        assert_eq!(words(&Kind::Tuple(&[u, u]), &json!([1, 2])), ["1", "2"]);
+        assert_eq!(words(&Kind::Tuple(&[u, s]), &json!([7, "z"])), ["7", "z"]);
+    }
+
+    static REC: &[Field] = &[
+        fld("first", s),
+        fld("opt", opt_u),
+        fld("on", b),
+        fld("second", s),
+        SEC,
+        Field {
+            hidden: true,
+            ..fld("hid", s)
+        },
+        fld("many", list_s),
+    ];
+
+    #[test]
+    fn struct_words_bare_first_then_key_value() {
+        let v =
+            json!({"first":"x","opt":null,"on":true,"second":"y","pw":"p","hid":"h","many":["m"]});
+        assert_eq!(
+            struct_words(REC, None, &v),
+            ["x", "on", "second", "y", "pw", HIDDEN]
+        );
+        let v = json!({"first":"x","opt":4,"on":false,"second":"y","pw":"p","hid":"h","many":[]});
+        assert_eq!(
+            struct_words(REC, None, &v),
+            ["x", "opt", "4", "second", "y", "pw", HIDDEN]
+        );
+        // With a default only what differs is written; the bare field always.
+        let d = json!({"first":"","opt":null,"on":false,"second":"y","pw":"p","hid":"h","many":[]});
+        let v = json!({"first":"x","opt":null,"on":true,"second":"y","pw":"p","hid":"h","many":[]});
+        assert_eq!(struct_words(REC, Some(&d), &v), ["x", "on"]);
+        let v =
+            json!({"first":"x","opt":null,"on":false,"second":"z","pw":"p","hid":"h","many":[]});
+        assert_eq!(struct_words(REC, Some(&d), &v), ["x", "second", "z"]);
+    }
+
+    static VARIANTS: &[Variant] = &[
+        Variant {
+            name: "Plain",
+            words: None,
+            aliases: &[],
+            default: true,
+            payload: Payload::Unit,
+        },
+        Variant {
+            name: "WithNum",
+            words: Some("num"),
+            aliases: &[],
+            default: false,
+            payload: Payload::Newtype(u),
+        },
+        Variant {
+            name: "Rec",
+            words: None,
+            aliases: &[],
+            default: false,
+            payload: Payload::Struct(REC),
+        },
+    ];
+
+    #[test]
+    fn enum_words_by_payload() {
+        let k = Kind::Enum(VARIANTS);
+        assert_eq!(words(&k, &json!("Plain")), ["plain"]);
+        assert_eq!(words(&k, &json!({"WithNum": 5})), ["num", "5"]);
+        let rec = json!({"Rec":{"first":"x","opt":null,"on":true,"second":"y","pw":"p","hid":"h","many":[]}});
+        assert_eq!(
+            words(&k, &rec),
+            ["rec", "x", "on", "second", "y", "pw", HIDDEN]
+        );
+        assert!(words(&k, &json!("Nope")).is_empty());
+        assert!(words(&k, &json!(3)).is_empty());
+        assert!(words(&k, &json!({})).is_empty());
+    }
+
+    fn cfg(f: impl FnOnce(&mut Value)) -> Value {
+        let mut v = default_json::<Config>();
+        f(&mut v);
+        v
+    }
+
+    #[test]
+    fn render_root_real_config() {
+        assert!(render_root(&default_json::<Config>()).is_empty());
+        let c = cfg(|v| {
+            v["hostname"] = json!("r1");
+            v["lldp"]["tx_interval_secs"] = json!(10);
+            v["lldp"]["management_addresses"] = json!(["10.0.0.1"]);
+            v["community_aliases"] = json!([{"name":"a1","value":"65000:1"}]);
+            v["users"] = json!([{"name":"admin","password":"$argon2id$x"}]);
+        });
+        assert_eq!(
+            indent(&render_root(&c)),
+            "community-alias a1\n  value 65000:1\nhostname r1\nlldp\n  tx-interval 10\n  management-address 10.0.0.1\nuser admin\n  password <hidden>"
+        );
+    }
+
+    #[test]
+    fn render_at_paths() {
+        let c = cfg(|v| {
+            v["lldp"]["tx_interval_secs"] = json!(10);
+            v["community_aliases"] = json!([
+                {"name":"a1","value":"65000:1"},
+                {"name":"a2","value":"65000:2"},
+            ]);
+        });
+        let p = |s: &[&str]| s.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            render_at(&c, &p(&["community-alias", "a2"])),
+            Some(vec![l(0, "community-alias a2"), l(1, "value 65000:2")])
+        );
+        assert_eq!(
+            render_at(&c, &p(&["lldp"])),
+            Some(vec![l(0, "lldp"), l(1, "tx-interval 10")])
+        );
+        // Nothing there, or a scalar: no object to show.
+        assert_eq!(render_at(&c, &p(&["community-alias", "zz"])), None);
+        assert_eq!(render_at(&c, &p(&["community-alias"])), None);
+        assert_eq!(render_at(&c, &p(&["hostname"])), None);
+        assert_eq!(render_at(&c, &p(&["nope"])), None);
+        // The empty path is the whole config, with no header.
+        assert_eq!(render_at(&c, &[]), Some(render_root(&c)));
+    }
+
+    #[test]
+    fn unwrap_option_nests() {
+        fn oo() -> Kind {
+            Kind::Option(opt_u)
+        }
+        assert!(matches!(unwrap_option(oo()), Kind::Uint(255)));
+    }
+}

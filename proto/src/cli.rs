@@ -224,3 +224,53 @@ pub fn root() -> &'static Node {
         _ => unreachable!("Config derives Cli as a struct"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kebab_field_replaces_underscores() {
+        assert_eq!(kebab_field("area_id"), "area-id");
+        assert_eq!(kebab_field("x"), "x");
+    }
+
+    #[test]
+    fn kebab_cases() {
+        assert_eq!(kebab("BgpInstance"), "bgp-instance");
+        assert_eq!(kebab("Ospf"), "ospf");
+        assert_eq!(kebab("snake_case"), "snake-case");
+        assert_eq!(kebab("V4Only"), "v4-only");
+        assert_eq!(kebab(""), "");
+    }
+
+    static VARS: &[Variant] = &[
+        Variant {
+            name: "FooBar",
+            words: None,
+            aliases: &["fb"],
+            default: true,
+            payload: Payload::Unit,
+        },
+        Variant {
+            name: "Pay",
+            words: None,
+            aliases: &[],
+            default: false,
+            payload: Payload::Newtype(<u8 as CliValue>::kind),
+        },
+    ];
+
+    #[test]
+    fn enum_word_unit_only() {
+        let k = Kind::Enum(VARS);
+        assert_eq!(
+            enum_word(&k, "foo-bar"),
+            Some(Value::String("FooBar".into()))
+        );
+        assert_eq!(enum_word(&k, "fb"), Some(Value::String("FooBar".into())));
+        assert_eq!(enum_word(&k, "pay"), None);
+        assert_eq!(enum_word(&k, "nope"), None);
+        assert_eq!(enum_word(&Kind::Str, "foo-bar"), None);
+    }
+}
