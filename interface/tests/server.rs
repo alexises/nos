@@ -239,3 +239,107 @@ async fn push_bfd_members_enslaves_the_up_member_immediately() {
     }
     panic!("eth0 never became active");
 }
+
+// ---- live role gate (#364): refused roles are disconnected, others served ----
+
+async fn connect_role(
+    path: &std::path::Path,
+    role: nos_proto::Role,
+) -> (
+    FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<InterfaceEvent>>,
+    FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
+) {
+    let stream = shared()
+        .identity(role.as_str(), "x")
+        .connect(path, &nos_pki::PeerId::new("interfaced", ""))
+        .await
+        .unwrap();
+    let (r, w) = tokio::io::split(stream);
+    (
+        FramedRead::new(r, IpcCodec::<InterfaceEvent>::default()),
+        FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default()),
+    )
+}
+
+#[tokio::test]
+async fn queries_and_pushes_are_gated_by_role_over_the_live_server() {
+    use nos_proto::Role;
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("interface.sock");
+    let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
+    let _server = server::start(
+        &path,
+        interfaces,
+        Arc::new(NoopInterfaceDriver),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
+
+    let queriers = [
+        Role::User,
+        Role::Restd,
+        Role::Bgpd,
+        Role::Ribd,
+        Role::Ospfd,
+        Role::Ospfv3d,
+        Role::Fdbd,
+    ];
+    for role in Role::ALL {
+        // A query: a real reply for the allow list, a closed connection else.
+        let (mut r, mut w) = connect_role(&path, role).await;
+        w.send(InterfaceRequest::GetInterfaces).await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), r.next())
+            .await
+            .unwrap_or_else(|_| panic!("{role:?}: connection left open with no reply"));
+        if queriers.contains(&role) {
+            assert!(
+                matches!(reply, Some(Ok(InterfaceEvent::Interfaces(ref v))) if v.len() == 2),
+                "{role:?}: {reply:?}"
+            );
+        } else {
+            assert!(
+                reply.is_none_or(|e| e.is_err()),
+                "{role:?} must get no reply"
+            );
+        }
+
+        // The pushes are fire-and-forget: kept open for the one owner,
+        // disconnected for everyone else.
+        let pushes: [(Role, InterfaceRequest); 3] = [
+            (
+                Role::Lacpd,
+                InterfaceRequest::PushLacpMembers(nos_proto::LacpAggregateMembers {
+                    aggregate: "nope".to_string(),
+                    active_members: vec![],
+                }),
+            ),
+            (
+                Role::Bfdd,
+                InterfaceRequest::PushBfdMembers(nos_proto::BfdAggregateMembers {
+                    aggregate: "nope".to_string(),
+                    up_members: vec![],
+                }),
+            ),
+            (Role::Stpd, InterfaceRequest::SetStpPortStates(Vec::new())),
+        ];
+        for (owner, req) in pushes {
+            let (mut r, mut w) = connect_role(&path, role).await;
+            w.send(req).await.unwrap();
+            let next = tokio::time::timeout(
+                Duration::from_secs(if role == owner { 1 } else { 5 }),
+                r.next(),
+            )
+            .await;
+            if role == owner {
+                assert!(next.is_err(), "{role:?} owns this push but was refused");
+            } else {
+                let closed = next.unwrap_or_else(|_| {
+                    panic!("{role:?}: a refused push left the connection open")
+                });
+                assert!(closed.is_none_or(|e| e.is_err()), "{role:?}");
+            }
+        }
+    }
+}

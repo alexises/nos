@@ -450,6 +450,27 @@ mod authz_tests {
         assert!(shown.candidates[0].backup_tunnel);
     }
 
+    /// `backup_tunnel` needs a tunnel target, no plain backup next hop and no
+    /// discard: each condition alone must be enough to clear it (#364).
+    #[test]
+    fn a_tunnel_backup_needs_all_three_conditions() {
+        let route = |backup_next_hop, backup_tunnel, discard| OspfRoute {
+            prefix: "10.255.0.2/32".parse().unwrap(),
+            next_hops: vec![("10.1.2.2".parse().unwrap(), None)],
+            backup_next_hop,
+            backup_interface_id: None,
+            metric: 2,
+            discard,
+            backup_tunnel,
+        };
+        let ip: std::net::IpAddr = "10.255.0.4".parse().unwrap();
+        assert!(ospf_entry(route(None, Some(ip), false)).backup_tunnel);
+        assert!(!ospf_entry(route(None, None, false)).backup_tunnel);
+        assert!(!ospf_entry(route(Some(ip), None, false)).backup_tunnel);
+        assert!(!ospf_entry(route(Some(ip), Some(ip), false)).backup_tunnel);
+        assert!(!ospf_entry(route(None, Some(ip), true)).backup_tunnel);
+    }
+
     #[test]
     fn an_evpn_candidate_shows_its_router_mac_and_vni() {
         let vtep: std::net::IpAddr = "10.50.0.3".parse().unwrap();
