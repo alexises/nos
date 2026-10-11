@@ -1202,4 +1202,101 @@ mod tests {
             Err(PacketError::TruncatedBody)
         );
     }
+
+    // RFC 7166 section 4.1: the trailer starts at the header's Length; the
+    // Length field is bounds-checked before it is trusted.
+    fn signed_lsr(requests: usize) -> Vec<u8> {
+        let mut lsr = sample_lsr();
+        lsr.requests.truncate(requests);
+        signed(&OspfPacket::Lsr(lsr), 3)
+    }
+
+    fn set_length(wire: &mut [u8], length: usize) {
+        wire[2..4].copy_from_slice(&u16::try_from(length).unwrap().to_be_bytes());
+    }
+
+    #[test]
+    fn trailer_length_field_boundary() {
+        let wire = signed_lsr(1);
+        let a = auth();
+        for bad in [0, HEADER_LEN - 1, wire.len() + 1] {
+            let mut w = wire.clone();
+            set_length(&mut w, bad);
+            assert_eq!(
+                verify_trailer(&w, Some(&a), SRC),
+                Err(PacketError::TruncatedBody),
+                "length={bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_only_packet_with_trailer_verifies() {
+        let wire = signed_lsr(0);
+        assert_eq!(
+            usize::from(u16::from_be_bytes([wire[2], wire[3]])),
+            HEADER_LEN
+        );
+        assert_eq!(
+            verify_trailer(&wire, Some(&auth()), SRC),
+            Ok((&wire[..HEADER_LEN], Some(3)))
+        );
+    }
+
+    #[test]
+    fn short_trailer_is_auth_type_mismatch_and_digestless_is_truncated() {
+        let wire = signed_lsr(1);
+        let length = usize::from(u16::from_be_bytes([wire[2], wire[3]]));
+        // Fewer than the 16 trailer-header bytes (type bytes still present
+        // for n >= 2): cannot be an authentication trailer.
+        for n in [0, 2, TRAILER_HEADER_LEN - 1] {
+            assert_eq!(
+                verify_trailer(&wire[..length + n], Some(&auth()), SRC),
+                Err(PacketError::AuthTypeMismatch),
+                "trailer bytes={n}"
+            );
+        }
+        // Right type, full header, digest missing.
+        assert_eq!(
+            verify_trailer(&wire[..length + TRAILER_HEADER_LEN], Some(&auth()), SRC),
+            Err(PacketError::TruncatedBody)
+        );
+    }
+
+    #[test]
+    fn trailer_with_wrong_auth_type_is_auth_type_mismatch() {
+        let wire = signed_lsr(1);
+        let length = usize::from(u16::from_be_bytes([wire[2], wire[3]]));
+        for ty in [0u16, 2] {
+            let mut w = wire.clone();
+            w[length..length + 2].copy_from_slice(&ty.to_be_bytes());
+            assert_eq!(
+                verify_trailer(&w, Some(&auth()), SRC),
+                Err(PacketError::AuthTypeMismatch),
+                "type={ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn datagram_shorter_than_header_is_truncated_and_bare_header_has_no_trailer() {
+        let wire = signed_lsr(0);
+        for n in [0, 1, 2, 10, HEADER_LEN - 1] {
+            assert_eq!(
+                verify_trailer(&wire[..n], Some(&auth()), SRC),
+                Err(PacketError::Truncated),
+                "len={n}"
+            );
+            // No auth configured: handed to `decode` untouched.
+            assert_eq!(
+                verify_trailer(&wire[..n], None, SRC),
+                Ok((&wire[..n], None))
+            );
+        }
+        // Exactly the header, Length == HEADER_LEN, but no trailer after it.
+        assert_eq!(
+            verify_trailer(&wire[..HEADER_LEN], Some(&auth()), SRC),
+            Err(PacketError::AuthTypeMismatch)
+        );
+    }
 }

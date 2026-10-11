@@ -1677,4 +1677,129 @@ mod tests {
         hdr[0] = 3;
         assert_eq!(decode_header(&hdr), Err(PacketError::BadVersion(3)));
     }
+
+    // RFC 2328 Appendix D.4.3 (AuType 2) and RFC 7474 section 3 (AuType 3):
+    // the header's Length field locates the digest, so it is bounds-checked
+    // before it is trusted.
+    const EXT_SRC: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
+    type Keys = Vec<(u16, CryptoAlgorithm, Vec<u8>)>;
+
+    fn crypto_wire(extended: bool, body: &[u8]) -> (Vec<u8>, Keys) {
+        let algorithm = if extended {
+            CryptoAlgorithm::HmacSha256
+        } else {
+            CryptoAlgorithm::Md5
+        };
+        let auth = OutgoingAuth::Crypto {
+            key_id: 1,
+            algorithm,
+            key: b"secret",
+            sequence: 7,
+            extended: extended.then_some(EXT_SRC),
+        };
+        let wire = encode_packet(
+            TYPE_HELLO,
+            Ipv4Addr::new(9, 9, 9, 9),
+            Ipv4Addr::UNSPECIFIED,
+            body,
+            &auth,
+        );
+        (wire, vec![(1, algorithm, b"secret".to_vec())])
+    }
+
+    fn set_length(wire: &mut [u8], length: usize) {
+        wire[2..4].copy_from_slice(&u16::try_from(length).unwrap().to_be_bytes());
+    }
+
+    #[test]
+    fn crypto_length_field_boundaries_both_arms() {
+        for extended in [false, true] {
+            let (wire, keys) = crypto_wire(extended, &[0u8; 8]);
+            let policy = AuthPolicy::Crypto {
+                keys: &keys,
+                extended: extended.then_some(EXT_SRC),
+            };
+            // Header-only packet: Length == HEADER_LEN is the exact boundary.
+            let (header_only, _) = crypto_wire(extended, &[]);
+            assert_eq!(
+                verify_auth(&header_only, &policy),
+                Ok(&[][..]),
+                "ext={extended}"
+            );
+            // Below the header, Length cannot locate a digest.
+            for bad in [0, HEADER_LEN - 1] {
+                let mut w = wire.clone();
+                set_length(&mut w, bad);
+                assert_eq!(
+                    verify_auth(&w, &policy),
+                    Err(PacketError::TruncatedBody),
+                    "ext={extended} length={bad}"
+                );
+            }
+            // Beyond the datagram.
+            let mut w = wire.clone();
+            set_length(&mut w, wire.len() + 1);
+            assert_eq!(verify_auth(&w, &policy), Err(PacketError::TruncatedBody));
+            // Length reaching exactly the end of the datagram leaves no digest.
+            let mut w = wire.clone();
+            set_length(&mut w, wire.len());
+            assert_eq!(verify_auth(&w, &policy), Err(PacketError::TruncatedBody));
+        }
+    }
+
+    #[test]
+    fn crypto_digest_length_and_truncation_both_arms() {
+        for extended in [false, true] {
+            let (wire, keys) = crypto_wire(extended, &[0u8; 8]);
+            let policy = AuthPolicy::Crypto {
+                keys: &keys,
+                extended: extended.then_some(EXT_SRC),
+            };
+            assert!(verify_auth(&wire, &policy).is_ok());
+            let len_at = if extended { 23 } else { 19 };
+            let digest_len = wire[len_at];
+            for bad in [digest_len - 1, digest_len + 1] {
+                let mut w = wire.clone();
+                w[len_at] = bad;
+                assert_eq!(verify_auth(&w, &policy), Err(PacketError::TruncatedBody));
+            }
+            let mut short = wire.clone();
+            short.pop();
+            assert_eq!(
+                verify_auth(&short, &policy),
+                Err(PacketError::TruncatedBody)
+            );
+            let mut flipped = wire.clone();
+            *flipped.last_mut().unwrap() ^= 1;
+            assert_eq!(verify_auth(&flipped, &policy), Err(PacketError::AuthFailed));
+        }
+    }
+
+    #[test]
+    fn crypto_datagram_must_hold_length_plus_trailer_before_key_lookup() {
+        // No key matches, so a datagram that passes the size check reports
+        // `AuthFailed` and one that does not reports `TruncatedBody`: this
+        // pins the exact size boundary of each arm (the classic digest
+        // follows Length directly; the extended arm has the 8-byte sequence
+        // number first, RFC 7474 section 3).
+        for (extended, tail) in [(false, 0usize), (true, 8)] {
+            let (wire, _) = crypto_wire(extended, &[0u8; 8]);
+            let length = usize::from(u16::from_be_bytes([wire[2], wire[3]]));
+            let policy = AuthPolicy::Crypto {
+                keys: &[],
+                extended: extended.then_some(EXT_SRC),
+            };
+            assert_eq!(
+                verify_auth(&wire[..length + tail - 1], &policy),
+                Err(PacketError::TruncatedBody),
+                "ext={extended}"
+            );
+            assert_eq!(
+                verify_auth(&wire[..length + tail], &policy),
+                Err(PacketError::AuthFailed),
+                "ext={extended}"
+            );
+        }
+    }
 }
