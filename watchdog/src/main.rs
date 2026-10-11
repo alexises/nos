@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -7,8 +8,8 @@ use nos_log_client::ForwardingLayer;
 use nos_proto::diff::REST_API_LABEL;
 use nos_proto::diff::VNI_LABEL;
 use nos_proto::{
-    DiffScope, Role, DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_PKI_DIR,
-    DEFAULT_WATCHDOG_SOCKET,
+    ConfigDiff, DiffScope, Role, SectionDiff, DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET,
+    DEFAULT_PKI_DIR, DEFAULT_WATCHDOG_SOCKET,
 };
 use nos_watchdog::{
     broker::{self, Sockets},
@@ -270,6 +271,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let policy = BackoffPolicy::default();
     let registry = EndpointRegistry::default();
+    let managed = managed_families(&args, &pki, policy, &registry);
     let mut tasks = vec![
         pki.spawn_self_rotation(shutdown_rx.clone()),
         tokio::spawn(
@@ -311,159 +313,16 @@ async fn main() -> anyhow::Result<()> {
         policy,
         shutdown_rx.clone(),
     )));
-    // The three dynamically-spawned daemon families: one process per named
-    // config object, all supervised by the same `instances::manage`.
-    let managed = [
-        Managed {
-            scope: DiffScope::BgpInstances,
-            section: |d| &d.bgp_instances,
-            bin: args.bgpd_bin,
-            flags: args.bgpd_flags,
-            name_flag: "--instance",
-            daemon: "nos-bgpd",
-            role: Role::Bgpd,
-            pki: pki.clone(),
-            noun: "BGP instance",
-            endpoint: Some(Endpoint {
-                kind: EndpointKind::BgpInstance,
-                socket_prefix: "bgp",
-            }),
-            claim_label: None,
-            config_socket: args.config_socket.clone(),
-            log_socket: args.log_socket.clone(),
-            watchdog_listen_socket: args.listen_socket.clone(),
-            run_dir: args.run_dir.clone(),
-            policy,
-            registry: registry.clone(),
-        },
-        Managed {
-            scope: DiffScope::RoutingTables,
-            section: |d| &d.routing_tables,
-            bin: args.ribd_bin,
-            flags: args.ribd_flags,
-            name_flag: "--table",
-            daemon: "nos-ribd",
-            role: Role::Ribd,
-            pki: pki.clone(),
-            noun: "routing table",
-            endpoint: Some(Endpoint {
-                kind: EndpointKind::RibTable,
-                socket_prefix: "rib",
-            }),
-            claim_label: None,
-            config_socket: args.config_socket.clone(),
-            log_socket: args.log_socket.clone(),
-            watchdog_listen_socket: args.listen_socket.clone(),
-            run_dir: args.run_dir.clone(),
-            policy,
-            registry: registry.clone(),
-        },
-        Managed {
-            scope: DiffScope::OspfInstances,
-            section: |d| &d.ospf_instances,
-            bin: args.ospfd_bin,
-            flags: args.ospfd_flags,
-            name_flag: "--instance",
-            daemon: "nos-ospfd",
-            role: Role::Ospfd,
-            pki: pki.clone(),
-            noun: "OSPF instance",
-            endpoint: Some(Endpoint {
-                kind: EndpointKind::OspfInstance,
-                socket_prefix: "ospf",
-            }),
-            claim_label: None,
-            config_socket: args.config_socket.clone(),
-            log_socket: args.log_socket.clone(),
-            watchdog_listen_socket: args.listen_socket.clone(),
-            run_dir: args.run_dir.clone(),
-            policy,
-            registry: registry.clone(),
-        },
-        Managed {
-            scope: DiffScope::Ospfv3Instances,
-            section: |d| &d.ospfv3_instances,
-            bin: args.ospfv3d_bin,
-            flags: args.ospfv3d_flags,
-            name_flag: "--instance",
-            daemon: "nos-ospfv3d",
-            role: Role::Ospfv3d,
-            pki: pki.clone(),
-            noun: "OSPFv3 instance",
-            endpoint: Some(Endpoint {
-                kind: EndpointKind::Ospfv3Instance,
-                socket_prefix: "ospfv3",
-            }),
-            claim_label: None,
-            config_socket: args.config_socket.clone(),
-            log_socket: args.log_socket.clone(),
-            watchdog_listen_socket: args.listen_socket.clone(),
-            run_dir: args.run_dir.clone(),
-            policy,
-            registry: registry.clone(),
-        },
-        // One `nos-fdbd` per broadcast domain, but only while the domain has a
-        // `vni` (`claim_label`, like `nos-restd` on `rest-api`) — a plain L2
-        // domain has no EVPN/VXLAN state for a daemon to own.
-        Managed {
-            scope: DiffScope::BroadcastDomains,
-            section: |d| &d.broadcast_domains,
-            bin: args.fdbd_bin,
-            flags: args.fdbd_flags,
-            name_flag: "--domain",
-            daemon: "nos-fdbd",
-            role: Role::Fdbd,
-            pki: pki.clone(),
-            noun: "broadcast domain",
-            endpoint: Some(Endpoint {
-                kind: EndpointKind::FdbDomain,
-                socket_prefix: "fdb",
-            }),
-            claim_label: Some(VNI_LABEL),
-            config_socket: args.config_socket.clone(),
-            log_socket: args.log_socket.clone(),
-            watchdog_listen_socket: args.listen_socket.clone(),
-            run_dir: args.run_dir.clone(),
-            policy,
-            registry: registry.clone(),
-        },
-        // Opt-in per routing table (its `rest_api` field), not one per
-        // table — hence `claim_label`. No IPC query listener of its own, so
-        // no endpoint registration.
-        Managed {
-            scope: DiffScope::RoutingTables,
-            section: |d| &d.routing_tables,
-            bin: args.restd_bin,
-            flags: args.restd_flags,
-            name_flag: "--table",
-            daemon: "nos-restd",
-            role: Role::Restd,
-            pki: pki.clone(),
-            noun: "REST API",
-            endpoint: None,
-            claim_label: Some(REST_API_LABEL),
-            config_socket: args.config_socket.clone(),
-            log_socket: args.log_socket.clone(),
-            watchdog_listen_socket: args.listen_socket.clone(),
-            run_dir: args.run_dir.clone(),
-            policy,
-            registry: registry.clone(),
-        },
-    ];
     for m in managed {
         tasks.push(tokio::spawn(instances::manage(m, shutdown_rx.clone())));
     }
 
-    let interfaced_args = std::iter::once("--listen-socket".to_string())
-        .chain(std::iter::once(
-            args.interfaced_listen_socket.display().to_string(),
-        ))
-        .chain(std::iter::once("--watchdog-socket".to_string()))
-        .chain(std::iter::once(args.listen_socket.display().to_string()))
-        .chain(std::iter::once("--log-socket".to_string()))
-        .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.interfaced_flags)
-        .collect();
+    let interfaced_args = fixed_args(
+        &args.interfaced_listen_socket,
+        &args.listen_socket,
+        &args.log_socket,
+        args.interfaced_flags,
+    );
     let interfaced_spec = ProcessSpec::new("nos-interfaced", args.interfaced_bin, interfaced_args)
         .with_identity(pki.clone(), Role::Interfaced, "");
     tasks.push(tokio::spawn(supervise_one(
@@ -472,16 +331,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
-    let lacpd_args = std::iter::once("--listen-socket".to_string())
-        .chain(std::iter::once(
-            args.lacpd_listen_socket.display().to_string(),
-        ))
-        .chain(std::iter::once("--watchdog-socket".to_string()))
-        .chain(std::iter::once(args.listen_socket.display().to_string()))
-        .chain(std::iter::once("--log-socket".to_string()))
-        .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.lacpd_flags)
-        .collect();
+    let lacpd_args = fixed_args(
+        &args.lacpd_listen_socket,
+        &args.listen_socket,
+        &args.log_socket,
+        args.lacpd_flags,
+    );
     let lacpd_spec = ProcessSpec::new("nos-lacpd", args.lacpd_bin, lacpd_args).with_identity(
         pki.clone(),
         Role::Lacpd,
@@ -493,16 +348,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
-    let lldpd_args = std::iter::once("--listen-socket".to_string())
-        .chain(std::iter::once(
-            args.lldpd_listen_socket.display().to_string(),
-        ))
-        .chain(std::iter::once("--watchdog-socket".to_string()))
-        .chain(std::iter::once(args.listen_socket.display().to_string()))
-        .chain(std::iter::once("--log-socket".to_string()))
-        .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.lldpd_flags)
-        .collect();
+    let lldpd_args = fixed_args(
+        &args.lldpd_listen_socket,
+        &args.listen_socket,
+        &args.log_socket,
+        args.lldpd_flags,
+    );
     let lldpd_spec = ProcessSpec::new("nos-lldpd", args.lldpd_bin, lldpd_args).with_identity(
         pki.clone(),
         Role::Lldpd,
@@ -514,16 +365,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
-    let bfdd_args = std::iter::once("--listen-socket".to_string())
-        .chain(std::iter::once(
-            args.bfdd_listen_socket.display().to_string(),
-        ))
-        .chain(std::iter::once("--watchdog-socket".to_string()))
-        .chain(std::iter::once(args.listen_socket.display().to_string()))
-        .chain(std::iter::once("--log-socket".to_string()))
-        .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.bfdd_flags)
-        .collect();
+    let bfdd_args = fixed_args(
+        &args.bfdd_listen_socket,
+        &args.listen_socket,
+        &args.log_socket,
+        args.bfdd_flags,
+    );
     let bfdd_spec = ProcessSpec::new("nos-bfdd", args.bfdd_bin, bfdd_args).with_identity(
         pki.clone(),
         Role::Bfdd,
@@ -535,16 +382,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
-    let stpd_args = std::iter::once("--listen-socket".to_string())
-        .chain(std::iter::once(
-            args.stpd_listen_socket.display().to_string(),
-        ))
-        .chain(std::iter::once("--watchdog-socket".to_string()))
-        .chain(std::iter::once(args.listen_socket.display().to_string()))
-        .chain(std::iter::once("--log-socket".to_string()))
-        .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.stpd_flags)
-        .collect();
+    let stpd_args = fixed_args(
+        &args.stpd_listen_socket,
+        &args.listen_socket,
+        &args.log_socket,
+        args.stpd_flags,
+    );
     let stpd_spec = ProcessSpec::new("nos-stpd", args.stpd_bin, stpd_args).with_identity(
         pki.clone(),
         Role::Stpd,
@@ -594,6 +437,146 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The argument vector of a single fixed daemon (`nos-interfaced`,
+/// `nos-lacpd`, `nos-lldpd`, `nos-bfdd`, `nos-stpd`): its own listen socket,
+/// the broker and log sockets, then the operator's pass-through flags.
+fn fixed_args(listen: &Path, watchdog: &Path, log: &Path, extra: Vec<String>) -> Vec<String> {
+    let mut v = vec![
+        "--listen-socket".to_string(),
+        listen.display().to_string(),
+        "--watchdog-socket".to_string(),
+        watchdog.display().to_string(),
+        "--log-socket".to_string(),
+        log.display().to_string(),
+    ];
+    v.extend(extra);
+    v
+}
+
+/// The dynamically-spawned daemon families: one process per named config
+/// object, all supervised by the same `instances::manage`.
+fn managed_families(
+    args: &Args,
+    pki: &Arc<Pki>,
+    policy: BackoffPolicy,
+    registry: &EndpointRegistry,
+) -> Vec<Managed> {
+    let family = |scope,
+                  section: fn(&ConfigDiff) -> &[SectionDiff],
+                  bin: &PathBuf,
+                  flags: &Vec<String>,
+                  name_flag,
+                  daemon,
+                  role,
+                  noun,
+                  endpoint,
+                  claim_label| Managed {
+        scope,
+        section,
+        bin: bin.clone(),
+        flags: flags.clone(),
+        name_flag,
+        daemon,
+        role,
+        pki: pki.clone(),
+        noun,
+        endpoint,
+        claim_label,
+        config_socket: args.config_socket.clone(),
+        log_socket: args.log_socket.clone(),
+        watchdog_listen_socket: args.listen_socket.clone(),
+        run_dir: args.run_dir.clone(),
+        policy,
+        registry: registry.clone(),
+    };
+    let ep = |kind, socket_prefix| {
+        Some(Endpoint {
+            kind,
+            socket_prefix,
+        })
+    };
+    vec![
+        family(
+            DiffScope::BgpInstances,
+            |d| &d.bgp_instances,
+            &args.bgpd_bin,
+            &args.bgpd_flags,
+            "--instance",
+            "nos-bgpd",
+            Role::Bgpd,
+            "BGP instance",
+            ep(EndpointKind::BgpInstance, "bgp"),
+            None,
+        ),
+        family(
+            DiffScope::RoutingTables,
+            |d| &d.routing_tables,
+            &args.ribd_bin,
+            &args.ribd_flags,
+            "--table",
+            "nos-ribd",
+            Role::Ribd,
+            "routing table",
+            ep(EndpointKind::RibTable, "rib"),
+            None,
+        ),
+        family(
+            DiffScope::OspfInstances,
+            |d| &d.ospf_instances,
+            &args.ospfd_bin,
+            &args.ospfd_flags,
+            "--instance",
+            "nos-ospfd",
+            Role::Ospfd,
+            "OSPF instance",
+            ep(EndpointKind::OspfInstance, "ospf"),
+            None,
+        ),
+        family(
+            DiffScope::Ospfv3Instances,
+            |d| &d.ospfv3_instances,
+            &args.ospfv3d_bin,
+            &args.ospfv3d_flags,
+            "--instance",
+            "nos-ospfv3d",
+            Role::Ospfv3d,
+            "OSPFv3 instance",
+            ep(EndpointKind::Ospfv3Instance, "ospfv3"),
+            None,
+        ),
+        // One `nos-fdbd` per broadcast domain, but only while the domain has a
+        // `vni` (`claim_label`, like `nos-restd` on `rest-api`) - a plain L2
+        // domain has no EVPN/VXLAN state for a daemon to own.
+        family(
+            DiffScope::BroadcastDomains,
+            |d| &d.broadcast_domains,
+            &args.fdbd_bin,
+            &args.fdbd_flags,
+            "--domain",
+            "nos-fdbd",
+            Role::Fdbd,
+            "broadcast domain",
+            ep(EndpointKind::FdbDomain, "fdb"),
+            Some(VNI_LABEL),
+        ),
+        // Opt-in per routing table (its `rest_api` field), not one per
+        // table - hence `claim_label`. No IPC query listener of its own, so
+        // no endpoint registration.
+        family(
+            DiffScope::RoutingTables,
+            |d| &d.routing_tables,
+            &args.restd_bin,
+            &args.restd_flags,
+            "--table",
+            "nos-restd",
+            Role::Restd,
+            "REST API",
+            None,
+            Some(REST_API_LABEL),
+        ),
+    ]
+}
+
 /// Waits for either SIGTERM (the signal `docker stop` sends) or SIGINT
 /// (Ctrl-C, for interactive/local runs).
 async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
@@ -618,5 +601,199 @@ mod tests {
         let args = Args::try_parse_from(["nos-watchdogd", "--bgpd-arg", "--profile-memory-out=x"])
             .unwrap();
         assert_eq!(args.bgpd_flags, ["--profile-memory-out=x"]);
+    }
+
+    #[test]
+    fn defaults_name_the_installed_binaries_and_sockets() {
+        let a = Args::try_parse_from(["x"]).unwrap();
+        assert_eq!(a.configd_bin, PathBuf::from("/usr/local/bin/nos-configd"));
+        assert_eq!(a.stpd_bin, PathBuf::from("/usr/local/bin/nos-stpd"));
+        assert_eq!(a.stpd_listen_socket, PathBuf::from("/run/nos/stp.sock"));
+        assert_eq!(a.run_dir, PathBuf::from("/run/nos"));
+        assert_eq!(a.log_socket, PathBuf::from(DEFAULT_LOG_SOCKET));
+        assert_eq!(a.listen_socket, PathBuf::from(DEFAULT_WATCHDOG_SOCKET));
+        assert_eq!(a.config_socket, PathBuf::from(DEFAULT_CONFIG_SOCKET));
+        assert_eq!(a.pki_dir, PathBuf::from(DEFAULT_PKI_DIR));
+        assert_eq!(
+            (a.pki_leaf_lifetime, a.pki_rotate_every, a.pki_user_lifetime),
+            (86_400, 28_800, 28_800)
+        );
+        assert!(a.logd_flags.is_empty() && a.restd_flags.is_empty());
+    }
+
+    #[test]
+    fn fixed_args_orders_sockets_then_extra_flags() {
+        let (l, w, g) = (
+            Path::new("/l.sock"),
+            Path::new("/w.sock"),
+            Path::new("/g.sock"),
+        );
+        let base = [
+            "--listen-socket",
+            "/l.sock",
+            "--watchdog-socket",
+            "/w.sock",
+            "--log-socket",
+            "/g.sock",
+        ];
+        assert_eq!(fixed_args(l, w, g, vec![]), base);
+        assert_eq!(
+            fixed_args(l, w, g, vec!["--driver".into(), "noop".into()]),
+            [&base[..], &["--driver", "noop"]].concat()
+        );
+    }
+
+    #[test]
+    fn managed_families_wire_each_family_to_its_own_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            dir.path(),
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let mut cli_args = vec!["x".to_string()];
+        for f in ["bgpd", "ribd", "ospfd", "ospfv3d", "fdbd", "restd"] {
+            cli_args.push(format!("--{f}-bin"));
+            cli_args.push(format!("/bin/{f}"));
+            cli_args.push(format!("--{f}-arg"));
+            cli_args.push(format!("--{f}-flag"));
+        }
+        let args = Args::try_parse_from(cli_args).unwrap();
+        let ms = managed_families(
+            &args,
+            &pki,
+            BackoffPolicy::default(),
+            &EndpointRegistry::default(),
+        );
+        assert_eq!(ms.len(), 6);
+        // (daemon, name_flag, role, scope, noun, endpoint prefix, claim label)
+        let want = [
+            (
+                "nos-bgpd",
+                "--instance",
+                Role::Bgpd,
+                DiffScope::BgpInstances,
+                "BGP instance",
+                Some("bgp"),
+                None,
+            ),
+            (
+                "nos-ribd",
+                "--table",
+                Role::Ribd,
+                DiffScope::RoutingTables,
+                "routing table",
+                Some("rib"),
+                None,
+            ),
+            (
+                "nos-ospfd",
+                "--instance",
+                Role::Ospfd,
+                DiffScope::OspfInstances,
+                "OSPF instance",
+                Some("ospf"),
+                None,
+            ),
+            (
+                "nos-ospfv3d",
+                "--instance",
+                Role::Ospfv3d,
+                DiffScope::Ospfv3Instances,
+                "OSPFv3 instance",
+                Some("ospfv3"),
+                None,
+            ),
+            (
+                "nos-fdbd",
+                "--domain",
+                Role::Fdbd,
+                DiffScope::BroadcastDomains,
+                "broadcast domain",
+                Some("fdb"),
+                Some(VNI_LABEL),
+            ),
+            (
+                "nos-restd",
+                "--table",
+                Role::Restd,
+                DiffScope::RoutingTables,
+                "REST API",
+                None,
+                Some(REST_API_LABEL),
+            ),
+        ];
+        for (m, (daemon, name_flag, role, scope, noun, prefix, label)) in ms.iter().zip(want) {
+            assert_eq!(m.daemon, daemon);
+            assert_eq!(m.name_flag, name_flag);
+            assert_eq!(m.role, role);
+            assert_eq!(m.scope, scope);
+            assert_eq!(m.noun, noun);
+            assert_eq!(m.endpoint.as_ref().map(|e| e.socket_prefix), prefix);
+            assert_eq!(m.claim_label, label);
+            let short = daemon.trim_start_matches("nos-");
+            assert_eq!(m.bin, PathBuf::from(format!("/bin/{short}")));
+            assert_eq!(m.flags, [format!("--{short}-flag")]);
+            assert_eq!(m.config_socket, args.config_socket);
+            assert_eq!(m.watchdog_listen_socket, args.listen_socket);
+            assert_eq!(m.run_dir, args.run_dir);
+        }
+    }
+
+    #[test]
+    fn managed_sections_select_the_matching_diff_field() {
+        // The `section` fn pointers are the one thing a literal can swap
+        // silently (ribd vs restd share RoutingTables).
+        let dir = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            dir.path(),
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let args = Args::try_parse_from(["x"]).unwrap();
+        let ms = managed_families(
+            &args,
+            &pki,
+            BackoffPolicy::default(),
+            &EndpointRegistry::default(),
+        );
+        let sec = |name: &str| SectionDiff {
+            header: String::new(),
+            name: name.into(),
+            status: nos_proto::DiffStatus::Added,
+            fields: vec![],
+            subsections: vec![],
+        };
+        let diff = ConfigDiff {
+            bgp_instances: vec![sec("bgp")],
+            routing_tables: vec![sec("rt")],
+            ospf_instances: vec![sec("ospf")],
+            ospfv3_instances: vec![sec("ospfv3")],
+            broadcast_domains: vec![sec("bd")],
+            ..ConfigDiff::default()
+        };
+        let got: Vec<_> = ms
+            .iter()
+            .map(|m| (m.section)(&diff)[0].name.clone())
+            .collect();
+        assert_eq!(got, ["bgp", "rt", "ospf", "ospfv3", "bd", "rt"]);
+    }
+
+    #[test]
+    fn pki_rejects_rotation_slower_than_the_leaf_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Pki::start(
+            dir.path(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+        .err()
+        .expect("rotate_every >= leaf_lifetime");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

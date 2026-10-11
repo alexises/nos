@@ -9,6 +9,7 @@
 //! live tuning matters.
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,9 +41,43 @@ const SUMMARY_EVERY: u32 = 10;
 /// A Rapid-PVST+ member: port name, tag, configured cost, link type.
 type PvstPort = (String, VlanTag, Option<u32>, nos_proto::schema::LinkType);
 
+/// What the actor needs of one port's BPDU socket: the seam that lets tests
+/// drive the daemon without `CAP_NET_RAW` (#346).
+trait BpduIo: Send + Sync {
+    fn send_frame(&self, frame: &[u8]) -> io::Result<()>;
+    fn own_hw_addr(&self) -> [u8; 6];
+}
+
+impl BpduIo for L2Socket {
+    fn send_frame(&self, frame: &[u8]) -> io::Result<()> {
+        L2Socket::send_frame(self, frame)
+    }
+    fn own_hw_addr(&self) -> [u8; 6] {
+        L2Socket::own_hw_addr(self)
+    }
+}
+
 struct Io {
-    socket: Arc<L2Socket>,
+    socket: Arc<dyn BpduIo>,
     reader: JoinHandle<()>,
+}
+
+type Frames = mpsc::Sender<(String, Vec<u8>)>;
+
+/// Opens the BPDU socket of a link (`None`: the IEEE group only, `Some(ieee)`:
+/// the SSTP group, plus the IEEE one when `ieee`) and starts the task that
+/// forwards its frames to the actor.
+type Opener = Arc<dyn Fn(&str, Option<bool>, &Frames) -> io::Result<Io> + Send + Sync>;
+
+/// The production opener: a real raw `AF_PACKET` socket and its reader task.
+fn open_l2(name: &str, pvst: Option<bool>, frames: &Frames) -> io::Result<Io> {
+    let s = match pvst {
+        None => L2Socket::open_bpdu(name)?,
+        Some(ieee) => L2Socket::open_pvst(name, ieee)?,
+    };
+    let socket = Arc::new(s);
+    let reader = tokio::spawn(read_loop(socket.clone(), name.to_string(), frames.clone()));
+    Ok(Io { socket, reader })
 }
 
 #[derive(Default)]
@@ -68,13 +103,38 @@ struct Daemon {
     io: HashMap<String, Io>,
     links: LinkTable,
     push_tx: mpsc::Sender<Push>,
-    frames_tx: mpsc::Sender<(String, Vec<u8>)>,
+    frames_tx: Frames,
+    opener: Opener,
     ticks: u32,
     /// What `show spanning-tree` serves; refreshed after every event.
     snapshot: Snapshot,
 }
 
 pub async fn run(
+    plan_rx: watch::Receiver<Option<Plan>>,
+    links_rx: watch::Receiver<LinkTable>,
+    push_tx: mpsc::Sender<Push>,
+    snapshot: Snapshot,
+    cmds: mpsc::Receiver<Cmd>,
+    shutdown: watch::Receiver<bool>,
+) {
+    run_with(
+        Arc::new(open_l2),
+        identity::local_mac(),
+        plan_rx,
+        links_rx,
+        push_tx,
+        snapshot,
+        cmds,
+        shutdown,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)] // `run`'s six plus the two test seams
+async fn run_with(
+    opener: Opener,
+    mac: [u8; 6],
     mut plan_rx: watch::Receiver<Option<Plan>>,
     mut links_rx: watch::Receiver<LinkTable>,
     push_tx: mpsc::Sender<Push>,
@@ -84,7 +144,7 @@ pub async fn run(
 ) {
     let (frames_tx, mut frames_rx) = mpsc::channel(256);
     let mut d = Daemon {
-        mac: identity::local_mac(),
+        mac,
         plan: None,
         engine: None,
         rt: Vec::new(),
@@ -95,6 +155,7 @@ pub async fn run(
         links: LinkTable::default(),
         push_tx,
         frames_tx,
+        opener,
         ticks: 0,
         snapshot,
     };
@@ -126,7 +187,7 @@ pub async fn run(
 }
 
 /// Forwards every frame of one port to the actor until the socket fails.
-async fn read_loop(socket: Arc<L2Socket>, name: String, tx: mpsc::Sender<(String, Vec<u8>)>) {
+async fn read_loop(socket: Arc<L2Socket>, name: String, tx: Frames) {
     loop {
         match socket.recv_frame().await {
             Ok(f) => {
@@ -329,17 +390,9 @@ impl Daemon {
         if self.io.contains_key(name) {
             return;
         }
-        let opened = match pvst {
-            None => L2Socket::open_bpdu(name),
-            Some(ieee) => L2Socket::open_pvst(name, ieee),
-        };
-        match opened {
-            Ok(s) => {
-                let socket = Arc::new(s);
-                let tx = self.frames_tx.clone();
-                let (rs, n) = (socket.clone(), name.to_string());
-                let reader = tokio::spawn(read_loop(rs, n, tx));
-                self.io.insert(name.to_string(), Io { socket, reader });
+        match (self.opener)(name, pvst, &self.frames_tx) {
+            Ok(io) => {
+                self.io.insert(name.to_string(), io);
                 *warned = false;
                 info!(port = %name, "bpdu socket open");
             }
@@ -615,3 +668,6 @@ impl Daemon {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

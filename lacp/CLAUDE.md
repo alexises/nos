@@ -40,7 +40,7 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 | `socket.rs` | `LacpSocket` over `nos-l2-socket`: one member interface, ethertype `0x8809`, group `01:80:C2:00:00:02` |
 | `receive_machine.rs`, `periodic_tx_machine.rs`, `mux_machine.rs`, `churn_machine.rs` | The pure state machines (churn: 60s, `NOS_LACP_CHURN_SECS`) |
 | `selection.rs` | Config-scoped `select` |
-| `link.rs` | Per-port `run()`: socket, machines, timers, Marker responder |
+| `link.rs` | Per-port `run()` (open the socket, build a `Port`) and `drive()` (the event loop); `Port` has one method per event. Test seam (#346): `FrameSink`/`FrameLink` abstract the socket, so `link/port_tests.rs` needs no `CAP_NET_RAW`; deadlines use `tokio::time::Instant` so paused-time tests work |
 | `aggregate.rs` | `AggregateManager`: per-aggregate `reconcile` and `selection_loop` |
 | `interface_client.rs` | Full-resend push of `PushLacpMembers` to `nos-interfaced` |
 | `server.rs` | `LacpRequest::GetSummary` for `show lacp` |

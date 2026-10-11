@@ -261,7 +261,7 @@ impl Pvst {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
@@ -293,7 +293,7 @@ mod tests {
 
     /// Trees `bd1` (VLAN 10) and `bd2` (VLAN 20) over `eth1`/`eth2`, both
     /// tagged; `costs` is the per-tree cost of eth1 and eth2.
-    fn plan(prio: [u16; 2], costs: [[Option<u32>; 2]; 2]) -> Plan {
+    pub(crate) fn plan(prio: [u16; 2], costs: [[Option<u32>; 2]; 2]) -> Plan {
         let tree = |i: usize, d: &str, vid: u16| {
             let tag = VlanTag::Dot1q(vid);
             TreePlan {
