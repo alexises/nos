@@ -1,0 +1,16 @@
+experimental = ["wrapper-scripts"]
+
+# Profile used by cargo-mutants (.cargo/mutants.toml): every test process runs
+# under a virtual-memory cap so a runaway mutant (e.g. an unbounded `reserve`)
+# aborts itself instead of OOM-killing the host (#362).
+[scripts.wrapper.mem-cap]
+# Inline sh rather than a script file: cargo-mutants' tree copy drops the exec bit.
+# ulimit only wraps the test binary, so rustc/cargo are unaffected.
+command = ["sh", "-c", 'ulimit -v "${NOS_MUTANTS_AS_KB:-6291456}"; exec "$0" "$@"']
+
+[profile.mutants]
+test-threads = 2
+
+[[profile.mutants.scripts]]
+filter = "all()"
+run-wrapper = "mem-cap"

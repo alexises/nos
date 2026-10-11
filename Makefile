@@ -85,9 +85,20 @@ coverage: toolchain-check ## Collect test coverage as lcov.info, failing under C
 	$(RUN) cargo llvm-cov --workspace --ignore-filename-regex '/tools/e2e/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$|/bfd/src/socket\.rs$$' \
 		--fail-under-lines $(COVERAGE_MIN) --lcov --output-path lcov.info
 
-mutants: ## Run mutation testing (needs a nightly toolchain; slow — CI only runs this on schedule)
+MUTANTS_JOBS ?= 2
+MUTANTS_MEM ?= 20G
+MUTANTS_TMPDIR ?= $(HOME)/.cache/nos-mutants
+MUTANTS_ARGS ?=
+MUTANTS_CARGO ?= cargo +nightly
+MUTANTS_SCOPE ?= $(shell command -v systemd-run >/dev/null 2>&1 && echo systemd-run --user --scope -q -p MemoryMax=$(MUTANTS_MEM))
+
+mutants: ## Run mutation testing, memory-capped (needs nightly; MUTANTS_JOBS/MUTANTS_MEM/MUTANTS_ARGS; CI shards it on schedule)
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not found — run 'make tools'"; exit 1; }
-	cargo +nightly mutants --workspace
+	@# A shared CARGO_TARGET_DIR with -j2 gives false MISSED: unset it so each job copy (under TMPDIR, ~20 GB) builds its own.
+	@# systemd-run is the whole-run backstop; the per-test cap is .config/nextest.toml (run-wrapper).
+	@mkdir -p $(MUTANTS_TMPDIR)
+	env -u CARGO_TARGET_DIR TMPDIR=$(MUTANTS_TMPDIR) $(MUTANTS_SCOPE) $(MUTANTS_CARGO) mutants --workspace -j $(MUTANTS_JOBS) $(MUTANTS_ARGS); rc=$$?; \
+	[ $$rc -eq 0 ] || [ $$rc -eq 2 ] || [ $$rc -eq 3 ] || exit $$rc  # 2 = missed, 3 = timeout: report only (#362)
 
 docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot

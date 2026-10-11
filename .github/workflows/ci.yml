@@ -190,12 +190,27 @@ jobs:
     runs-on: ubuntu-latest
     # Run nightly or on manual dispatch only — too slow for every PR
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-mutants
-      - run: cargo mutants --workspace
+      - uses: taiki-e/install-action@nextest
+      # Same entry point as local; the per-test cap comes from .config/nextest.toml.
+      # `make mutants` reports survivors/timeouts (cargo-mutants exit 2/3) without
+      # failing; only usage errors and a red unmutated baseline fail the job (#362).
+      - name: Run shard ${{ matrix.shard }}/8
+        run: make mutants MUTANTS_ARGS="--shard ${{ matrix.shard }}/8"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-out-${{ matrix.shard }}
+          path: mutants.out
 
   # A red master (or canary) opens one `ci-red` issue, or comments on the open one, the
   # same day — instead of the next PR finding it (#180). Never on PRs: their checks are
