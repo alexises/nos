@@ -2,11 +2,13 @@
 //! — the LACP counterpart of `ospf::link.rs`'s per-link `run()` shape.
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nos_proto::LacpRate;
 use tokio::sync::{watch, Notify};
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::churn_machine::{self, ChurnState};
@@ -84,6 +86,29 @@ fn far_future() -> Instant {
     Instant::now() + Duration::from_hours(24)
 }
 
+/// What the engine needs of the member's socket to transmit: the seam that
+/// lets tests drive a [`Port`] without `CAP_NET_RAW` (#346).
+trait FrameSink {
+    fn send(&self, pdu: &[u8]) -> io::Result<()>;
+}
+
+/// A [`FrameSink`] that also yields the next received PDU.
+trait FrameLink: FrameSink {
+    async fn recv(&self) -> io::Result<Vec<u8>>;
+}
+
+impl FrameSink for LacpSocket {
+    fn send(&self, pdu: &[u8]) -> io::Result<()> {
+        LacpSocket::send(self, pdu)
+    }
+}
+
+impl FrameLink for LacpSocket {
+    async fn recv(&self) -> io::Result<Vec<u8>> {
+        LacpSocket::recv(self).await
+    }
+}
+
 /// Runs one member port's LACP engine until its socket dies or the
 /// aggregate drops it (the caller aborts this task — see
 /// `aggregate.rs::reconcile`, mirroring `ospf::link::LinkManager`'s own
@@ -107,162 +132,272 @@ pub async fn run(
     // operand's sign, so this always fits.
     let port_number =
         u16::try_from(socket.ifindex() & 0xffff).expect("masked to 16 bits, always fits");
+    let selected_rx = config.selected_rx.clone();
+    let p = Port::new(config, observations, changed, port_number);
+    drive(p, selected_rx, &socket).await;
+}
 
-    let mut receive_state = ReceiveState::Current; // overwritten by Started below
-    let mut mux_state = MuxState::Detached;
-    let mut current_while_deadline = Instant::now();
-    let mut wait_while_deadline = far_future();
-    let mut partner: Option<PortInfo> = None;
-    let mut selected_rx = config.selected_rx.clone();
-
-    let (rs, action) = receive_machine::step(receive_state, receive_machine::Event::Started);
-    receive_state = rs;
-    apply_receive_action(action, &mut current_while_deadline);
-
-    // First send is immediate; each later one is scheduled from the state at
-    // the time of the previous send (see `periodic_tx_machine::interval_for`).
-    let mut tx = TxState::new();
-    tx.update_periodic(
-        &config.interface,
-        config.actor_active,
-        receive_state,
-        partner,
-    );
-    let mut marker_limiter = TxLimiter::new(Instant::now(), MAX_MARKER_PER_WINDOW);
-
-    let mut churn = Churn::new(&config.interface, config.churn_time);
-    churn.eval(mux_state, partner);
-    report(
-        &observations,
-        &changed,
-        &config.interface,
-        port_number,
-        receive_state,
-        mux_state,
-        partner,
-        &churn,
-    );
-
+/// The event loop of one port: timers, Selection Logic verdicts and received
+/// PDUs, until the aggregate is gone or the link's receive side fails.
+async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>, link: &L) {
     loop {
         tokio::select! {
-            () = tokio::time::sleep_until(tx.next_periodic_send.into()) => {
-                let pdu = build_pdu(&config, port_number, receive_state, mux_state, partner);
-                // Must move the deadline forward every time it fires, or the
-                // elapsed deadline re-fires immediately: a hot loop. A send
-                // denied by the limiter retries at the next refill instead
-                // (`transmit` sets that).
-                tx.next_periodic_send = Instant::now()
-                    + interval_for(
-                        receive_state,
-                        config.actor_active,
-                        partner.is_some_and(|p| p.has_state(state_bit::ACTIVITY)),
-                        partner.is_some_and(|p| p.has_state(state_bit::TIMEOUT)),
-                    )
-                    .unwrap_or(Duration::from_hours(24));
-                tx.transmit(&socket, &config.interface, pdu);
+            () = tokio::time::sleep_until(p.tx.next_periodic_send) => p.on_periodic(link),
+            () = tokio::time::sleep_until(p.current_while_deadline) => {
+                p.on_current_while_expired(link);
             }
-            () = tokio::time::sleep_until(current_while_deadline.into()) => {
-                let (rs, action) = receive_machine::step(receive_state, receive_machine::Event::CurrentWhileTimerExpired);
-                receive_state = rs;
-                apply_receive_action(action, &mut current_while_deadline);
-                if receive_state != ReceiveState::Current {
-                    partner = None;
-                    let (ms, mux_action) = mux_machine::step(
-                        mux_state,
-                        mux_machine::Event::PartnerStateChanged { synchronized: false, collecting: false },
-                    );
-                    mux_state = ms;
-                    apply_mux_action(mux_action, &mut wait_while_deadline);
-                }
-                info!(interface = %config.interface, receive_state = ?receive_state, "lacp receive machine transitioned");
-                tx.update_periodic(&config.interface, config.actor_active, receive_state, partner);
-                churn.eval(mux_state, partner);
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
-                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
-            }
-            () = tokio::time::sleep_until(churn.actor_deadline.into()) => {
-                churn.expire_actor();
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
-            }
-            () = tokio::time::sleep_until(churn.partner_deadline.into()) => {
-                churn.expire_partner();
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
-            }
-            () = tokio::time::sleep_until(wait_while_deadline.into()) => {
-                let (ms, action) = mux_machine::step(mux_state, mux_machine::Event::WaitWhileTimerExpired);
-                mux_state = ms;
-                apply_mux_action(action, &mut wait_while_deadline);
-                info!(interface = %config.interface, mux_state = ?mux_state, "lacp mux machine transitioned");
-                churn.eval(mux_state, partner);
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
-                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
+            () = tokio::time::sleep_until(p.churn.actor_deadline) => p.on_actor_churn(),
+            () = tokio::time::sleep_until(p.churn.partner_deadline) => p.on_partner_churn(),
+            () = tokio::time::sleep_until(p.wait_while_deadline) => {
+                p.on_wait_while_expired(link);
             }
             result = selected_rx.changed() => {
                 if result.is_err() {
-                    debug!(interface = %config.interface, "aggregate manager gone, lacp link task exiting");
+                    debug!(interface = %p.config.interface, "aggregate manager gone, lacp link task exiting");
                     return;
                 }
                 let selected = *selected_rx.borrow_and_update();
-                let (ms, action) = mux_machine::step(mux_state, mux_machine::Event::SelectionChanged { selected });
-                mux_state = ms;
-                apply_mux_action(action, &mut wait_while_deadline);
-                info!(interface = %config.interface, mux_state = ?mux_state, selected, "lacp mux machine transitioned");
-                churn.eval(mux_state, partner);
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
-                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
+                p.on_selection(selected, link);
             }
-            recv = socket.recv() => {
+            recv = link.recv() => {
                 let Ok(bytes) = recv else {
-                    warn!(interface = %config.interface, error = ?recv.err(), "lacp socket closed, link task exiting");
+                    warn!(interface = %p.config.interface, error = ?recv.err(), "lacp socket closed, link task exiting");
                     return;
                 };
-                if let Some(m) = packet::decode_marker(&bytes) {
-                    // §6.5.4.2 responder: stateless, same port, no effect on the LACP machines.
-                    if marker_limiter.try_take(Instant::now()) {
-                        match socket.send(&packet::encode_marker_response(&m)) {
-                            Ok(()) => info!(interface = %config.interface, requester_port = m.requester_port, requester_system = ?m.requester_system, transaction_id = m.transaction_id, "lacp marker answered"),
-                            Err(e) if crate::socket::is_link_down(&e) => debug!(interface = %config.interface, "link down, marker response not sent"),
-                            Err(e) => warn!(interface = %config.interface, error = %e, "failed to send marker response"),
-                        }
-                    } else {
-                        debug!(interface = %config.interface, "marker rate limit hit, dropping");
-                    }
-                    continue;
-                }
-                let Ok(pdu) = packet::decode(&bytes) else {
-                    continue;
-                };
-                partner = Some(pdu.actor);
-                let (rs, action) = receive_machine::step(
-                    receive_state,
-                    receive_machine::Event::LacpduReceived {
-                        we_advertise_short_timeout: config.rate == LacpRate::Fast,
-                    },
-                );
-                receive_state = rs;
-                apply_receive_action(action, &mut current_while_deadline);
-                let (ms, mux_action) = mux_machine::step(
-                    mux_state,
-                    mux_machine::Event::PartnerStateChanged {
-                        synchronized: pdu.actor.has_state(state_bit::SYNCHRONIZATION),
-                        collecting: pdu.actor.has_state(state_bit::COLLECTING),
-                    },
-                );
-                mux_state = ms;
-                apply_mux_action(mux_action, &mut wait_while_deadline);
-                info!(
-                    interface = %config.interface,
-                    receive_state = ?receive_state,
-                    mux_state = ?mux_state,
-                    partner_system = ?pdu.actor.system,
-                    "lacp lacpdu received"
-                );
-                tx.update_periodic(&config.interface, config.actor_active, receive_state, partner);
-                churn.eval(mux_state, partner);
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
-                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
+                p.on_frame(&bytes, link);
             }
         }
+    }
+}
+
+/// One member port's whole state: the three machines, their deadlines, the
+/// transmit state and what was last reported. One method per event of
+/// [`run`]'s loop, so tests can drive them with a fake [`FrameSink`].
+struct Port {
+    config: LinkConfig,
+    observations: Arc<Mutex<HashMap<String, PortObservation>>>,
+    changed: Arc<Notify>,
+    number: u16,
+    receive_state: ReceiveState,
+    mux_state: MuxState,
+    partner: Option<PortInfo>,
+    current_while_deadline: Instant,
+    wait_while_deadline: Instant,
+    tx: TxState,
+    marker_limiter: TxLimiter,
+    churn: Churn,
+}
+
+impl Port {
+    /// The Receive machine's `Started` event, the first (immediate) periodic
+    /// send armed, and the initial observation reported.
+    fn new(
+        config: LinkConfig,
+        observations: Arc<Mutex<HashMap<String, PortObservation>>>,
+        changed: Arc<Notify>,
+        port_number: u16,
+    ) -> Self {
+        let mut current_while_deadline = Instant::now();
+        let (receive_state, action) = receive_machine::step(
+            ReceiveState::Current, // overwritten by Started
+            receive_machine::Event::Started,
+        );
+        apply_receive_action(action, &mut current_while_deadline);
+
+        // First send is immediate; each later one is scheduled from the state
+        // at the time of the previous send (see `interval_for`).
+        let mut tx = TxState::new();
+        tx.update_periodic(&config.interface, config.actor_active, receive_state, None);
+        let mut churn = Churn::new(&config.interface, config.churn_time);
+        churn.eval(MuxState::Detached, None);
+        let port = Self {
+            config,
+            observations,
+            changed,
+            number: port_number,
+            receive_state,
+            mux_state: MuxState::Detached,
+            partner: None,
+            current_while_deadline,
+            wait_while_deadline: far_future(),
+            tx,
+            marker_limiter: TxLimiter::new(Instant::now(), MAX_MARKER_PER_WINDOW),
+            churn,
+        };
+        port.report();
+        port
+    }
+
+    fn pdu(&self) -> Lacpdu {
+        build_pdu(
+            &self.config,
+            self.number,
+            self.receive_state,
+            self.mux_state,
+            self.partner,
+        )
+    }
+
+    fn report(&self) {
+        report(
+            &self.observations,
+            &self.changed,
+            &self.config.interface,
+            self.number,
+            self.receive_state,
+            self.mux_state,
+            self.partner,
+            &self.churn,
+        );
+    }
+
+    /// Re-evaluates what depends on the machines' state after any event, then
+    /// reports it.
+    fn settle(&mut self) {
+        self.churn.eval(self.mux_state, self.partner);
+        self.report();
+    }
+
+    fn on_periodic(&mut self, sink: &dyn FrameSink) {
+        let pdu = self.pdu();
+        // Must move the deadline forward every time it fires, or the elapsed
+        // deadline re-fires immediately: a hot loop. A send denied by the
+        // limiter retries at the next refill instead (`transmit` sets that).
+        self.tx.next_periodic_send = Instant::now()
+            + interval_for(
+                self.receive_state,
+                self.config.actor_active,
+                self.partner
+                    .is_some_and(|p| p.has_state(state_bit::ACTIVITY)),
+                self.partner
+                    .is_some_and(|p| p.has_state(state_bit::TIMEOUT)),
+            )
+            .unwrap_or(Duration::from_hours(24));
+        self.tx.transmit(sink, &self.config.interface, pdu);
+    }
+
+    fn on_current_while_expired(&mut self, sink: &dyn FrameSink) {
+        let (rs, action) = receive_machine::step(
+            self.receive_state,
+            receive_machine::Event::CurrentWhileTimerExpired,
+        );
+        self.receive_state = rs;
+        apply_receive_action(action, &mut self.current_while_deadline);
+        if self.receive_state != ReceiveState::Current {
+            self.partner = None;
+            let (ms, mux_action) = mux_machine::step(
+                self.mux_state,
+                mux_machine::Event::PartnerStateChanged {
+                    synchronized: false,
+                    collecting: false,
+                },
+            );
+            self.mux_state = ms;
+            apply_mux_action(mux_action, &mut self.wait_while_deadline);
+        }
+        info!(interface = %self.config.interface, receive_state = ?self.receive_state, "lacp receive machine transitioned");
+        self.tx.update_periodic(
+            &self.config.interface,
+            self.config.actor_active,
+            self.receive_state,
+            self.partner,
+        );
+        self.settle();
+        self.tx
+            .send_if_changed(sink, &self.config.interface, self.pdu());
+    }
+
+    fn on_actor_churn(&mut self) {
+        self.churn.expire_actor();
+        self.report();
+    }
+
+    fn on_partner_churn(&mut self) {
+        self.churn.expire_partner();
+        self.report();
+    }
+
+    fn on_wait_while_expired(&mut self, sink: &dyn FrameSink) {
+        let (ms, action) =
+            mux_machine::step(self.mux_state, mux_machine::Event::WaitWhileTimerExpired);
+        self.mux_state = ms;
+        apply_mux_action(action, &mut self.wait_while_deadline);
+        info!(interface = %self.config.interface, mux_state = ?self.mux_state, "lacp mux machine transitioned");
+        self.settle();
+        self.tx
+            .send_if_changed(sink, &self.config.interface, self.pdu());
+    }
+
+    fn on_selection(&mut self, selected: bool, sink: &dyn FrameSink) {
+        let (ms, action) = mux_machine::step(
+            self.mux_state,
+            mux_machine::Event::SelectionChanged { selected },
+        );
+        self.mux_state = ms;
+        apply_mux_action(action, &mut self.wait_while_deadline);
+        info!(interface = %self.config.interface, mux_state = ?self.mux_state, selected, "lacp mux machine transitioned");
+        self.settle();
+        self.tx
+            .send_if_changed(sink, &self.config.interface, self.pdu());
+    }
+
+    fn on_frame(&mut self, bytes: &[u8], sink: &dyn FrameSink) {
+        if let Some(m) = packet::decode_marker(bytes) {
+            // §6.5.4.2 responder: stateless, same port, no effect on the LACP machines.
+            if self.marker_limiter.try_take(Instant::now()) {
+                match sink.send(&packet::encode_marker_response(&m)) {
+                    Ok(()) => {
+                        info!(interface = %self.config.interface, requester_port = m.requester_port, requester_system = ?m.requester_system, transaction_id = m.transaction_id, "lacp marker answered");
+                    }
+                    Err(e) if crate::socket::is_link_down(&e) => {
+                        debug!(interface = %self.config.interface, "link down, marker response not sent");
+                    }
+                    Err(e) => {
+                        warn!(interface = %self.config.interface, error = %e, "failed to send marker response");
+                    }
+                }
+            } else {
+                debug!(interface = %self.config.interface, "marker rate limit hit, dropping");
+            }
+            return;
+        }
+        let Ok(pdu) = packet::decode(bytes) else {
+            return;
+        };
+        self.partner = Some(pdu.actor);
+        let (rs, action) = receive_machine::step(
+            self.receive_state,
+            receive_machine::Event::LacpduReceived {
+                we_advertise_short_timeout: self.config.rate == LacpRate::Fast,
+            },
+        );
+        self.receive_state = rs;
+        apply_receive_action(action, &mut self.current_while_deadline);
+        let (ms, mux_action) = mux_machine::step(
+            self.mux_state,
+            mux_machine::Event::PartnerStateChanged {
+                synchronized: pdu.actor.has_state(state_bit::SYNCHRONIZATION),
+                collecting: pdu.actor.has_state(state_bit::COLLECTING),
+            },
+        );
+        self.mux_state = ms;
+        apply_mux_action(mux_action, &mut self.wait_while_deadline);
+        info!(
+            interface = %self.config.interface,
+            receive_state = ?self.receive_state,
+            mux_state = ?self.mux_state,
+            partner_system = ?pdu.actor.system,
+            "lacp lacpdu received"
+        );
+        self.tx.update_periodic(
+            &self.config.interface,
+            self.config.actor_active,
+            self.receive_state,
+            self.partner,
+        );
+        self.settle();
+        self.tx
+            .send_if_changed(sink, &self.config.interface, self.pdu());
     }
 }
 
@@ -494,7 +629,7 @@ fn build_pdu(
     }
 }
 
-fn send_lacpdu(socket: &LacpSocket, interface: &str, pdu: &Lacpdu) {
+fn send_lacpdu(socket: &dyn FrameSink, interface: &str, pdu: &Lacpdu) {
     match socket.send(&packet::encode(pdu)) {
         Ok(()) => {}
         // Expected while the link is down; the fast periodic send retries.
@@ -603,7 +738,7 @@ impl TxState {
     /// untouched (so the change still counts as unsent) and pulls the
     /// periodic timer forward to the next refill, which rebuilds the PDU from
     /// live state — so a suppressed change is delayed, never lost.
-    fn transmit(&mut self, socket: &LacpSocket, interface: &str, pdu: Lacpdu) {
+    fn transmit(&mut self, socket: &dyn FrameSink, interface: &str, pdu: Lacpdu) {
         if self.no_periodic {
             return;
         }
@@ -621,7 +756,7 @@ impl TxState {
     /// every received LACPDU unconditionally made two peers ping-pong at wire
     /// speed; with this they settle as soon as their states agree, and the
     /// periodic timer alone keeps the partner's `Current_While_Timer` alive.
-    fn send_if_changed(&mut self, socket: &LacpSocket, interface: &str, pdu: Lacpdu) {
+    fn send_if_changed(&mut self, socket: &dyn FrameSink, interface: &str, pdu: Lacpdu) {
         if needs_transmit(self.last_sent.as_ref(), &pdu) {
             self.transmit(socket, interface, pdu);
         }
@@ -820,6 +955,9 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod port_tests;
 
 #[cfg(test)]
 mod churn_tests {
