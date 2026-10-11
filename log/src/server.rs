@@ -241,7 +241,7 @@ mod tests {
         let (mut r, mut w) = connect(&path, "user").await;
         w.send(LogRequest::Push(entry("from user"))).await.unwrap();
         assert!(next(&mut r).await.is_none());
-        assert!(store.snapshot(None, None).await.is_empty());
+        assert_eq!(store.snapshot(None, None).await.len(), 0);
 
         // A daemon's push is stored, with no reply frame.
         let (_r, mut w) = connect(&path, "bgpd").await;
@@ -326,6 +326,6 @@ mod tests {
         // The server may drop it before the write lands; either way no reply.
         let _ = w.send(LogRequest::Push(entry("x"))).await;
         assert!(next(&mut r).await.is_none());
-        assert!(store.snapshot(None, None).await.is_empty());
+        assert_eq!(store.snapshot(None, None).await.len(), 0);
     }
 }

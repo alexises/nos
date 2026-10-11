@@ -169,7 +169,7 @@ mod tests {
                 let Some(Ok(LldpEvent::Neighbors(n))) = r.next().await else {
                     panic!("{role:?}: no neighbors");
                 };
-                assert!(n.is_empty());
+                assert_eq!(n.len(), 0);
             } else {
                 assert!(reply.is_none(), "{role:?} must get no reply");
             }
