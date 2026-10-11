@@ -267,6 +267,28 @@ mod tests {
     }
 
     #[test]
+    fn ensure_twice_does_not_duplicate_the_subinterface() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1", vec![])],
+            ..Default::default()
+        };
+        for tag in [100, 100, 200] {
+            PortAggregateSubinterfaceOp::Ensure {
+                port_aggregate: "bond1".to_string(),
+                tag,
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        let tags: Vec<u16> = cfg.port_aggregates[0]
+            .subinterfaces
+            .iter()
+            .map(|s| s.tag)
+            .collect();
+        assert_eq!(tags, [100, 200]);
+    }
+
+    #[test]
     fn ensure_missing_aggregate_errors() {
         let mut cfg = Config::default();
         let err = PortAggregateSubinterfaceOp::Ensure {
@@ -303,6 +325,109 @@ mod tests {
         let sub = &cfg.port_aggregates[0].subinterfaces[0];
         assert_eq!(sub.addresses.len(), 1);
         assert_eq!(sub.addresses[0].label.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn remove_address_drops_only_that_address_and_missing_errors() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1", vec![])],
+            ..Default::default()
+        };
+        for a in ["10.0.0.1/24", "10.0.1.1/24"] {
+            PortAggregateSubinterfaceOp::AddAddress {
+                port_aggregate: "bond1".to_string(),
+                tag: 5,
+                address: addr(a),
+                label: None,
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        let remove = |cfg: &mut Config, a: &str| {
+            PortAggregateSubinterfaceOp::RemoveAddress {
+                port_aggregate: "bond1".to_string(),
+                tag: 5,
+                address: addr(a),
+            }
+            .apply(cfg)
+        };
+        remove(&mut cfg, "10.0.0.1/24").unwrap();
+        let sub = &cfg.port_aggregates[0].subinterfaces[0];
+        assert_eq!(sub.addresses.len(), 1);
+        assert_eq!(sub.addresses[0].address, addr("10.0.1.1/24"));
+        let err = remove(&mut cfg, "10.0.0.1/24").unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::PortAggregateSubinterfaceAddressNotFound { tag: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn set_and_clear_touch_only_the_tagged_subinterface() {
+        let sub = |tag| Subinterface {
+            tag,
+            addresses: Vec::new(),
+            routing_table: None,
+            ospf_profile: None,
+            ospfv3_profile: None,
+            bfd_unsolicited: None,
+        };
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1", vec![sub(1), sub(2)])],
+            ..Default::default()
+        };
+        let op = |cfg: &mut Config, f: fn(String, u16) -> PortAggregateSubinterfaceOp, tag| {
+            f("bond1".to_string(), tag).apply(cfg)
+        };
+        let subs = |cfg: &Config| cfg.port_aggregates[0].subinterfaces.clone();
+        op(
+            &mut cfg,
+            |p, t| PortAggregateSubinterfaceOp::SetRoutingTable {
+                port_aggregate: p,
+                tag: t,
+                routing_table: "rt".to_string(),
+            },
+            2,
+        )
+        .unwrap();
+        assert_eq!(subs(&cfg)[0].routing_table, None);
+        assert_eq!(subs(&cfg)[1].routing_table.as_deref(), Some("rt"));
+        op(
+            &mut cfg,
+            |p, t| PortAggregateSubinterfaceOp::SetRoutingTable {
+                port_aggregate: p,
+                tag: t,
+                routing_table: "rt1".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+        // Clearing tag 2 leaves tag 1's value alone and is really stored.
+        op(
+            &mut cfg,
+            |p, t| PortAggregateSubinterfaceOp::ClearRoutingTable {
+                port_aggregate: p,
+                tag: t,
+            },
+            2,
+        )
+        .unwrap();
+        assert_eq!(subs(&cfg)[0].routing_table.as_deref(), Some("rt1"));
+        assert_eq!(subs(&cfg)[1].routing_table, None);
+        let err = op(
+            &mut cfg,
+            |p, t| PortAggregateSubinterfaceOp::ClearRoutingTable {
+                port_aggregate: p,
+                tag: t,
+            },
+            9,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::PortAggregateSubinterfaceNotFound { tag: 9, .. }
+        ));
+        assert_eq!(subs(&cfg).len(), 2);
     }
 
     #[test]

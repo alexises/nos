@@ -318,3 +318,7 @@ pub fn render_shutdown(shutdown: &Value) -> Vec<String> {
         None => vec!["shutdown".to_string()],
     }
 }
+
+#[cfg(test)]
+#[path = "sugar_tests.rs"]
+mod tests;

@@ -1212,4 +1212,194 @@ mod tests {
         assert_eq!(BgpRole::Provider.counterpart(), BgpRole::Customer);
         assert_eq!(BgpRole::Peer.counterpart(), BgpRole::Peer);
     }
+
+    // ---- rejecting cases (#360) ----
+
+    #[test]
+    fn damping_rejects_each_bad_field_and_accepts_the_boundaries() {
+        assert!(valid_damping(None).is_ok());
+        assert!(valid_damping(Some(&BgpDamping::default())).is_ok());
+        let d = BgpDamping::default();
+        let bad = [
+            BgpDamping { half_life: 0, ..d },
+            BgpDamping { reuse: 0, ..d },
+            BgpDamping {
+                suppress: d.reuse,
+                ..d
+            },
+            BgpDamping {
+                suppress: d.reuse - 1,
+                ..d
+            },
+            BgpDamping {
+                max_suppress: d.half_life - 1,
+                ..d
+            },
+        ];
+        for b in bad {
+            assert!(valid_damping(Some(&b)).is_err(), "{b:?}");
+        }
+        let edge = BgpDamping {
+            half_life: 1,
+            reuse: 1,
+            suppress: 2,
+            max_suppress: 1,
+        };
+        assert!(valid_damping(Some(&edge)).is_ok());
+    }
+
+    #[test]
+    fn policy_reference_must_exist_unless_builtin() {
+        let cfg = Config {
+            policy_definitions: vec![crate::schema::PolicyDefinition {
+                name: "mine".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let s = |s: &str| s.to_string();
+        assert!(policy_reference_valid(None, &cfg).is_ok());
+        assert!(policy_reference_valid(Some(&s(nos_rpl::ACCEPT_ALL_NAME)), &cfg).is_ok());
+        assert!(policy_reference_valid(Some(&s(nos_rpl::DENY_ALL_NAME)), &cfg).is_ok());
+        assert!(policy_reference_valid(Some(&s("mine")), &cfg).is_ok());
+        assert!(policy_reference_valid(Some(&s("nope")), &cfg).is_err());
+        assert!(policy_reference_valid(Some(&s("nope")), &Config::default()).is_err());
+    }
+
+    fn aokey(send_id: u8, recv_id: u8, is_current: bool, is_rnext: bool) -> BgpAoKey {
+        BgpAoKey {
+            send_id,
+            recv_id,
+            algorithm: BgpAoAlgorithm::HmacSha1_96,
+            key: "k".to_string(),
+            is_current,
+            is_rnext,
+            exclude_options: false,
+        }
+    }
+
+    fn ao_valid(keys: Vec<BgpAoKey>) -> bool {
+        valid_auth(Some(&BgpAuth::Ao { keys })).is_ok()
+    }
+
+    #[test]
+    fn ao_auth_rejects_duplicate_ids_and_bad_current_rnext_counts() {
+        assert!(valid_auth(None).is_ok());
+        assert!(ao_valid(vec![aokey(1, 1, true, false)]));
+        assert!(ao_valid(vec![
+            aokey(1, 1, true, true),
+            aokey(2, 2, false, false)
+        ]));
+        assert!(ao_valid(vec![
+            aokey(1, 1, true, false),
+            aokey(2, 2, false, true)
+        ]));
+        // Duplicate send-id, duplicate recv-id (each alone).
+        assert!(!ao_valid(vec![
+            aokey(1, 1, true, false),
+            aokey(1, 2, false, false)
+        ]));
+        assert!(!ao_valid(vec![
+            aokey(1, 1, true, false),
+            aokey(2, 1, false, false)
+        ]));
+        // No current key, two current keys, two rnext keys.
+        assert!(!ao_valid(vec![aokey(1, 1, false, false)]));
+        assert!(!ao_valid(vec![
+            aokey(1, 1, true, false),
+            aokey(2, 2, true, false)
+        ]));
+        assert!(!ao_valid(vec![
+            aokey(1, 1, true, true),
+            aokey(2, 2, false, true)
+        ]));
+        assert!(!ao_valid(vec![]));
+    }
+
+    #[test]
+    fn md5_and_ao_key_length_boundaries() {
+        let md5 = |n: usize| {
+            valid_auth(Some(&BgpAuth::Md5 {
+                password: "x".repeat(n),
+            }))
+            .is_ok()
+        };
+        assert!(!md5(0));
+        assert!(md5(1));
+        assert!(md5(80));
+        assert!(!md5(81));
+        let mut k = aokey(1, 1, true, false);
+        k.key = "x".repeat(80);
+        assert!(ao_valid(vec![k.clone()]));
+        k.key = String::new();
+        assert!(!ao_valid(vec![k]));
+    }
+
+    #[test]
+    fn display_words_for_family_role_and_source_address() {
+        let fam = AddressFamily::ALL.map(|f| f.to_string());
+        assert_eq!(fam, ["ipv4", "ipv6", "l2vpn-evpn"]);
+        let roles = [
+            (BgpRole::Provider, "provider"),
+            (BgpRole::RouteServer, "route-server"),
+            (BgpRole::RouteServerClient, "route-server-client"),
+            (BgpRole::Customer, "customer"),
+            (BgpRole::Peer, "peer"),
+        ];
+        for (r, w) in roles {
+            assert_eq!(r.as_str(), w);
+        }
+        let s = |v: &SourceAddress| v.to_string();
+        let label = Some("l".to_string());
+        let iface = |label| SourceAddress::Interface {
+            interface: "eth0".to_string(),
+            label,
+        };
+        assert_eq!(s(&iface(None)), "interface eth0");
+        assert_eq!(s(&iface(label.clone())), "interface eth0 label l");
+        assert_eq!(s(&SourceAddress::Loopback { label: None }), "loopback");
+        assert_eq!(s(&SourceAddress::Loopback { label }), "loopback label l");
+    }
+
+    #[test]
+    fn shutdown_message_and_max_hops_boundaries() {
+        let msg = |n: usize| {
+            valid_shutdown(Some(&BgpShutdown {
+                message: Some("x".repeat(n)),
+            }))
+            .is_ok()
+        };
+        assert!(valid_shutdown(None).is_ok());
+        assert!(valid_shutdown(Some(&BgpShutdown { message: None })).is_ok());
+        assert!(msg(0));
+        assert!(msg(SHUTDOWN_MESSAGE_MAX));
+        assert!(!msg(SHUTDOWN_MESSAGE_MAX + 1));
+        assert!(valid_max_hops(None).is_ok());
+        assert!(valid_max_hops(Some(1)).is_ok());
+        assert!(valid_max_hops(Some(254)).is_ok());
+        assert!(valid_max_hops(Some(0)).is_err());
+        assert!(valid_max_hops(Some(255)).is_err());
+    }
+
+    #[test]
+    fn add_path_send_count_defaults_depend_on_route_server_client() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        assert_eq!(BgpPeerGroup::default_add_path_send_count(false), Some(2));
+        assert_eq!(BgpPeerGroup::default_add_path_send_count(true), None);
+        assert_eq!(pg.effective_add_path_send_count(), Some(2));
+        pg.route_server_client = true;
+        assert_eq!(pg.effective_add_path_send_count(), None);
+        pg.add_path_send_count = Some(7);
+        assert_eq!(pg.effective_add_path_send_count(), Some(7));
+    }
+
+    #[test]
+    fn add_path_words_and_wire_values() {
+        assert_eq!(BgpAddPath::Receive.as_str(), "receive");
+        assert_eq!(BgpAddPath::Send.as_str(), "send");
+        assert_eq!(BgpAddPath::Both.as_str(), "both");
+        assert_eq!(BgpAddPath::Receive.send_receive(), 1);
+        assert_eq!(BgpAddPath::Send.send_receive(), 2);
+        assert_eq!(BgpAddPath::Both.send_receive(), 3);
+    }
 }

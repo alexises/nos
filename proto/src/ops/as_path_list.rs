@@ -106,6 +106,31 @@ mod tests {
     }
 
     #[test]
+    fn ensure_is_idempotent_and_adds_distinct_names() {
+        let mut cfg = Config::default();
+        let ensure = |cfg: &mut Config, n: &str| {
+            AsPathListOp::Ensure {
+                name: n.to_string(),
+            }
+            .apply(cfg)
+            .unwrap();
+        };
+        ensure(&mut cfg, "g1");
+        AsPathListOp::AddPattern {
+            name: "g1".to_string(),
+            pattern: "^1$".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        ensure(&mut cfg, "g1");
+        assert_eq!(cfg.as_path_lists.len(), 1);
+        assert_eq!(cfg.as_path_lists[0].patterns, ["^1$"]);
+        ensure(&mut cfg, "g2");
+        let names: Vec<_> = cfg.as_path_lists.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["g1", "g2"]);
+    }
+
+    #[test]
     fn add_and_remove_pattern() {
         let mut cfg = Config {
             as_path_lists: vec![list("g1")],

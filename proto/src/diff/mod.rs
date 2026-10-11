@@ -308,6 +308,53 @@ mod tests {
     }
 
     #[test]
+    fn is_empty_is_false_when_any_single_section_changed() {
+        type Set = fn(&mut ConfigDiff, FieldDiff, SectionDiff);
+        let field = || FieldDiff {
+            label: "l".to_string(),
+            old: None,
+            new: None,
+        };
+        let section = || SectionDiff {
+            header: "h".to_string(),
+            name: "n".to_string(),
+            status: DiffStatus::Added,
+            fields: Vec::new(),
+            subsections: Vec::new(),
+        };
+        assert!(ConfigDiff::default().is_empty());
+        let setters: [Set; 22] = [
+            |d, f, _| d.hostname = Some(f),
+            |d, _, s| d.bgp_instances.push(s),
+            |d, _, s| d.routing_tables.push(s),
+            |d, _, s| d.ospf_instances.push(s),
+            |d, _, s| d.ospfv3_instances.push(s),
+            |d, _, s| d.static_routing_instances.push(s),
+            |d, _, s| d.interfaces.push(s),
+            |d, _, s| d.policy_definitions.push(s),
+            |d, _, s| d.community_aliases.push(s),
+            |d, _, s| d.community_groups.push(s),
+            |d, _, s| d.as_path_lists.push(s),
+            |d, _, s| d.prefix_lists.push(s),
+            |d, _, s| d.broadcast_domains.push(s),
+            |d, _, s| d.switching_profiles.push(s),
+            |d, _, s| d.port_aggregates.push(s),
+            |d, f, _| d.lldp.push(f),
+            |d, _, s| d.users.push(s),
+            |d, f, _| d.logging.push(f),
+            |d, _, s| d.bfd_profiles.push(s),
+            |d, f, _| d.sbfd_reflector.push(f),
+            |d, f, _| d.spanning_tree.push(f),
+            |d, _, s| d.stp_port_profiles.push(s),
+        ];
+        for (i, set) in setters.iter().enumerate() {
+            let mut d = ConfigDiff::default();
+            set(&mut d, field(), section());
+            assert!(!d.is_empty(), "setter {i}");
+        }
+    }
+
+    #[test]
     fn identical_configs_produce_empty_diff() {
         let cfg = Config {
             bgp_instances: vec![instance("r1", 65000)],
