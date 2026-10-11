@@ -1029,7 +1029,9 @@ fn decode_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
             }))
         }
         LSA_TYPE_LINK => {
-            if data.len() < 20 {
+            // priority/options (4) + link-local address (16) + prefix count (4);
+            // the guard used to say 20 and the count read panicked on 20..24.
+            if data.len() < 24 {
                 return Err(PacketError::TruncatedBody);
             }
             let priority = data[0];
@@ -1816,5 +1818,124 @@ mod tests {
         let mut wire = unhex(hex);
         wire.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(decode_lsa(&wire).unwrap().header.checksum, checksum);
+    }
+
+    #[test]
+    fn split_tlvs_boundary_lengths() {
+        // Empty value: 4-byte header only.
+        assert_eq!(split_tlvs(&[0, 1, 0, 0]).unwrap(), [(1, &[][..])]);
+        // Header cut short.
+        assert_eq!(
+            split_tlvs(&[0, 1, 0]).unwrap_err(),
+            PacketError::TruncatedBody
+        );
+        // Value exactly fits (padded to 4 by the sender, tail padding optional).
+        assert_eq!(
+            split_tlvs(&[0, 1, 0, 2, 0xaa, 0xbb]).unwrap(),
+            [(1, &[0xaa, 0xbb][..])]
+        );
+        assert_eq!(
+            split_tlvs(&[0, 1, 0, 2, 0xaa]).unwrap_err(),
+            PacketError::TruncatedBody
+        );
+        // Padding after a 1-byte value is skipped before the next TLV.
+        assert_eq!(
+            split_tlvs(&[0, 1, 0, 1, 0xaa, 0, 0, 0, 0, 2, 0, 0]).unwrap(),
+            [(1, &[0xaa][..]), (2, &[][..])]
+        );
+    }
+
+    #[test]
+    fn options_bytes_land_in_the_right_place_and_order() {
+        // Distinct bytes: options 0x01_0203 on every LSA that carries them.
+        let LsaBody::Router(r) = decode_body(LSA_TYPE_ROUTER, &[0x80, 1, 2, 3]).unwrap() else {
+            panic!("not a Router-LSA")
+        };
+        assert_eq!((r.flags, r.options, r.links.len()), (0x80, 0x01_0203, 0));
+        let LsaBody::Network(n) = decode_body(LSA_TYPE_NETWORK, &[0, 1, 2, 3, 1, 1, 1, 1]).unwrap()
+        else {
+            panic!("not a Network-LSA")
+        };
+        assert_eq!(n.options, 0x01_0203);
+        assert_eq!(n.attached_routers, [Ipv4Addr::new(1, 1, 1, 1)]);
+        let mut link = [0u8; 24];
+        link[0] = 5;
+        link[1..4].copy_from_slice(&[1, 2, 3]);
+        let LsaBody::Link(l) = decode_body(LSA_TYPE_LINK, &link).unwrap() else {
+            panic!("not a Link-LSA")
+        };
+        assert_eq!((l.priority, l.options), (5, 0x01_0203));
+    }
+
+    #[test]
+    fn network_lsa_length_is_4_plus_a_multiple_of_4() {
+        let body = [0u8; 8];
+        for (n, ok) in [
+            (0, false),
+            (3, false),
+            (4, true),
+            (5, false),
+            (7, false),
+            (8, true),
+        ] {
+            assert_eq!(
+                decode_body(LSA_TYPE_NETWORK, &body[..n]).is_ok(),
+                ok,
+                "{n} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn intra_area_prefix_lsa_boundaries() {
+        let mut body = [0u8; 16];
+        // 12 bytes, no prefixes: decodes; 11 does not.
+        assert!(decode_body(LSA_TYPE_INTRA_AREA_PREFIX, &body[..12]).is_ok());
+        assert_eq!(
+            decode_body(LSA_TYPE_INTRA_AREA_PREFIX, &body[..11]).unwrap_err(),
+            PacketError::TruncatedBody
+        );
+        // One announced prefix: 3 bytes behind the fixed part is short, 4 fits.
+        body[1] = 1;
+        assert_eq!(
+            decode_body(LSA_TYPE_INTRA_AREA_PREFIX, &body[..15]).unwrap_err(),
+            PacketError::TruncatedBody
+        );
+        let LsaBody::IntraAreaPrefix(p) =
+            decode_body(LSA_TYPE_INTRA_AREA_PREFIX, &body[..16]).unwrap()
+        else {
+            panic!("not an Intra-Area-Prefix-LSA")
+        };
+        assert_eq!(p.prefixes.len(), 1);
+    }
+
+    #[test]
+    fn link_lsa_fixed_part_is_24_bytes() {
+        // priority/options (4) + link-local address (16) + prefix count (4).
+        let body = [0u8; 24];
+        let LsaBody::Link(l) = decode_body(LSA_TYPE_LINK, &body).unwrap() else {
+            panic!("not a Link-LSA")
+        };
+        assert_eq!(l.prefixes.len(), 0);
+        // 20..=23 bytes used to index past the end (the guard said 20).
+        for n in [0, 4, 19, 20, 23] {
+            assert_eq!(
+                decode_body(LSA_TYPE_LINK, &body[..n]).unwrap_err(),
+                PacketError::TruncatedBody,
+                "{n} bytes"
+            );
+        }
+        // One announced prefix with no 4-byte entry behind it.
+        let mut one = body;
+        one[23] = 1;
+        assert_eq!(
+            decode_body(LSA_TYPE_LINK, &one).unwrap_err(),
+            PacketError::TruncatedBody
+        );
+        assert_eq!(
+            decode_body(LSA_TYPE_LINK, &[&one[..], &[0u8; 4]].concat())
+                .map(|b| matches!(b, LsaBody::Link(l) if l.prefixes.len() == 1)),
+            Ok(true)
+        );
     }
 }

@@ -1124,4 +1124,82 @@ mod tests {
         short.pop();
         assert_eq!(decode_hello(&short), Err(PacketError::TruncatedBody));
     }
+
+    /// Hand-written packet: 16-byte header (declared length = real length) + `body`.
+    fn raw(ty: u8, body: &[u8]) -> Vec<u8> {
+        let len = u16::try_from(HEADER_LEN + body.len()).unwrap();
+        let mut v = vec![VERSION, ty];
+        v.extend(len.to_be_bytes());
+        v.extend([9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 0, 0]); // router, area, cksum/instance/rsvd
+        v.extend_from_slice(body);
+        v
+    }
+
+    #[test]
+    fn decode_header_boundary_length() {
+        let pkt = raw(TYPE_HELLO, &[]);
+        assert_eq!(pkt.len(), HEADER_LEN);
+        assert_eq!(decode_header(&pkt).unwrap().3, &[] as &[u8]);
+        assert_eq!(
+            decode_header(&pkt[..HEADER_LEN - 1]),
+            Err(PacketError::Truncated)
+        );
+        // Declared length below the header, and above the data.
+        let mut bad = pkt.clone();
+        bad[3] = u8::try_from(HEADER_LEN).unwrap() - 1;
+        assert_eq!(decode_header(&bad), Err(PacketError::TruncatedBody));
+        bad[3] = u8::try_from(HEADER_LEN).unwrap() + 1;
+        assert_eq!(decode_header(&bad), Err(PacketError::TruncatedBody));
+    }
+
+    #[test]
+    fn dbd_fixed_part_fields_and_flags() {
+        // rsvd, options 0x01_0203, MTU 0x0405, rsvd, flags, DD sequence 0x0a0b0c0d.
+        let body = |flags: u8| [0, 1, 2, 3, 4, 5, 0, flags, 0x0a, 0x0b, 0x0c, 0x0d];
+        let d = decode_dbd(&raw(TYPE_DBD, &body(0x07))).unwrap();
+        assert_eq!(
+            (d.options, d.interface_mtu, d.dd_sequence_number),
+            (0x01_0203, 0x0405, 0x0a0b_0c0d)
+        );
+        assert!(d.init && d.more && d.master);
+        for (flags, want) in [
+            (DBD_FLAG_INIT, (true, false, false)),
+            (DBD_FLAG_MORE, (false, true, false)),
+            (DBD_FLAG_MASTER, (false, false, true)),
+            (0, (false, false, false)),
+        ] {
+            let d = decode_dbd(&raw(TYPE_DBD, &body(flags))).unwrap();
+            assert_eq!((d.init, d.more, d.master), want, "flags {flags:#x}");
+        }
+    }
+
+    #[test]
+    fn dbd_body_exact_fixed_part_and_lsa_header_multiples() {
+        let fixed = [0u8; DBD_BODY_FIXED_LEN];
+        let got = decode_dbd(&raw(TYPE_DBD, &fixed)).unwrap();
+        assert_eq!(got.lsa_headers.len(), 0);
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &fixed[..DBD_BODY_FIXED_LEN - 1])),
+            Err(PacketError::TruncatedBody)
+        );
+        let with_one = [&fixed[..], &[0u8; lsa::LSA_HEADER_LEN]].concat();
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &with_one))
+                .unwrap()
+                .lsa_headers
+                .len(),
+            1
+        );
+        // One byte short of, and one byte past, a whole LSA header.
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &with_one[..with_one.len() - 1])),
+            Err(PacketError::TruncatedBody)
+        );
+        let mut over = with_one.clone();
+        over.push(0);
+        assert_eq!(
+            decode_dbd(&raw(TYPE_DBD, &over)),
+            Err(PacketError::TruncatedBody)
+        );
+    }
 }

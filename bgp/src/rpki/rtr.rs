@@ -704,6 +704,71 @@ mod tests {
         );
     }
 
+    fn dec(bytes: &[u8]) -> (io::Result<Option<Frame>>, usize) {
+        let mut b = BytesMut::from(bytes);
+        let r = RtrCodec { version: 1 }.decode(&mut b);
+        (r, b.len())
+    }
+
+    #[test]
+    fn header_boundary_lengths() {
+        // 8 bytes with length 8: a complete Reset Query.
+        let rq = [1, RESET_QUERY, 0, 0, 0, 0, 0, 8];
+        let (r, left) = dec(&rq);
+        assert_eq!(r.unwrap().unwrap().pdu, Pdu::ResetQuery);
+        assert_eq!(left, 0);
+        // 7 bytes: header incomplete, nothing consumed.
+        let (r, left) = dec(&rq[..7]);
+        assert!(r.unwrap().is_none());
+        assert_eq!(left, 7);
+        // Length 7 (below header) and MAX_PDU + 1 are corrupt.
+        assert!(dec(&[1, 2, 0, 0, 0, 0, 0, 7]).0.is_err());
+        let over = u32::try_from(MAX_PDU + 1).unwrap().to_be_bytes();
+        assert!(dec(&[1, 2, 0, 0, over[0], over[1], over[2], over[3]])
+            .0
+            .is_err());
+        // Length MAX_PDU is accepted: it waits for the rest.
+        let max = u32::try_from(MAX_PDU).unwrap().to_be_bytes();
+        let (r, _) = dec(&[1, 2, 0, 0, max[0], max[1], max[2], max[3]]);
+        assert!(r.unwrap().is_none());
+    }
+
+    #[test]
+    fn one_byte_short_waits_and_exact_decodes() {
+        let sn = [1, SERIAL_NOTIFY, 0, 7, 0, 0, 0, 12, 0, 0, 0, 9];
+        let (r, left) = dec(&sn[..11]);
+        assert!(r.unwrap().is_none());
+        assert_eq!(left, 11);
+        assert_eq!(
+            dec(&sn).0.unwrap().unwrap().pdu,
+            Pdu::SerialNotify {
+                session: 7,
+                serial: 9
+            }
+        );
+        // Declared length 8 but a type needing a body: truncated, not a panic.
+        assert!(dec(&[1, SERIAL_NOTIFY, 0, 7, 0, 0, 0, 8]).0.is_err());
+    }
+
+    fn prefix_pdu(ty: u8, plen: u8, max_len: u8) -> Vec<u8> {
+        let alen = if ty == IPV4_PREFIX { 4 } else { 16 };
+        let mut v = vec![1, ty, 0, 0, 0, 0, 0, u8::try_from(16 + alen).unwrap()];
+        v.extend([1, plen, max_len, 0]);
+        v.extend(vec![0; alen]);
+        v.extend([0, 0, 0xfd, 0xe9]);
+        v
+    }
+
+    #[test]
+    fn prefix_max_len_bounds() {
+        for (ty, plen, top) in [(IPV4_PREFIX, 24u8, 32u8), (IPV6_PREFIX, 48, 128)] {
+            assert!(dec(&prefix_pdu(ty, plen, plen)).0.unwrap().is_some());
+            assert!(dec(&prefix_pdu(ty, plen, top)).0.unwrap().is_some());
+            assert!(dec(&prefix_pdu(ty, plen, plen - 1)).0.is_err());
+            assert!(dec(&prefix_pdu(ty, plen, top + 1)).0.is_err());
+        }
+    }
+
     #[test]
     fn wire_layout_and_bad_input() {
         let mut buf = BytesMut::new();
