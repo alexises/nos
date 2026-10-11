@@ -3457,4 +3457,255 @@ mod shutdown_message_tests {
         body.extend_from_slice(&[6, OPT_PARAM_CAPABILITIES, 4, 9, 2, 0, 0]);
         assert_eq!(parse_open(&body).unwrap().capabilities, []);
     }
+
+    // --- boundary-length decoding (#359): hand-written buffers, exact vs one short ---
+
+    const OPEN_FIXED: [u8; 9] = [4, 0xfd, 0xe9, 0, 90, 1, 1, 1, 1];
+
+    fn open_body(tail: &[u8]) -> Vec<u8> {
+        [&OPEN_FIXED[..], tail].concat()
+    }
+
+    #[test]
+    fn open_fixed_part_boundary() {
+        assert!(parse_open(&open_body(&[0]))
+            .unwrap()
+            .capabilities
+            .is_empty());
+        assert!(matches!(
+            parse_open(&OPEN_FIXED),
+            Err(WireError::MalformedOpen)
+        ));
+    }
+
+    #[test]
+    fn open_opt_param_len_255_needs_the_second_255_for_extended_form() {
+        // 10 bytes, opt_param_len 255 and no octet 10: classic, 255 bytes missing.
+        assert!(matches!(
+            parse_open(&open_body(&[255])),
+            Err(WireError::Truncated)
+        ));
+        // Non-255 next octet: classic form with exactly 255 parameter bytes
+        // (one unknown parameter, type 9, 253 value bytes).
+        let mut params = vec![9, 253];
+        params.extend(vec![0; 253]);
+        assert_eq!(params.len(), 255);
+        assert!(parse_open(&open_body(&[&[255][..], &params].concat()))
+            .unwrap()
+            .capabilities
+            .is_empty());
+        // 255/255: extended, total length 0 in exactly 13 bytes; 12 is malformed.
+        assert!(parse_open(&open_body(&[255, 255, 0, 0]))
+            .unwrap()
+            .capabilities
+            .is_empty());
+        assert!(matches!(
+            parse_open(&open_body(&[255, 255, 0])),
+            Err(WireError::MalformedOpen)
+        ));
+    }
+
+    #[test]
+    fn open_optional_parameters_exact_vs_one_short() {
+        // Parameter (type 9, len 0) exactly fills the declared 2 bytes.
+        assert!(parse_open(&open_body(&[2, 9, 0])).is_ok());
+        assert!(matches!(
+            parse_open(&open_body(&[2, 9])),
+            Err(WireError::Truncated)
+        ));
+        // Declared parameter length 1 with no value byte.
+        assert!(matches!(
+            parse_open(&open_body(&[2, 9, 1])),
+            Err(WireError::Truncated)
+        ));
+        // A lone type octet is shorter than the parameter header.
+        assert!(matches!(
+            parse_open(&open_body(&[1, 9])),
+            Err(WireError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn capability_length_exact_vs_one_short() {
+        assert_eq!(
+            parse_capabilities(&[CAP_ROUTE_REFRESH, 0]).unwrap(),
+            [Capability::RouteRefresh]
+        );
+        assert_eq!(
+            parse_capabilities(&[CAP_FOUR_OCTET_ASN, 4, 0, 0, 0xfd, 0xe9]).unwrap(),
+            [Capability::FourOctetAsn(65001)]
+        );
+        assert!(matches!(
+            parse_capabilities(&[CAP_FOUR_OCTET_ASN, 4, 0, 0, 0xfd]),
+            Err(WireError::Truncated)
+        ));
+        // A one-byte tail cannot hold code + length.
+        assert!(matches!(
+            parse_capabilities(&[CAP_ROUTE_REFRESH]),
+            Err(WireError::Truncated)
+        ));
+        assert!(matches!(
+            parse_capabilities(&[CAP_ROUTE_REFRESH, 0, CAP_ROUTE_REFRESH]),
+            Err(WireError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn graceful_restart_capability_length_must_be_2_plus_a_multiple_of_4() {
+        let gr = |value: &[u8]| {
+            let mut v = vec![CAP_GRACEFUL_RESTART, u8::try_from(value.len()).unwrap()];
+            v.extend_from_slice(value);
+            parse_capabilities(&v).unwrap()
+        };
+        // cap_len 2: header only, no families.
+        assert_eq!(
+            gr(&[0x00, 90]),
+            [Capability::GracefulRestart(GracefulRestartCap {
+                restart: false,
+                notification: false,
+                time: 90,
+                families: vec![],
+            })]
+        );
+        // cap_len 6: one family.
+        assert_eq!(
+            gr(&[0x00, 90, 0, 1, 1, 0x80]),
+            [Capability::GracefulRestart(GracefulRestartCap {
+                restart: false,
+                notification: false,
+                time: 90,
+                families: vec![GrFamily {
+                    afi: 1,
+                    safi: 1,
+                    forwarding: true,
+                }],
+            })]
+        );
+        // cap_len 0, 1, 3, 4, 5: not 2 + 4k, skipped.
+        for n in [0, 1, 3, 4, 5] {
+            assert_eq!(gr(&vec![0; n]), [], "cap_len {n}");
+        }
+    }
+
+    fn attrs(data: &[u8]) -> Result<ParsedAttributes, WireError> {
+        parse_path_attributes(data, &HashSet::new(), false)
+    }
+
+    #[test]
+    fn attribute_header_boundary() {
+        assert!(attrs(&[]).is_ok());
+        // One byte, then flags+type without a length byte.
+        assert!(matches!(attrs(&[0x40]), Err(WireError::MalformedUpdate)));
+        assert!(matches!(
+            attrs(&[0x40, ATTR_ORIGIN]),
+            Err(WireError::MalformedUpdate)
+        ));
+        // Exact: header of 3, value of 1.
+        assert_eq!(
+            attrs(&[0x40, ATTR_ORIGIN, 1, 0]).unwrap().origin,
+            Some(Origin::Igp)
+        );
+        assert!(matches!(
+            attrs(&[0x40, ATTR_ORIGIN, 1]),
+            Err(WireError::MalformedUpdate)
+        ));
+        // Extended length: header of 4.
+        assert!(matches!(
+            attrs(&[0x50, ATTR_ORIGIN, 0]),
+            Err(WireError::MalformedUpdate)
+        ));
+        assert_eq!(
+            attrs(&[0x50, ATTR_ORIGIN, 0, 1, 2]).unwrap().origin,
+            Some(Origin::Incomplete)
+        );
+        assert!(matches!(
+            attrs(&[0x50, ATTR_ORIGIN, 0, 1]),
+            Err(WireError::MalformedUpdate)
+        ));
+        // Header only, zero-length value: framing is fine, content is not.
+        assert!(attrs(&[0x50, ATTR_ORIGIN, 0, 0]).unwrap().withdraw);
+    }
+
+    #[test]
+    fn origin_values_decode_and_3_is_treat_as_withdraw() {
+        for (v, want) in [(0, Origin::Igp), (1, Origin::Egp), (2, Origin::Incomplete)] {
+            let p = attrs(&[0x40, ATTR_ORIGIN, 1, v]).unwrap();
+            assert_eq!(p.origin, Some(want));
+            assert!(!p.withdraw);
+        }
+        let p = attrs(&[0x40, ATTR_ORIGIN, 1, 3]).unwrap();
+        assert_eq!(p.origin, None);
+        assert!(p.withdraw);
+    }
+
+    #[test]
+    fn fixed_size_attributes_reject_one_byte_either_side() {
+        for ty in [
+            ATTR_NEXT_HOP,
+            ATTR_LOCAL_PREF,
+            ATTR_MULTI_EXIT_DISC,
+            ATTR_ORIGINATOR_ID,
+        ] {
+            let ok = attrs(&[0x40, ty, 4, 1, 2, 3, 4]).unwrap();
+            assert!(!ok.withdraw, "type {ty}");
+            assert!(attrs(&[0x40, ty, 3, 1, 2, 3]).unwrap().withdraw, "{ty}");
+            assert!(
+                attrs(&[0x40, ty, 5, 1, 2, 3, 4, 5]).unwrap().withdraw,
+                "{ty}"
+            );
+        }
+    }
+
+    fn mp_reach_hdr(nh_len: u8) -> Vec<u8> {
+        vec![0, 1, 1, nh_len]
+    }
+
+    #[test]
+    fn mp_reach_minimum_and_next_hop_boundaries() {
+        let afis = HashSet::new();
+        let d = |v: &[u8]| decode_mp_reach(v, &afis);
+        assert!(matches!(d(&[0, 1, 1, 4]), Err(WireError::MalformedUpdate)));
+        // 5 bytes with nh_len 0: unsupported next-hop length, never an index panic.
+        assert!(matches!(
+            d(&[0, 1, 1, 0, 0]),
+            Err(WireError::MalformedUpdate)
+        ));
+        for nh_len in [4usize, 16, 32] {
+            // exactly header + next hop + SNPA count
+            let mut v = mp_reach_hdr(u8::try_from(nh_len).unwrap());
+            v.extend(vec![0; nh_len]);
+            v.push(0);
+            let got = d(&v).unwrap();
+            assert_eq!((got.afi, got.safi, got.nlri.len()), (1, 1, 0), "{nh_len}");
+            v.pop();
+            assert!(
+                matches!(d(&v), Err(WireError::MalformedUpdate)),
+                "one short, nh_len {nh_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn mp_reach_snpa_boundaries() {
+        let afis = HashSet::new();
+        let base = |snpa: &[u8]| {
+            let mut v = mp_reach_hdr(4);
+            v.extend([10, 0, 0, 1]);
+            v.extend_from_slice(snpa);
+            decode_mp_reach(&v, &afis)
+        };
+        // One SNPA announced but its length byte is missing.
+        assert!(matches!(base(&[1]), Err(WireError::MalformedUpdate)));
+        // Length byte present, empty SNPA, then one NLRI (10.1.0.0/16).
+        let got = base(&[1, 0, 16, 10, 1]).unwrap();
+        assert_eq!(got.nlri.len(), 1);
+        // A 2-byte SNPA fitting exactly, then no NLRI, vs one byte short.
+        assert!(base(&[1, 2, 0xaa, 0xbb]).unwrap().nlri.is_empty());
+        assert!(matches!(
+            base(&[1, 2, 0xaa]),
+            Err(WireError::MalformedUpdate)
+        ));
+        // Two SNPAs, the second missing.
+        assert!(matches!(base(&[2, 0]), Err(WireError::MalformedUpdate)));
+    }
 }
