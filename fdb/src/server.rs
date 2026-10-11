@@ -119,3 +119,130 @@ mod authz_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use nos_pki::{PeerId, Stream};
+    use nos_proto::{EvpnKey, EvpnRoute, EvpnUpdate, MacSource};
+
+    use super::*;
+    use crate::driver::NoopFdbDriver;
+    use crate::fdb::Ready;
+
+    type Reader = FramedRead<tokio::io::ReadHalf<Stream>, IpcCodec<FdbEvent>>;
+    type Writer = FramedWrite<tokio::io::WriteHalf<Stream>, IpcCodec<FdbRequest>>;
+
+    const RT: u64 = 0x0002_fde8_0000_2774;
+
+    async fn connect(path: &Path, role: Role) -> (Reader, Writer) {
+        let id = nos_pki::testing::shared().identity(role.as_str(), "x");
+        let s = id.connect(path, &PeerId::new("fdbd", "")).await.unwrap();
+        let (r, w) = tokio::io::split(s);
+        (
+            FramedRead::new(r, IpcCodec::default()),
+            FramedWrite::new(w, IpcCodec::default()),
+        )
+    }
+
+    /// A ready domain, so a pushed remote MAC lands in `table()`.
+    async fn server(path: &Path) -> Arc<Fdb> {
+        let fdb = Fdb::new("d1".into(), Arc::new(NoopFdbDriver), Duration::ZERO);
+        fdb.set_ready(Some(Ready {
+            vni: 10100,
+            bridge: "br1".into(),
+            vtep: "192.0.2.1".parse().unwrap(),
+            underlay: "eth0".into(),
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            rt_import: vec![RT],
+            rt_export: vec![RT],
+            bgp_instance: "r1".into(),
+            arp: false,
+            connected: Vec::new(),
+            es_ports: Vec::new(),
+            neigh_suppress: false,
+            irb: None,
+        }))
+        .await;
+        let id = nos_pki::testing::shared().identity("fdbd", "");
+        drop(start(path, "d1".into(), fdb.clone(), &id).unwrap());
+        fdb
+    }
+
+    fn push() -> FdbRequest {
+        FdbRequest::PushEvpnRoutes(EvpnUpdate::Add(EvpnRoute {
+            key: EvpnKey::Mac {
+                rd: [0; 8],
+                mac: [0, 0, 0, 0, 0, 1],
+            },
+            vni: 10100,
+            next_hop: "192.0.2.9".parse().unwrap(),
+            ext_communities: vec![RT],
+            esi: [0; 10],
+            l3_vni: None,
+        }))
+    }
+
+    async fn next(r: &mut Reader) -> Option<FdbEvent> {
+        tokio::time::timeout(Duration::from_secs(5), r.next())
+            .await
+            .expect("connection left open")
+            .map(|e| e.unwrap())
+    }
+
+    async fn remote_macs(fdb: &Fdb) -> usize {
+        fdb.table()
+            .await
+            .macs
+            .iter()
+            .filter(|m| m.source == MacSource::Remote)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn only_people_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fdb.sock");
+        let _fdb = server(&path).await;
+        for role in Role::ALL {
+            let (mut r, mut w) = connect(&path, role).await;
+            w.send(FdbRequest::GetMacs).await.unwrap();
+            let reply = next(&mut r).await;
+            if matches!(role, Role::User | Role::Restd) {
+                assert!(
+                    matches!(reply, Some(FdbEvent::Table(ref t)) if t.domain == "d1"),
+                    "{role:?}: {reply:?}"
+                );
+            } else {
+                assert!(reply.is_none(), "{role:?} must get no reply");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn only_bgpd_pushes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fdb.sock");
+        let fdb = server(&path).await;
+
+        // Every non-bgpd role: closed, nothing applied.
+        for role in Role::ALL.into_iter().filter(|r| *r != Role::Bgpd) {
+            let (mut r, mut w) = connect(&path, role).await;
+            w.send(push()).await.unwrap();
+            assert!(next(&mut r).await.is_none(), "{role:?} must be closed");
+            assert_eq!(remote_macs(&fdb).await, 0, "{role:?} push applied");
+        }
+
+        // `bgpd` is applied, with no reply frame.
+        let (_r, mut w) = connect(&path, Role::Bgpd).await;
+        w.send(push()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while remote_macs(&fdb).await != 1 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("bgpd push applied");
+    }
+}

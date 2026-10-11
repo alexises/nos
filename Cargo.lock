@@ -1862,6 +1862,7 @@ dependencies = [
  "nos-pki",
  "nos-proto",
  "rtnetlink",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",

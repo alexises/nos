@@ -156,6 +156,9 @@ async fn tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nos_pki::PeerId;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
 
     #[test]
     fn daemons_push_and_people_read() {
@@ -179,5 +182,150 @@ mod tests {
                 "{role:?} read"
             );
         }
+    }
+
+    type Reader = FramedRead<ReadHalf<Stream>, IpcCodec<LogEvent>>;
+    type Writer = FramedWrite<WriteHalf<Stream>, IpcCodec<LogRequest>>;
+
+    fn entry(message: &str) -> nos_proto::LogEntry {
+        nos_proto::LogEntry {
+            timestamp_ms: 1,
+            level: nos_proto::LogLevel::Info,
+            source: "bgpd".into(),
+            target: String::new(),
+            message: message.into(),
+            fields: Vec::new(),
+        }
+    }
+
+    async fn connect(path: &Path, role: &str) -> (Reader, Writer) {
+        let id = nos_pki::testing::shared().identity(role, "x");
+        let s = id.connect(path, &PeerId::new("logd", "")).await.unwrap();
+        let (r, w) = split(s);
+        (
+            FramedRead::new(r, IpcCodec::default()),
+            FramedWrite::new(w, IpcCodec::default()),
+        )
+    }
+
+    async fn next(r: &mut Reader) -> Option<LogEvent> {
+        tokio::time::timeout(Duration::from_secs(5), r.next())
+            .await
+            .expect("connection left open")
+            .map(|e| e.unwrap())
+    }
+
+    /// Returns the store, plus the persistence receiver (kept alive so
+    /// `record` never sees a closed channel) and the server handle.
+    fn server(
+        path: &Path,
+    ) -> (
+        LogStore,
+        mpsc::UnboundedReceiver<nos_proto::LogEntry>,
+        JoinHandle<()>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let store = LogStore::new(100, vec![], tx);
+        let id = nos_pki::testing::shared().identity("logd", "");
+        let h = start(path, store.clone(), &id).unwrap();
+        (store, rx, h)
+    }
+
+    #[tokio::test]
+    async fn push_is_for_daemons_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("log.sock");
+        let (store, _rx, _h) = server(&path);
+
+        // `user` may not push: closed, nothing stored.
+        let (mut r, mut w) = connect(&path, "user").await;
+        w.send(LogRequest::Push(entry("from user"))).await.unwrap();
+        assert!(next(&mut r).await.is_none());
+        assert!(store.snapshot(None, None).await.is_empty());
+
+        // A daemon's push is stored, with no reply frame.
+        let (_r, mut w) = connect(&path, "bgpd").await;
+        w.send(LogRequest::Push(entry("from bgpd"))).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.snapshot(None, None).await.len() != 1 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("bgpd push stored");
+    }
+
+    #[tokio::test]
+    async fn reads_are_for_people_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("log.sock");
+        let (store, _rx, _h) = server(&path);
+        store.record(entry("seeded")).await;
+
+        for role in Role::ALL {
+            let (mut r, mut w) = connect(&path, role.as_str()).await;
+            w.send(LogRequest::GetLogs {
+                source: None,
+                limit: None,
+            })
+            .await
+            .unwrap();
+            let reply = next(&mut r).await;
+            if matches!(role, Role::User | Role::Restd) {
+                let Some(LogEvent::Logs(l)) = reply else {
+                    panic!("{role:?}: no logs");
+                };
+                assert_eq!(l.len(), 1, "{role:?}");
+                assert_eq!(l[0].message, "seeded");
+            } else {
+                assert!(reply.is_none(), "{role:?} must be closed");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tail_is_for_people_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("log.sock");
+        let (store, _rx, _h) = server(&path);
+        store.record(entry("old")).await;
+
+        let (mut r, mut w) = connect(&path, "bgpd").await;
+        w.send(LogRequest::Tail { source: None }).await.unwrap();
+        assert!(next(&mut r).await.is_none(), "daemon tail must be closed");
+
+        for role in ["user", "restd"] {
+            let (mut r, mut w) = connect(&path, role).await;
+            w.send(LogRequest::Tail { source: None }).await.unwrap();
+            let Some(LogEvent::Logs(l)) = next(&mut r).await else {
+                panic!("{role}: no backlog");
+            };
+            assert!(l.iter().any(|e| e.message == "old"), "{role}: backlog");
+            // `Tail` subscribes after the backlog is sent, so keep recording
+            // until a live line shows.
+            let mut got = None;
+            for i in 0..50 {
+                store.record(entry(&format!("live {i}"))).await;
+                if let Ok(Some(Ok(LogEvent::Line(e)))) =
+                    tokio::time::timeout(Duration::from_millis(100), r.next()).await
+                {
+                    got = Some(e);
+                    break;
+                }
+            }
+            assert!(got.is_some(), "{role}: no live line");
+        }
+    }
+
+    #[tokio::test]
+    async fn unrecognised_certificate_role_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("log.sock");
+        let (store, _rx, _h) = server(&path);
+        let (mut r, mut w) = connect(&path, "martian").await;
+        // The server may drop it before the write lands; either way no reply.
+        let _ = w.send(LogRequest::Push(entry("x"))).await;
+        assert!(next(&mut r).await.is_none());
+        assert!(store.snapshot(None, None).await.is_empty());
     }
 }
