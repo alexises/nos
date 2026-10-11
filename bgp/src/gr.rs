@@ -258,6 +258,14 @@ impl Deferral {
         self.local = true;
     }
 
+    /// The peers still waited for, sorted (`reconcile::tests`).
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> Vec<IpAddr> {
+        let mut w: Vec<IpAddr> = self.waiting.iter().copied().collect();
+        w.sort();
+        w
+    }
+
     /// Why the deferral is over, if it is.
     pub fn over(&self, now: Instant) -> Option<&'static str> {
         if self.waiting.is_empty() && self.local {

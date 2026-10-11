@@ -1200,6 +1200,12 @@ impl BgpRib {
         self.deferral.is_some()
     }
 
+    /// The peers the deferral still waits for (`reconcile::tests`).
+    #[cfg(test)]
+    pub(crate) fn deferral_waiting(&self) -> Option<Vec<IpAddr>> {
+        self.deferral.as_ref().map(crate::gr::Deferral::waiting)
+    }
+
     /// Ends the deferral if it is over: every established peer gets its
     /// initial update and End-of-RIB, and the next push to `nos-ribd` is a
     /// `Full` that replaces what it kept (§4.1: stale forwarding state goes).

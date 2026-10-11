@@ -1011,3 +1011,7 @@ mod tests {
         assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 }
+
+#[cfg(test)]
+#[path = "reconcile_tests.rs"]
+mod resync_tests;

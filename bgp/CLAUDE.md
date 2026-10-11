@@ -143,4 +143,4 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE, per-route `info!`): run
 | `config_client.rs`, `watchdog_client.rs`, `rib_client.rs` | Reimplemented clients (star dependency graph) |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 
-Tests: `bgp/tests/` (`handshake.rs`, `session.rs`); e2e phases per feature in `docs/e2e-phases.md`.
+Tests: `bgp/tests/`, `reconcile_tests.rs`/`fsm_tests.rs` (fakes, #344); e2e phases in `docs/e2e-phases.md`.
