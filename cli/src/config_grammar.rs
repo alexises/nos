@@ -1029,4 +1029,122 @@ mod tests {
         }
         walk(&<Config as cli::CliValue>::kind());
     }
+    #[allow(
+        clippy::assert_is_empty,
+        reason = "Vec<String> == [] is ambiguous to infer"
+    )]
+    mod mutants_361 {
+        use super::super::*;
+        use nos_proto::cli::Variant;
+        use nos_proto::Topic;
+
+        fn u() -> Kind {
+            Kind::Uint(255)
+        }
+        fn s() -> Kind {
+            Kind::Str
+        }
+
+        const fn fld(name: &'static str, kind: fn() -> Kind) -> Field {
+            Field {
+                name,
+                topic: None,
+                hidden: false,
+                secret: false,
+                render: None,
+                key: false,
+                words: None,
+                aliases: &[],
+                sugar: &[],
+                templates: &[],
+                kind,
+            }
+        }
+
+        static UNITS: &[Variant] = &[Variant {
+            name: "A",
+            words: None,
+            aliases: &[],
+            default: true,
+            payload: Payload::Unit,
+        }];
+        static PAYLOAD: &[Variant] = &[
+            Variant {
+                name: "A",
+                words: None,
+                aliases: &[],
+                default: true,
+                payload: Payload::Unit,
+            },
+            Variant {
+                name: "B",
+                words: None,
+                aliases: &[],
+                default: false,
+                payload: Payload::Newtype(u),
+            },
+        ];
+
+        #[test]
+        fn arity_is_fixed_only_where_the_grammar_says() {
+            assert_eq!(arity(&Kind::Bool), Some(0));
+            assert_eq!(arity(&Kind::Tuple(&[u, u])), Some(2));
+            assert_eq!(arity(&Kind::Tuple(&[u, u, s])), Some(3));
+            assert_eq!(arity(&Kind::Option(|| Kind::Tuple(&[u, u]))), Some(2));
+            assert_eq!(arity(&Kind::Enum(UNITS)), Some(1));
+            // A variant with a payload has no fixed arity.
+            assert_eq!(arity(&Kind::Enum(PAYLOAD)), None);
+            assert_eq!(arity(&Kind::Str), Some(1));
+            assert_eq!(arity(&Kind::List(s)), None);
+        }
+
+        static NOISY: &[Field] = &[
+            Field {
+                hidden: true,
+                ..fld("derived", s)
+            },
+            Field {
+                key: true,
+                ..fld("name", s)
+            },
+            Field {
+                words: Some("tx interval"),
+                aliases: &["txi"],
+                ..fld("tx_interval", u)
+            },
+            Field {
+                sugar: &[nos_proto::cli::Sugar {
+                    word: "fast hello",
+                    topic: Topic::Hostname,
+                    with: |_, _, _| None,
+                }],
+                ..fld("plain", u)
+            },
+        ];
+
+        fn words_of(words: &[&str]) -> Vec<String> {
+            field_candidates(NOISY, words)
+                .into_iter()
+                .map(|c| c.word)
+                .collect()
+        }
+
+        #[test]
+        fn field_candidates_skip_hidden_and_key_and_complete_word_by_word() {
+            // Hidden and key fields are never offered; the canonical
+            // spelling's first word and the sugar's first word are.
+            assert_eq!(words_of(&[]), ["tx", "plain", "fast"]);
+            // Typing the canonical spelling offers its next word ...
+            assert_eq!(words_of(&["tx"]), ["interval"]);
+            // ... and the alias being typed is offered nothing more.
+            assert_eq!(words_of(&["txi"]), Vec::<String>::new());
+            assert_eq!(words_of(&["fast"]), ["hello"]);
+            // Complete spelling: nothing left to offer; foreign words: none.
+            assert!(words_of(&["tx", "interval"]).is_empty());
+            assert!(words_of(&["fast", "hello"]).is_empty());
+            assert!(words_of(&["zzz"]).is_empty());
+            assert!(words_of(&["name"]).is_empty());
+            assert!(words_of(&["derived"]).is_empty());
+        }
+    }
 }
