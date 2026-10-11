@@ -1,0 +1,19 @@
+# cargo-mutants config (#362). Exclusions mirror `make coverage`'s
+# --ignore-filename-regex (keep in sync): code only the real kernel/e2e can test.
+exclude_globs = [
+    "tools/**",
+    "**/driver/linux.rs",
+    "rib/src/driver/route_channel.rs",
+    "l2-socket/**",
+    "ospf/src/socket.rs",
+    "ospfv3/src/socket.rs",
+    "bfd/src/socket.rs",
+]
+# Daemon glue (#356 out of scope): process entry/IO wrappers, e2e-tested only.
+# Anchored on `replace <fn>` / `in <fn>` so `domain` or `main.rs` don't match.
+exclude_re = ['(replace|in) ([A-Za-z0-9_<>]+::)*(main|wait_or_shutdown|resolve_once|resolve_with_retry)\b']
+test_tool = "nextest"
+additional_cargo_test_args = ["--profile", "mutants"]
+# Looping mutants must end as TIMEOUT fast: memory grows for the whole window.
+minimum_test_timeout = 60
+timeout_multiplier = 3
