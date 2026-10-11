@@ -197,6 +197,49 @@ mod tests {
     }
 
     #[test]
+    fn range_and_ttl_boundaries_are_inclusive() {
+        let ok = |i, h| settings(i, h, None).check().is_ok();
+        assert!(ok(Some(1), None));
+        assert!(ok(Some(TX_INTERVAL_MAX_SECS), Some(1)));
+        assert!(!ok(Some(0), None));
+        assert!(!ok(Some(TX_INTERVAL_MAX_SECS + 1), None));
+        assert!(ok(None, Some(1)));
+        assert!(ok(None, Some(TX_HOLD_MAX)));
+        assert!(!ok(None, Some(0)));
+        assert!(!ok(None, Some(TX_HOLD_MAX + 1)));
+        // 65535 = 51 x 1285 fits the 16-bit TTL exactly; one more does not.
+        assert!(ok(Some(1285), Some(51)));
+        assert!(!ok(Some(1286), Some(51)));
+        assert_eq!(
+            settings(Some(1285), Some(51), None).effective_ttl_secs(),
+            65535
+        );
+        assert_eq!(
+            settings(Some(1286), Some(51), None).effective_ttl_secs(),
+            65535
+        );
+    }
+
+    #[test]
+    fn duplicate_management_address_is_listed_once_only() {
+        let a = IpAddr::from([10, 0, 0, 1]);
+        let b = IpAddr::from([10, 0, 0, 2]);
+        let with = |v: Vec<IpAddr>| LldpSettings {
+            management_addresses: v,
+            ..LldpSettings::default()
+        };
+        assert!(with(vec![a, b]).check().is_ok());
+        assert!(with(vec![a, b, a]).check().is_err());
+        assert!(with(vec![a, a]).check().is_err());
+        // Exactly at the cap with distinct addresses passes; one more fails.
+        let cap_n: u8 = 4;
+        assert_eq!(usize::from(cap_n), MAX_MANAGEMENT_ADDRESSES);
+        let cap = |n: u8| with((1..=n).map(|i| IpAddr::from([10, 0, 0, i])).collect());
+        assert!(cap(cap_n).check().is_ok());
+        assert!(cap(cap_n + 1).check().is_err());
+    }
+
+    #[test]
     fn management_address_must_be_unicast() {
         assert!(settings(None, None, Some("10.0.0.1")).check().is_ok());
         assert!(settings(None, None, Some("2001:db8::1")).check().is_ok());

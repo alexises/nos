@@ -336,6 +336,52 @@ mod tests {
     }
 
     #[test]
+    fn each_evpn_field_alone_requires_a_vni() {
+        let cfg = Config::default();
+        let set: [fn(&mut BroadcastDomain); 8] = [
+            |d| d.rd = Some("65000:1".to_string()),
+            |d| d.route_targets_import = vec!["65000:1".to_string()],
+            |d| d.route_targets_export = vec!["65000:1".to_string()],
+            |d| d.vtep_source = Some(SourceAddress::Loopback { label: None }),
+            |d| d.mac_redistribute = Some("r1".to_string()),
+            |d| d.arp_redistribute = Some("r1".to_string()),
+            |d| d.connected_redistribute = Some("r1".to_string()),
+            |d| d.neigh_suppress = true,
+        ];
+        for (i, f) in set.iter().enumerate() {
+            let mut d = domain("bd1");
+            f(&mut d);
+            // The vni rule itself fires (not a later, differently-worded one).
+            let err = valid_broadcast_domains(&[d.clone()], &cfg).unwrap_err();
+            assert!(
+                err.to_string().contains("require a vni"),
+                "field {i}: {err}"
+            );
+        }
+        // With a vni the non-redistribute fields stand alone.
+        for f in [&set[0], &set[1], &set[2], &set[3], &set[7]] {
+            let mut d = domain("bd1");
+            d.vni = Some(100);
+            f(&mut d);
+            assert!(valid_broadcast_domains(&[d], &cfg).is_ok());
+        }
+        // `redistribute mac` needs an rd and a vtep-source; arp/connected the same target.
+        let mut d = domain("bd1");
+        d.vni = Some(100);
+        d.mac_redistribute = Some("r1".to_string());
+        assert!(valid_broadcast_domains(&[d.clone()], &cfg).is_err());
+        d.rd = Some("65000:1".to_string());
+        assert!(valid_broadcast_domains(&[d.clone()], &cfg).is_err());
+        d.vtep_source = Some(SourceAddress::Loopback { label: None });
+        assert!(valid_broadcast_domains(&[d.clone()], &cfg).is_ok());
+        d.arp_redistribute = Some("r2".to_string());
+        assert!(valid_broadcast_domains(&[d.clone()], &cfg).is_err());
+        d.arp_redistribute = Some("r1".to_string());
+        d.connected_redistribute = Some("r1".to_string());
+        assert!(valid_broadcast_domains(&[d], &cfg).is_ok());
+    }
+
+    #[test]
     fn valid_domain_passes() {
         let cfg = config_with(vec![domain("bd1")], vec![]);
         cfg.validate_with(&cfg).unwrap();

@@ -109,6 +109,44 @@ mod tests {
     }
 
     #[test]
+    fn ensure_is_idempotent_and_adds_distinct_names() {
+        let mut cfg = Config::default();
+        let ensure = |cfg: &mut Config, n: &str| {
+            CommunityGroupOp::Ensure {
+                name: n.to_string(),
+            }
+            .apply(cfg)
+            .unwrap();
+        };
+        ensure(&mut cfg, "g1");
+        CommunityGroupOp::AddMember {
+            name: "g1".to_string(),
+            member: "65000:1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        ensure(&mut cfg, "g1");
+        assert_eq!(cfg.community_groups.len(), 1);
+        assert_eq!(cfg.community_groups[0].members, ["65000:1"]);
+        ensure(&mut cfg, "g2");
+        let names: Vec<_> = cfg
+            .community_groups
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(names, ["g1", "g2"]);
+        // An edit lands on the named group only.
+        CommunityGroupOp::AddMember {
+            name: "g2".to_string(),
+            member: "65000:2".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.community_groups[0].members, ["65000:1"]);
+        assert_eq!(cfg.community_groups[1].members, ["65000:2"]);
+    }
+
+    #[test]
     fn add_and_remove_member() {
         let mut cfg = Config {
             community_groups: vec![group("g1")],
