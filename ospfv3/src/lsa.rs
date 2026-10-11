@@ -1205,7 +1205,7 @@ fn lsa_checksum(without_age: &[u8]) -> u16 {
         c1 += c0;
     }
     c0 %= 255;
-    c1 %= 255;
+    // `c1` is only used mod 255 below, so it is not reduced here (a `%=` on it would be an equivalent mutant).
     let mut x =
         (i64::try_from(without_age.len() - CHECKSUM_OFFSET - 1).unwrap_or(0) * c0 - c1) % 255;
     if x <= 0 {
@@ -1217,7 +1217,7 @@ fn lsa_checksum(without_age: &[u8]) -> u16 {
     }
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let (x, y) = (x as u8, y as u8);
-    (u16::from(x) << 8) | u16::from(y)
+    u16::from_be_bytes([x, y])
 }
 
 /// Encodes a raw RFC 5340 Interface ID (or any other opaque 32-bit value —
@@ -1699,5 +1699,122 @@ mod tests {
     fn identical_headers_are_equal() {
         let a = router_lsa().header;
         assert_eq!(is_newer(&a, &a), Ordering::Equal);
+    }
+
+    // ---- Known-answer checksums (#357) ----
+    //
+    // Each vector is a complete wire LSA whose checksum was produced by an
+    // oracle that shares nothing with `lsa_checksum`: a throwaway script
+    // that searches for the two check bytes (non-zero, RFC 905 Annex B)
+    // making the *verification* running sums `(C0, C1)` over everything
+    // after `age` come out `(0, 0)`. Per body kind, the seq number picks a
+    // body whose `x = ((len-15)*C0 - C1) % 255` is positive / negative /
+    // exactly zero (the `x <= 0` branch), and whose `y = 510 - C0 - x` is
+    // exactly 255 (the `y > 255` boundary). `*_x_zero` have a 0xff check
+    // byte, not 0x00, and `*_y_255` an `0xff` second byte, which a `<=`/`>=`
+    // slip turns into `0x00`.
+    // ponytail: hand-built vectors only; a real FRR/BIRD capture can be
+    // appended as another row (needs a lab capture + provenance note).
+    const KNOWN_ANSWERS: &[(&str, &str, u16)] = &[
+        ("router_x_pos", "00012001000000000101010180000001b2510028000000130100000a000000030000000402020202", 0xb251),
+        ("router_x_neg", "00012001000000000101010180000005aa550028000000130100000a000000030000000402020202", 0xaa55),
+        ("router_x_zero", "0001200100000000010101018000005affaa0028000000130100000a000000030000000402020202", 0xffaa),
+        ("router_y_255", "000120010000000001010101800000af55ff0028000000130100000a000000030000000402020202", 0x55ff),
+        ("network_x_pos", "000120020000000301010101800000017a9b0020000000130101010102020202", 0x7a9b),
+        ("network_x_neg", "000120020000000301010101800000174eb10020000000130101010102020202", 0x4eb1),
+        ("network_x_zero", "0001200200000003010101018000003effd80020000000130101010102020202", 0xffd8),
+        ("network_y_255", "00012002000000030101010180000065b1ff0020000000130101010102020202", 0xb1ff),
+        ("inter_area_prefix_x_pos", "00012003000000070101010180000001ecfd0024000000194000000020010db800010000", 0xecfd),
+        ("inter_area_prefix_x_neg", "000120030000000701010101800000eb17e80024000000194000000020010db800010000", 0x17e8),
+        ("inter_area_prefix_x_zero", "00012003000000070101010180000077ff740024000000194000000020010db800010000", 0xff74),
+        ("inter_area_prefix_y_255", "00012003000000070101010180000003e8ff0024000000194000000020010db800010000", 0xe8ff),
+        ("as_external_x_pos", "00014005000000090101010180000001686e0024040000143000000020010db800020000", 0x686e),
+        ("as_external_x_neg", "000140050000000901010101800000d7ba450024040000143000000020010db800020000", 0xba45),
+        ("as_external_x_zero", "00014005000000090101010180000035ffa20024040000143000000020010db800020000", 0xffa2),
+        ("as_external_y_255", "0001400500000009010101018000009245ff0024040000143000000020010db800020000", 0x45ff),
+        ("router_20_links_x_pos", "00012001000000000303030380000001559e01580000001301000001000000010000006402020202010000020000000200000065020202020100000300000003000000660202020201000004000000040000006702020202010000050000000500000068020202020100000600000006000000690202020201000007000000070000006a0202020201000008000000080000006b0202020201000009000000090000006c020202020100000a0000000a0000006d020202020100000b0000000b0000006e020202020100000c0000000c0000006f020202020100000d0000000d00000070020202020100000e0000000e00000071020202020100000f0000000f00000072020202020100001000000010000000730202020201000011000000110000007402020202010000120000001200000075020202020100001300000013000000760202020201000014000000140000007702020202", 0x559e),
+        ("router_20_links_x_neg", "000120010000000003030303800000f46d9201580000001301000001000000010000006402020202010000020000000200000065020202020100000300000003000000660202020201000004000000040000006702020202010000050000000500000068020202020100000600000006000000690202020201000007000000070000006a0202020201000008000000080000006b0202020201000009000000090000006c020202020100000a0000000a0000006d020202020100000b0000000b0000006e020202020100000c0000000c0000006f020202020100000d0000000d00000070020202020100000e0000000e00000071020202020100000f0000000f00000072020202020100001000000010000000730202020201000011000000110000007402020202010000120000001200000075020202020100001300000013000000760202020201000014000000140000007702020202", 0x6d92),
+        ("router_20_links_x_zero", "000120010000000003030303800000abff4901580000001301000001000000010000006402020202010000020000000200000065020202020100000300000003000000660202020201000004000000040000006702020202010000050000000500000068020202020100000600000006000000690202020201000007000000070000006a0202020201000008000000080000006b0202020201000009000000090000006c020202020100000a0000000a0000006d020202020100000b0000000b0000006e020202020100000c0000000c0000006f020202020100000d0000000d00000070020202020100000e0000000e00000071020202020100000f0000000f00000072020202020100001000000010000000730202020201000011000000110000007402020202010000120000001200000075020202020100001300000013000000760202020201000014000000140000007702020202", 0xff49),
+        ("router_20_links_y_255", "0001200100000000030303038000006292ff01580000001301000001000000010000006402020202010000020000000200000065020202020100000300000003000000660202020201000004000000040000006702020202010000050000000500000068020202020100000600000006000000690202020201000007000000070000006a0202020201000008000000080000006b0202020201000009000000090000006c020202020100000a0000000a0000006d020202020100000b0000000b0000006e020202020100000c0000000c0000006f020202020100000d0000000d00000070020202020100000e0000000e00000071020202020100000f0000000f00000072020202020100001000000010000000730202020201000011000000110000007402020202010000120000001200000075020202020100001300000013000000760202020201000014000000140000007702020202", 0x92ff),
+    ];
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// RFC 905 Annex B *verification*: running sums over every byte after
+    /// `age`, checksum field included, both `mod 255`; zero iff the LSA is
+    /// valid. A different formulation from `lsa_checksum` (which generates).
+    fn fletcher_residue(wire: &[u8]) -> (u32, u32) {
+        let (mut c0, mut c1) = (0u32, 0u32);
+        for &b in &wire[2..] {
+            c0 = (c0 + u32::from(b)) % 255;
+            c1 = (c1 + c0) % 255;
+        }
+        (c0, c1)
+    }
+
+    #[test]
+    fn known_answer_checksums_decode_and_re_encode_byte_for_byte() {
+        for (name, hex, checksum) in KNOWN_ANSWERS {
+            let wire = unhex(hex);
+            assert_eq!(fletcher_residue(&wire), (0, 0), "{name}: bad vector");
+            let lsa = decode_lsa(&wire).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(lsa.header.checksum, *checksum, "{name}");
+            assert_eq!(usize::from(lsa.header.length), wire.len(), "{name}");
+            assert_eq!(encode_lsa(&lsa), wire, "{name}");
+        }
+    }
+
+    #[test]
+    fn known_answer_lsa_with_one_flipped_byte_is_rejected() {
+        for (name, hex, _) in KNOWN_ANSWERS {
+            let wire = unhex(hex);
+            // Every position after `age`, so an off-by-one in the summed
+            // range or the checksum-field skip cannot hide.
+            for at in 2..wire.len() {
+                let mut bad = wire.clone();
+                bad[at] ^= 0x01;
+                let r = decode_lsa(&bad);
+                if (16..18).contains(&at) {
+                    assert_eq!(r, Err(PacketError::BadChecksum), "{name} @{at}");
+                } else if (18..20).contains(&at) {
+                    // Length: the checksum covers it, but a shorter value
+                    // may be rejected as truncated first.
+                    assert!(r.is_err(), "{name} @{at}");
+                } else {
+                    assert_eq!(r, Err(PacketError::BadChecksum), "{name} @{at}");
+                }
+            }
+        }
+    }
+
+    /// The origination path: a locally built LSA gets exactly the known
+    /// checksum and length from `fill_checksum`, and its encoding verifies.
+    #[test]
+    fn fill_checksum_stores_the_known_answer() {
+        for (name, hex, checksum) in KNOWN_ANSWERS {
+            let wire = unhex(hex);
+            let mut lsa = decode_lsa(&wire).unwrap();
+            lsa.header.checksum = 0;
+            lsa.header.length = 0;
+            fill_checksum(&mut lsa);
+            assert_eq!(lsa.header.checksum, *checksum, "{name}");
+            assert_eq!(usize::from(lsa.header.length), wire.len(), "{name}");
+            assert_eq!(fletcher_residue(&encode_lsa(&lsa)), (0, 0), "{name}");
+        }
+    }
+
+    /// `decode_lsa` uses the header's `length`, not the buffer's, so a
+    /// trailing LSA in an LSU does not enter the checksum.
+    #[test]
+    fn checksum_ignores_bytes_after_the_lsa() {
+        let (_, hex, checksum) = KNOWN_ANSWERS[0];
+        let mut wire = unhex(hex);
+        wire.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(decode_lsa(&wire).unwrap().header.checksum, checksum);
     }
 }
