@@ -5096,4 +5096,1041 @@ mod tests {
         assert_eq!(cfg.broadcast_domains[0].stp_priority, Some(4096));
         assert_eq!(cfg.switching_profiles[0].members[0].stp_cost, Some(100_000));
     }
+
+    // ---- coverage of the flag families the tests above never mention (#345) ----
+
+    const REQUIRED: [&str; 11] = [
+        "nos-provision",
+        "--address",
+        "10.0.0.1/24",
+        "--asn",
+        "65001",
+        "--router-id",
+        "1.1.1.1",
+        "--remote-as",
+        "65002",
+        "--peer",
+        "10.0.0.2",
+    ];
+
+    fn parse(extra: &[&str]) -> Args {
+        Args::try_parse_from(REQUIRED.iter().chain(extra.iter())).unwrap()
+    }
+
+    /// Every op's `Debug` text, joined: `shows` asserts one op by its rendering.
+    fn dump(ops: &[ConfigOp]) -> String {
+        ops.iter()
+            .map(|o| format!("{o:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn shows(ops: &[ConfigOp], text: &str) {
+        let d = dump(ops);
+        assert!(d.contains(text), "{text:?} missing from\n{d}");
+    }
+
+    /// `build_ops` applied to a default `Config`, then `apply_bfd` (the e2e seed).
+    fn seeded(extra: &[&str]) -> nos_proto::Config {
+        let args = parse(extra);
+        let mut cfg = nos_proto::Config::default();
+        for op in build_ops(&args).unwrap() {
+            op.apply(&mut cfg).unwrap();
+        }
+        apply_bfd(&args, &mut cfg);
+        cfg
+    }
+
+    #[test]
+    fn value_parsers_accept_and_refuse() {
+        for (s, t) in [
+            ("normal", OspfAreaType::Normal),
+            ("stub", OspfAreaType::Stub),
+            ("totally-stubby", OspfAreaType::TotallyStubby),
+            ("nssa", OspfAreaType::Nssa),
+            ("nssa-no-summary", OspfAreaType::NssaNoSummary),
+        ] {
+            assert_eq!(parse_ospf_area_type(s), Ok(t));
+        }
+        assert!(parse_ospf_area_type("bogus").unwrap_err().contains("bogus"));
+
+        assert!(parse_family("ipv6").is_ok());
+        assert!(parse_family("ipx").is_err());
+        for s in ["receive", "send", "both"] {
+            assert_eq!(parse_add_path(s).unwrap().as_str(), s);
+        }
+        assert!(parse_add_path("nope").is_err());
+        for s in [
+            "provider",
+            "route-server",
+            "route-server-client",
+            "customer",
+            "peer",
+        ] {
+            assert_eq!(parse_role(s).unwrap().as_str(), s);
+        }
+        assert!(parse_role("boss").is_err());
+
+        assert_eq!(parse_maximum_prefix("ipv4=10").unwrap().1, 10);
+        assert!(parse_maximum_prefix("ipv4")
+            .unwrap_err()
+            .contains("expected"));
+        assert!(parse_maximum_prefix("ipx=1").is_err());
+        assert!(parse_maximum_prefix("ipv4=x").is_err());
+
+        assert_eq!(parse_user("bob=pw=1"), Ok(("bob".into(), "pw=1".into())));
+        assert!(parse_user("bob").is_err());
+
+        for s in ["affiliated", "unaffiliated", "disabled"] {
+            assert!(parse_echo_mode(s).is_ok());
+        }
+        assert!(parse_echo_mode("x").is_err());
+
+        for m in [
+            "simple-password",
+            "keyed-md5",
+            "meticulous-md5",
+            "keyed-sha1",
+            "meticulous-sha1",
+        ] {
+            assert!(parse_bfd_auth(&format!("{m}:1:k")).is_ok(), "{m}");
+        }
+        assert!(parse_bfd_auth("keyed-md5").is_err());
+        assert!(parse_bfd_auth("keyed-md5:x:k").is_err());
+
+        assert_eq!(
+            virtual_link_spec("--f", "0.0.0.1:2.2.2.2").unwrap(),
+            ("0.0.0.1".parse().unwrap(), "2.2.2.2".parse().unwrap())
+        );
+        for bad in ["0.0.0.1", "x:2.2.2.2", "0.0.0.1:y"] {
+            assert!(virtual_link_spec("--f", bad).is_err(), "{bad}");
+        }
+
+        for (name, alg) in [
+            ("md5", OspfCryptoAlgorithm::Md5),
+            ("hmac-sha1", OspfCryptoAlgorithm::HmacSha1),
+            ("hmac-sha256", OspfCryptoAlgorithm::HmacSha256),
+            ("hmac-sha384", OspfCryptoAlgorithm::HmacSha384),
+            ("hmac-sha512", OspfCryptoAlgorithm::HmacSha512),
+        ] {
+            let k = parse_ospf_crypto_key(&format!("7:{name}:secret")).unwrap();
+            assert_eq!((k.key_id, k.algorithm, k.is_current), (7, alg, true));
+        }
+        for bad in ["7:md5", "x:md5:k", "7:rot13:k"] {
+            assert!(parse_ospf_crypto_key(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn clap_mirrors_map_every_variant() {
+        use nos_proto::schema::StpForceVersion;
+        for (arg, want) in [
+            (StpModeArg::Rstp, "Rstp"),
+            (StpModeArg::Mstp, "Mstp"),
+            (StpModeArg::RapidPvst, "RapidPvst"),
+            (StpModeArg::Disabled, "Disabled"),
+        ] {
+            assert_eq!(format!("{:?}", nos_proto::StpMode::from(arg)), want);
+        }
+        for (arg, want) in [
+            (StpForceVersionArg::Stp, "Stp"),
+            (StpForceVersionArg::Rstp, "Rstp"),
+        ] {
+            assert_eq!(format!("{:?}", StpForceVersion::from(arg)), want);
+        }
+        for (arg, want) in [
+            (PortAggregateModeArg::Xor, "Xor"),
+            (PortAggregateModeArg::Lacp, "Lacp"),
+        ] {
+            assert_eq!(format!("{:?}", PortAggregateMode::from(arg)), want);
+        }
+        for (arg, want) in [
+            (EsRedundancyArg::AllActive, "AllActive"),
+            (EsRedundancyArg::SingleActive, "SingleActive"),
+        ] {
+            assert_eq!(format!("{:?}", EsRedundancy::from(arg)), want);
+        }
+        for (arg, want) in [
+            (DfAlgorithmArg::Modulo, "Modulo"),
+            (DfAlgorithmArg::Hrw, "Hrw"),
+        ] {
+            assert_eq!(format!("{:?}", nos_proto::DfAlgorithm::from(arg)), want);
+        }
+        for (arg, want) in [
+            (LacpModeArg::Active, "Active"),
+            (LacpModeArg::Passive, "Passive"),
+        ] {
+            assert_eq!(format!("{:?}", nos_proto::LacpMode::from(arg)), want);
+        }
+        for (arg, want) in [(LacpRateArg::Slow, "Slow"), (LacpRateArg::Fast, "Fast")] {
+            assert_eq!(format!("{:?}", LacpRate::from(arg)), want);
+        }
+        for (arg, want) in [
+            (BgpAoAlgorithmArg::HmacSha1, "HmacSha1_96"),
+            (BgpAoAlgorithmArg::AesCmac, "AesCmac96"),
+        ] {
+            assert_eq!(format!("{:?}", BgpAoAlgorithm::from(arg)), want);
+        }
+    }
+
+    #[test]
+    fn remaining_bgp_flags() {
+        let o = ops(&[
+            "--role",
+            "customer",
+            "--strict-mode",
+            "--maximum-paths",
+            "4",
+            "--cluster-id",
+            "9.9.9.9",
+            "--no-graceful-restart",
+            "--gr-restart-time",
+            "120",
+            "--gr-stale-time",
+            "300",
+            "--gr-selection-deferral-time",
+            "60",
+            "--confederation-id",
+            "65100",
+            "--confederation-peer",
+            "65101",
+            "--confederation-peer",
+            "65102",
+            "--rpki-cache",
+            "192.0.2.5:3323",
+            "--announce-rpki-state",
+            "--aggregate-address",
+            "10.0.0.0/8",
+            "--aggregate-as-set",
+            "--aggregate-summary-only",
+            "--remove-aggregate-address",
+            "172.16.0.0/12",
+            "--remove-static-route",
+            "198.51.100.0/24",
+            "--static-routing-instance",
+            "sri9",
+            "--damping-half-life",
+            "900",
+            "--damping-reuse",
+            "750",
+            "--damping-suppress",
+            "2000",
+            "--damping-max-suppress",
+            "3600",
+            "--local-as",
+            "64999",
+            "--local-as-no-prepend",
+            "--bgp-instance",
+            "r2",
+            "--peer-group",
+            "pgx",
+            "--import-policy",
+            "imp",
+            "--export-policy",
+            "exp",
+            "--ao-send-id",
+            "3",
+            "--ao-recv-id",
+            "4",
+            "--ao-key-secret",
+            "s",
+            "--ao-algorithm",
+            "aes-cmac",
+            "--ao-current",
+            "--ao-rnext",
+            "--ao-exclude-options",
+            "--ao-promote-current",
+            "3",
+            "--ao-remove-key",
+            "9",
+            "--evpn",
+            "--route-server-client",
+            "--route-reflector-client",
+            "--save",
+        ])
+        .unwrap();
+        shows(
+            &o,
+            r#"SetRole { instance: "r2", name: "pgx", role: Customer }"#,
+        );
+        shows(&o, "SetStrictMode");
+        shows(&o, r#"SetMaximumPaths { name: "r2", maximum_paths: 4 }"#);
+        shows(&o, "SetClusterId");
+        shows(&o, "SetGracefulRestart");
+        shows(&o, "selection_deferral_time: Some(60)");
+        shows(&o, "SetConfederationIdentifier");
+        assert_eq!(dump(&o).matches("AddConfederationPeer").count(), 2);
+        shows(&o, "SetRpkiCache");
+        shows(&o, "SetAnnounceRpkiState");
+        shows(&o, "as_set: true");
+        shows(&o, "summary_only: true");
+        shows(&o, "RemoveAggregate");
+        shows(&o, r#"Delete { instance: "sri9""#);
+        for m in [
+            "SetAoKey",
+            "recv_id: 4",
+            "SetAoCurrentKey",
+            "RemoveAoKey",
+            "SetRouteServerClient",
+            "SetRouteReflectorClient",
+            "L2vpnEvpn",
+        ] {
+            shows(&o, m);
+        }
+    }
+
+    #[test]
+    fn flags_without_their_partner_are_refused() {
+        assert!(err(&["--redistribute-metric", "5"]).contains("--redistribute-to-ospf"));
+        assert!(err(&["--redistribute-to-ospf"]).contains("--static-route"));
+        let st = [
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-gateway",
+            "10.0.0.2",
+        ];
+        assert!(err(&[&st[..], &["--redistribute-to-ospf"]].concat()).contains("--ospf-instance"));
+        assert!(
+            err(&[&st[..], &["--redistribute-to-ospfv3"]].concat()).contains("--ospfv3-instance")
+        );
+        assert!(err(&[
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-gateway",
+            "10.0.0.2",
+            "--redistribute-to-ospfv3",
+            "--clear-redistribute-to-ospfv3",
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-router-id",
+            "3.3.3.3"
+        ])
+        .contains("mutually exclusive"));
+        assert!(err(&[
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-gateway",
+            "10.0.0.2",
+            "--redistribute-to-ospf",
+            "--clear-redistribute-to-ospf",
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1"
+        ])
+        .contains("mutually exclusive"));
+        assert!(err(&["--evpn-clear", "--evpn-vni", "10"]).contains("--evpn-clear"));
+        assert!(err(&[
+            "--evpn-vtep-source-interface",
+            "lo",
+            "--evpn-vtep-source-loopback"
+        ])
+        .contains("mutually exclusive"));
+        assert!(err(&["--l3vni", "10"]).contains("--l3vni-rd"));
+        assert!(
+            err(&["--switching-profile", "sp", "--delete-switching-profile"])
+                .contains("mutually exclusive")
+        );
+        assert!(err(&["--switching-profile-member", "bd:10"]).contains("--switching-profile"));
+        assert!(err(&["--port-aggregate-mtu", "9000"]).contains("--port-aggregate"));
+        assert!(err(&["--delete-port-aggregate"]).contains("--port-aggregate"));
+        assert!(err(&["--syslog-server", "s", "--syslog-transport", "sctp"])
+            .contains("--syslog-transport"));
+        assert!(err(&["--syslog-server", "s", "--syslog-level", "loud"]).contains("--syslog-level"));
+        assert!(err(&["--syslog-server", "s", "--syslog-facility", "kern"])
+            .contains("--syslog-facility"));
+        assert!(err(&[
+            "--syslog-server",
+            "s",
+            "--syslog-trust-anchor-file",
+            "/nonexistent/anchor.pem"
+        ])
+        .contains("/nonexistent/anchor.pem"));
+        assert!(err(&["--lldp-destination-interface", "eth1"]).contains("<interface>=<group>"));
+        assert!(err(&["--lldp-destination-interface", "eth1=nowhere"]).contains("nowhere"));
+        assert!(err(&["--rest-api-address", "10.0.0.1", "--clear-rest-api"])
+            .contains("mutually exclusive"));
+        assert!(err(&["--ospf-router-id", "1.1.1.1"]).contains("--ospf-instance"));
+        assert!(err(&["--ospf-instance", "o"]).contains("--ospf-router-id"));
+        assert!(err(&["--ospfv3-profile", "p"]).contains("--ospfv3-area"));
+    }
+
+    #[test]
+    fn ospf_profile_guards_and_extras() {
+        let inst = [
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.1",
+        ];
+        let with = |extra: &[&str]| err(&[&inst[..], extra].concat());
+        assert!(with(&["--ospf-simple-password", "x"]).contains("--ospf-profile"));
+        assert!(with(&["--ospf-crypto-key", "1:md5:k"]).contains("--ospf-profile"));
+        assert!(with(&["--ospf-profile-mtu", "1500"]).contains("--ospf-profile"));
+        assert!(with(&["--ospf-mtu-ignore", "true"]).contains("--ospf-profile"));
+        assert!(with(&["--ospf-profile-network-type", "broadcast"]).contains("--ospf-profile"));
+        assert!(with(&["--ospf-profile-hello-interval", "5"]).contains("--ospf-profile"));
+        assert!(with(&[
+            "--ospf-profile",
+            "p",
+            "--ospf-profile-network-type",
+            "weird"
+        ])
+        .contains("unknown"));
+        assert!(with(&["--ospf-profile", "p", "--ospf-crypto-key", "bad"]).contains("crypto-key"));
+
+        let o = ops(&[
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-graceful-restart-grace-period",
+            "0",
+            "--ospf-remote-lfa",
+            "true",
+            "--ospf-prefix-suppression",
+            "true",
+            "--ospf-max-metric-on-startup",
+            "30",
+            "--ospf-max-metric-on-shutdown",
+            "0",
+            "--ospf-max-metric-administrative",
+            "true",
+            "--ospf-host-router",
+            "false",
+            "--ospf-area",
+            "0.0.0.1",
+            "--ospf-area-range",
+            "10.9.0.0/16",
+            "--ospf-profile",
+            "p",
+            "--ospf-mtu-ignore",
+            "true",
+            "--ospf-profile-network-type",
+            "point-to-multipoint",
+            "--ospf-bfd",
+            "--redistribute-to-ospf",
+            "--redistribute-to-ospf-policy",
+            "pol",
+            "--redistribute-metric",
+            "20",
+            "--redistribute-metric-type",
+            "2",
+            "--bfd-unsolicited",
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-gateway",
+            "10.0.0.2",
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-router-id",
+            "3.3.3.3",
+            "--ospfv3-area",
+            "0.0.0.0",
+            "--ospfv3-profile",
+            "p3",
+            "--ospfv3-mtu-ignore",
+            "false",
+            "--ospfv3-instance-id",
+            "0",
+            "--ospfv3-crypto-key",
+            "1:hmac-sha256:k",
+        ])
+        .unwrap();
+        for m in [
+            "SetGracefulRestartGracePeriod { name: \"o\", grace_period: None }",
+            "SetRemoteLfa",
+            "SetPrefixSuppression",
+            "SetMaxMetricOnStartup { name: \"o\", seconds: Some(30) }",
+            "SetMaxMetricOnShutdown { name: \"o\", seconds: None }",
+            "SetMaxMetricAdministrative",
+            "SetHostRouter",
+            "not_advertise: false",
+            "SetMtuIgnore",
+            "SetNetworkType",
+            "PointToMultipoint",
+            "metric: Some(20)",
+            "metric_type: Some(2)",
+            "SetBfdUnsolicited",
+            "instance_id: None",
+            "Ospfv3Profile(SetCryptoKey",
+        ] {
+            shows(&o, m);
+        }
+        let o2 = ops(&[
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.1",
+            "--ospf-profile",
+            "p",
+            "--ospf-profile-network-type",
+            "clear",
+            "--no-bfd-unsolicited",
+        ])
+        .unwrap();
+        shows(&o2, "ClearNetworkType");
+        shows(&o2, "ClearBfdUnsolicited");
+        let v3 = [
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-router-id",
+            "3.3.3.3",
+            "--ospfv3-area",
+            "0.0.0.0",
+        ];
+        assert!(
+            err(&[&v3[..], &["--ospfv3-mtu-ignore", "true"]].concat()).contains("--ospfv3-profile")
+        );
+        for extra in [
+            ["--ospfv3-crypto-key", "1:hmac-sha1:k"],
+            ["--ospfv3-instance-id", "1"],
+            ["--ospfv3-profile-mtu", "1500"],
+        ] {
+            assert!(err(&[&v3[..], &extra].concat()).contains("--ospfv3-profile"));
+        }
+        assert!(err(&[
+            &v3[..],
+            &["--ospfv3-profile", "p", "--ospfv3-crypto-key", "1:md5:k"]
+        ]
+        .concat())
+        .contains("md5"));
+    }
+
+    #[test]
+    fn evpn_l3vni_and_svi_flags() {
+        let o = ops(&[
+            "--evpn-vni",
+            "100",
+            "--evpn-rd",
+            "1:1",
+            "--evpn-rt-import",
+            "1:100",
+            "--evpn-rt-export",
+            "1:101",
+            "--evpn-vtep-source-loopback",
+            "--evpn-vtep-source-label",
+            "vtep",
+            "--evpn-redistribute-bgp",
+            "r1",
+            "--evpn-redistribute-arp-bgp",
+            "r1",
+            "--evpn-redistribute-connected-bgp",
+            "r1",
+            "--evpn-neigh-suppress",
+            "true",
+            "--l3vni",
+            "5000",
+            "--l3vni-table",
+            "ten",
+            "--l3vni-rd",
+            "1:5",
+            "--l3vni-rt",
+            "1:5000",
+            "--l3vni-vtep-source-interface",
+            "lo",
+            "--l3vni-interface",
+            "eth5",
+            "--l3vni-address",
+            "10.5.0.1/24",
+            "--broadcast-domain-svi-address",
+            "10.6.0.1/24",
+            "--broadcast-domain-svi-table",
+            "ten",
+        ])
+        .unwrap();
+        for m in [
+            "SetVni",
+            "SetRd",
+            "AddRouteTarget",
+            "SetVtepSource",
+            "Loopback",
+            "SetMacRedistribute",
+            "SetArpRedistribute",
+            "SetConnectedRedistribute",
+            "SetNeighSuppress",
+            "SetEvpn",
+            "Ensure { name: \"ten\" }",
+            "SetRoutingTable { interface: \"eth5\"",
+        ] {
+            shows(&o, m);
+        }
+        let cleared = ops(&[
+            "--evpn-clear",
+            "--evpn-rt-import",
+            "1:100",
+            "--evpn-rt-export",
+            "1:101",
+            "--l3vni-clear",
+        ])
+        .unwrap();
+        for m in [
+            "RemoveRouteTarget",
+            "ClearArpRedistribute",
+            "ClearConnectedRedistribute",
+            "ClearMacRedistribute",
+            "ClearVtepSource",
+            "ClearRd",
+            "ClearVni",
+            "ClearEvpn",
+        ] {
+            shows(&cleared, m);
+        }
+        let via_iface = ops(&["--evpn-rd", "1:1", "--evpn-vtep-source-interface", "lo1"]).unwrap();
+        shows(&via_iface, "lo1");
+    }
+
+    #[test]
+    fn interface_aggregate_lldp_syslog_rest_and_user_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = dir.path().join("anchor.pem");
+        std::fs::write(&anchor, "PEM").unwrap();
+        let anchor = anchor.to_str().unwrap().to_string();
+        let o = ops(&[
+            "--link-interface",
+            "eth7-link",
+            "--mtu",
+            "9000",
+            "--clear-mtu",
+            "--hostname",
+            "r9",
+            "--user",
+            "bob=pw",
+            "--port-aggregate",
+            "bond0",
+            "--port-aggregate-mode",
+            "lacp",
+            "--lacp-rate",
+            "fast",
+            "--port-aggregate-mtu",
+            "9000",
+            "--port-aggregate-address",
+            "10.8.0.1/24",
+            "--port-aggregate-esi",
+            "00:11:22:33:44:55:66:77:88:99",
+            "--port-aggregate-redundancy-mode",
+            "single-active",
+            "--port-aggregate-df-algorithm",
+            "hrw",
+            "--lacp-system-id",
+            "00:aa:bb:cc:dd:ee",
+            "--lacp-system-priority",
+            "100",
+            "--min-links",
+            "2",
+            "--port-aggregate-bfd",
+            "fast",
+            "--port-aggregate-bfd-peer",
+            "10.8.0.2",
+            "--port-aggregate-untagged-domain",
+            "bd9",
+            "--enslave-interface-into-port-aggregate",
+            "eth8",
+            "--lacp-mode",
+            "passive",
+            "--lacp-port-priority",
+            "5",
+            "--clear-port-aggregate-member",
+            "eth9",
+            "--lldp-transmit-interface",
+            "eth1",
+            "--lldp-receive-interface",
+            "eth2",
+            "--no-lldp-transmit-interface",
+            "eth3",
+            "--no-lldp-receive-interface",
+            "eth4",
+            "--lldp-tx-interval",
+            "10",
+            "--lldp-tx-hold",
+            "3",
+            "--lldp-management-address",
+            "10.1.1.1",
+            "--no-lldp-management-address",
+            "10.1.1.2",
+            "--lldp-destination-interface",
+            "eth1=nearest-bridge",
+            "--syslog-server",
+            "s1",
+            "--syslog-address",
+            "10.0.0.9",
+            "--syslog-port",
+            "6514",
+            "--syslog-transport",
+            "tls",
+            "--syslog-routing-table",
+            "rt9",
+            "--syslog-level",
+            "debug",
+            "--syslog-facility",
+            "local3",
+            "--syslog-trust-anchor-file",
+            &anchor,
+            "--syslog-fingerprint",
+            "aa:bb",
+            "--syslog-server-name",
+            "syslog.example",
+            "--syslog-allow-tls12",
+            "--no-syslog-server",
+            "old",
+            "--rest-api-address",
+            "10.0.0.1",
+            "--rest-api-port",
+            "8443",
+            "--switching-profile",
+            "sp1",
+            "--switching-profile-member",
+            "bd1:untagged",
+            "--switching-profile-member",
+            "bd2:30",
+        ])
+        .unwrap();
+        for m in [
+            "SetMtu { name: \"eth7-link\", mtu: 9000 }",
+            "ClearMtu",
+            "SetHostname(\"r9\")",
+            "SetPassword { name: \"bob\"",
+            "SetLacpRate",
+            "SetEsi",
+            "SetRedundancyMode",
+            "SetDfAlgorithm",
+            "SetLacpSystemId",
+            "SetLacpSystemPriority",
+            "SetMinLinks",
+            "SetBfdPeer",
+            "SetPortAggregate { name: \"eth8\"",
+            "SetLacpMode",
+            "SetLacpPortPriority",
+            "ClearPortAggregate { name: \"eth9\" }",
+            "SetLldpTransmit { name: \"eth1\", enabled: true }",
+            "SetLldpReceive { name: \"eth2\", enabled: true }",
+            "SetLldpTransmit { name: \"eth3\", enabled: false }",
+            "SetLldpReceive { name: \"eth4\", enabled: false }",
+            "SetTxInterval",
+            "SetTxHold",
+            "AddManagementAddress",
+            "RemoveManagementAddress",
+            "SetLldpDestination",
+            "EnsureSyslog",
+            "SetSyslogAddress",
+            "SetSyslogPort { name: \"s1\", port: Some(6514) }",
+            "SetSyslogTransport",
+            "SetSyslogTlsTrustAnchor",
+            "pem: Some(\"PEM\")",
+            "SetSyslogTlsFingerprint",
+            "SetSyslogTlsServerName",
+            "SetSyslogTlsAllowTls12 { name: \"s1\", allow: true }",
+            "SetSyslogRoutingTable",
+            "SetSyslogLevel",
+            "SetSyslogFacility",
+            "RemoveSyslog { name: \"old\" }",
+            "SetRestApi",
+            "8443",
+            "Dot1q(30)",
+            "Untagged",
+        ] {
+            shows(&o, m);
+        }
+        for (flag, want) in [("udp", "Udp"), ("tcp", "Tcp")] {
+            let o = ops(&["--syslog-server", "s", "--syslog-transport", flag]).unwrap();
+            shows(&o, want);
+        }
+        for l in ["error", "warn", "info", "trace"] {
+            ops(&["--syslog-server", "s", "--syslog-level", l]).unwrap();
+        }
+        let o = ops(&["--syslog-server", "s", "--no-syslog-allow-tls12"]).unwrap();
+        shows(&o, "allow: false");
+        let o = ops(&[
+            "--port-aggregate",
+            "b",
+            "--delete-port-aggregate",
+            "--enslave-interface-into-port-aggregate",
+            "eth1",
+            "--clear-rest-api",
+            "--delete-subinterface",
+            "--delete-switching-profile",
+            "--delete-broadcast-domain-svi",
+        ])
+        .unwrap();
+        for m in ["Delete {", "ClearRestApi", "ClearSwitchingProfile"] {
+            shows(&o, m);
+        }
+        assert!(err(&[
+            "--switching-profile",
+            "sp",
+            "--switching-profile-member",
+            "bd"
+        ])
+        .contains("DOMAIN:TAG"));
+        assert!(err(&[
+            "--switching-profile",
+            "sp",
+            "--switching-profile-member",
+            "bd:x"
+        ])
+        .contains("invalid vlan tag"));
+    }
+
+    #[test]
+    fn bfd_paths_and_local_config_agree_on_a_full_flag_set() {
+        let flags = [
+            "--bfd-bgp",
+            "--bfd-static",
+            "--static-route",
+            "198.51.100.0/24",
+            "--static-gateway",
+            "10.0.0.2",
+            "--bfd-interval-ms",
+            "300",
+            "--bfd-echo-mode",
+            "unaffiliated",
+            "--bfd-echo-interval",
+            "50",
+            "--bfd-padded-pdu-size",
+            "64",
+            "--bfd-auth",
+            "keyed-sha1:2:k",
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p",
+            "--ospf-bfd",
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-router-id",
+            "3.3.3.3",
+            "--ospfv3-area",
+            "0.0.0.0",
+            "--ospfv3-profile",
+            "p3",
+            "--ospfv3-bfd",
+            "--stp-mode",
+            "rstp",
+            "--stp-priority",
+            "8192",
+            "--stp-force-version",
+            "stp",
+            "--interface",
+            "eth1",
+            "--stp-profile-interface",
+            "eth1",
+            "--stp-profile-field",
+            "bpdu-guard=true",
+            "--stp-profile-field",
+            "cost=",
+            "--sbfd-static-route",
+            "198.51.100.0/24",
+            "--sbfd-reflector",
+            "10.0.0.1",
+        ];
+        let args = parse(&flags);
+        let edits = bfd_paths(&args);
+        let has_path = |p: &[&str]| edits.iter().any(|(path, _)| path == p);
+        assert!(has_path(&["spanning-tree", "priority"]));
+        assert!(has_path(&["spanning-tree", "force-version"]));
+        assert!(has_path(&[
+            "stp-port-profile",
+            STP_PROT_PROFILE,
+            "bpdu-guard"
+        ]));
+        assert!(has_path(&["interface", "eth1", "stp-port-profile"]));
+        assert!(has_path(&[
+            "bgp-instance",
+            "r1",
+            "peer-group",
+            "pg1",
+            "bfd"
+        ]));
+        assert!(has_path(&[
+            "ospf-instance",
+            "o",
+            "area",
+            "0.0.0.0",
+            "profile",
+            "p",
+            "bfd"
+        ]));
+        assert!(has_path(&[
+            "ospfv3-instance",
+            "o3",
+            "area",
+            "0.0.0.0",
+            "profile",
+            "p3",
+            "bfd"
+        ]));
+        assert!(has_path(&["bfd-profile", "fast", "echo-interval"]));
+        assert!(has_path(&["bfd-profile", "fast", "padded-pdu-size"]));
+        assert!(has_path(&[
+            "static-routing-instance",
+            "sri1",
+            "route",
+            "198.51.100.0/24",
+            "bfd"
+        ]));
+
+        let cfg = seeded(&flags);
+        assert_eq!(cfg.spanning_tree.priority, 8192);
+        assert!(cfg.spanning_tree.force_version.is_some());
+        let prot = cfg
+            .stp_port_profiles
+            .iter()
+            .find(|p| p.name == STP_PROT_PROFILE)
+            .unwrap();
+        assert!(prot.bpdu_guard);
+        assert_eq!(
+            cfg.interfaces
+                .iter()
+                .find(|i| i.name == "eth1")
+                .unwrap()
+                .stp_port_profile
+                .as_deref(),
+            Some(STP_PROT_PROFILE)
+        );
+        let fast = cfg.bfd_profiles.iter().find(|p| p.name == "fast").unwrap();
+        assert_eq!(fast.min_tx_interval, 300);
+        assert_eq!(fast.echo_interval, 50);
+        assert_eq!(fast.padded_pdu_size, Some(64));
+        assert!(fast.auth.is_some());
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].bfd.as_deref(),
+            Some("fast")
+        );
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].bfd.as_deref(),
+            Some("fast")
+        );
+        assert_eq!(
+            cfg.ospfv3_instances[0].areas[0].profiles[0].bfd.as_deref(),
+            Some("fast")
+        );
+    }
+
+    #[test]
+    fn bfd_off_switches_clear_the_references() {
+        let on = [
+            "--bfd-bgp",
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p",
+            "--ospf-bfd",
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-router-id",
+            "3.3.3.3",
+            "--ospfv3-area",
+            "0.0.0.0",
+            "--ospfv3-profile",
+            "p3",
+            "--ospfv3-bfd",
+        ];
+        let mut cfg = seeded(&on);
+        let off = parse(&[
+            "--no-bfd-bgp",
+            "--ospf-instance",
+            "o",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p",
+            "--no-ospf-bfd",
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-area",
+            "0.0.0.0",
+            "--ospfv3-profile",
+            "p3",
+            "--no-ospfv3-bfd",
+            "--no-bfd-auth",
+            "--no-sbfd-reflector",
+        ]);
+        apply_bfd(&off, &mut cfg);
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].bfd, None);
+        assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].bfd, None);
+        assert_eq!(cfg.ospfv3_instances[0].areas[0].profiles[0].bfd, None);
+        assert_eq!(cfg.sbfd_reflector.discriminators.len(), 0);
+        let edits = bfd_paths(&off);
+        assert!(edits
+            .iter()
+            .any(|(p, v)| p.last().map(String::as_str) == Some("auth") && v.is_none()));
+        assert!(edits
+            .iter()
+            .any(|(p, v)| p == &["sbfd-reflector", "discriminator"] && v.as_deref() == Some("[]")));
+    }
+
+    #[test]
+    fn stp_profile_fields_set_and_clear_typed_values() {
+        let mut p = nos_proto::schema::StpPortProfile::default();
+        set_profile_field(&mut p, "bpdu-guard=true");
+        assert!(p.bpdu_guard);
+        set_profile_field(&mut p, "cost=1000");
+        assert_eq!(p.cost, Some(1000));
+        set_profile_field(&mut p, "cost=");
+        assert_eq!(p.cost, None);
+    }
+
+    #[test]
+    fn mst_flags_with_malformed_values_are_skipped() {
+        let args = parse(&[
+            "--stp-region",
+            "no-colon",
+            "--stp-mst-instance",
+            "nocolon",
+            "--stp-member-cost",
+            "only:two",
+        ]);
+        assert!(mst_paths(&args)
+            .iter()
+            .all(|(p, _)| p[0] != "region" && p.get(1).map(String::as_str) != Some("region")));
+        let mut cfg = nos_proto::Config::default();
+        cfg.stp_port_profiles
+            .push(nos_proto::schema::StpPortProfile {
+                name: STP_PROT_PROFILE.into(),
+                ..Default::default()
+            });
+        let bad = parse(&[
+            "--stp-mst-instance",
+            "x:y",
+            "--stp-profile-interface",
+            "eth1",
+            "--stp-profile-mst-cost",
+            "x:y",
+            "--stp-profile-mst-cost",
+            "1:5",
+        ]);
+        apply_bfd(&bad, &mut cfg);
+        assert_eq!(cfg.spanning_tree.mst_instances.len(), 0);
+        assert_eq!(cfg.stp_port_profiles[0].mst_instances.len(), 1);
+        // The same id again updates in place rather than appending.
+        let again = parse(&[
+            "--stp-profile-interface",
+            "eth1",
+            "--stp-profile-mst-cost",
+            "1:9",
+        ]);
+        apply_bfd(&again, &mut cfg);
+        assert_eq!(cfg.stp_port_profiles[0].mst_instances.len(), 1);
+        assert_eq!(cfg.stp_port_profiles[0].mst_instances[0].cost, Some(9));
+        apply_bfd(&parse(&["--stp-mst-instance", "1:4096"]), &mut cfg);
+        apply_bfd(&parse(&["--stp-mst-instance", "1:8192"]), &mut cfg);
+        assert_eq!(cfg.spanning_tree.mst_instances.len(), 1);
+        assert_eq!(cfg.spanning_tree.mst_instances[0].priority, 8192);
+        assert_eq!(
+            format!("{:?}", stp_mode(&parse(&["--stp-mode", "mstp"]))),
+            "Mstp"
+        );
+    }
 }
