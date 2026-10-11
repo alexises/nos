@@ -23,7 +23,7 @@ Computes the best route per prefix for one routing table (binary `nos-ribd`, one
 | `rib.rs` | `RouteSource`, `RibEntry`, `Rib`, `build_from_config` |
 | `evpn.rs`, `evpn_client.rs` | EVPN IP-VRF pure part and Type-5 push |
 | `driver/` | `mod.rs` trait, `noop.rs`, `linux.rs`, `table_registry.rs` |
-| `reconcile.rs` | Diff-triggered resync, 10s tick, `driver.teardown` on exit |
+| `reconcile.rs` | Diff-triggered resync, 10s tick, `driver.teardown` on exit; `reconcile_tests.rs` runs it against `nos-test-support`'s fakes and a recording `RibDriver` (#344) |
 | `server.rs` | Route queries, `GetVrfName`/`GetTableId`, `BgpRouteCount`, route pushes |
 | `bgp_client.rs`, `ospf_client.rs`, `interface_client.rs` | Redistribution pushes; `get_interfaces`/`get_port_aggregates`/`get_broadcast_domain` |
 | `config_client.rs`, `watchdog_client.rs` | Per-crate clients (star dependency graph) |

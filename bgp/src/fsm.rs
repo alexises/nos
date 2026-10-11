@@ -2292,3 +2292,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "fsm_tests.rs"]
+mod io_tests;

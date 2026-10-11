@@ -42,3 +42,4 @@ proptest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["test-util"] }
+nos-test-support = { workspace = true, features = ["fakes"] }

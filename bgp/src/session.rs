@@ -325,6 +325,19 @@ pub struct SessionManager {
     bfd_targets: watch::Sender<crate::bfd_client::Target>,
 }
 
+/// `SessionManager::applied`.
+#[cfg(test)]
+pub(crate) struct Applied {
+    pub peers: Vec<ResolvedPeer>,
+    pub vrf: VrfRequirement,
+    pub local: LocalIdentity,
+    /// `None` while deferring (`BgpRib::push_snapshot` hides it).
+    pub routing_table: Option<String>,
+    pub fdb_domains: Vec<String>,
+    pub evpn_tables: Vec<String>,
+    pub deferral_waiting: Option<Vec<IpAddr>>,
+}
+
 /// What a BFD Down does to `peer` (RFC 5882 §4.3, RFC 9384).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BfdAction {
@@ -388,6 +401,29 @@ impl SessionManager {
             rpki: Mutex::new(None),
             bfd_targets: watch::channel(crate::bfd_client::Target::default()).0,
         })
+    }
+
+    /// What the last `reconcile` applied, for `reconcile::tests` (#344).
+    #[cfg(test)]
+    pub(crate) async fn applied(&self) -> Applied {
+        let mut peers: Vec<ResolvedPeer> = self
+            .peers
+            .read()
+            .await
+            .values()
+            .map(|s| s.peer.clone())
+            .collect();
+        peers.sort_by_key(|p| p.remote_address);
+        let rib = self.bgp_rib.lock().await;
+        Applied {
+            peers,
+            vrf: self.vrf.borrow().clone(),
+            local: *self.local.borrow(),
+            routing_table: rib.push_snapshot().0,
+            fdb_domains: rib.fdb_domains().to_vec(),
+            evpn_tables: rib.evpn_tables().to_vec(),
+            deferral_waiting: rib.deferral_waiting(),
+        }
     }
 
     pub fn bfd_targets(&self) -> watch::Receiver<crate::bfd_client::Target> {
