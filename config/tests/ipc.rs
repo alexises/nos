@@ -94,6 +94,16 @@ async fn connect_as(socket_path: &std::path::Path, role: &str, name: &str) -> (R
     )
 }
 
+/// A bounded read: a dead dispatcher/forwarder fails the test in seconds
+/// instead of hanging (or ending a mutant as a Timeout, #374).
+async fn next_event(reader: &mut Reader) -> Event {
+    tokio::time::timeout(Duration::from_secs(5), reader.next())
+        .await
+        .expect("no reply within 5s")
+        .expect("connection closed without a reply")
+        .expect("undecodable reply")
+}
+
 #[tokio::test]
 async fn get_returns_current_config() {
     let tmp = tempfile::tempdir().unwrap();
@@ -114,7 +124,7 @@ async fn get_returns_current_config() {
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(Request::Get).await.unwrap();
 
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     match event {
         Event::Config(c) => {
             assert_eq!(c.bgp_instances.len(), 1);
@@ -141,7 +151,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     writer.send(Request::Subscribe).await.unwrap();
 
     // Initial snapshot — empty config.
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Config(c) if c.bgp_instances.is_empty()));
 
     // Commit a change directly through the store (in-process, as a future
@@ -155,7 +165,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     store.commit_transaction("t1", None).await.unwrap();
 
     // Receive the update.
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     match event {
         Event::Config(c) => assert_eq!(c.bgp_instances[0].name, "vrf-a"),
         other => panic!("expected Config event, got {other:?}"),
@@ -177,7 +187,7 @@ async fn unsubscribe_stops_updates() {
     writer.send(Request::Subscribe).await.unwrap();
 
     // Consume initial snapshot.
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     // Unsubscribe, then commit.
     writer.send(Request::Unsubscribe).await.unwrap();
@@ -220,7 +230,7 @@ async fn subscribe_survives_client_dropping_its_write_half() {
     let mut reader = {
         let (mut reader, mut writer) = connect(&path).await;
         writer.send(Request::Subscribe).await.unwrap();
-        reader.next().await.unwrap().unwrap(); // initial snapshot
+        next_event(&mut reader).await; // initial snapshot
         reader
         // `writer` dropped here — the connection's write-to-server half closes.
     };
@@ -265,7 +275,7 @@ async fn subscribe_diff_survives_client_dropping_its_write_half() {
             })
             .await
             .unwrap();
-        reader.next().await.unwrap().unwrap(); // initial diff
+        next_event(&mut reader).await; // initial diff
         reader
         // `writer` dropped here — the connection's write-to-server half closes.
     };
@@ -319,7 +329,7 @@ async fn subscribe_diff_reports_pre_existing_instance_as_added_then_incremental_
 
     // Initial diff: the pre-existing instance shows up as Added, since it's
     // synthesized against an empty config.
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     match event {
         Event::Diff(diff) => {
             assert_eq!(diff.bgp_instances.len(), 1);
@@ -344,7 +354,7 @@ async fn subscribe_diff_reports_pre_existing_instance_as_added_then_incremental_
         .unwrap();
     store.commit_transaction("t2", None).await.unwrap();
 
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     match event {
         Event::Diff(diff) => {
             assert_eq!(diff.bgp_instances.len(), 2);
@@ -385,7 +395,7 @@ async fn subscribe_diff_skips_commits_outside_requested_scope() {
         .unwrap();
 
     // Initial diff — nothing configured yet, so it's empty.
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Diff(d) if d.is_empty()));
 
     // A hostname-only commit is out of scope and must never be forwarded.
@@ -425,7 +435,7 @@ async fn save_persists_running_config_to_disk() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer.send(Request::Save).await.unwrap();
 
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Saved));
 
     let saved = nos_config::persistence::load_or_default(&config_path).unwrap();
@@ -446,7 +456,7 @@ async fn save_without_configured_path_returns_error() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer.send(Request::Save).await.unwrap();
 
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Error(_)));
 }
 
@@ -474,7 +484,7 @@ async fn open_transaction_blank_and_current_over_ipc() {
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => {
             assert_eq!(
                 snap.config.bgp_instances,
@@ -493,7 +503,7 @@ async fn open_transaction_blank_and_current_over_ipc() {
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => {
             assert_eq!(snap.config.bgp_instances.len(), 1);
             assert!(!snap.resumed);
@@ -522,7 +532,7 @@ async fn resume_by_reopening_over_new_connection() {
             })
             .await
             .unwrap();
-        reader.next().await.unwrap().unwrap();
+        next_event(&mut reader).await;
 
         writer
             .send(Request::ApplyOp {
@@ -531,7 +541,7 @@ async fn resume_by_reopening_over_new_connection() {
             })
             .await
             .unwrap();
-        reader.next().await.unwrap().unwrap();
+        next_event(&mut reader).await;
     }
 
     // Connection B: reopen the same name.
@@ -543,7 +553,7 @@ async fn resume_by_reopening_over_new_connection() {
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => {
             assert!(snap.resumed);
             assert!(snap.dirty);
@@ -572,7 +582,7 @@ async fn apply_op_over_ipc_reflects_in_get_transaction() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     writer
         .send(Request::ApplyOp {
@@ -581,7 +591,7 @@ async fn apply_op_over_ipc_reflects_in_get_transaction() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     writer
         .send(Request::GetTransaction {
@@ -589,7 +599,7 @@ async fn apply_op_over_ipc_reflects_in_get_transaction() {
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => {
             assert_eq!(snap.config.bgp_instances.len(), 1);
             assert_eq!(snap.config.bgp_instances[0].name, "r1");
@@ -616,7 +626,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
             name: "t1".to_string(),
@@ -624,7 +634,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
             name: "t1".to_string(),
@@ -632,7 +642,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
     writer
         .send(Request::CommitTransaction {
             name: "t1".to_string(),
@@ -640,15 +650,12 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
-        Event::Committed
-    ));
+    assert!(matches!(next_event(&mut reader).await, Event::Committed));
 
     // Fresh connection, one-shot Get, matching the CLI's actual usage pattern.
     let (mut reader2, mut writer2) = connect(&sock_path).await;
     writer2.send(Request::Get).await.unwrap();
-    match reader2.next().await.unwrap().unwrap() {
+    match next_event(&mut reader2).await {
         Event::Config(c) => {
             assert_eq!(c.bgp_instances.len(), 1);
             assert_eq!(c.bgp_instances[0].name, "r1");
@@ -676,7 +683,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
     // Ensure leaves asn at the invalid placeholder 0.
     writer
         .send(Request::ApplyOp {
@@ -685,7 +692,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     writer
         .send(Request::CommitTransaction {
@@ -694,10 +701,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
-        Event::Error(_)
-    ));
+    assert!(matches!(next_event(&mut reader).await, Event::Error(_)));
 
     writer
         .send(Request::GetTransaction {
@@ -705,7 +709,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => assert_eq!(snap.config.bgp_instances.len(), 1),
         other => panic!("expected Transaction event, got {other:?}"),
     }
@@ -729,7 +733,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
     writer
         .send(Request::SetTransactionPath {
             name: "t1".to_string(),
@@ -739,7 +743,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => assert_eq!(snap.generation, 1),
         other => panic!("expected Transaction event, got {other:?}"),
     }
@@ -757,7 +761,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
         },
     ] {
         writer.send(req).await.unwrap();
-        match reader.next().await.unwrap().unwrap() {
+        match next_event(&mut reader).await {
             Event::Error(msg) => assert!(msg.starts_with("precondition failed"), "{msg}"),
             other => panic!("expected Error event, got {other:?}"),
         }
@@ -768,7 +772,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => {
             assert_eq!((snap.generation, snap.config.hostname.as_str()), (1, "h1"));
         }
@@ -794,10 +798,7 @@ async fn commit_missing_transaction_over_ipc_returns_error() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
-        Event::Error(_)
-    ));
+    assert!(matches!(next_event(&mut reader).await, Event::Error(_)));
 }
 
 #[tokio::test]
@@ -818,7 +819,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
             name: "t1".to_string(),
@@ -826,7 +827,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     writer
         .send(Request::DiscardTransaction {
@@ -835,10 +836,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
-        Event::Discarded
-    ));
+    assert!(matches!(next_event(&mut reader).await, Event::Discarded));
 
     writer
         .send(Request::OpenTransaction {
@@ -847,7 +845,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
         })
         .await
         .unwrap();
-    match reader.next().await.unwrap().unwrap() {
+    match next_event(&mut reader).await {
         Event::Transaction(snap) => {
             assert!(!snap.resumed);
             assert_eq!(
@@ -873,7 +871,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
     // Connection A: subscribes (stands in for a future daemon like nos-bgp).
     let (mut reader_a, mut writer_a) = connect(&sock_path).await;
     writer_a.send(Request::Subscribe).await.unwrap();
-    let initial = reader_a.next().await.unwrap().unwrap();
+    let initial = next_event(&mut reader_a).await;
     assert!(matches!(initial, Event::Config(c) if c.bgp_instances.is_empty()));
 
     // Connection B: opens, edits, and commits a named transaction.
@@ -885,7 +883,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
         })
         .await
         .unwrap();
-    reader_b.next().await.unwrap().unwrap();
+    next_event(&mut reader_b).await;
     writer_b
         .send(Request::ApplyOp {
             name: "demo".to_string(),
@@ -893,7 +891,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
         })
         .await
         .unwrap();
-    reader_b.next().await.unwrap().unwrap();
+    next_event(&mut reader_b).await;
     writer_b
         .send(Request::ApplyOp {
             name: "demo".to_string(),
@@ -901,7 +899,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
         })
         .await
         .unwrap();
-    reader_b.next().await.unwrap().unwrap();
+    next_event(&mut reader_b).await;
     writer_b
         .send(Request::CommitTransaction {
             name: "demo".to_string(),
@@ -909,10 +907,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader_b.next().await.unwrap().unwrap(),
-        Event::Committed
-    ));
+    assert!(matches!(next_event(&mut reader_b).await, Event::Committed));
 
     // Connection A must receive the broadcast update.
     let update = tokio::time::timeout(Duration::from_millis(200), reader_a.next())
@@ -945,12 +940,12 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
     // shells watching the same daemon.
     let (mut reader_a, mut writer_a) = connect(&sock_path).await;
     writer_a.send(Request::Subscribe).await.unwrap();
-    let initial_a = reader_a.next().await.unwrap().unwrap();
+    let initial_a = next_event(&mut reader_a).await;
     assert!(matches!(initial_a, Event::Config(c) if c.hostname == "nos"));
 
     let (mut reader_b, mut writer_b) = connect(&sock_path).await;
     writer_b.send(Request::Subscribe).await.unwrap();
-    let initial_b = reader_b.next().await.unwrap().unwrap();
+    let initial_b = next_event(&mut reader_b).await;
     assert!(matches!(initial_b, Event::Config(c) if c.hostname == "nos"));
 
     // A third connection commits a hostname change.
@@ -962,7 +957,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
         })
         .await
         .unwrap();
-    reader_c.next().await.unwrap().unwrap();
+    next_event(&mut reader_c).await;
     writer_c
         .send(Request::ApplyOp {
             name: "t1".to_string(),
@@ -970,7 +965,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
         })
         .await
         .unwrap();
-    reader_c.next().await.unwrap().unwrap();
+    next_event(&mut reader_c).await;
     writer_c
         .send(Request::CommitTransaction {
             name: "t1".to_string(),
@@ -978,10 +973,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader_c.next().await.unwrap().unwrap(),
-        Event::Committed
-    ));
+    assert!(matches!(next_event(&mut reader_c).await, Event::Committed));
 
     // Both subscribers — every connected client — must see the new hostname.
     for reader in [&mut reader_a, &mut reader_b] {
@@ -1012,7 +1004,7 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     for op in [
         ensure_op("r1"),
@@ -1037,7 +1029,7 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
             })
             .await
             .unwrap();
-        reader.next().await.unwrap().unwrap();
+        next_event(&mut reader).await;
     }
 
     writer
@@ -1047,14 +1039,11 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
-        Event::Committed
-    ));
+    assert!(matches!(next_event(&mut reader).await, Event::Committed));
 
     let (mut reader2, mut writer2) = connect(&path).await;
     writer2.send(Request::Get).await.unwrap();
-    match reader2.next().await.unwrap().unwrap() {
+    match next_event(&mut reader2).await {
         Event::Config(c) => {
             assert_eq!(c.routing_tables.len(), 1);
             assert_eq!(c.routing_tables[0].bgp_instance.as_deref(), Some("r1"));
@@ -1087,7 +1076,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     writer
         .send(Request::ApplyOp {
@@ -1096,7 +1085,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
             name: "t1".to_string(),
@@ -1104,7 +1093,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
         })
         .await
         .unwrap();
-    reader.next().await.unwrap().unwrap();
+    next_event(&mut reader).await;
 
     writer
         .send(Request::CommitTransaction {
@@ -1113,10 +1102,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
         })
         .await
         .unwrap();
-    assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
-        Event::Error(_)
-    ));
+    assert!(matches!(next_event(&mut reader).await, Event::Error(_)));
 }
 
 #[tokio::test]
@@ -1137,7 +1123,7 @@ async fn describe_returns_the_requested_topics_doc() {
         .await
         .unwrap();
 
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
     match event {
         Event::Description(doc) => {
             assert_eq!(doc.topic, Topic::Hostname);
@@ -1162,10 +1148,7 @@ async fn a_daemon_role_can_read_but_not_edit() {
 
     let (mut reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
     writer.send(Request::Get).await.unwrap();
-    assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
-        Event::Config(_)
-    ));
+    assert!(matches!(next_event(&mut reader).await, Event::Config(_)));
 
     writer
         .send(Request::OpenTransaction {
@@ -1175,7 +1158,7 @@ async fn a_daemon_role_can_read_but_not_edit() {
         .await
         .unwrap();
     assert!(matches!(
-        reader.next().await.unwrap().unwrap(),
+        next_event(&mut reader).await,
         Event::Error(m) if m == "permission denied"
     ));
     assert!(
@@ -1207,7 +1190,7 @@ async fn restd_and_users_can_edit() {
             .await
             .unwrap();
         assert!(
-            matches!(reader.next().await.unwrap().unwrap(), Event::Transaction(_)),
+            matches!(next_event(&mut reader).await, Event::Transaction(_)),
             "{role} should be allowed to edit"
         );
     }
