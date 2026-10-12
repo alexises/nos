@@ -1792,22 +1792,22 @@ async fn mstp_provision(r: &Router, revision: u16) -> anyhow::Result<()> {
 pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     const MATCH: &str = "mst region match port=eth1";
     const BOUNDARY: &str = "mst boundary port port=eth1 reason=revision";
-    const RAISED: &str = "brought parent link up for vlan sub-interfaces interface=eth1";
     const APPLY_FAILED: &str = "failed to apply interface configuration.*Network is down";
     let (a, b) = (w.a()?, w.b()?);
     let routers = [a, b];
     let matched = routers.map(|r| r.count(MATCH));
 
     w.link_veths().await?;
-    // router-a's fresh veths stay admin-down: `nos-interfaced` must raise the
-    // parent itself before the `ethX.<tag>` sub-links (#338). router-b's are
-    // raised here so router-a's ports have carrier the moment they come up (a
-    // carrierless bridge port is DISABLED, so the kernel forwards on carrier
-    // with no state write to log until the next resync).
+    // router-a's fresh veths stay admin-down, but earlier phases leave a bare
+    // `Interface eth1` behind, so `nos-interfaced` may already have raised
+    // them: the raise itself is no anchor here (#355) and is proven by the
+    // driver's kernel test (#338). router-b's are raised here so router-a's
+    // ports have carrier the moment they come up (a carrierless bridge port is
+    // DISABLED, so the kernel forwards on carrier with no state write to log
+    // until the next resync).
     for iface in ["eth1", "eth2"] {
         w.set_link("router-b", iface, true).await?;
     }
-    let raised = a.count(RAISED);
     let enetdown = routers.map(|r| r.count(APPLY_FAILED));
     for r in routers {
         r.provision(&[
@@ -1824,7 +1824,6 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
         mstp_provision(r, 1).await?;
     }
 
-    a.wait_new(RAISED, raised, 40).await?;
     log("waiting for both routers to join one MST region");
     for (r, base) in routers.iter().zip(matched) {
         r.wait_new(MATCH, base, 40).await?;
