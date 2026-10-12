@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use super::*;
 use crate::collision::Role;
 use crate::message::{Capability, Origin, PathAttributes, UpdateMessage};
-use crate::rib::AdvertisedRoute;
+use crate::rib::{AdvertisedRoute, BgpRib};
 use crate::session::ResolvedPeer;
 
 const PEER: &str = "10.0.0.2";
@@ -92,10 +92,10 @@ fn local() -> LocalIdentity {
     }
 }
 
-fn new_rib() -> Arc<Mutex<BgpRib>> {
+fn new_rib() -> Arc<SharedRib> {
     let mut rib = BgpRib::new();
     rib.set_local_identity(65001, Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(1, 1, 1, 1));
-    Arc::new(Mutex::new(rib))
+    Arc::new(SharedRib::new(rib))
 }
 
 async fn loopback_pair() -> (TcpStream, TcpStream) {
@@ -599,7 +599,7 @@ fn log_notification_decodes_shutdown_communications() {
 // -------------------------------------------- classify_inbound and friends
 
 struct Cls {
-    rib: Arc<Mutex<BgpRib>>,
+    rib: Arc<SharedRib>,
     slot: Arc<PeerSlot>,
     peer: PeerContext,
     rx: UnboundedReceiver<OutboundUpdate>,
@@ -994,7 +994,7 @@ impl Script {
 struct Sess {
     peer: Script,
     slot: Arc<PeerSlot>,
-    rib: Arc<Mutex<BgpRib>>,
+    rib: Arc<SharedRib>,
     task: JoinHandle<FsmOutcome>,
     /// The OPEN the router sent.
     local_open: OpenMessage,

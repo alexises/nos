@@ -1,6 +1,6 @@
 //! Polls the owning `nos-ribd` for IGP costs (`RibRequest::IgpCosts`) and
 //! hands them to `BgpRib` for decision step (d) — see `BgpRib::set_igp`.
-//! Polled, not subscribed, for the same reason as `rib_push_client`.
+//! Polled, not subscribed: `nos-ribd` has no cost change stream to subscribe to.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

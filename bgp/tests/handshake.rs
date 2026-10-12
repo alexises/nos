@@ -18,14 +18,13 @@ use futures::{SinkExt, StreamExt};
 use nos_bgp::collision::{PeerSlot, Role};
 use nos_bgp::fsm::{self, FsmOutcome, PeerContext};
 use nos_bgp::message::{self, BgpCodec, BgpMessage};
-use nos_bgp::rib::BgpRib;
+use nos_bgp::rib::{BgpRib, SharedRib};
 use nos_bgp::session::{LocalIdentity, ResolvedPeer};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-fn new_bgp_rib() -> Arc<Mutex<BgpRib>> {
-    Arc::new(Mutex::new(BgpRib::new()))
+fn new_bgp_rib() -> Arc<SharedRib> {
+    Arc::new(SharedRib::new(BgpRib::new()))
 }
 
 async fn loopback_pair() -> (TcpStream, TcpStream) {

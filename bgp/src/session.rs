@@ -19,7 +19,7 @@ use crate::collision::{FsmCommand, PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
 use crate::gr::Disconnect;
 use crate::message::CeaseSubcode;
-use crate::rib::BgpRib;
+use crate::rib::{BgpRib, SharedRib};
 use crate::rpki;
 use crate::status::{PeerState, PeerStatus};
 use crate::tcp;
@@ -311,7 +311,7 @@ pub struct SessionManager {
     peer_tasks: Mutex<HashMap<IpAddr, PeerTask>>,
     listeners: Mutex<Option<Listeners>>,
     vrf: watch::Sender<VrfRequirement>,
-    bgp_rib: Arc<Mutex<BgpRib>>,
+    bgp_rib: Arc<SharedRib>,
     /// The listener's port and the port peers are dialed on — both 179
     /// except in `with_listen`'s localhost tests.
     listen_port: u16,
@@ -394,7 +394,7 @@ impl SessionManager {
             peer_tasks: Mutex::new(HashMap::new()),
             listeners: Mutex::new(None),
             vrf,
-            bgp_rib: Arc::new(Mutex::new(BgpRib::new())),
+            bgp_rib: Arc::new(SharedRib::new(BgpRib::new())),
             listen_port,
             peer_port,
             bind_vrf,
@@ -673,8 +673,14 @@ impl SessionManager {
         self.bgp_rib.lock().await.set_aggregates(aggregates);
     }
 
+    /// Resolves `changed()` after any RIB mutation; the push clients'
+    /// wake-up (#420).
+    pub fn push_changed(&self) -> watch::Receiver<u64> {
+        self.bgp_rib.subscribe()
+    }
+
     /// This instance's owning routing table name and current best-path
-    /// snapshot, for `rib_push_client`'s poll loop.
+    /// snapshot, for `rib_push_client`.
     pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, crate::rib::Hops>) {
         self.bgp_rib.lock().await.push_snapshot()
     }
@@ -1305,7 +1311,7 @@ async fn active_connect_loop(
     slot: Arc<PeerSlot>,
     mut vrf: watch::Receiver<VrfRequirement>,
     local: watch::Receiver<LocalIdentity>,
-    bgp_rib: Arc<Mutex<BgpRib>>,
+    bgp_rib: Arc<SharedRib>,
 ) {
     loop {
         let current_vrf = vrf.borrow().clone();
