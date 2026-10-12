@@ -135,7 +135,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 - Deviations: the CIST is a flat 5-component vector (external and internal root path costs summed, the regional root is the CIST root, internal cost 0 on send); `rcvdInternal`/`infoInternal` and the Master port role are not modelled, a boundary port follows the CIST instead; port protections other than `bpdu-filter`/err-disable act on the CIST only.
 - The BPDU socket's receive buffer is 1536 bytes (an MST BPDU with 64 MSTI messages is 1143 bytes plus the frame header); at the old 128 bytes every v3 BPDU with MSTIs was dropped as truncated.
 - Every 10 s the daemon re-pushes every `(port, domain)` state (`Engine::all_states`): `nos-interfaced` only writes states that differ, and a resync running at the same time as a plan rebuild was seen to overwrite a pushed Blocking with the previous Forwarding.
-- Known limit of `nos-interfaced`, not of MSTP: a tagged trunk over a parent link that is administratively down fails to bring `ethX.<tag>` up (ENETDOWN) and is retried forever; bring the parent up first (the `stp-mstp` phase does).
+- Known limit of `nos-interfaced`, not of MSTP: a tagged trunk over a parent link that is administratively down fails to bring `ethX.<tag>` up (ENETDOWN) and is retried forever; `nos-interfaced` now raises an admin-down parent itself, proven by the `reconcile_tagged_subinterfaces` kernel test in `interface/src/driver/linux.rs` (#338, #355); the `stp-mstp` phase only asserts no ENETDOWN loop and the sub-links' state.
 - Tests: `stp/src/mst/` (digest oracle, VLAN map, region mismatch, a two-engine run with two trees blocking different links) and the `stp-mstp` e2e phase.
 
 ## Deviations from the standard's text

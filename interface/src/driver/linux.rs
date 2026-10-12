@@ -1493,4 +1493,67 @@ mod tests {
             .await
             .is_err());
     }
+
+    /// #338/#355: an admin-down parent is raised before its tagged sub-links
+    /// (the e2e topology cannot control that precondition), unless BPDU guard
+    /// holds it down. Run like the test above.
+    #[tokio::test]
+    #[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+    #[allow(
+        clippy::disallowed_types,
+        reason = "test code: ip is the independent oracle for the netlink writes (#228)"
+    )]
+    async fn tagged_subinterfaces_raise_an_admin_down_parent() {
+        let run = |cmd: &str| {
+            let o = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{cmd}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        run("ip link add pa type veth peer name pb; ip link set pb up");
+        let dir = tempfile::tempdir().unwrap();
+        let driver = LinuxInterfaceDriver::new(
+            dir.path().join("w.sock"),
+            dir.path().join("bridges"),
+            dir.path().join("aggregates"),
+        )
+        .unwrap();
+        let desired = [(
+            10u16,
+            TaggedMaster::Vrf {
+                routing_table: None,
+                addresses: vec![],
+            },
+        )];
+        let index = driver.find_link("pa").await.unwrap().unwrap().header.index;
+        let is_up =
+            |dev: &str| run(&format!("ip -o link show {dev}")).contains("<BROADCAST,MULTICAST,UP");
+        let flags = |dev: &str| run(&format!("ip -o link show {dev}"));
+
+        // BPDU guard holds the parent down: it stays down, the sub-link is made.
+        let held = StpPorts {
+            err_disabled: true,
+            ..Default::default()
+        };
+        driver
+            .reconcile_tagged_subinterfaces("pa", index, &desired, &held)
+            .await
+            .unwrap();
+        assert!(!is_up("pa"), "{}", flags("pa"));
+        assert!(!is_up("pa.10"), "{}", flags("pa.10"));
+
+        // Otherwise the parent is raised, then the sub-link.
+        driver
+            .reconcile_tagged_subinterfaces("pa", index, &desired, &StpPorts::default())
+            .await
+            .unwrap();
+        assert!(is_up("pa"), "{}", flags("pa"));
+        assert!(is_up("pa.10"), "{}", flags("pa.10"));
+    }
 }
