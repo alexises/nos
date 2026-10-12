@@ -67,8 +67,22 @@ impl IntoResponse for ApiError {
             }
             ApiError::PreconditionFailed(m) => (StatusCode::PRECONDITION_FAILED, m),
             ApiError::Unprocessable(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
-            ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
-            ApiError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m),
+            // 502/503 strings can carry socket paths or daemon replies: log
+            // them, never send them (#408).
+            ApiError::Unavailable(m) => {
+                tracing::warn!(detail = %m, "503 to client");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "a backend daemon is unavailable".to_string(),
+                )
+            }
+            ApiError::BadGateway(m) => {
+                tracing::warn!(detail = %m, "502 to client");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "a backend daemon returned an unexpected reply".to_string(),
+                )
+            }
         };
         problem(status, msg)
     }
@@ -122,6 +136,29 @@ pub async fn problem_for_framework_errors(resp: Response) -> Response {
     out
 }
 
+/// Hardening headers on every response; a CSP on the bundled Swagger UI only.
+pub async fn security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let swagger = req.uri().path().starts_with("/swagger-ui");
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    if swagger {
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'",
+            ),
+        );
+    }
+    resp
+}
+
 /// Media type of every error response (RFC 9457).
 pub const PROBLEM_JSON: &str = "application/problem+json";
 
@@ -141,3 +178,28 @@ pub struct ErrorBody {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn body(e: ApiError) -> (u16, String) {
+        let r = e.into_response();
+        let st = r.status().as_u16();
+        let b = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        (st, String::from_utf8(b.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn backend_errors_are_generic() {
+        let (s, b) = body(ApiError::Unavailable(
+            "cannot reach daemon at /run/nos/watchdog.sock: x".into(),
+        ))
+        .await;
+        assert_eq!(s, 503);
+        assert!(!b.contains("/run/") && !b.contains(".sock") && !b.contains("cannot reach"));
+        let (s, b) = body(ApiError::BadGateway("x sent Config { users: [] }".into())).await;
+        assert_eq!(s, 502);
+        assert!(!b.contains("Config"));
+    }
+}
