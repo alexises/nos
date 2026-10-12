@@ -79,6 +79,24 @@ mod tests {
     }
 
     #[test]
+    fn uri_is_byte_exact_and_escapes_uppercase_hex() {
+        assert_eq!(PeerId::new("ribd", "a.b-c_d9").uri(), "nos://ribd/a.b-c_d9");
+        assert_eq!(PeerId::new("x", " ").uri(), "nos://x/%20");
+        assert_eq!(PeerId::new("x", "/").uri(), "nos://x/%2F");
+        assert_eq!(PeerId::new("x", "%").uri(), "nos://x/%25");
+        assert_eq!(PeerId::new("x", "\u{e9}").uri(), "nos://x/%C3%A9");
+        for name in [".", "-", "_", "._-", "a b/c%\u{e9}"] {
+            let id = PeerId::new("ribd", name);
+            assert_eq!(PeerId::parse(&id.uri()), Some(id));
+        }
+    }
+
+    #[test]
+    fn display_is_role_slash_name() {
+        assert_eq!(PeerId::new("ribd", "rt1").to_string(), "ribd/rt1");
+    }
+
+    #[test]
     fn foreign_uris_are_not_identities() {
         assert_eq!(PeerId::parse("https://ribd/rt1"), None);
         assert_eq!(PeerId::parse("nos://ribd"), None);

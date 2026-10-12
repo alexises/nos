@@ -212,3 +212,88 @@ pub async fn renew(
             .await?,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_forgets_the_user_only_when_nobody_else_waits() {
+        let gate = LoginGate::default();
+        let a = gate.lock_for("u");
+        gate.release("u", &a);
+        assert!(gate.locks.lock().unwrap().is_empty());
+
+        let a = gate.lock_for("u");
+        let b = gate.lock_for("u");
+        assert!(Arc::ptr_eq(&a, &b));
+        gate.release("u", &a);
+        assert!(Arc::ptr_eq(&gate.lock_for("u"), &b));
+    }
+
+    #[test]
+    fn lockout_after_max_failures_until_cleared() {
+        let gate = LoginGate::default();
+        for _ in 0..MAX_FAILED_LOGINS - 1 {
+            gate.record_failure("u");
+        }
+        assert_eq!(gate.retry_after("u"), None);
+        gate.record_failure("u");
+        // A fresh window: 60s minus a sliver, rounded up to whole seconds.
+        assert_eq!(gate.retry_after("u"), Some(60));
+        assert_eq!(gate.retry_after("other"), None);
+        gate.clear("u");
+        assert_eq!(gate.retry_after("u"), None);
+    }
+
+    #[test]
+    fn debug_hides_the_password() {
+        let r = LoginRequest {
+            user: "alice".into(),
+            password: "hunter2".into(),
+            csr: "x".into(),
+        };
+        let s = format!("{r:?}");
+        assert!(s.contains("alice") && s.contains("<hidden>") && !s.contains("hunter2"));
+    }
+
+    fn err(reply: WatchdogEvent) -> ApiError {
+        match certificate(reply) {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn issued_becomes_a_base64_certificate() {
+        let Ok(Json(c)) = certificate(WatchdogEvent::Issued {
+            cert_der: vec![1, 2, 3],
+            lifetime_secs: 7,
+        }) else {
+            panic!("expected a certificate");
+        };
+        assert_eq!(c.certificate, "AQID");
+        assert_eq!(c.lifetime_secs, 7);
+    }
+
+    #[test]
+    fn denials_map_to_distinct_statuses() {
+        for m in [INVALID_CREDENTIALS, "no such user"] {
+            assert!(
+                matches!(err(WatchdogEvent::Denied(m.into())), ApiError::Unauthorized(x) if x == m)
+            );
+        }
+        assert!(matches!(
+            err(WatchdogEvent::Denied("bad certificate request".into())),
+            ApiError::BadRequest(x) if x == "bad certificate request"
+        ));
+        assert!(matches!(
+            err(WatchdogEvent::Denied("other".into())),
+            ApiError::Unavailable(x) if x == "other"
+        ));
+        assert!(matches!(
+            err(WatchdogEvent::NotAvailable),
+            ApiError::BadGateway(_)
+        ));
+    }
+}

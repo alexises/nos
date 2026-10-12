@@ -31,3 +31,4 @@ argon2   = { version = "0.5", features = ["std", "password-hash", "rand"] }
 nos-pki  = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+x509-parser = { workspace = true }
