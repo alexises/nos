@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_interface::driver::NoopInterfaceDriver;
+use nos_interface::driver::{
+    BridgePortRef, DriverError, InterfaceDriver, LinkWatch, NoopInterfaceDriver,
+};
+use nos_interface::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 use nos_interface::{server, Interfaces};
 use nos_pki::testing::shared;
 use nos_proto::{InterfaceAddress, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
@@ -67,6 +70,144 @@ async fn sample_interfaces() -> Interfaces {
     nos_interface::state::build_from_config(&cfg, &NoopInterfaceDriver, &Interfaces::new()).await
 }
 
+/// A bounded read: a dead dispatcher fails the test in seconds instead of
+/// hanging (or ending a mutant as a Timeout, #374).
+async fn next_event(
+    r: &mut FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<InterfaceEvent>>,
+) -> InterfaceEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(5), r.next())
+        .await
+        .expect("no reply within 5s")
+        .expect("connection closed without a reply")
+        .expect("undecodable reply")
+}
+
+/// `Noop` that remembers every `apply` (interface name, member active), so a
+/// push's immediate re-apply is observable (#374).
+#[derive(Default)]
+struct RecordingDriver {
+    applied: std::sync::Mutex<Vec<(String, bool)>>,
+}
+
+#[async_trait::async_trait]
+impl InterfaceDriver for RecordingDriver {
+    async fn apply(&self, d: &InterfaceState) -> Result<(), DriverError> {
+        self.applied
+            .lock()
+            .unwrap()
+            .push((d.name.clone(), d.port_aggregate_active));
+        Ok(())
+    }
+    async fn remove(&self, n: &str) -> Result<(), DriverError> {
+        NoopInterfaceDriver.remove(n).await
+    }
+    async fn ensure_broadcast_domain(
+        &self,
+        d: &BroadcastDomainState,
+    ) -> Result<String, DriverError> {
+        NoopInterfaceDriver.ensure_broadcast_domain(d).await
+    }
+    async fn remove_broadcast_domain(&self, d: &str) -> Result<(), DriverError> {
+        NoopInterfaceDriver.remove_broadcast_domain(d).await
+    }
+    async fn ensure_port_aggregate(&self, d: &PortAggregateState) -> Result<String, DriverError> {
+        NoopInterfaceDriver.ensure_port_aggregate(d).await
+    }
+    async fn remove_port_aggregate(&self, n: &str) -> Result<(), DriverError> {
+        NoopInterfaceDriver.remove_port_aggregate(n).await
+    }
+    async fn link_local_address(&self, k: &str) -> Option<std::net::Ipv6Addr> {
+        NoopInterfaceDriver.link_local_address(k).await
+    }
+    async fn set_bridge_port_state(
+        &self,
+        p: &BridgePortRef,
+        s: nos_proto::StpPortState,
+    ) -> Result<(), DriverError> {
+        NoopInterfaceDriver.set_bridge_port_state(p, s).await
+    }
+    async fn flush_bridge_port(&self, p: &BridgePortRef) -> Result<(), DriverError> {
+        NoopInterfaceDriver.flush_bridge_port(p).await
+    }
+    fn watch_links(&self) -> LinkWatch {
+        NoopInterfaceDriver.watch_links()
+    }
+}
+
+impl RecordingDriver {
+    fn applied(&self) -> Vec<(String, bool)> {
+        self.applied.lock().unwrap().clone()
+    }
+
+    /// Waits (bounded) until `eth0` was applied with this `active` value.
+    async fn wait_applied(&self, active: bool) {
+        for _ in 0..100 {
+            if self.applied().contains(&("eth0".to_string(), active)) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "eth0 never applied with active={active}: {:?}",
+            self.applied()
+        );
+    }
+}
+
+/// `eth0` in `bond1` (mode `mode`, optionally BFD-tracked), the server running
+/// over a `RecordingDriver`, and a writer connected as `role`.
+async fn bond_server(
+    mode: nos_proto::PortAggregateMode,
+    bfd: bool,
+    role: &str,
+    dir: &std::path::Path,
+) -> (
+    Arc<RecordingDriver>,
+    Arc<RwLock<Interfaces>>,
+    FramedWrite<nos_pki::Stream, IpcCodec<InterfaceRequest>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let path = dir.join("interface.sock");
+    let cfg = nos_proto::Config {
+        interfaces: vec![nos_proto::Interface {
+            name: "eth0".to_string(),
+            port_aggregate: Some("bond1".to_string()),
+            ..Default::default()
+        }],
+        port_aggregates: vec![nos_proto::PortAggregate {
+            name: "bond1".to_string(),
+            mode,
+            bfd: bfd.then(|| "fast".to_string()),
+            bfd_peer: bfd.then(|| "10.0.0.2".parse().unwrap()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let interfaces = Arc::new(RwLock::new(
+        nos_interface::state::build_from_config(&cfg, &NoopInterfaceDriver, &Interfaces::new())
+            .await,
+    ));
+    let driver = Arc::new(RecordingDriver::default());
+    let server = server::start(
+        &path,
+        interfaces.clone(),
+        driver.clone(),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
+    let stream = shared()
+        .identity(role, "")
+        .connect(&path, &nos_pki::PeerId::new("interfaced", ""))
+        .await
+        .unwrap();
+    (
+        driver,
+        interfaces,
+        FramedWrite::new(stream, IpcCodec::<InterfaceRequest>::default()),
+        server,
+    )
+}
+
 async fn connect(
     path: &std::path::Path,
 ) -> (
@@ -100,7 +241,7 @@ async fn get_interfaces_returns_every_interface_sorted_by_name() {
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(InterfaceRequest::GetInterfaces).await.unwrap();
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
 
     let InterfaceEvent::Interfaces(statuses) = event else {
         panic!("expected Interfaces, got {event:?}");
@@ -130,7 +271,7 @@ async fn get_interface_returns_matching_status() {
         })
         .await
         .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
 
     let InterfaceEvent::Interface(InterfaceStatus {
         name,
@@ -166,7 +307,7 @@ async fn get_interface_missing_returns_not_found() {
         })
         .await
         .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
+    let event = next_event(&mut reader).await;
 
     assert!(matches!(event, InterfaceEvent::NotFound));
 }
@@ -238,6 +379,94 @@ async fn push_bfd_members_enslaves_the_up_member_immediately() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("eth0 never became active");
+}
+
+#[tokio::test]
+async fn push_bfd_members_applies_the_member_immediately() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (driver, interfaces, mut w, _server) =
+        bond_server(nos_proto::PortAggregateMode::Xor, true, "bfdd", tmp.path()).await;
+    w.send(InterfaceRequest::PushBfdMembers(
+        nos_proto::BfdAggregateMembers {
+            aggregate: "bond1".to_string(),
+            up_members: vec!["eth0".to_string()],
+        },
+    ))
+    .await
+    .unwrap();
+    driver.wait_applied(true).await;
+    assert!(
+        interfaces
+            .read()
+            .await
+            .get("eth0")
+            .unwrap()
+            .port_aggregate_active
+    );
+}
+
+#[tokio::test]
+async fn push_lacp_members_applies_the_active_member() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (driver, interfaces, mut w, _server) = bond_server(
+        nos_proto::PortAggregateMode::Lacp,
+        false,
+        "lacpd",
+        tmp.path(),
+    )
+    .await;
+    assert_eq!(driver.applied().len(), 0);
+
+    w.send(InterfaceRequest::PushLacpMembers(
+        nos_proto::LacpAggregateMembers {
+            aggregate: "bond1".to_string(),
+            active_members: vec!["eth0".to_string()],
+        },
+    ))
+    .await
+    .unwrap();
+    driver.wait_applied(true).await;
+    assert!(
+        interfaces
+            .read()
+            .await
+            .get("eth0")
+            .unwrap()
+            .port_aggregate_active
+    );
+
+    // Emptying the set re-applies the member as inactive.
+    w.send(InterfaceRequest::PushLacpMembers(
+        nos_proto::LacpAggregateMembers {
+            aggregate: "bond1".to_string(),
+            active_members: vec![],
+        },
+    ))
+    .await
+    .unwrap();
+    driver.wait_applied(false).await;
+}
+
+#[tokio::test]
+async fn push_for_an_unknown_aggregate_applies_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (driver, _interfaces, mut w, _server) = bond_server(
+        nos_proto::PortAggregateMode::Lacp,
+        false,
+        "lacpd",
+        tmp.path(),
+    )
+    .await;
+    w.send(InterfaceRequest::PushLacpMembers(
+        nos_proto::LacpAggregateMembers {
+            aggregate: "nope".to_string(),
+            active_members: vec!["eth0".to_string()],
+        },
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(driver.applied().len(), 0, "{:?}", driver.applied());
 }
 
 // ---- live role gate (#364): refused roles are disconnected, others served ----

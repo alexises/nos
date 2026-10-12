@@ -161,7 +161,7 @@ mod tests {
     use crate::manager::tests::mgr;
     use nos_pki::PeerId;
     use nos_proto::schema::BfdProfile;
-    use nos_proto::BfdState;
+    use nos_proto::{BfdDiag, BfdSessionKind, BfdState};
     use std::time::Duration;
 
     type Reader = FramedRead<tokio::io::ReadHalf<Stream>, IpcCodec<BfdEvent>>;
@@ -175,6 +175,123 @@ mod tests {
             FramedRead::new(r, IpcCodec::default()),
             FramedWrite::new(w, IpcCodec::default()),
         )
+    }
+
+    /// A bounded read: a dead server fails the test fast instead of hanging
+    /// (or ending a mutant as a Timeout, #374).
+    async fn next(r: &mut Reader) -> Option<Result<BfdEvent, std::io::Error>> {
+        tokio::time::timeout(Duration::from_secs(5), r.next())
+            .await
+            .expect("no reply within 5s")
+    }
+
+    fn status(state: BfdState, cpi: bool) -> Status {
+        Status {
+            state,
+            diag: BfdDiag::NoDiagnostic,
+            local_discriminator: 1,
+            remote_discriminator: 0,
+            tx_interval_us: 1_000_000,
+            detection_time_us: 3_000_000,
+            control_plane_independent: cpi,
+            auth_method: None,
+            auth_key_id: None,
+            auth_failures: 0,
+            echo_active: false,
+            echo_interval_us: 0,
+            echo_only: false,
+            tx_pdu_bytes: 0,
+            kind: BfdSessionKind::Classical,
+        }
+    }
+
+    async fn ev(rx: &mut mpsc::Receiver<BfdEvent>) -> (BfdState, BfdDiag, bool) {
+        let e = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("forward emitted nothing within 5s")
+            .expect("forward closed the channel");
+        let BfdEvent::State {
+            state,
+            diag,
+            control_plane_independent,
+            ..
+        } = e
+        else {
+            panic!("not a State event");
+        };
+        (state, diag, control_plane_independent)
+    }
+
+    fn key() -> SessionKey {
+        key_of(&register("192.0.2.1")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn forward_emits_current_then_only_changes() {
+        let (tx, rx) = watch::channel(status(BfdState::Down, false));
+        let (out, mut events) = mpsc::channel(8);
+        let _task = tokio::spawn(forward(key(), rx, out));
+
+        assert_eq!(
+            ev(&mut events).await,
+            (BfdState::Down, BfdDiag::NoDiagnostic, false)
+        );
+        // Identical status (even though `changed()` fires): nothing re-emitted.
+        let mut same = status(BfdState::Down, false);
+        same.tx_interval_us = 5; // not part of the dedup key
+        tx.send_replace(same);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), events.recv())
+                .await
+                .is_err(),
+            "an unchanged (state, diag, cpi) was re-emitted"
+        );
+        // Each tuple member alone is enough to emit.
+        tx.send_replace(status(BfdState::Down, true));
+        assert_eq!(
+            ev(&mut events).await,
+            (BfdState::Down, BfdDiag::NoDiagnostic, true)
+        );
+        let mut s = status(BfdState::Down, true);
+        s.diag = BfdDiag::PathDown;
+        tx.send_replace(s);
+        assert_eq!(
+            ev(&mut events).await,
+            (BfdState::Down, BfdDiag::PathDown, true)
+        );
+        s.state = BfdState::Up;
+        tx.send_replace(s);
+        assert_eq!(
+            ev(&mut events).await,
+            (BfdState::Up, BfdDiag::PathDown, true)
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_ends_when_either_side_goes_away() {
+        // Subscriber gone while the session lives: the next send fails.
+        let (tx, rx) = watch::channel(status(BfdState::Down, false));
+        let (out, events) = mpsc::channel(8);
+        let task = tokio::spawn(forward(key(), rx, out));
+        drop(events);
+        // The first send may already have failed; if it succeeded the task
+        // is parked on `changed()`, so give it a change to send.
+        tx.send_replace(status(BfdState::Up, false));
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("forward outlived its subscriber")
+            .unwrap();
+
+        // Session gone: `changed()` errors.
+        let (tx, rx) = watch::channel(status(BfdState::Down, false));
+        let (out, mut events) = mpsc::channel(8);
+        let task = tokio::spawn(forward(key(), rx, out));
+        ev(&mut events).await;
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("forward outlived its session")
+            .unwrap();
     }
 
     fn register(peer: &str) -> BfdRequest {
@@ -198,7 +315,7 @@ mod tests {
 
         let (mut r, mut w) = connect(&path, "ribd").await;
         w.send(register("192.0.2.1")).await.unwrap();
-        let Some(Ok(BfdEvent::State { key, state, .. })) = r.next().await else {
+        let Some(Ok(BfdEvent::State { key, state, .. })) = next(&mut r).await else {
             panic!("no initial state");
         };
         assert_eq!(
@@ -212,19 +329,19 @@ mod tests {
         w2.send(BfdRequest::GetSessions { peer: None })
             .await
             .unwrap();
-        let Some(Ok(BfdEvent::Sessions(v))) = r2.next().await else {
+        let Some(Ok(BfdEvent::Sessions(v))) = next(&mut r2).await else {
             panic!("no sessions");
         };
         assert_eq!(v.len(), 1);
         w2.send(BfdRequest::GetReflector).await.unwrap();
-        let Some(Ok(BfdEvent::Reflector(v))) = r2.next().await else {
+        let Some(Ok(BfdEvent::Reflector(v))) = next(&mut r2).await else {
             panic!("no reflector");
         };
         assert_eq!((v.received, v.discriminators.len()), (0, 0));
 
         w.send(BfdRequest::Deregister { key }).await.unwrap();
         w.send(register("192.0.2.2")).await.unwrap();
-        let _ = r.next().await;
+        let _ = next(&mut r).await;
         drop((r, w));
         tokio::time::timeout(Duration::from_secs(2), async {
             while !m.sessions(None).is_empty() {
@@ -246,7 +363,7 @@ mod tests {
         // `user` may query, not register.
         let (mut r, mut w) = connect(&path, "user").await;
         w.send(register("192.0.2.1")).await.unwrap();
-        assert!(r.next().await.is_none());
+        assert!(next(&mut r).await.is_none());
         assert_eq!(m.sessions(None).len(), 0);
     }
 }
