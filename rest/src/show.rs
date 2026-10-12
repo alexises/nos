@@ -437,7 +437,10 @@ where
                 None => (None, Some("unexpected reply".to_string())),
             },
             Err(ApiError::Unavailable(_)) => (None, Some("not running".to_string())),
-            Err(e) => (None, Some(format!("{e:?}"))),
+            Err(e) => {
+                tracing::warn!(error = ?e, %instance, "instance query failed");
+                (None, Some("daemon error".to_string()))
+            }
         };
         out.push(InstanceReport {
             instance,

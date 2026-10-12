@@ -632,10 +632,9 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
             .0,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        send(&f.app, Method::GET, "/v1/routes/other", None).await.0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
+    let (st, v) = send(&f.app, Method::GET, "/v1/routes/other", None).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["detail"], "a backend daemon is unavailable");
     assert_eq!(
         send(&f.app, Method::GET, "/v1/interfaces", None).await.0,
         StatusCode::SERVICE_UNAVAILABLE
@@ -1054,6 +1053,21 @@ async fn serves_swagger_ui_from_vendored_assets() {
     assert!(html.as_str().unwrap().contains("Swagger UI"));
     let (s, _) = send(&f.app, Method::GET, "/swagger-ui/swagger-ui.css", None).await;
     assert_eq!(s, StatusCode::OK);
+    // #408: hardening headers; CSP on the UI only.
+    for (uri, csp) in [("/swagger-ui/", true), ("/openapi.json", false)] {
+        let req = HttpRequest::builder()
+            .uri(uri)
+            .extension(PeerUser(Some(USER.to_string())))
+            .body(Body::empty())
+            .unwrap();
+        let resp = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            resp.headers().contains_key("content-security-policy"),
+            csp,
+            "{uri}"
+        );
+    }
 }
 
 fn log_entry(source: &str, message: &str) -> LogEntry {

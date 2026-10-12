@@ -125,4 +125,5 @@ pub fn router(daemons: Daemons) -> Router {
         .layer(axum::middleware::map_response(
             crate::error::problem_for_framework_errors,
         ))
+        .layer(axum::middleware::from_fn(crate::error::security_headers))
 }

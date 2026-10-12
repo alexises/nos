@@ -291,5 +291,8 @@ impl Daemons {
 }
 
 pub fn unexpected(daemon: &str, ev: &impl std::fmt::Debug) -> ApiError {
-    ApiError::BadGateway(format!("{daemon} sent an unexpected reply: {ev:?}"))
+    // Variant name only: a full reply (a `Config`) must not reach nos-logd.
+    let dbg = format!("{ev:?}");
+    let variant = dbg.split([' ', '(', '{']).next().unwrap_or("");
+    ApiError::BadGateway(format!("{daemon} sent an unexpected reply: {variant}"))
 }
