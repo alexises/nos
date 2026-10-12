@@ -303,3 +303,123 @@ fn publish(dir: &Path, name: &str, pem: &str) -> io::Result<()> {
 fn peer(role: Role, name: &str) -> PeerId {
     PeerId::new(role.as_str(), name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nos_pki::{generate_csr, generate_csr_for};
+    use x509_parser::prelude::*;
+
+    fn pki() -> (tempfile::TempDir, Arc<Pki>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            tmp.path(),
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        (tmp, pki)
+    }
+
+    fn issue(pki: &Pki, user: &str) {
+        pki.sign_user(&generate_csr().unwrap().0, user).unwrap();
+    }
+
+    fn diff(name: &str, status: DiffStatus) -> SectionDiff {
+        SectionDiff {
+            header: format!("user {name}"),
+            name: name.to_string(),
+            status,
+            fields: vec![],
+            subsections: vec![],
+        }
+    }
+
+    fn issued(pki: &Pki, user: &str) -> bool {
+        lock(&pki.users).contains_key(user)
+    }
+
+    #[tokio::test]
+    async fn initial_diff_revokes_only_users_missing_from_the_list() {
+        let (_tmp, pki) = pki();
+        issue(&pki, "alice");
+        issue(&pki, "bob");
+        let crl = pki.crl();
+        let none = Path::new("/nonexistent");
+
+        // Everyone listed: nobody revoked, CRL untouched.
+        let all = [
+            diff("alice", DiffStatus::Added),
+            diff("bob", DiffStatus::Added),
+        ];
+        pki.users_changed(none, &all, true).await;
+        assert!(issued(&pki, "alice") && issued(&pki, "bob"));
+        assert!(!crl.has_changed().unwrap());
+
+        // alice missing: she is revoked, bob kept.
+        pki.users_changed(none, &all[1..], true).await;
+        assert!(!issued(&pki, "alice"));
+        assert!(issued(&pki, "bob"));
+        assert!(crl.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn non_initial_diff_revokes_removed_users_only() {
+        let (_tmp, pki) = pki();
+        issue(&pki, "alice");
+        issue(&pki, "bob");
+        let crl = pki.crl();
+        let none = Path::new("/nonexistent");
+
+        // A non-initial diff must not apply the "missing from the list" rule.
+        pki.users_changed(none, &[diff("bob", DiffStatus::Added)], false)
+            .await;
+        assert!(issued(&pki, "alice") && issued(&pki, "bob"));
+        assert!(!crl.has_changed().unwrap());
+
+        pki.users_changed(none, &[diff("alice", DiffStatus::Removed)], false)
+            .await;
+        assert!(!issued(&pki, "alice"));
+        assert!(issued(&pki, "bob"));
+        assert!(crl.has_changed().unwrap());
+    }
+
+    #[test]
+    fn a_noted_rehash_is_recognised_once() {
+        let (_tmp, pki) = pki();
+        assert!(!pki.was_rehash("u", Some("h")));
+        pki.note_rehash("u", "h");
+        assert!(pki.was_rehash("u", Some("h")));
+        assert!(!pki.was_rehash("u", Some("h")), "consumed");
+        pki.note_rehash("u", "h");
+        assert!(!pki.was_rehash("u", Some("other")));
+        pki.note_rehash("u", "h");
+        assert!(!pki.was_rehash("u", None));
+    }
+
+    #[test]
+    fn rest_server_cert_has_the_addresses_and_chains_to_the_rest_ca() {
+        let (tmp, pki) = pki();
+        let (csr, _key) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+        let addrs: [IpAddr; 2] = ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
+        let (cert_der, ca_der) = pki.sign_rest_server(&csr, &addrs).unwrap();
+
+        let pem = std::fs::read(tmp.path().join("rest-ca.crt")).unwrap();
+        let (_, on_disk) = x509_parser::pem::parse_x509_pem(&pem).unwrap();
+        assert_eq!(ca_der, on_disk.contents);
+
+        let (_, cert) = parse_x509_certificate(&cert_der).unwrap();
+        let (_, ca) = parse_x509_certificate(&ca_der).unwrap();
+        cert.verify_signature(Some(ca.public_key())).unwrap();
+        let san = cert.subject_alternative_name().unwrap().unwrap();
+        let names = &san.value.general_names;
+        let mut v6 = [0u8; 16];
+        v6[15] = 1;
+        assert!(names.contains(&GeneralName::DNSName("nos.internal")));
+        assert!(names.contains(&GeneralName::IPAddress(&[127, 0, 0, 1])));
+        assert!(names.contains(&GeneralName::IPAddress(&v6)));
+
+        assert!(pki.sign_rest_server(b"garbage", &addrs).is_err());
+    }
+}

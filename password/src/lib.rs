@@ -90,6 +90,33 @@ mod tests {
         assert!(needs_rehash(&old));
     }
 
+    /// A PHC string with the given cost parameters (no real hashing: only the
+    /// parameters are read).
+    fn phc(m: u32, t: u32, p: u32) -> String {
+        format!("$argon2id$v=19$m={m},t={t},p={p}$c29tZXNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g")
+    }
+
+    #[test]
+    fn needs_rehash_compares_each_dimension() {
+        // One dimension weaker at a time, or a mix of weaker and stronger.
+        for (m, t, p) in [
+            (32, 3, 4),
+            (65536, 2, 4),
+            (65536, 3, 3),
+            (32, 4, 4),
+            (65536, 4, 3),
+        ] {
+            assert!(needs_rehash(&phc(m, t, p)), "{m},{t},{p}");
+        }
+        // Equal or stronger everywhere.
+        for (m, t, p) in [(65536, 3, 4), (65537, 3, 4), (65536, 4, 4), (65536, 3, 5)] {
+            assert!(!needs_rehash(&phc(m, t, p)), "{m},{t},{p}");
+        }
+        for bad in ["", "garbage", "$argon2id$"] {
+            assert!(!needs_rehash(bad), "{bad:?}");
+        }
+    }
+
     #[test]
     fn salted_so_hashes_differ() {
         assert_ne!(hash("same"), hash("same"));
