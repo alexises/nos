@@ -1332,6 +1332,27 @@ struct ParsedAttributes {
 /// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` decoding. With `two_octet_as`, `AS_PATH`
 /// is read as 2-byte and merged with `AS4_PATH` per RFC 6793 §4.2.3; without
 /// it a stray `AS4_PATH` is ignored.
+/// Expected Optional|Transitive bits (0x80|0x40) per RFC 4271 §5 / RFC 7606
+/// §3(c); `None` for types we do not know (never checked).
+fn expected_flags(attr_type: u8) -> Option<u8> {
+    match attr_type {
+        ATTR_ORIGIN | ATTR_AS_PATH | ATTR_NEXT_HOP | ATTR_LOCAL_PREF | ATTR_ATOMIC_AGGREGATE => {
+            Some(ATTR_FLAG_WELL_KNOWN_TRANSITIVE)
+        }
+        ATTR_MULTI_EXIT_DISC | ATTR_ORIGINATOR_ID | ATTR_CLUSTER_LIST | ATTR_MP_REACH_NLRI
+        | ATTR_MP_UNREACH_NLRI => Some(ATTR_FLAG_OPTIONAL_NON_TRANSITIVE),
+        ATTR_AGGREGATOR
+        | ATTR_COMMUNITY
+        | ATTR_EXTENDED_COMMUNITIES
+        | ATTR_LARGE_COMMUNITY
+        | ATTR_AS4_PATH
+        | ATTR_AS4_AGGREGATOR
+        | ATTR_PMSI_TUNNEL
+        | ATTR_OTC => Some(ATTR_FLAG_OPTIONAL_TRANSITIVE),
+        _ => None,
+    }
+}
+
 fn parse_path_attributes(
     mut data: &[u8],
     add_path_afis: &HashSet<u16>,
@@ -1358,6 +1379,8 @@ fn parse_path_attributes(
     // RFC 7606 treat-as-withdraw: set by any attribute whose *content* is
     // malformed. Framing errors (below, outside `'attr`) still reset.
     let mut withdraw = false;
+    // RFC 7606 §3(g): types already seen in this UPDATE.
+    let mut seen = [false; 256];
 
     while !data.is_empty() {
         if data.len() < 2 {
@@ -1382,6 +1405,28 @@ fn parse_path_attributes(
         let value = &data[header_len..header_len + len];
 
         'attr: {
+            let is_mp = matches!(attr_type, ATTR_MP_REACH_NLRI | ATTR_MP_UNREACH_NLRI);
+            // RFC 7606 §3(c): flags conflicting with the type are a
+            // treat-as-withdraw, or a reset for MP_* (no NLRI to withdraw).
+            // Partial and Extended-Length are never checked.
+            if let Some(want) = expected_flags(attr_type) {
+                if flags & (ATTR_FLAG_OPTIONAL_TRANSITIVE) != want {
+                    if is_mp {
+                        return Err(WireError::MalformedUpdate);
+                    }
+                    withdraw = true;
+                    break 'attr;
+                }
+            }
+            // RFC 7606 §3(g): a repeated MP_* resets the session; any other
+            // repeat keeps the first occurrence and discards the rest.
+            if std::mem::replace(&mut seen[usize::from(attr_type)], true) {
+                if is_mp {
+                    return Err(WireError::MalformedUpdate);
+                }
+                debug!(attr_type, "discarding duplicate path attribute");
+                break 'attr;
+            }
             match attr_type {
                 ATTR_ORIGIN => {
                     if value.len() != 1 {
@@ -3221,12 +3266,13 @@ mod tests {
         };
         for bad in [
             &[0x40, ATTR_ORIGIN, 1, 9][..],             // bad ORIGIN value
-            &[0x80, ATTR_COMMUNITY, 3, 1, 2, 3][..],    // COMMUNITY length % 4
+            &[0xC0, ATTR_COMMUNITY, 3, 1, 2, 3][..],    // COMMUNITY length % 4
             &[0x80, ATTR_MULTI_EXIT_DISC, 2, 0, 0][..], // MED length
             &[0x40, ATTR_AS_PATH, 4, 2, 1, 0, 0][..],   // AS_PATH truncated segment
         ] {
-            let mut attrs = valid_attrs();
-            attrs.extend_from_slice(bad);
+            // `bad` first: a later duplicate of it would be discarded (§3(g)).
+            let mut attrs = bad.to_vec();
+            attrs.extend_from_slice(&valid_attrs());
             attrs.extend_from_slice(&[
                 0x80,
                 ATTR_MP_REACH_NLRI,
@@ -3240,6 +3286,70 @@ mod tests {
             assert_eq!(
                 u.mp_unreach[0].withdrawn,
                 vec!["2001:db8:1::/48".parse().unwrap()]
+            );
+        }
+    }
+
+    fn body_attrs(extra: &[u8]) -> Result<ParsedAttributes, WireError> {
+        let mut attrs = valid_attrs();
+        attrs.extend_from_slice(extra);
+        parse_path_attributes(&attrs, &HashSet::new(), false)
+    }
+
+    #[test]
+    fn wrong_attribute_flags_are_treat_as_withdraw() {
+        for bad in [
+            &[0xC0, ATTR_ORIGIN, 1, 0][..], // optional well-known
+            &[0x00, ATTR_ORIGIN, 1, 0][..], // not transitive
+            &[0x40, ATTR_MULTI_EXIT_DISC, 4, 0, 0, 0, 1][..], // not optional
+            &[0x80, ATTR_COMMUNITY, 4, 0, 0, 0, 1][..], // optional transitive lacks T
+            &[0xC0, ATTR_MULTI_EXIT_DISC, 4, 0, 0, 0, 1][..], // non-transitive has T
+        ] {
+            assert!(body_attrs(bad).unwrap().withdraw, "{bad:?}");
+        }
+        // Partial (0x20) and Extended-Length (0x10) are never checked.
+        let ok = body_attrs(&[0xE0, ATTR_COMMUNITY, 4, 0, 0, 0, 1]).unwrap();
+        assert!(!ok.withdraw && ok.communities == vec![1]);
+        let ok = body_attrs(&[0xD0, ATTR_COMMUNITY, 0, 4, 0, 0, 0, 1]).unwrap();
+        assert!(!ok.withdraw && ok.communities == vec![1]);
+        // Unknown type with odd flags is still skipped.
+        assert!(!body_attrs(&[0x00, 99, 1, 7]).unwrap().withdraw);
+        // MP_* with wrong flags: session reset.
+        assert!(matches!(
+            body_attrs(&[0x40, ATTR_MP_UNREACH_NLRI, 3, 0, 2, 1]),
+            Err(WireError::MalformedUpdate)
+        ));
+    }
+
+    #[test]
+    fn duplicate_attribute_keeps_first_and_duplicate_mp_resets() {
+        let p = body_attrs(&[
+            0xC0,
+            ATTR_COMMUNITY,
+            4,
+            0,
+            0,
+            0,
+            1,
+            0xC0,
+            ATTR_COMMUNITY,
+            4,
+            0,
+            0,
+            0,
+            2,
+        ])
+        .unwrap();
+        assert_eq!(p.communities, vec![1]);
+        assert!(!p.withdraw);
+        for t in [ATTR_MP_REACH_NLRI, ATTR_MP_UNREACH_NLRI] {
+            let mut a = Vec::new();
+            for _ in 0..2 {
+                encode_attribute(&mut a, 0x80, t, &[0, 2, 1]);
+            }
+            assert!(
+                matches!(body_attrs(&a), Err(WireError::MalformedUpdate)),
+                "type {t}"
             );
         }
     }

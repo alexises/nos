@@ -305,7 +305,7 @@ Every OPEN advertises these capabilities, with no option to turn them off:
 - extended optional parameters (RFC 9072), used in an OPEN only when its capabilities exceed 255 bytes;
 - multiprotocol extensions (RFC 4760) for each configured address family.
 
-A malformed attribute in a received UPDATE does not reset the session: the routes in that UPDATE are treated as withdrawn and logged (RFC 7606). Only a message that cannot be parsed at all closes the session.
+A malformed attribute in a received UPDATE does not reset the session: the routes in that UPDATE are treated as withdrawn and logged (RFC 7606). Attributes whose flags conflict with their type are treated the same way; a repeated attribute keeps its first occurrence (a repeated multiprotocol attribute resets the session). Only a message that cannot be parsed at all closes the session.
 
 ### Address families
 
@@ -838,7 +838,7 @@ These are known gaps, so plan around them:
 - A route's attributes cannot be displayed. `show route` shows the chosen next hop, and the log records each learned route.
 - There is no soft reconfiguration: changing a peer-group or its policies resets its sessions.
 - The well-known communities have no built-in effect (see [Communities](#communities)).
-- Malformed UPDATEs: attribute flags are not validated and a duplicate attribute keeps the last one (RFC 7606 §3(c), §3(g)); a malformed multiprotocol attribute resets the session.
+- Malformed UPDATEs: a malformed multiprotocol attribute resets the session (no AFI/SAFI-disable, RFC 7606 §3(d)).
 
 ## Configuration reference
 

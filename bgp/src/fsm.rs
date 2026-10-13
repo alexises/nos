@@ -321,6 +321,8 @@ enum Event {
     KeepaliveTimerExpires,
     TcpFailed,
     CollisionLost,
+    /// UPDATE (or End-of-RIB) before Established: RFC 4271 §8.2.2 FSM error.
+    UnexpectedUpdate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,10 +647,7 @@ async fn classify_inbound(
                     }
                 }
             } else {
-                debug!(
-                    peer = %peer.remote_address,
-                    "ignoring bgp update received before session established"
-                );
+                return Some(Event::UnexpectedUpdate);
             }
             None
         }
@@ -657,12 +656,15 @@ async fn classify_inbound(
             None
         }
         BgpMessage::EndOfRib { afi, safi } => {
-            if let (State::Established(_), Some(family)) = (state, gr::family_of(afi, safi)) {
+            if !matches!(state, State::Established(_)) {
+                return Some(Event::UnexpectedUpdate);
+            }
+            if let Some(family) = gr::family_of(afi, safi) {
                 bgp_rib.lock().await.end_of_rib(peer.remote_address, family);
             } else {
                 debug!(
                     peer = %peer.remote_address, afi, safi,
-                    "ignoring end-of-rib before session established or for an unknown family"
+                    "ignoring end-of-rib for an unknown family"
                 );
             }
             None
@@ -2015,6 +2017,8 @@ mod tests {
         };
         for (state, event, subcode) in [
             (State::OpenSent, Event::KeepaliveReceived, 1),
+            (State::OpenSent, Event::UnexpectedUpdate, 1),
+            (State::OpenConfirm(remote), Event::UnexpectedUpdate, 2),
             (
                 State::OpenConfirm(remote),
                 Event::OpenReceived(valid_open(65002, 90)),
