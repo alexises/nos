@@ -20,7 +20,7 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, warn};
@@ -34,7 +34,7 @@ use crate::message::{
     NotificationMessage, OpenMessage, OpenMessageSubcode, RouteRefreshMessage,
     UpdateMessageSubcode, WireError,
 };
-use crate::rib::{BgpRib, OutboundUpdate};
+use crate::rib::{OutboundUpdate, SharedRib};
 use crate::session::{LocalIdentity, PeerKind};
 use crate::status::{PeerState, PeerStatus};
 
@@ -609,7 +609,7 @@ async fn classify_inbound(
     state: &State,
     peer: &PeerContext,
     remote_is_ibgp: bool,
-    bgp_rib: &Mutex<BgpRib>,
+    bgp_rib: &SharedRib,
     slot: &PeerSlot,
     stale_until: &mut HashMap<AddressFamily, Instant>,
 ) -> Option<Event> {
@@ -683,7 +683,7 @@ async fn resend_loc_rib(
     rr: RouteRefreshMessage,
     state: &State,
     peer: &PeerContext,
-    bgp_rib: &Mutex<BgpRib>,
+    bgp_rib: &SharedRib,
     stale_until: &mut HashMap<AddressFamily, Instant>,
 ) {
     if !matches!(state, State::Established(_)) {
@@ -868,7 +868,7 @@ pub async fn run(
     local: LocalIdentity,
     peer: PeerContext,
     slot: Arc<PeerSlot>,
-    bgp_rib: Arc<Mutex<BgpRib>>,
+    bgp_rib: Arc<SharedRib>,
 ) -> FsmOutcome {
     // Captured before `into_split()` consumes `stream`: this session's own
     // local address (of whatever family), used as next-hop-self for every

@@ -10,12 +10,13 @@
 //!   `evpn.bgp_instance` names this instance — every Type-5 route
 //!   (`RibRequest::PushEvpnRoutes`).
 //!
-//! Same fixed-poll design and the same ceiling as `rib_push_client`: a
-//! `ponytail:` upgrade to a `Notify` from `BgpRib::handle_update` if
-//! sub-second propagation is ever needed. Route-Target filtering is the
-//! receiver's job, so every consumer of a feed gets every route of it. The
-//! write-only connection is also read for EOF each tick, so a restarted
-//! consumer (which lost what it was told) gets a fresh `Full` at once.
+//! Change-driven like `rib_push_client` (#420): woken by
+//! `SessionManager::push_changed`, a short hold-down, a `FALLBACK_TICK`
+//! safety net, and `RETRY_DELAY` while a consumer is not connected yet.
+//! Route-Target filtering is the receiver's job, so every consumer of a feed
+//! gets every route of it. The write-only connection is also watched for
+//! EOF, so a restarted consumer (which lost what it was told) gets a fresh
+//! `Full` at once.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,8 +36,12 @@ use tracing::{debug, info, warn};
 use crate::session::SessionManager;
 use crate::watchdog_client::resolve_once;
 
-// ponytail: fixed poll, see the module doc.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Safety-net re-diff when no change was signalled.
+const FALLBACK_TICK: Duration = Duration::from_secs(10);
+/// Coalesces a burst of RIB mutations into one snapshot + diff.
+const HOLD_DOWN: Duration = Duration::from_millis(50);
+/// Reconnect cadence while a consumer is not reachable.
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 type Routes = HashMap<EvpnKey, EvpnRoute>;
 
@@ -117,12 +122,15 @@ async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut conns: HashMap<String, Conn> = HashMap::new();
+    // Subscribed before the first snapshot: a change after it is never lost.
+    let mut changed = sessions.push_changed();
     while !*shutdown.borrow() {
         let (targets, routes) = sessions.evpn_feed_snapshot(feed == Feed::Tables).await;
         // A consumer no longer attached (or whose write failed, or that
         // closed the connection) just loses it; the next tick reconnects
         // with a `Full`.
         conns.retain(|t, c| targets.contains(t) && !c.closed());
+        let mut unconnected = false;
         for target in targets {
             if let Some(conn) = conns.get_mut(&target) {
                 let mut failed = false;
@@ -140,10 +148,38 @@ async fn run(
                 }
             } else if let Some(conn) = connect(&watchdog_socket, feed, &target, &routes).await {
                 conns.insert(target, conn);
+            } else {
+                unconnected = true;
             }
         }
+        let tick = if unconnected {
+            RETRY_DELAY
+        } else {
+            FALLBACK_TICK
+        };
+        // A consumer closing its end (it never writes) also wakes the loop.
+        let eof = async {
+            if conns.is_empty() {
+                std::future::pending::<()>().await;
+            }
+            let reads = conns.values_mut().map(|c| {
+                Box::pin(async move {
+                    let mut buf = [0u8; 64];
+                    c.reader.read(&mut buf).await
+                })
+            });
+            let _ = futures::future::select_all(reads).await;
+        };
         tokio::select! {
-            () = tokio::time::sleep(POLL_INTERVAL) => {}
+            () = tokio::time::sleep(tick) => {}
+            r = changed.changed() => {
+                if r.is_ok() {
+                    tokio::time::sleep(HOLD_DOWN).await;
+                    // Covered by the snapshot taken next.
+                    changed.borrow_and_update();
+                }
+            }
+            () = eof => {}
             _ = shutdown.changed() => {}
         }
     }

@@ -67,7 +67,7 @@
 //!   or `MP_REACH_NLRI`/`MP_UNREACH_NLRI` (`fsm::outbound_update_to_message`
 //!   is the encode side of that decision).
 //!
-//! Locking: one whole-instance `Arc<tokio::sync::Mutex<BgpRib>>`, owned by
+//! Locking: one whole-instance `Arc<SharedRib>` (`rib/shared.rs`: a mutex plus the push generation), owned by
 //! `session::SessionManager`. All methods here are synchronous `&mut self`
 //! (channel sends are non-blocking) — callers lock once per call. A single
 //! lock is deliberate: best-path recomputation must see a consistent
@@ -100,7 +100,9 @@ use crate::message::{self, UpdateMessage};
 
 mod aggregate;
 mod evpn_out;
+mod shared;
 pub use evpn_out::{feeds as evpn_feeds, AdvertisedEvpn, EvpnSource};
+pub use shared::{RibGuard, SharedRib};
 
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
 /// "Execution model". A plain function, not an adapter trait: there is

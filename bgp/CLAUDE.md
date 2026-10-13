@@ -112,11 +112,11 @@ Well-known values get no suppression; the RFC 4360 transitive bit is enforced on
 - `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); import policy and best path do not apply (RFC 7432 §15 aside).
 - MAC mobility has **no withdraw**: a sequence number only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; otherwise PEs on one segment bump each other into a frozen duplicate.
-- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`); `fdb_push_client` polls every 1s and Route-Target filtering is the consumer's.
+- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`); Route-Target filtering is the consumer's.
 
 ## Backup path, multipath (#70)
 
-`backups`/`multipaths` are updated before the `unchanged` early return so a sibling reaches `nos-ribd` through the 1s poll without touching Loc-RIB or advertisements; only `best` is advertised. Multipath = ties on steps 1-7 plus the same neighbouring AS; a backup must not share an installed next hop.
+`backups`/`multipaths` are updated before the `unchanged` early return so a sibling reaches `nos-ribd` without touching Loc-RIB or advertisements; only `best` is advertised. Multipath = ties on steps 1-7 plus the same neighbouring AS; a backup must not share an installed next hop.
 
 ## IGP cost, next-hop feasibility
 
@@ -138,8 +138,8 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE, per-route `info!`): run
 | `session.rs`, `tcp.rs`, `collision.rs` | `SessionManager`, `diff_peers`, `ao_delta`; VRF-scoped sockets; `PeerSlot` |
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
 | `message.rs`, `evpn.rs`, `as_path.rs` | Wire codecs (`BgpCodec` is BGP, not postcard) |
-| `rib.rs`, `rib/` | Adj-RIB/Loc-RIB, decision, `aggregate.rs`, `evpn_out.rs` |
-| `rib_push_client.rs`, `fdb_push_client.rs`, `igp_client.rs` | 1s/2s polls to `nos-ribd`/`nos-fdbd` (`ponytail:` `Notify` if sub-second); a `nos-ribd` restart goes unnoticed until the next change |
+| `rib.rs`, `rib/` | Adj-RIB/Loc-RIB, decision, `aggregate.rs`, `evpn_out.rs`, `shared.rs` (`SharedRib`) |
+| `rib_push_client.rs`, `fdb_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); `igp_client` polls every 2s; a `nos-ribd` restart goes unnoticed until the next change |
 | `config_client.rs`, `watchdog_client.rs`, `rib_client.rs` | Reimplemented clients (star dependency graph) |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 
