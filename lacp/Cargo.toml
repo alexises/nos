@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 nos-pki            = { workspace = true }
-tokio              = { workspace = true }
+tokio              = { workspace = true, features = ["signal"] }
 tracing            = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }

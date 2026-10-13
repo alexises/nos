@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-tokio              = { workspace = true }
+tokio              = { workspace = true, features = ["signal", "process"] }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap               = { workspace = true }

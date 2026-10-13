@@ -156,7 +156,7 @@ pub fn bind_listener(local: SocketAddr, vrf: Option<&str>) -> io::Result<TcpList
     if local.is_ipv6() {
         SockRef::from(&socket).set_unicast_hops_v6(255)?;
     } else {
-        SockRef::from(&socket).set_ttl(255)?;
+        SockRef::from(&socket).set_ttl_v4(255)?;
     }
     if let Some(vrf) = vrf {
         bind_device(&socket, vrf)?;

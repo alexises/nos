@@ -15,7 +15,7 @@ use crate::error::ConfigError;
 /// partially-written file at `path`.
 pub fn save_to_disk(config: &Config, path: &Path) -> Result<(), ConfigError> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let yaml = serde_yaml::to_string(config)?;
+    let yaml = serde_norway::to_string(config)?;
 
     let mut tmp = match dir {
         Some(dir) => tempfile::NamedTempFile::new_in(dir),
@@ -37,7 +37,7 @@ pub fn save_to_disk(config: &Config, path: &Path) -> Result<(), ConfigError> {
 /// risks masking real data loss.
 pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
     match std::fs::read(path) {
-        Ok(bytes) => match serde_yaml::from_slice(&bytes) {
+        Ok(bytes) => match serde_norway::from_slice(&bytes) {
             Ok(cfg) => {
                 info!(path = %path.display(), "loaded config from disk");
                 Ok(cfg)

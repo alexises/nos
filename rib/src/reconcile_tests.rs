@@ -177,7 +177,7 @@ fn base_cfg() -> Config {
 }
 
 fn bgp_instance(underlay_table: &str) -> nos_proto::BgpInstance {
-    serde_yaml::from_str(&format!(
+    serde_norway::from_str(&format!(
         "name: b1\nasn: 65001\nrouter_id: 1.1.1.1\npeers: []\npeer_groups: []\nrouting_table: {underlay_table}\n"
     ))
     .unwrap()

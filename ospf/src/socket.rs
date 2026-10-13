@@ -64,7 +64,7 @@ impl OspfSocket {
         // neighbor, chasing its own DBD negotiation over unicast loopback.
         socket.set_multicast_loop_v4(false)?;
         // Link-local scope only (a virtual link has its own socket, above).
-        socket.set_ttl(1)?;
+        socket.set_ttl_v4(1)?;
         socket.set_multicast_ttl_v4(1)?;
         socket.set_nonblocking(true)?;
         Ok(Self {

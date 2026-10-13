@@ -11,7 +11,7 @@ workspace = true
 [dependencies]
 thiserror          = { workspace = true }
 nos-pki            = { workspace = true }
-tokio              = { workspace = true }
+tokio              = { workspace = true, features = ["signal"] }
 tracing            = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }

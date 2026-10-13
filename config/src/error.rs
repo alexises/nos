@@ -35,5 +35,5 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     #[error("failed to (de)serialize config: {0}")]
-    Serialization(#[from] serde_yaml::Error),
+    Serialization(#[from] serde_norway::Error),
 }

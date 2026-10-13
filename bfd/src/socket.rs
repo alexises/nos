@@ -120,7 +120,7 @@ fn recv_one(fd: RawFd, buf: &mut [u8]) -> io::Result<Datagram> {
     // SAFETY: every pointer handed to recvmsg points into locals that live to
     // the end of the function; the cmsg walk stays inside `msg_controllen`.
     unsafe {
-        let mut name: libc::sockaddr_storage = std::mem::zeroed();
+        let mut name: socket2::SockAddrStorage = std::mem::zeroed();
         let mut iov = libc::iovec {
             iov_base: buf.as_mut_ptr().cast(),
             iov_len: buf.len(),
@@ -129,7 +129,7 @@ fn recv_one(fd: RawFd, buf: &mut [u8]) -> io::Result<Datagram> {
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_name = (&raw mut name).cast();
         msg.msg_namelen =
-            libc::socklen_t::try_from(size_of::<libc::sockaddr_storage>()).unwrap_or(128);
+            libc::socklen_t::try_from(size_of::<socket2::SockAddrStorage>()).unwrap_or(128);
         msg.msg_iov = &raw mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = ctrl.as_mut_ptr().cast();
@@ -260,7 +260,7 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Resul
         )?;
     } else {
         set_int(s.as_raw_fd(), libc::IPPROTO_IP, libc::IP_RECVTTL, 1)?;
-        s.set_ttl(TTL)?;
+        s.set_ttl_v4(TTL)?;
         set_int(
             s.as_raw_fd(),
             libc::IPPROTO_IP,
@@ -500,7 +500,7 @@ fn recv_probe(fd: RawFd, buf: &mut [u8]) -> io::Result<Probe> {
     // SAFETY: as `recv_one`: every pointer is to a local that outlives the
     // call, the cmsg walk stays inside `msg_controllen`.
     unsafe {
-        let mut name: libc::sockaddr_storage = std::mem::zeroed();
+        let mut name: socket2::SockAddrStorage = std::mem::zeroed();
         let mut iov = libc::iovec {
             iov_base: buf.as_mut_ptr().cast(),
             iov_len: buf.len(),
@@ -509,7 +509,7 @@ fn recv_probe(fd: RawFd, buf: &mut [u8]) -> io::Result<Probe> {
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_name = (&raw mut name).cast();
         msg.msg_namelen =
-            libc::socklen_t::try_from(size_of::<libc::sockaddr_storage>()).unwrap_or(128);
+            libc::socklen_t::try_from(size_of::<socket2::SockAddrStorage>()).unwrap_or(128);
         msg.msg_iov = &raw mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = ctrl.as_mut_ptr().cast();
@@ -626,7 +626,7 @@ fn reflector_socket(vrf: &str, v6: bool) -> io::Result<AsyncFd<Socket>> {
         (Ipv6Addr::UNSPECIFIED, sbfd::PORT).into()
     } else {
         set_int(fd, libc::IPPROTO_IP, libc::IP_PKTINFO, 1)?;
-        s.set_ttl(TTL)?;
+        s.set_ttl_v4(TTL)?;
         (Ipv4Addr::UNSPECIFIED, sbfd::PORT).into()
     };
     s.bind(&bind.into())?;

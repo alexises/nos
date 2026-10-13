@@ -11,12 +11,12 @@ workspace = true
 [dependencies]
 nos-proto     = { workspace = true }
 nos-provision = { path = "../nos-provision", version = "0.1.0" }
-tokio         = { workspace = true }
+tokio         = { workspace = true, features = ["signal"] }
 futures       = { workspace = true }
 clap          = { workspace = true }
 anyhow        = { workspace = true }
 serde_json    = { workspace = true }
-serde_yaml    = { workspace = true }
+serde_norway    = { workspace = true }
 reqwest       = { workspace = true, features = ["rustls-no-provider", "http2"] }
 nos-pki       = { workspace = true }
 rustls        = { workspace = true }
