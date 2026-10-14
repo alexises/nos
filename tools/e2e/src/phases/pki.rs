@@ -69,21 +69,21 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
     a.wait("issued a REST listener certificate").await?;
 
     log("logging in with the wrong password (must be refused)");
-    let rejected = a.count(&format!("login rejected user={E2E_USER}"));
+    let rejected = a.count(&format!("login rejected user=\"{E2E_USER}\""));
     let (code, out) = provision_as(w, "not-the-password").await?;
     if code == 0 || !out.contains("login refused") {
         bail!("a wrong password must be refused, got exit {code}: {out}");
     }
-    a.wait_new(&format!("login rejected user={E2E_USER}"), rejected, 15)
+    a.wait_new(&format!("login rejected user=\"{E2E_USER}\""), rejected, 15)
         .await?;
 
     log("logging in with the right password, then editing config as that user");
-    let accepted = a.count(&format!("login accepted user={E2E_USER}"));
+    let accepted = a.count(&format!("login accepted user=\"{E2E_USER}\""));
     let (code, out) = provision_as(w, E2E_PASSWORD).await?;
     if code != 0 || !out.contains("provisioning complete") {
         bail!("login with the right password should provision, got exit {code}: {out}");
     }
-    a.wait_new(&format!("login accepted user={E2E_USER}"), accepted, 15)
+    a.wait_new(&format!("login accepted user=\"{E2E_USER}\""), accepted, 15)
         .await?;
 
     revoke_user(w).await?;

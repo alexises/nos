@@ -262,7 +262,7 @@ impl ConfigStore {
         let diff = diff_configs(&running, &config);
         *running = config.clone();
         drop(running);
-        info!(user = %user, "password hash upgraded");
+        info!(user = ?user, "password hash upgraded");
         let _ = self.0.tx.send(Arc::new(CommitUpdate { config, diff }));
         Ok(())
     }

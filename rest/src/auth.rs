@@ -61,7 +61,10 @@ pub async fn client_auth(State(daemons): State<Daemons>, req: Request, next: Nex
         return unauthorized();
     };
     match daemons.running_config().await {
-        Ok(config) if config.users.iter().any(|u| u.name == user) => next.run(req).await,
+        Ok(config) if config.users.iter().any(|u| u.name == user) => {
+            tracing::info!(user = ?user, method = %req.method(), path = %req.uri().path(), "rest request");
+            next.run(req).await
+        }
         Ok(_) => unauthorized(),
         Err(e) => e.into_response(),
     }

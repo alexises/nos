@@ -109,6 +109,7 @@ pub async fn open_transaction(
     let (mut reader, mut writer) = connect(socket_path).await?;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: name.to_string(),
             base,
         })
@@ -125,6 +126,7 @@ pub async fn apply_op(
     let (mut reader, mut writer) = connect(socket_path).await?;
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: name.to_string(),
             op,
         })
@@ -171,6 +173,7 @@ pub async fn commit_transaction(socket_path: &Path, name: &str) -> Result<(), Cl
     let (mut reader, mut writer) = connect(socket_path).await?;
     writer
         .send(Request::CommitTransaction {
+            actor: None,
             name: name.to_string(),
             if_match: None,
         })

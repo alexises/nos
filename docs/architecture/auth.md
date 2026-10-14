@@ -11,3 +11,10 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260). Operator view: [docs
 
 A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925 TCP-AO with key rotation — see `docs/protocols/bgp-internals.md`'s "Session authentication" for the wire-level detail). Neither mechanism has a maintained Rust binding, so the raw `setsockopt(TCP_MD5SIG)`/`setsockopt(TCP_AO_*)` calls live in their own crate, `tcp-auth/` (`nos-tcp-auth`) — no NOS dependencies, like `nos-proto`, and the one crate in the workspace whose whole purpose is `unsafe` FFI (every other crate stays within the workspace's `unsafe_code = "warn"` default). Secrets are stored **clear-text** in config, like every other field — this system has no encryption-at-rest anywhere, and `nos-cli` renders them in the clear too.
 
+## Audit identity (#400)
+
+- `OpenTransaction`, `ApplyOp` and `CommitTransaction` carry `actor: Option<String>`. `nos-restd` fills it with the REST user from the client certificate; the CLI sends `None`.
+- `nos-configd` decides the effective actor itself: a `User` connection is attributed to its own certificate name (a body `actor` is ignored), `Restd` is trusted to name the REST user, and other roles are attributed to their certificate name.
+- Every commit logs `config commit audit transaction=<tx> actor=<user>` at info; open and apply log the actor at debug.
+- `nos-restd` logs `rest request user=<user> method=<m> path=<p>` for every authenticated request.
+- Not enforced: any user may commit or discard another's transaction (every user is an administrator); this is an audit trail only. `DiscardTransaction`, `SetTransactionPath` and `Save` carry no actor.

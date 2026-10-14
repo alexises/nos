@@ -132,7 +132,7 @@ impl RestServer {
             .map(|p| p.name);
         let h2 = conn.alpn_protocol() == Some(b"h2");
         debug!(
-            user = %user.as_deref().unwrap_or("none"),
+            user = ?user.as_deref().unwrap_or("none"),
             alpn = %if h2 { "h2" } else { "http/1.1" },
             kx = ?conn.negotiated_key_exchange_group()
                 .map(rustls::crypto::SupportedKxGroup::name),

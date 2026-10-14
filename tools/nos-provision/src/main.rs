@@ -138,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
         &mut writer,
         &mut reader,
         Request::OpenTransaction {
+            actor: None,
             name: txn.clone(),
             base: TransactionBase::Current,
         },
@@ -149,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
             &mut writer,
             &mut reader,
             Request::ApplyOp {
+                actor: None,
                 name: txn.clone(),
                 op,
             },
@@ -174,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
         &mut writer,
         &mut reader,
         Request::CommitTransaction {
+            actor: None,
             name: txn.clone(),
             if_match: None,
         },
