@@ -16,6 +16,7 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 - **Ignore our own frames.** An `AF_PACKET` socket also receives its own outgoing frames (`socket::payload_of_foreign_frame` drops them by source MAC); otherwise a port negotiates with itself.
 - **Only signal on a real change.** `watch::Sender::send` wakes the receiver even for an identical value, so `aggregate::set_if_changed` and `link::report`'s dedupe exist to break the report → re-select → notify feedback loop.
 - **A down link is not fatal.** `ENETDOWN` on read/send (link administratively down, or just coming up) is retried (`socket::is_link_down`), not a reason for the link task to exit; a task that does end on its own is respawned by `reconcile`.
+- **Bound the receive path (#397).** `Port::on_frame` takes an RX budget (10 LACPDUs/s per port, Markers excluded) before touching any machine, warning once per burst; `lacp lacpdu received` is `info!` only when receive state, mux state or partner changed, else `debug!`. `selection_loop` coalesces `PushLacpMembers` to one per second (leading edge immediate, newest set trailing, A->B->A pushes nothing).
 
 ## Explicitly deferred (documented, not silently missing)
 
