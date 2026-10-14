@@ -7,6 +7,7 @@
 //! whose whole purpose is raw FFI — every `unsafe` block here is confined to
 //! `setsockopt` calls and `sockaddr_storage` construction, each documented
 //! at its use site.
+#![warn(missing_docs)]
 #![allow(unsafe_code)]
 
 use std::io;
@@ -38,7 +39,9 @@ const TCP_AO_KEYF_EXCLUDE_OPT: u8 = 1 << 1;
 /// crypto API (`alg_name` in `struct tcp_ao_add`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AoAlgorithm {
+    /// HMAC-SHA-1 truncated to 96 bits (RFC 5926 §2.2), kernel name `hmac(sha1)`.
     HmacSha1_96,
+    /// AES-128-CMAC truncated to 96 bits (RFC 5926 §2.2), kernel name `cmac(aes)`.
     AesCmac96,
 }
 
@@ -59,12 +62,19 @@ impl AoAlgorithm {
 /// authentication fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AoKey {
+    /// `KeyID` we put on segments we send (RFC 5925 §3.1; `sndid` in `tcp_ao_add`).
     pub send_id: u8,
+    /// `RecvID` the peer puts on segments we verify with this key (`rcvid` in `tcp_ao_add`).
     pub recv_id: u8,
+    /// MAC algorithm of this key.
     pub algorithm: AoAlgorithm,
+    /// The master key bytes (RFC 5925 §3.1).
     pub key: Vec<u8>,
+    /// Make this the key that signs outgoing segments (`set_current` in `tcp_ao_add`).
     pub set_current: bool,
+    /// Ask the peer to sign with this key (`set_rnext`, the `RNextKeyID` we send).
     pub set_rnext: bool,
+    /// Exclude TCP options from the MAC (RFC 5925 §5.2, `TCP_AO_KEYF_EXCLUDE_OPT`).
     pub exclude_options: bool,
 }
 
@@ -142,10 +152,15 @@ pub fn delete_ao_key(fd: RawFd, peer: IpAddr, send_id: u8, recv_id: u8) -> io::R
 /// lifetime).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AoInfo {
+    /// `KeyID` currently signing outgoing segments.
     pub current_key: u8,
+    /// `RecvID` of our rnext key, the `RNextKeyID` we ask the peer to send with.
     pub rnext_key: u8,
+    /// Segments that passed AO verification since AO was installed.
     pub pkt_good: u64,
+    /// Segments that failed AO verification (bad MAC).
     pub pkt_bad: u64,
+    /// Segments whose KeyID/RecvID matched no installed key.
     pub pkt_key_not_found: u64,
 }
 

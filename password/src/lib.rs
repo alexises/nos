@@ -1,5 +1,6 @@
 //! Password hashing for NOS users — argon2id, PHC-string encoded (`$argon2id$…`),
 //! with a random per-hash salt. No NOS dependencies, like `nos-tcp-auth`/`nos-rpl`.
+#![warn(missing_docs)]
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -10,6 +11,7 @@ use std::sync::LazyLock;
 /// clear-text password waiting to be hashed.
 pub const HASH_PREFIX: &str = "$argon2id$";
 
+/// Whether `s` already looks like a PHC argon2id hash (prefix check only, no parsing).
 pub fn is_hash(s: &str) -> bool {
     s.starts_with(HASH_PREFIX)
 }

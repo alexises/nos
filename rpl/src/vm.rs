@@ -26,8 +26,11 @@ pub enum CommunityValue {
 /// own copy, not a shared type — see `Input`'s doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
+    /// `IGP` (RFC 4271 ORIGIN 0).
     Igp = 0,
+    /// `EGP` (RFC 4271 ORIGIN 1).
     Egp = 1,
+    /// `INCOMPLETE` (RFC 4271 ORIGIN 2).
     Incomplete = 2,
 }
 
@@ -35,18 +38,27 @@ pub enum Origin {
 /// `rpki.not_found` in a script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidationState {
+    /// A covering VRP validates the origin AS.
     Valid = 0,
+    /// A covering VRP exists but none matches.
     Invalid = 1,
+    /// No covering VRP (the default).
     #[default]
     NotFound = 2,
 }
 
+/// A stack value of the interpreter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
+    /// Integer.
     Int(i64),
+    /// Boolean.
     Bool(bool),
+    /// IP prefix.
     Prefix(IpNet),
+    /// IP address.
     Ip(IpAddr),
+    /// Enum variant discriminant (e.g. an [`Origin`]).
     Enum(u8),
 }
 
@@ -57,6 +69,7 @@ pub enum Value {
 pub struct AsPathRegexes(Vec<regex::Regex>);
 
 impl AsPathRegexes {
+    /// Compiles each pattern; an invalid regex is the error string.
     pub fn new(patterns: &[&str]) -> Result<Self, String> {
         patterns
             .iter()
@@ -99,14 +112,23 @@ impl Eq for AsPathRegexes {}
 /// result, so `Value` never needs a list variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
+    /// Pushes a scalar field of the input.
     LoadField(FieldId),
+    /// Pushes an integer constant.
     LoadConstInt(i64),
+    /// Pushes a prefix constant.
     LoadConstPrefix(IpNet),
+    /// Pushes an IP address constant.
     LoadConstIp(IpAddr),
+    /// Pushes an enum discriminant constant.
     LoadConstEnum(u8),
+    /// Pushes the length of a list field.
     FieldLen(FieldId),
+    /// Pushes whether a list field contains the integer.
     ListContainsInt(FieldId, u32),
+    /// Pushes whether a list field contains the IPv4 address.
     ListContainsIp(FieldId, Ipv4Addr),
+    /// Pushes whether a community list contains the value.
     ListContainsCommunity(FieldId, CommunityValue),
     /// `this.bgp.as_path.matches(..)` / `this.bgp.as_path in LIST` — true if
     /// any regex matches the current path.
@@ -122,39 +144,62 @@ pub enum Op {
     SetNextHop,
     /// `set this.bgp.next_hop = self`.
     SetNextHopSelf,
+    /// Adds a community to a community-list field.
     CommunityAdd(FieldId, CommunityValue),
+    /// Removes a community from a community-list field.
     CommunityRemove(FieldId, CommunityValue),
+    /// Empties a community-list field.
     CommunityClear(FieldId),
+    /// Pops two integers, pushes their sum.
     Add,
+    /// Pops two integers, pushes their difference.
     Sub,
+    /// Pops two values, pushes `==`.
     CmpEq,
+    /// Pops two values, pushes `!=`.
     CmpNe,
+    /// Pops two integers, pushes `<`.
     CmpLt,
+    /// Pops two integers, pushes `<=`.
     CmpLe,
+    /// Pops two integers, pushes `>`.
     CmpGt,
+    /// Pops two integers, pushes `>=`.
     CmpGe,
+    /// Pops a prefix literal and a prefix, pushes containment.
     PrefixIn,
     /// `this.prefix in SOME_PREFIX_LIST` — the entry list is resolved and
     /// compiled in at codegen time (not pushed as a runtime value), unlike
     /// `PrefixIn`'s plain-literal rhs. See `PrefixListEntry`'s doc comment
     /// for exact-vs-range matching.
     PrefixInList(Vec<PrefixListEntry>),
+    /// Pops two booleans, pushes their conjunction.
     And,
+    /// Pops two booleans, pushes their disjunction.
     Or,
+    /// Pops a boolean, pushes its negation.
     Not,
+    /// Pops a boolean; jumps to the instruction index when false.
     JumpIfFalse(usize),
+    /// Jumps to the instruction index.
     Jump(usize),
+    /// Pops a value and stores it in a mutable field.
     SetField(FieldId),
     /// Pops a signed delta and adds it (saturating) to a numeric field; an
     /// unset `med` counts as 0.
     AddField(FieldId),
+    /// Ends evaluation accepting the route.
     Accept,
+    /// Ends evaluation rejecting the route.
     Reject,
 }
 
+/// A compiled policy: bytecode plus the stack depth it needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledPolicy {
+    /// The instructions.
     pub code: Vec<Op>,
+    /// Maximum operand-stack depth any path reaches.
     pub max_stack_depth: usize,
 }
 
@@ -172,28 +217,45 @@ impl CompiledPolicy {
 /// other NOS-internal type, so a consumer (e.g. `nos-bgp`) writes a plain
 /// conversion function into this shape rather than `nos-rpl` depending on it.
 pub struct Input<'a> {
+    /// The route's prefix.
     pub prefix: IpNet,
+    /// BGP path attributes.
     pub bgp: BgpInput<'a>,
 }
 
+/// The BGP attributes a policy can read.
 pub struct BgpInput<'a> {
+    /// ORIGIN (RFC 4271 §5.1.1).
     pub origin: Origin,
+    /// `AS_PATH` as a flat ASN list (RFC 4271 §5.1.2).
     pub as_path: &'a [u32],
+    /// `LOCAL_PREF` (RFC 4271 §5.1.5).
     pub local_pref: u32,
+    /// `MULTI_EXIT_DISC`, if present (RFC 4271 §5.1.4).
     pub med: Option<u32>,
+    /// `NEXT_HOP`, if known (RFC 4271 §5.1.3).
     pub next_hop: Option<IpAddr>,
+    /// Whether the route was learned over IBGP.
     pub learned_via_ibgp: bool,
+    /// BGP identifier of the advertising peer, if known.
     pub router_id: Option<Ipv4Addr>,
+    /// `ORIGINATOR_ID` (RFC 4456 §8), if present.
     pub originator_id: Option<Ipv4Addr>,
+    /// `CLUSTER_LIST` (RFC 4456 §8).
     pub cluster_list: &'a [Ipv4Addr],
     /// The neighbor this route is being imported from / exported to; `None`
     /// (and `peer_as == 0`, never a real ASN) for a locally-redistributed
     /// route, which has no neighbor.
     pub peer: Option<IpAddr>,
+    /// AS number of that neighbor (0 for a locally-redistributed route).
     pub peer_as: u32,
+    /// Standard communities (RFC 1997), raw `AA:NN` values.
     pub communities: &'a [u32],
+    /// Extended communities (RFC 4360), raw 8-octet values.
     pub extended_communities: &'a [u64],
+    /// Large communities (RFC 8092), `(global, local1, local2)`.
     pub large_communities: &'a [(u32, u32, u32)],
+    /// RFC 6811 origin validation state.
     pub validation_state: ValidationState,
 }
 
@@ -204,30 +266,43 @@ pub struct BgpInput<'a> {
 pub struct Edits {
     /// The full replacement `AS_PATH`, only if the script prepended.
     pub as_path: Option<Vec<u32>>,
+    /// Replacement ORIGIN, if the script set it.
     pub origin: Option<Origin>,
+    /// What the script did to the next hop.
     pub next_hop: NextHopSet,
 }
 
 /// What a policy did to the route's next hop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NextHopSet {
+    /// The script did not touch the next hop.
     #[default]
     Unchanged,
     /// `set this.bgp.next_hop = self`.
     SelfAddress,
+    /// `set this.bgp.next_hop = <ip>`.
     Addr(IpAddr),
 }
 
+/// The outcome of running a policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
+    /// The route is accepted, with its (possibly rewritten) attributes.
     Accept {
+        /// Final `LOCAL_PREF`.
         local_pref: u32,
+        /// Final MED.
         med: Option<u32>,
+        /// Final standard communities.
         communities: Vec<u32>,
+        /// Final extended communities.
         extended_communities: Vec<u64>,
+        /// Final large communities.
         large_communities: Vec<(u32, u32, u32)>,
+        /// Further rewrites (AS path, origin, next hop).
         edits: Edits,
     },
+    /// The route is rejected.
     Reject,
 }
 

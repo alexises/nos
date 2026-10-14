@@ -4,7 +4,9 @@
 //! source) and `nos-bgp` (compiling, caching, and executing policies against
 //! real routes). See `docs/architecture/rpl.md`
 //! section for the language and architecture this implements.
+#![warn(missing_docs)]
 
+/// Parsed syntax tree (statements and expressions).
 pub mod ast;
 mod check;
 mod codegen;
@@ -12,6 +14,7 @@ mod lexer;
 mod parser;
 pub mod schema;
 mod symbols;
+/// Bytecode, inputs, edits and the interpreter.
 pub mod vm;
 
 pub use symbols::{PrefixListEntry, Symbols};
@@ -23,9 +26,12 @@ pub use vm::{
 use std::fmt;
 use std::sync::LazyLock;
 
+/// A compile-time error with its 1-based source line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
+    /// 1-based source line of the error.
     pub line: usize,
+    /// Human-readable description.
     pub message: String,
 }
 
@@ -98,11 +104,13 @@ pub fn parse_colon_literal(s: &str) -> Option<Vec<i64>> {
 /// `PolicyDefinition` config entries: nothing to edit, nothing to delete.
 pub static ACCEPT_ALL: LazyLock<CompiledPolicy> =
     LazyLock::new(|| compile("accept\n", &Symbols::EMPTY).expect("accept-all must compile"));
+/// Compiled `reject`: the deny-all system policy.
 pub static DENY_ALL: LazyLock<CompiledPolicy> =
     LazyLock::new(|| compile("reject\n", &Symbols::EMPTY).expect("deny-all must compile"));
 
 /// The two reserved policy names — see `ACCEPT_ALL`/`DENY_ALL`.
 pub const ACCEPT_ALL_NAME: &str = "accept-all";
+/// Reserved name of [`DENY_ALL`].
 pub const DENY_ALL_NAME: &str = "deny-all";
 
 #[cfg(test)]

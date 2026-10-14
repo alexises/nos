@@ -43,6 +43,7 @@ use tokio_rustls::TlsConnector;
 use crate::ca::err;
 use crate::policy::{key_alg_name, provider, Policy};
 
+/// The client side of a TLS connection to a syslog collector.
 pub type Stream = tokio_rustls::client::TlsStream<TcpStream>;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,6 +81,7 @@ pub struct Negotiated {
     pub kx: String,
     /// The cipher suite, e.g. `TLS13_AES_256_GCM_SHA384`.
     pub suite: String,
+    /// Algorithm of the peer's certificate key (e.g. `ML-DSA-65`).
     pub peer_key: &'static str,
 }
 

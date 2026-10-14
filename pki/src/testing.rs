@@ -12,6 +12,7 @@ pub fn shared() -> &'static TestPki {
     &SHARED
 }
 
+/// A test CA that mints identities for fake servers and clients.
 pub struct TestPki {
     ca: Ca,
 }
@@ -23,12 +24,14 @@ impl Default for TestPki {
 }
 
 impl TestPki {
+    /// A fresh ML-DSA-65 test CA.
     pub fn new() -> Self {
         Self {
             ca: Ca::new(KeyAlg::MlDsa65).expect("test CA"),
         }
     }
 
+    /// The underlying CA.
     pub fn ca(&self) -> &Ca {
         &self.ca
     }

@@ -17,9 +17,12 @@ use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::SignatureScheme;
 use webpki::aws_lc_rs::{ECDSA_P256_SHA256, ML_DSA_65};
 
+/// Which transport policy a `CryptoProvider` is built for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
+    /// Daemon IPC: ML-DSA-65 certificates, hybrid `X25519MLKEM768` only.
     Ipc,
+    /// `nos-restd`'s TCP listener: ECDSA P-256 certificates, hybrid `X25519MLKEM768` only.
     Rest,
     /// `nos-logd` as a client of a syslog collector (RFC 5425/9662, #71):
     /// post-quantum key exchange, TLS 1.3 only, but the collector's certificate
