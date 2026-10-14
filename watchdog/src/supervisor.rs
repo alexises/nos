@@ -91,7 +91,34 @@ impl BackoffPolicy {
     fn grow(&self, current: Duration) -> Duration {
         current.saturating_mul(self.multiplier).min(self.max)
     }
+
+    /// The delay to wait after a run of `ran_for`: a run that survived
+    /// `stable_after` decays the level one step (never straight to `base`, so
+    /// a process crashing every 61 s stays near `max`); a rapid crash keeps it.
+    #[must_use]
+    pub fn next_delay(&self, current: Duration, ran_for: Duration) -> Duration {
+        if ran_for >= self.stable_after {
+            (current / self.multiplier.max(1)).max(self.base)
+        } else {
+            current
+        }
+    }
 }
+
+/// Environment variables a child inherits; everything else (`LD_PRELOAD`,
+/// proxies, secrets) is dropped. Identity goes through stdin, not the env.
+const CHILD_ENV: [&str; 4] = ["RUST_LOG", "PATH", "TZ", "NOS_LACP_CHURN_SECS"];
+
+/// Keeps only the `CHILD_ENV` entries of `vars`.
+fn allowed_env(
+    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    vars.filter(|(k, _)| CHILD_ENV.iter().any(|a| k == a))
+        .collect()
+}
+
+/// Consecutive rapid crashes at which (and every 10th after) an alarm is logged.
+const CRASH_LOOP_ALARM: u32 = 5;
 
 /// Supervises one child process: spawn, wait, restart with exponential
 /// backoff, forever, until `shutdown` reports `true`.
@@ -105,6 +132,7 @@ pub async fn supervise_one(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut delay = policy.base;
+    let mut consecutive_crashes: u32 = 0;
 
     while !*shutdown.borrow() {
         info!(process = %spec.name, program = %spec.program.display(), "starting");
@@ -112,6 +140,7 @@ pub async fn supervise_one(
 
         let mut command = Command::new(&spec.program);
         command.args(&spec.args);
+        command.env_clear().envs(allowed_env(std::env::vars_os()));
         if spec.identity.is_some() {
             command.stdin(Stdio::piped());
         }
@@ -164,10 +193,18 @@ pub async fn supervise_one(
             return;
         }
 
-        // Reset backoff if the process ran long enough to be "stable";
-        // otherwise this exit is treated as another rapid crash.
-        if start.elapsed() >= policy.stable_after {
-            delay = policy.base;
+        // A stable run decays the backoff one step; a rapid one is a crash.
+        let ran_for = start.elapsed();
+        delay = policy.next_delay(delay, ran_for);
+        if ran_for >= policy.stable_after {
+            consecutive_crashes = 0;
+        } else {
+            consecutive_crashes += 1;
+            if consecutive_crashes >= CRASH_LOOP_ALARM
+                && (consecutive_crashes - CRASH_LOOP_ALARM).is_multiple_of(10)
+            {
+                error!(process = %spec.name, consecutive_crashes, "crash loop");
+            }
         }
 
         info!(process = %spec.name, delay_secs = delay.as_secs(), "restarting after backoff");
@@ -273,5 +310,54 @@ async fn shutdown_child(name: &str, child: &mut Child) {
             warn!(process = %name, error = %e, "failed to force-kill process");
         }
         let _ = child.wait().await;
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    const S: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn rapid_crash_keeps_level_then_grows_to_max() {
+        let p = BackoffPolicy::default();
+        assert_eq!(p.next_delay(4 * S, 2 * S), 4 * S);
+        let mut d = p.base;
+        for _ in 0..10 {
+            d = p.grow(d);
+        }
+        assert_eq!(d, p.max);
+    }
+
+    #[test]
+    fn stable_run_decays_one_step_never_to_base_from_max() {
+        let p = BackoffPolicy::default();
+        assert_eq!(p.next_delay(p.max, 61 * S), 15 * S);
+        assert_eq!(p.next_delay(p.base, 61 * S), p.base);
+        // 61 s crash cycle at the cap: wait, grow, decay stays at 15 s.
+        let mut d = p.max;
+        for _ in 0..5 {
+            d = p.next_delay(d, 61 * S);
+            assert!(d > p.base);
+            d = p.grow(d);
+        }
+    }
+
+    #[test]
+    fn env_allow_list_drops_the_rest() {
+        let v = |s: &str| std::ffi::OsString::from(s);
+        let out = allowed_env(
+            [
+                ("LD_PRELOAD", "x"),
+                ("HTTP_PROXY", "y"),
+                ("RUST_LOG", "info"),
+                ("PATH", "/bin"),
+            ]
+            .into_iter()
+            .map(|(k, x)| (v(k), v(x))),
+        );
+        let keys: Vec<_> = out.iter().map(|(k, _)| k.to_str().unwrap()).collect();
+        assert_eq!(keys, ["RUST_LOG", "PATH"]);
     }
 }
