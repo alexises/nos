@@ -183,7 +183,7 @@ pub struct OspfProfile {
 
     /// Interface cost, in the usual OSPF sense (lower is preferred by
     /// SPF). `None` defaults to `1` — a real behavioral consumer:
-    /// `ospf::link::router_lsa_links`/`originate_router_lsas` use it as
+    /// `ospf::link::originate::router_lsa_links`/`originate_router_lsas` use it as
     /// this link's RFC 2328 §16 metric, and `ospf::spf::compute` sums it
     /// along the Dijkstra path. `0` is rejected (not a valid OSPF cost).
     #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_cost(*c)))]

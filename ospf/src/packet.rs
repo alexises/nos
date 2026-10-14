@@ -205,7 +205,7 @@ pub enum AuthPolicy<'a> {
 }
 
 /// One Hello packet's contents. `network_mask`/`options` back
-/// `ospf::link::handle_hello`'s RFC 2328 §10.5 packet-validity check — the
+/// `ospf::link::rx::handle_hello`'s RFC 2328 §10.5 packet-validity check — the
 /// mask is ignored by that check on a point-to-point/virtual link (RFC 2328
 /// §10.5), and `options` only ever carries the `E`-bit meaningfully today
 /// (see `OPTION_E`). `router_priority`/`designated_router`/

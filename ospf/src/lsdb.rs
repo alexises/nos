@@ -122,7 +122,7 @@ impl Lsdb {
     }
 
     /// Drops `key` outright — a received Grace-LSA, acted on and never held
-    /// (see `link::handle_lsu`).
+    /// (see `link::rx::handle_lsu`).
     pub fn remove(&mut self, key: &LsaKey) {
         self.entries.remove(key);
         self.kick();
@@ -148,9 +148,9 @@ impl Lsdb {
     /// RFC 2328 §14: ages every installed LSA by `delta` (saturating at
     /// `MAX_AGE`) and evicts any entry that has sat at `MAX_AGE` for
     /// `MAX_AGE_HOLD_TICKS` ticks — whether it aged out naturally or was
-    /// prematurely aged (§14.1, `link::withdraw_self_originated`) — returning
+    /// prematurely aged (§14.1, `link::originate::withdraw_self_originated`) — returning
     /// the evicted keys so `link.rs` can log them. The hold is what gives
-    /// `link::flood_full_neighbors`' periodic resend a chance to carry the
+    /// `link::flood::flood_full_neighbors`' periodic resend a chance to carry the
     /// `MaxAge` copy to every neighbor first.
     ///
     /// An LSA whose advertising router is in `hold` (a neighbor in its RFC

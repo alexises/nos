@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 ## Scope
 
-`nos-ospfd` resolves its instance, areas and profiles from `nos-configd` and runs RFC 2328 on every `Subinterface.ospf_profile` (point-to-point) and `BroadcastDomain.ospf_profile` (broadcast, DR/BDR) attach point: raw protocol-89 socket, Hello to `Full`, per-area LSDB, SPF pushed to `nos-ribd` (`RibRequest::PushOspfRoutes`). A loopback (`Interface.ospf_profile`) has no peer and is log-only: it only feeds `LinkManager.stub_networks`. Modules: `main`, `config_client`, `watchdog_client`, `rib_client`, `interface_client`, `link_client`, `packet`, `lsa`, `lsdb`, `exchange`, `neighbor`, `election`, `socket`, `link`, `spf`, `rib_push_client`, `reconcile`, `server`, `boot`.
+`nos-ospfd` resolves its instance, areas and profiles from `nos-configd` and runs RFC 2328 on every `Subinterface.ospf_profile` (point-to-point) and `BroadcastDomain.ospf_profile` (broadcast, DR/BDR) attach point: raw protocol-89 socket, Hello to `Full`, per-area LSDB, SPF pushed to `nos-ribd` (`RibRequest::PushOspfRoutes`). A loopback (`Interface.ospf_profile`) has no peer and is log-only: it only feeds `LinkManager.stub_networks`. Modules: `main`, `config_client`, `watchdog_client`, `rib_client`, `interface_client`, `link_client`, `packet`, `lsa`, `lsdb`, `exchange`, `neighbor`, `election`, `socket`, `link` (+ `link/{rx,flood,grace,originate}.rs` and `link/tests/`, split from one file in #424), `spf`, `rib_push_client`, `reconcile`, `server`, `boot`.
 
 ## Shared with OSPFv3
 
@@ -42,7 +42,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - `spf::compute` derives next hops from the LSDB only (a neighbor's address comes from its own LSA's link back), never the neighbor table. Roots' directly attached destinations are filtered by `(link_id, link_data)`, not reachability. Equal-cost sets are unioned (`merge_equal`); `compute_routes` merges areas keeping the cheaper route, path classes per `spf::PathClass`.
 - Every collector skips `advertising_router == root` (our own LSA must not route back through us). External collection runs after every Internal collector (forwarding address resolution).
 - ABR = attached to 2+ areas, derived, never configured (`lsdbs.len() >= 2` for summaries; `is_area_border_router` for the B bit, counting a virtual link as backbone). `intra_area_routes` feeds summarization and excludes inter-area/external routes, which prevents two-area loops.
-- Link State IDs of Type-3/5/7 follow RFC 2328 Appendix E (`link::assign_link_state_ids`, stateless, per area and type); `spf::net_from` truncates host bits on receive.
+- Link State IDs of Type-3/5/7 follow RFC 2328 Appendix E (`link::originate::assign_link_state_ids`, stateless, per area and type); `spf::net_from` truncates host bits on receive.
 - `lsa::in_area_scope(type, stub, nssa)` is the one scope rule (Type-5/11 out of stub/NSSA, Type-7 only in an NSSA); every path (DBD, LSR answer, LSU, flood, SPF) must use it.
 - Stub/NSSA, virtual links, LFA/remote LFA, prefix suppression, stub router, host router, opaque LSAs: see the internals page for each knob and its tests.
 

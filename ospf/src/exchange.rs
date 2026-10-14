@@ -469,7 +469,7 @@ fn on_dbd_in_exchange(
     // The two sides' retransmit timers race independently, so this is an
     // expected, harmless duplicate, not a genuine restart (a genuine
     // restart is instead caught via Hello — losing 2-way already clears
-    // `adjacency`, see `link::handle_hello`). Ignoring it here matters:
+    // `adjacency`, see `link::rx::handle_hello`). Ignoring it here matters:
     // treating it as `SeqNumberMismatch` would force us to restart too,
     // and since both sides pick a fresh random sequence number on every
     // restart, that cascades into a live, unrecoverable ping-pong between
