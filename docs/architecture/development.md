@@ -61,3 +61,11 @@ cargo fmt --all
 - Looping mutants end as TIMEOUT after `max(60s, 3x baseline)`.
 - CI (`ci.yml` `mutants`, nightly or `workflow_dispatch`): 8 shards (`--shard k/8`), `make mutants` reports survivors and timeouts (cargo-mutants exit 2/3) without failing; only infra errors fail; `mutants-out-<k>` artifacts hold the results.
 - Resume or re-check one mutant: `make mutants MUTANTS_ARGS="-F '^exact name$'"`.
+
+## Dependency policy
+
+- `cargo deny check` (`deny.toml`) runs in CI: unmaintained crates fail (`unmaintained = "all"`), duplicate versions only warn (`multiple-versions = "warn"`).
+- A duplicate that a NOS manifest causes (a pinned older major, a second crate for the same job) gets fixed; duplicates reached only through third-party crates are left alone.
+- An advisory that NOS cannot fix is ignored in `deny.toml` with a `reason` (today: `atomic-polyfill`, via `postcard` 1).
+- YAML is `serde_norway` (maintained fork of `serde_yaml` 0.9, same on-disk format); timestamps use `time`, not `chrono`.
+- `tokio` has no `full`: the workspace entry lists the common features, crates add `signal`/`process`.

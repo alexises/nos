@@ -1,7 +1,6 @@
 use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     BgpSessionState, Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, InterfaceAddress,
     InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry,
@@ -9,6 +8,7 @@ use nos_proto::{
     Ospfv3NeighborSummary, PeerSummary, PortAggregateLacpSummary, PortAggregateStatus,
     PrefixRoutes, RouteSourceKind, SectionDiff, SubinterfaceStatus, TransactionSnapshot,
 };
+use time::OffsetDateTime;
 
 use nos_proto::cli::render;
 
@@ -905,13 +905,24 @@ fn render_log_level(level: LogLevel) -> &'static str {
 
 /// Render one log entry as one line: `<timestamp> <LEVEL> <source> <target>: <message> {fields}`.
 pub fn render_log_entry(entry: &LogEntry) -> String {
-    let timestamp = DateTime::<Utc>::from_timestamp_millis(
-        i64::try_from(entry.timestamp_ms).unwrap_or(i64::MAX),
-    )
-    .map_or_else(
-        || entry.timestamp_ms.to_string(),
-        |dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true),
-    );
+    let timestamp = i64::try_from(entry.timestamp_ms)
+        .ok()
+        .and_then(|ms| OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok())
+        .map_or_else(
+            || entry.timestamp_ms.to_string(),
+            |dt| {
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                    dt.year(),
+                    u8::from(dt.month()),
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second(),
+                    dt.millisecond()
+                )
+            },
+        );
     let base = format!(
         "{timestamp} {:>5} {} {}: {}",
         render_log_level(entry.level),

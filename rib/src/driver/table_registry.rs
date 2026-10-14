@@ -89,7 +89,7 @@ fn lock_path(path: &Path) -> std::path::PathBuf {
 
 fn load(path: &Path) -> io::Result<Registry> {
     match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_yaml::from_slice(&bytes).unwrap_or_else(|e| {
+        Ok(bytes) => Ok(serde_norway::from_slice(&bytes).unwrap_or_else(|e| {
             warn!(
                 path = %path.display(),
                 error = %e,
@@ -107,7 +107,7 @@ fn load(path: &Path) -> io::Result<Registry> {
 /// final rename is atomic), then renamed over `path`.
 fn save(path: &Path, reg: &Registry) -> io::Result<()> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let yaml = serde_yaml::to_string(reg).expect("Registry serialization cannot fail");
+    let yaml = serde_norway::to_string(reg).expect("Registry serialization cannot fail");
 
     let mut tmp = match dir {
         Some(dir) => tempfile::NamedTempFile::new_in(dir),
@@ -125,6 +125,16 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    /// #415: a file written by the old `serde_yaml` 0.9 still loads under `serde_norway`.
+    #[test]
+    fn registry_written_by_serde_yaml_0_9_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("table-ids.yaml");
+        std::fs::write(&path, "by_name:\n  rt1: 100\n  rt2: 101\n").unwrap();
+        assert_eq!(lookup_table_id(&path, "rt2"), Some(101));
+        assert_eq!(ensure_table_id(&path, "rt3").unwrap(), 102);
+    }
 
     #[test]
     fn allocating_twice_for_the_same_name_reuses_the_id() {

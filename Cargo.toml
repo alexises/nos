@@ -6,19 +6,19 @@ resolver = "2"
 license = "GPL-3.0-only"
 
 [workspace.dependencies]
-tokio       = { version = "1", features = ["full"] }
+# `full` is not used: crates add `signal`/`process` themselves where they need them.
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
-serde_yaml  = "0.9"
+serde_norway = "0.9"
 tracing     = "0.1"
-thiserror   = "1"
+thiserror   = "2"
 bytes       = "1"
 garde       = { version = "0.22", features = ["derive", "full"] }
 precis-core     = "0.2"
 precis-profiles = "0.2"
 ipnet       = { version = "2", features = ["serde"] }
 postcard    = { version = "1", features = ["alloc"] }
-chrono      = { version = "0.4", default-features = false, features = ["std"] }
 tokio-util  = { version = "0.7", features = ["codec"] }
 futures     = "0.3"
 reqwest     = { version = "0.13", default-features = false, features = ["json", "stream"] }
@@ -39,7 +39,7 @@ clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reedline            = "0.51.0"
-nix                 = { version = "0.29", default-features = false, features = ["signal", "process"] }
+nix                 = { version = "0.30", default-features = false, features = ["signal", "process"] }
 async-trait         = "0.1"
 rtnetlink           = "0.23"
 netlink-packet-core  = "0.9"
@@ -47,7 +47,7 @@ netlink-packet-route = "0.33"
 netlink-sys          = { version = "0.9", features = ["tokio_socket"] }
 crc32fast            = "1"
 fs2                 = "0.4"
-socket2             = { version = "0.5", features = ["all"] }
+socket2             = { version = "0.6", features = ["all"] }
 smallvec            = "1"
 libc                = "0.2"
 md-5                = "0.10"

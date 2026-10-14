@@ -124,7 +124,7 @@ dependencies = [
  "nom",
  "num-traits",
  "rusticata-macros",
- "thiserror 2.0.20",
+ "thiserror",
  "time",
 ]
 
@@ -367,7 +367,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "serde_urlencoded",
- "thiserror 2.0.20",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tower-service",
@@ -514,7 +514,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror",
 ]
 
 [[package]]
@@ -1211,7 +1211,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2",
  "tokio",
  "tower-service",
  "tracing",
@@ -1426,7 +1426,7 @@ dependencies = [
  "jni-sys",
  "log",
  "simd_cesu8",
- "thiserror 2.0.20",
+ "thiserror",
  "walkdir",
  "windows-link",
 ]
@@ -1664,7 +1664,7 @@ dependencies = [
  "log",
  "netlink-packet-core",
  "netlink-sys",
- "thiserror 2.0.20",
+ "thiserror",
 ]
 
 [[package]]
@@ -1682,19 +1682,6 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags",
- "cfg-if",
- "cfg_aliases",
- "libc",
- "memoffset",
-]
-
-[[package]]
-name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
@@ -1703,6 +1690,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -1727,16 +1715,16 @@ dependencies = [
  "libc",
  "md-5",
  "netlink-packet-route",
- "nix 0.29.0",
+ "nix",
  "nos-l2-socket",
  "nos-log-client",
  "nos-pki",
  "nos-proto",
  "rtnetlink",
  "sha1",
- "socket2 0.5.10",
+ "socket2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1763,9 +1751,9 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "socket2 0.5.10",
+ "socket2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1777,7 +1765,6 @@ name = "nos-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "futures",
  "ipnet",
@@ -1789,7 +1776,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
+ "time",
  "tokio",
  "tokio-util",
 ]
@@ -1812,9 +1800,9 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_norway",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1839,7 +1827,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "serde_json",
- "serde_yaml",
+ "serde_norway",
  "sha2",
  "tar",
  "tokio",
@@ -1863,7 +1851,7 @@ dependencies = [
  "nos-proto",
  "rtnetlink",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1889,9 +1877,9 @@ dependencies = [
  "proptest",
  "rtnetlink",
  "serde",
- "serde_yaml",
+ "serde_norway",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1903,7 +1891,7 @@ name = "nos-l2-socket"
 version = "0.1.0"
 dependencies = [
  "libc",
- "socket2 0.5.10",
+ "socket2",
  "tokio",
 ]
 
@@ -1919,7 +1907,7 @@ dependencies = [
  "nos-pki",
  "nos-proto",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1938,7 +1926,7 @@ dependencies = [
  "nos-pki",
  "nos-proto",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1960,9 +1948,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "socket2 0.5.10",
+ "socket2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -2004,9 +1992,9 @@ dependencies = [
  "serde",
  "sha1",
  "sha2",
- "socket2 0.5.10",
+ "socket2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2027,7 +2015,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "libc",
- "nix 0.29.0",
+ "nix",
  "nos-l2-socket",
  "nos-log-client",
  "nos-ospf-common",
@@ -2039,9 +2027,9 @@ dependencies = [
  "serde",
  "sha1",
  "sha2",
- "socket2 0.5.10",
+ "socket2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2086,7 +2074,7 @@ dependencies = [
  "precis-profiles",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio-util",
  "utoipa",
 ]
@@ -2135,9 +2123,9 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
- "socket2 0.5.10",
+ "socket2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -2170,9 +2158,9 @@ dependencies = [
  "proptest",
  "rtnetlink",
  "serde",
- "serde_yaml",
+ "serde_norway",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2185,7 +2173,7 @@ version = "0.1.0"
 dependencies = [
  "ipnet",
  "regex",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -2203,7 +2191,7 @@ dependencies = [
  "nos-proto",
  "proptest",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2215,7 +2203,7 @@ name = "nos-tcp-auth"
 version = "0.1.0"
 dependencies = [
  "libc",
- "socket2 0.5.10",
+ "socket2",
 ]
 
 [[package]]
@@ -2241,7 +2229,7 @@ dependencies = [
  "argon2",
  "clap",
  "futures",
- "nix 0.29.0",
+ "nix",
  "nos-log-client",
  "nos-password",
  "nos-pki",
@@ -2413,7 +2401,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "strum 0.27.2",
- "thiserror 2.0.20",
+ "thiserror",
 ]
 
 [[package]]
@@ -2645,7 +2633,7 @@ dependencies = [
  "serde",
  "strip-ansi-escapes",
  "strum 0.28.0",
- "thiserror 2.0.20",
+ "thiserror",
  "unicase",
  "unicode-segmentation",
  "unicode-width",
@@ -2782,8 +2770,8 @@ dependencies = [
  "netlink-packet-route",
  "netlink-proto",
  "netlink-sys",
- "nix 0.30.1",
- "thiserror 2.0.20",
+ "nix",
+ "thiserror",
  "tokio",
 ]
 
@@ -3035,6 +3023,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_norway"
+version = "0.9.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml-norway",
+]
+
+[[package]]
 name = "serde_path_to_error"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3066,19 +3067,6 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
-]
-
-[[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
 ]
 
 [[package]]
@@ -3190,16 +3178,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3364,31 +3342,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl 2.0.20",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -3472,10 +3430,9 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.5",
+ "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -3690,10 +3647,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
+name = "unsafe-libyaml-norway"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
 
 [[package]]
 name = "untrusted"
@@ -4150,7 +4107,7 @@ dependencies = [
  "nom",
  "oid-registry",
  "rusticata-macros",
- "thiserror 2.0.20",
+ "thiserror",
  "time",
 ]
 

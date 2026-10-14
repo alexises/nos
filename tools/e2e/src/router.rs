@@ -184,7 +184,7 @@ impl Router {
                 .map_err(|e| anyhow::anyhow!("seeding {}: {e}", id.name))?;
         }
         apply_bfd(&args, &mut config);
-        let yaml = serde_yaml::to_string(&config)?;
+        let yaml = serde_norway::to_string(&config)?;
 
         // A big log buffer, so the backlog re-read after a reconnect is complete.
         let mut cmd = strings(&["--logd-arg=--capacity=200000"]);
@@ -547,8 +547,8 @@ mod tests {
         assert_eq!(rest.address.to_string(), IP_A);
         assert_eq!(rest.port, REST_PORT);
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let back: Config = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_norway::to_string(&config).unwrap();
+        let back: Config = serde_norway::from_str(&yaml).unwrap();
         assert_eq!(back.routing_tables.len(), 1);
         assert_eq!(back.bgp_instances[0].asn, ASN_A);
     }
