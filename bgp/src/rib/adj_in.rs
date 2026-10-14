@@ -1,0 +1,525 @@
+//! Adj-RIB-In: per-peer path tables, UPDATE handling and withdrawal.
+//! Moved verbatim out of `rib.rs`.
+
+use super::{
+    apply_policy, debug, family_index, info, message, otc_leak, ov_state, warn, Arc, BgpRib,
+    CompiledPolicy, Damping, EvpnNlri, EvpnRoute, HashMap, HashSet, Instant, IpAddr, IpNet,
+    Ipv4Addr, MacMobility, RibRoute, RouteOrigin, SmallVec, UpdateMessage, CHANGE_PENALTY,
+    DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
+};
+use nos_proto::BgpRole::{Peer, Provider, RouteServer};
+
+/// A Type-2 route's `(VNI, MAC)` mobility identity, plus its ESI — `None`
+/// for every other EVPN route type, which RFC 7432 §15 mobility doesn't
+/// apply to.
+pub(super) fn evpn_mac_key(nlri: &EvpnNlri) -> Option<(u32, [u8; 6], [u8; 10])> {
+    match nlri {
+        EvpnNlri::MacIp {
+            mac, labels, esi, ..
+        } => Some((labels.first().copied().unwrap_or(0), *mac, *esi)),
+        _ => None,
+    }
+}
+
+/// Stores one `MP_REACH_NLRI` batch's EVPN routes in a peer's EVPN Adj-RIB-In,
+/// logging only routes that are new or changed, and registers each Type-2's
+/// `(VNI, MAC)` as an RFC 7432 §15 mobility candidate.
+pub(super) fn learn_evpn(
+    table: &mut HashMap<EvpnNlri, EvpnRoute>,
+    mac_mobility: &mut MacMobility,
+    from: IpAddr,
+    mp: &message::MpReachNlri,
+    extended_communities: &[u64],
+    pmsi: Option<message::Pmsi>,
+) {
+    for nlri in &mp.evpn {
+        let route = EvpnRoute {
+            nlri: nlri.clone(),
+            next_hop: mp.next_hop,
+            pmsi_vni: pmsi.map(|p| p.vni),
+            extended_communities: extended_communities.to_vec(),
+        };
+        if let Some((vni, mac, esi)) = evpn_mac_key(nlri) {
+            let (seq, sticky) = extended_communities
+                .iter()
+                .find_map(|c| nos_proto::evpn_id::parse_mac_mobility(*c))
+                .unwrap_or((0, false));
+            mac_mobility.candidate(vni, mac, mp.next_hop, esi, seq, sticky, Instant::now());
+        }
+        if table.insert(nlri.route_key(), route.clone()) != Some(route) {
+            info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, "evpn route learned");
+        }
+    }
+}
+
+/// Every path one peer holds for a prefix, by RFC 7911 path id (0 on a
+/// session that doesn't receive ADD-PATH). One inline entry, so a table
+/// without ADD-PATH pays no extra allocation per prefix.
+pub(super) type Paths = SmallVec<[(u32, RibRoute); 1]>;
+
+/// What `propagate_add_path` last sent one ADD-PATH peer for one prefix:
+/// per source path (`PathKey`), the id it was sent under and the route.
+pub(super) type AddPathSent = HashMap<PathKey, (u32, RibRoute)>;
+
+/// A path's identity: its origin and its received RFC 7911 path id (0
+/// without ADD-PATH). A `Local` origin is 0 for the redistributed route and
+/// 1 for the aggregate, which can coexist on one prefix.
+pub(super) type PathKey = (RouteOrigin, u32);
+
+/// One peer's Adj-RIB-In.
+pub(super) type PeerTable = HashMap<IpNet, Paths>;
+
+/// How many paths a peer holds, `[ipv4, ipv6]` — kept in step at every
+/// Adj-RIB-In mutation by `put_path`/`take_path`.
+pub(super) type PathCounts = [u32; 2];
+
+pub(super) fn get_path(table: &PeerTable, prefix: IpNet, id: u32) -> Option<&RibRoute> {
+    table
+        .get(&prefix)?
+        .iter()
+        .find(|(i, _)| *i == id)
+        .map(|(_, r)| r)
+}
+
+/// Stores path `id` of `prefix` (RFC 7911 §5: a new advertisement for the
+/// same path id replaces the old one).
+pub(super) fn put_path(
+    table: &mut PeerTable,
+    counts: &mut PathCounts,
+    prefix: IpNet,
+    id: u32,
+    route: RibRoute,
+) {
+    let paths = table.entry(prefix).or_default();
+    if let Some((_, old)) = paths.iter_mut().find(|(i, _)| *i == id) {
+        *old = route;
+    } else {
+        paths.push((id, route));
+        counts[family_index(prefix)] += 1;
+    }
+}
+
+/// Removes path `id` of `prefix`, if held — an unknown id is a no-op (RFC
+/// 7911 §5).
+pub(super) fn take_path(
+    table: &mut PeerTable,
+    counts: &mut PathCounts,
+    prefix: IpNet,
+    id: u32,
+) -> Option<RibRoute> {
+    let paths = table.get_mut(&prefix)?;
+    let pos = paths.iter().position(|(i, _)| *i == id)?;
+    let (_, route) = paths.remove(pos);
+    if paths.is_empty() {
+        table.remove(&prefix);
+    }
+    counts[family_index(prefix)] -= 1;
+    Some(route)
+}
+
+/// The path id of entry `i` of an NLRI list whose ids are index-aligned in
+/// `ids` — empty without ADD-PATH, which is path id 0.
+pub(super) fn path_id_at(ids: &[u32], i: usize) -> u32 {
+    ids.get(i).copied().unwrap_or(0)
+}
+
+/// Every `(prefix, path id)` an UPDATE withdraws, legacy and MP alike.
+pub(super) fn withdrawn_paths(update: &UpdateMessage) -> Vec<(IpNet, u32)> {
+    let legacy = update
+        .withdrawn_routes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (IpNet::V4(*p), path_id_at(&update.withdrawn_path_ids, i)));
+    let mp = update.mp_unreach.iter().flat_map(|u| {
+        u.withdrawn
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (*p, path_id_at(&u.withdrawn_path_ids, i)))
+    });
+    legacy.chain(mp).collect()
+}
+
+/// Every `(prefix, path id)` an UPDATE announces, legacy and MP alike.
+pub(super) fn announced_paths(update: &UpdateMessage) -> Vec<(IpNet, u32)> {
+    let legacy = update
+        .nlri
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (IpNet::V4(*p), path_id_at(&update.nlri_path_ids, i)));
+    let mp = update.mp_reach.iter().flat_map(|m| {
+        m.nlri
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (*p, path_id_at(&m.nlri_path_ids, i)))
+    });
+    legacy.chain(mp).collect()
+}
+
+/// Applies one learned NLRI to a peer's Adj-RIB-In, shared by an UPDATE's
+/// plain IPv4 NLRI and its RFC 4760 `MP_REACH_NLRI`, which differ only in
+/// where the next-hop comes from.
+///
+/// A rejected prefix is *removed* rather than skipped — a policy that now
+/// rejects it must not leave an earlier, now-superseded copy behind — and is
+/// `touched` either way so best-path selection re-runs for it.
+// ponytail: damping stays keyed by (peer, prefix), so a flap of any one
+// ADD-PATH path penalises the prefix from that peer; key it by path id too
+// if per-path damping is ever needed.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn learn_prefix(
+    table: &mut PeerTable,
+    counts: &mut PathCounts,
+    damping: &mut Damping,
+    touched: &mut HashSet<IpNet>,
+    peer: (IpAddr, u32),
+    (prefix, id): (IpNet, u32),
+    candidate: RibRoute,
+    import_policy: &CompiledPolicy,
+) {
+    let (from, _) = peer;
+    match apply_policy(prefix, candidate, import_policy, Some(peer)) {
+        Some(mut route) => {
+            if let Some(old) = get_path(table, prefix, id) {
+                // An RPKI state change alone is no flap (#17).
+                let same = RibRoute {
+                    received_at: old.received_at,
+                    validation_state: old.validation_state,
+                    ..route.clone()
+                } == *old;
+                if same {
+                    // Keep the age: `received_at` is part of `PartialEq`, so a
+                    // fresh one would make every identical re-announcement
+                    // look changed downstream and be re-propagated (#160).
+                    route.received_at = old.received_at;
+                } else if damping.enabled(from) {
+                    damping.flap(from, prefix, CHANGE_PENALTY, Instant::now());
+                }
+            }
+            info!(
+                peer = %from,
+                path_id = id,
+                atomic_aggregate = route.atomic_aggregate,
+                aggregator = ?route.aggregator.map(|a| (a.asn, a.router_id)),
+                otc = ?route.otc,
+                validation_state = ?route.validation_state,
+                communities = ?route.communities,
+                "bgp: learned route for {prefix} into adj-rib-in"
+            );
+            put_path(table, counts, prefix, id, route);
+        }
+        None => {
+            if take_path(table, counts, prefix, id).is_some() {
+                damping.flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
+            }
+        }
+    }
+    touched.insert(prefix);
+}
+
+impl BgpRib {
+    /// Handles one inbound UPDATE from `from`, whose BGP Identifier is
+    /// `remote_bgp_id` (used as the RFC 4271 §9.1.2.2 router-id tiebreak).
+    /// Withdrawals (legacy `withdrawn_routes` plus any `mp_unreach` batch)
+    /// are always processed first, unconditionally; announcements (legacy
+    /// `nlri` plus any `mp_reach` batch) are dropped entirely (with a
+    /// `warn!`) if the `AS_PATH` already contains our own ASN (loop
+    /// prevention), never partially applied. `ORIGIN`/`AS_PATH`/
+    /// `LOCAL_PREF`/`MULTI_EXIT_DISC` are shared across the legacy `nlri`
+    /// and every `mp_reach` batch in the same UPDATE (RFC 4760: only the
+    /// next-hop is per-batch); each `mp_reach` batch's own `next_hop` is
+    /// used instead of the legacy attribute's. `import_policy` is `from`'s
+    /// peer-group's resolved import policy (`deny-all` by default — see root
+    /// `CLAUDE.md`'s "Default-deny rollout impact"): a rejected prefix is
+    /// treated like an explicit withdrawal rather than inserted.
+    pub fn handle_update(
+        &mut self,
+        from: IpAddr,
+        remote_is_ibgp: bool,
+        remote_bgp_id: Ipv4Addr,
+        update: &UpdateMessage,
+        import_policy: &CompiledPolicy,
+    ) {
+        let peer_as = self.peer_asns.get(&from).copied().unwrap_or(0);
+        // Sized from the message's own known counts so this doesn't rehash
+        // its way up on every insert — bounded by the total NLRI/withdrawn
+        // entries this one UPDATE could possibly touch.
+        let touched_capacity = update.nlri.len()
+            + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>()
+            + update.withdrawn_routes.len()
+            + update
+                .mp_unreach
+                .iter()
+                .map(|u| u.withdrawn.len())
+                .sum::<usize>();
+        let mut touched: HashSet<IpNet> = HashSet::with_capacity(touched_capacity);
+
+        // RFC 4724: an EVPN route the peer mentions again is no longer stale.
+        if let Some(stale) = self.evpn_stale.get_mut(&from) {
+            for n in update.mp_reach.iter().flat_map(|m| &m.evpn) {
+                stale.remove(&n.route_key());
+            }
+            for n in update.mp_unreach.iter().flat_map(|m| &m.evpn) {
+                stale.remove(&n.route_key());
+            }
+        }
+        let withdrawn = withdrawn_paths(update);
+        let announced = announced_paths(update);
+        // RFC 7313 / RFC 4724: any path the peer mentions again is no
+        // longer stale.
+        if let Some(stale) = self.stale.get_mut(&from) {
+            for path in withdrawn.iter().chain(&announced) {
+                stale.remove(path);
+            }
+        }
+
+        for nlri in update.mp_unreach.iter().flat_map(|u| &u.evpn) {
+            // mac_mobility's record of this route's (vni, mac) is
+            // deliberately left alone here too — see peer_disconnected.
+            let removed = self
+                .evpn_adj_rib_in
+                .get_mut(&from)
+                .is_some_and(|t| t.remove(&nlri.route_key()).is_some());
+            if removed {
+                info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+            }
+        }
+        for &(prefix, id) in &withdrawn {
+            if self.remove_path(from, prefix, id).is_some() {
+                debug!(peer = %from, path_id = id, "bgp: withdrew path for {prefix} from adj-rib-in");
+                touched.insert(prefix);
+                self.damping
+                    .flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
+            }
+        }
+
+        if !update.nlri.is_empty() || !update.mp_reach.is_empty() {
+            let Some(attrs) = &update.attributes else {
+                // parse_update never actually produces this (attributes is
+                // Some whenever nlri or mp_reach is non-empty), but stay
+                // defensive.
+                for prefix in touched {
+                    self.recompute_and_propagate(prefix);
+                }
+                return;
+            };
+            let from_confed = self.confed_peers.contains(&from);
+            // RFC 9234 §5 applies to unicast only, never EVPN.
+            let unicast =
+                !update.nlri.is_empty() || update.mp_reach.iter().any(|m| !m.nlri.is_empty());
+            // RFC 9234 §5 ingress 3: a route from a Provider, Peer or Route
+            // Server with no OTC gets the neighbor's ASN.
+            let otc = match self.role_peers.get(&from).map(|r| r.counterpart()) {
+                Some(Provider | Peer | RouteServer) if unicast && attrs.otc.is_none() => {
+                    Some(peer_as)
+                }
+                _ => attrs.otc,
+            };
+            // RFC 5065 §5.3 / RFC 7606 §7.2: confederation segments only ever
+            // come from inside our own confederation.
+            let stray_confed = attrs.as_path.has_confed()
+                && (self.confed_id.is_none() || !(remote_is_ibgp || from_confed));
+            // RFC 5065 §5.1: our confederation identifier (or AS) in a plain
+            // segment, or our member AS in a confederation segment.
+            // Vendor `local-as`: it counts as ours on this peer's routes only.
+            let local_as = self.local_as_peers.get(&from).copied();
+            let looped = attrs
+                .as_path
+                .contains(self.confed_id.unwrap_or(self.local_asn))
+                || (self.confed_id.is_some() && attrs.as_path.contains_confed(self.local_asn))
+                || local_as.is_some_and(|l| attrs.as_path.contains(l.asn));
+            if stray_confed {
+                warn!(
+                    peer = %from, as_path = ?attrs.as_path,
+                    "treating bgp update as withdraw: as_path has confederation segments from outside the confederation"
+                );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else if looped {
+                // RFC 4271 §9.1.2: a looped route is unfeasible, so it
+                // replaces (implicitly withdraws) an earlier one.
+                warn!(
+                    peer = %from, as_path = ?attrs.as_path,
+                    "dropping bgp update: as_path already contains our own asn (loop prevention)"
+                );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else if let Some(role) = unicast
+                .then(|| self.role_peers.get(&from).map(|r| r.counterpart()))
+                .flatten()
+                .filter(|&r| otc_leak(r, attrs.otc, peer_as))
+            {
+                warn!(
+                    peer = %from, prefix = ?announced.iter().map(|a| a.0).collect::<Vec<_>>(),
+                    otc = ?attrs.otc, role = ?role,
+                    "route leak detected: dropping bgp update (rfc 9234 only-to-customer)"
+                );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else if attrs.cluster_list.contains(&self.cluster_id) {
+                warn!(
+                    peer = %from, cluster_list = ?attrs.cluster_list,
+                    "dropping bgp update: cluster_list already contains our own cluster-id (rfc 4456 reflection loop prevention)"
+                );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else if attrs.originator_id == Some(self.local_router_id) {
+                warn!(
+                    peer = %from, originator_id = ?attrs.originator_id,
+                    "dropping bgp update: originator_id is our own router-id (rfc 4456 reflection loop prevention)"
+                );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else {
+                let mut evpn_recheck: Vec<(u32, [u8; 6])> = Vec::new();
+                let table = self.adj_rib_in.entry(from).or_default();
+                let counts = self.path_counts.entry(from).or_default();
+                // This UPDATE adds at most this many entries — reserving
+                // once lets the per-peer table grow in fewer, larger steps
+                // on the way up to a full table, instead of rehashing on
+                // every insert-triggered doubling.
+                table.reserve(
+                    update.nlri.len() + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>(),
+                );
+                // RFC 8097 §2: always stripped; honoured only from an
+                // opted-in iBGP peer (`rpki_state_peers` holds no other).
+                let mut extended_communities = attrs.extended_communities.clone();
+                let mut received_ov = None;
+                extended_communities.retain(|&c| {
+                    let ov = crate::rpki::community::is_ov(c);
+                    if ov && received_ov.is_none() {
+                        received_ov = crate::rpki::community::decode(c);
+                    }
+                    !ov
+                });
+                let received_ov = received_ov.filter(|_| self.rpki_state_peers.contains(&from));
+                // Vendor `local-as`: the received path gets it as a real hop,
+                // so policy and every other peer see `[local-as, peer…]`.
+                let mut as_path = attrs.as_path.clone();
+                if let Some(l) = local_as.filter(|l| !l.no_prepend) {
+                    as_path.prepend_seq(l.asn);
+                }
+                let base_route = RibRoute {
+                    origin: RouteOrigin::Peer(from),
+                    as_path: Arc::new(as_path),
+                    bgp_origin: attrs.origin,
+                    local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
+                    med: attrs.med,
+                    learned_via_ibgp: remote_is_ibgp,
+                    learned_via_confed: from_confed,
+                    router_id: Some(remote_bgp_id),
+                    next_hop: None,
+                    received_at: Instant::now(),
+                    originator_id: attrs.originator_id,
+                    cluster_list: attrs.cluster_list.clone().into(),
+                    communities: attrs.communities.clone(),
+                    extended_communities,
+                    large_communities: attrs.large_communities.clone(),
+                    atomic_aggregate: attrs.atomic_aggregate,
+                    aggregator: attrs.aggregator,
+                    otc,
+                    validation_state: nos_rpl::ValidationState::NotFound,
+                    received_ov,
+                };
+                let origin_as = crate::rpki::origin_as(
+                    &base_route.as_path,
+                    self.confed_id.unwrap_or(self.local_asn),
+                );
+                for (i, prefix) in update.nlri.iter().enumerate() {
+                    let candidate = RibRoute {
+                        next_hop: Some(IpAddr::V4(attrs.next_hop)),
+                        validation_state: ov_state(
+                            &self.vrps,
+                            IpNet::V4(*prefix),
+                            origin_as,
+                            received_ov,
+                        ),
+                        ..base_route.clone()
+                    };
+                    learn_prefix(
+                        table,
+                        counts,
+                        &mut self.damping,
+                        &mut touched,
+                        (from, peer_as),
+                        (IpNet::V4(*prefix), path_id_at(&update.nlri_path_ids, i)),
+                        candidate,
+                        import_policy,
+                    );
+                }
+                for mp in &update.mp_reach {
+                    for (i, prefix) in mp.nlri.iter().enumerate() {
+                        let candidate = RibRoute {
+                            next_hop: Some(mp.next_hop),
+                            validation_state: ov_state(&self.vrps, *prefix, origin_as, received_ov),
+                            ..base_route.clone()
+                        };
+                        learn_prefix(
+                            table,
+                            counts,
+                            &mut self.damping,
+                            &mut touched,
+                            (from, peer_as),
+                            (*prefix, path_id_at(&mp.nlri_path_ids, i)),
+                            candidate,
+                            import_policy,
+                        );
+                    }
+                    if !mp.evpn.is_empty() {
+                        learn_evpn(
+                            self.evpn_adj_rib_in.entry(from).or_default(),
+                            &mut self.mac_mobility,
+                            from,
+                            mp,
+                            &attrs.extended_communities,
+                            attrs.pmsi,
+                        );
+                        evpn_recheck.extend(
+                            mp.evpn
+                                .iter()
+                                .filter_map(evpn_mac_key)
+                                .map(|(vni, mac, _)| (vni, mac)),
+                        );
+                    }
+                }
+                for (vni, mac) in evpn_recheck {
+                    self.mac_mobility_recheck(vni, mac);
+                }
+            }
+        }
+
+        for prefix in touched {
+            self.recompute_and_propagate(prefix);
+        }
+    }
+
+    /// RFC 7606 treat-as-withdraw, decided here rather than in the codec
+    /// because it depends on the peer: every route `update` announces is
+    /// removed from `from`'s Adj-RIB-In.
+    pub(super) fn withdraw_announced(
+        &mut self,
+        from: IpAddr,
+        update: &UpdateMessage,
+        announced: &[(IpNet, u32)],
+        touched: &mut HashSet<IpNet>,
+    ) {
+        for &(prefix, id) in announced {
+            if self.remove_path(from, prefix, id).is_some() {
+                debug!(peer = %from, path_id = id, "bgp: withdrew path for {prefix} from adj-rib-in");
+                touched.insert(prefix);
+            }
+        }
+        if let Some(table) = self.evpn_adj_rib_in.get_mut(&from) {
+            for nlri in update.mp_reach.iter().flat_map(|m| &m.evpn) {
+                if table.remove(&nlri.route_key()).is_some() {
+                    info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+                }
+            }
+        }
+    }
+
+    /// Removes path `id` of `prefix` from `peer`'s Adj-RIB-In, keeping the
+    /// path counters in step.
+    pub(super) fn remove_path(&mut self, peer: IpAddr, prefix: IpNet, id: u32) -> Option<RibRoute> {
+        take_path(
+            self.adj_rib_in.get_mut(&peer)?,
+            self.path_counts.entry(peer).or_default(),
+            prefix,
+            id,
+        )
+    }
+}

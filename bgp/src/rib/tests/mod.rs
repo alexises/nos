@@ -5,6 +5,8 @@
 
 use std::net::Ipv4Addr;
 
+use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
+
 use super::*;
 
 mod add_path;
