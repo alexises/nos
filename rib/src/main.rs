@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
         .init();
+    nos_log_client::install_panic_hook();
     info!(table = %args.table, peer = ?identity.peer(), "nos-ribd starting");
 
     let listen_socket = args

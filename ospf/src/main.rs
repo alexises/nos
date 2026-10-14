@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
             log_shutdown_rx,
         ))
         .init();
+    nos_log_client::install_panic_hook();
     info!(instance = %args.instance, "nos-ospfd starting");
 
     let Some(config_socket) = watchdog_client::resolve_with_retry(

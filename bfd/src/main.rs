@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
         .init();
+    nos_log_client::install_panic_hook();
     info!(listen_socket = %args.listen_socket.display(), "nos-bfdd starting");
 
     let demux = Demux::default();

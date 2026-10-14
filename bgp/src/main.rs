@@ -83,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
         .init();
+    nos_log_client::install_panic_hook();
     info!(instance = %args.instance, peer = ?identity.peer(), "nos-bgpd starting");
     #[cfg(feature = "dhat-heap")]
     info!(out = %args.profile_memory_out.display(), "memory profiling enabled (dhat)");

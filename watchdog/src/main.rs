@@ -262,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
         .init();
+    nos_log_client::install_panic_hook();
 
     info!(
         ca = %args.pki_dir.join("ca.crt").display(),

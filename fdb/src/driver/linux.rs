@@ -93,7 +93,7 @@ impl LinuxFdbDriver {
     pub fn new() -> Result<Self, DriverError> {
         let (connection, handle, _) =
             rtnetlink::new_connection().map_err(|e| DriverError::Other(e.to_string()))?;
-        tokio::spawn(connection);
+        nos_log_client::spawn_critical("rtnetlink-connection", connection);
         Ok(Self {
             handle,
             ifindex: Mutex::new(HashMap::new()),
@@ -1002,7 +1002,7 @@ impl FdbDriver for LinuxFdbDriver {
         let (conn, _handle, mut messages) =
             rtnetlink::new_multicast_connection(&[MulticastGroup::Neigh, MulticastGroup::Link])
                 .ok()?;
-        tokio::spawn(conn);
+        nos_log_client::spawn_critical("rtnetlink-connection", conn);
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some((msg, _)) = messages.next().await {
