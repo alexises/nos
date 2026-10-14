@@ -5,6 +5,7 @@ use std::fmt::{self, Write};
 
 use x509_parser::extensions::GeneralName;
 
+/// Who a peer is: the `nos://<role>/<name>` URI SAN of its certificate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeerId {
     /// A daemon family or `user`: `bgpd`, `ribd`, `configd`, ….
@@ -14,6 +15,7 @@ pub struct PeerId {
 }
 
 impl PeerId {
+    /// Builds a `PeerId` from a role and an instance name.
     pub fn new(role: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             role: role.into(),

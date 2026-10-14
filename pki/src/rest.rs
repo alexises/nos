@@ -33,6 +33,7 @@ use crate::identity::certified_key;
 use crate::policy::{provider, Policy};
 use crate::PeerId;
 
+/// The server side of an accepted REST TLS connection.
 pub type RestStream = tokio_rustls::server::TlsStream<TcpStream>;
 
 const ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
@@ -70,6 +71,7 @@ pub struct RestServer {
 
 /// A completed handshake.
 pub struct Accepted {
+    /// The established TLS stream.
     pub stream: RestStream,
     /// The user the client's certificate names; `None` if it sent none.
     pub user: Option<String>,
@@ -78,6 +80,7 @@ pub struct Accepted {
 }
 
 impl RestServer {
+    /// Builds a server trusting `rest_ca_der` for client certificates (optional at TLS level).
     pub fn new(rest_ca_der: &[u8]) -> io::Result<Self> {
         let provider = provider(Policy::Rest);
         let verifier =
@@ -109,6 +112,7 @@ impl RestServer {
         Ok(())
     }
 
+    /// Whether a server certificate has been installed yet.
     pub fn has_certificate(&self) -> bool {
         self.current.0.load().is_some()
     }

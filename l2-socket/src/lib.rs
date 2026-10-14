@@ -23,6 +23,7 @@
 //! crate is where that raw `libc` socket work lives. So is
 //! `ifindex_of_address` (`getifaddrs`), which LLDP's Management Address TLV
 //! needs.
+#![warn(missing_docs)]
 
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;

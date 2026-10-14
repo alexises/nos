@@ -9,36 +9,56 @@ use ipnet::IpNet;
 /// (at most one, in v1) is a property/method suffix.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Postfix {
+    /// `.field` step.
     Field(String),
+    /// `.name(args...)` method call.
     Call(String, Vec<Expr>),
 }
 
+/// Unary operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
+    /// Boolean negation (`not`).
     Not,
 }
 
+/// Binary operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
+    /// `+`
     Add,
+    /// `-`
     Sub,
+    /// `==`
     Eq,
+    /// `!=`
     Ne,
+    /// `<`
     Lt,
+    /// `<=`
     Le,
+    /// `>`
     Gt,
+    /// `>=`
     Ge,
+    /// `in` (membership/containment).
     In,
+    /// `and`
     And,
+    /// `or`
     Or,
 }
 
+/// Expression shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
+    /// Integer literal.
     IntLit(i64),
     /// `"^65001_"` — only valid as the argument to `.matches(..)`.
     StrLit(String),
+    /// Prefix literal (`10.0.0.0/8`).
     PrefixLit(IpNet),
+    /// IP address literal.
     IpLit(IpAddr),
     /// `origin.igp` — an enum type name plus a variant name.
     EnumLit(String, String),
@@ -55,16 +75,22 @@ pub enum ExprKind {
     Ident(String),
     /// `this` followed by zero or more postfix segments.
     This(Vec<Postfix>),
+    /// Unary operation.
     Unary(UnaryOp, Box<Expr>),
+    /// Binary operation.
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
 
+/// An expression with its source line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expr {
+    /// The expression's shape.
     pub kind: ExprKind,
+    /// 1-based source line.
     pub line: usize,
 }
 
+/// Statement shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
     /// `if`/`elif` branches (condition, body) in source order, plus an
@@ -73,9 +99,12 @@ pub enum StmtKind {
     /// terminal statement — the parser accepts a missing `else` as an
     /// ordinary (non-terminating) statement.
     If {
+        /// `(condition, body)` pairs in source order.
         branches: Vec<(Expr, Vec<Stmt>)>,
+        /// Optional `else` body.
         else_body: Option<Vec<Stmt>>,
     },
+    /// `set <field> = <expr>`.
     Set(Expr, Expr),
     /// `set this.bgp.local_pref += <expr>` / `-= <expr>` — the bool is
     /// `true` for `-=`.
@@ -92,14 +121,20 @@ pub enum StmtKind {
     /// `this.bgp.communities.clear()` — empties a settable community-list
     /// field.
     CommunityClear(Expr),
+    /// `accept` (terminal).
     Accept,
+    /// `reject` (terminal).
     Reject,
 }
 
+/// A statement with its source line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stmt {
+    /// The statement's shape.
     pub kind: StmtKind,
+    /// 1-based source line.
     pub line: usize,
 }
 
+/// A whole policy: its top-level statements.
 pub type Policy = Vec<Stmt>;

@@ -10,36 +10,61 @@
 //! variation to model yet — see root `CLAUDE.md`'s "Explicitly out of
 //! scope" for why a genuinely optional capability isn't built now.
 
+/// A field of the route a policy can read (and, where [`FieldInfo::mutable`], write).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FieldId {
+    /// `this.prefix`.
     Prefix,
+    /// `this.bgp.origin` (RFC 4271 ORIGIN).
     BgpOrigin,
+    /// `this.bgp.as_path` (RFC 4271 `AS_PATH`).
     BgpAsPath,
+    /// `this.bgp.local_pref` (RFC 4271 `LOCAL_PREF`).
     BgpLocalPref,
+    /// `this.bgp.med` (RFC 4271 `MULTI_EXIT_DISC`).
     BgpMed,
+    /// `this.bgp.next_hop` (RFC 4271 `NEXT_HOP`).
     BgpNextHop,
+    /// Address of the neighbor the route is imported from / exported to.
     BgpPeer,
+    /// AS number of that neighbor.
     BgpPeerAs,
+    /// Whether the route was learned over IBGP.
     BgpLearnedViaIbgp,
+    /// BGP identifier of the advertising peer.
     BgpRouterId,
+    /// `ORIGINATOR_ID` (RFC 4456), if present.
     BgpOriginatorId,
+    /// `CLUSTER_LIST` (RFC 4456).
     BgpClusterList,
+    /// Standard communities (RFC 1997).
     BgpCommunities,
+    /// Extended communities (RFC 4360).
     BgpExtCommunities,
+    /// Large communities (RFC 8092).
     BgpLargeCommunities,
     /// RFC 6811 origin validation state, read-only.
     BgpValidationState,
 }
 
+/// The type of a [`FieldId`], as the checker sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
+    /// Integer.
     Int,
+    /// Boolean.
     Bool,
+    /// IP prefix.
     Prefix,
+    /// IP address that may be absent.
     OptionalIp,
+    /// Integer that may be absent.
     OptionalInt,
+    /// One of the named enum's variants (e.g. `origin`).
     Enum(&'static str),
+    /// List of integers (e.g. an AS path).
     ListInt,
+    /// List of IP addresses.
     ListIp,
     /// RFC 1997 standard community — `AA:NN` colon literals only.
     ListCommunity,
@@ -49,10 +74,14 @@ pub enum FieldType {
     ListLargeCommunity,
 }
 
+/// Schema entry for one route field.
 #[derive(Debug, Clone, Copy)]
 pub struct FieldInfo {
+    /// Which field this describes.
     pub id: FieldId,
+    /// Its type.
     pub ty: FieldType,
+    /// Whether policies may `set` it.
     pub mutable: bool,
 }
 

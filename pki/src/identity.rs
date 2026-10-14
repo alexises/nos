@@ -149,6 +149,7 @@ pub struct Negotiated {
 }
 
 impl Stream {
+    /// What the finished handshake settled on (version, key exchange, suite, peer key algorithm).
     pub fn negotiated(&self) -> Negotiated {
         let (kx, certs) = match &self.0 {
             TlsStream::Client(c) => {
@@ -234,6 +235,7 @@ struct Inner {
     configs: ArcSwap<Configs>,
 }
 
+/// A swappable handle on this process's certificate and trust anchors; rotation affects new handshakes only.
 #[derive(Clone)]
 pub struct Identity(Arc<Inner>);
 
@@ -350,6 +352,7 @@ impl Identity {
         Self::anonymous(&CertificateDer::from_pem_slice(pem).map_err(err)?)
     }
 
+    /// Builds an identity from a [`Bundle`] (CA, leaf, key, CRL).
     pub fn from_bundle(b: &Bundle) -> io::Result<Self> {
         let id = Self::anonymous(&b.ca)?;
         id.update(b)?;
@@ -558,6 +561,7 @@ impl Listener {
     }
 }
 
+/// An accepted connection before its TLS handshake; the caller handshakes in its own task.
 pub struct Incoming {
     stream: UnixStream,
     config: Arc<ServerConfig>,

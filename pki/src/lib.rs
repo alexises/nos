@@ -2,6 +2,7 @@
 //! `nos-watchdogd` as the certificate authority. No NOS dependencies, like
 //! `nos-password`/`nos-tcp-auth` — callers name peers by `PeerId`
 //! (`nos_proto::ServiceRef::peer_id` builds the expected one).
+#![warn(missing_docs)]
 
 mod ca;
 mod identity;

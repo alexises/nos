@@ -62,6 +62,7 @@ impl KeyAlg {
     }
 }
 
+/// A certificate authority: signs leaves (`issue`, `sign_csr`, `sign_server_csr`) and the CRL, ephemeral in the watchdog's memory.
 pub struct Ca {
     cert: rcgen::Certificate,
     issuer: Issuer<'static, KeyPair>,
@@ -94,6 +95,7 @@ impl Serial {
         })
     }
 
+    /// Whether the certificate's `notAfter` has passed (with `SKEW` of slack).
     pub fn expired(&self) -> bool {
         self.not_after < OffsetDateTime::now_utc() - SKEW
     }
@@ -174,6 +176,7 @@ impl Ca {
         Ok(params.signed_by(&self.issuer).map_err(err)?.der().to_vec())
     }
 
+    /// The CA certificate, DER: the trust anchor handed to peers.
     pub fn cert_der(&self) -> &[u8] {
         self.cert.der()
     }
@@ -329,9 +332,13 @@ pub fn generate_csr_for(alg: KeyAlg) -> io::Result<(Vec<u8>, Vec<u8>)> {
 /// current CRL (empty: keep whatever CRL the identity already holds).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bundle {
+    /// The CA certificate (trust anchor), DER.
     pub ca: Vec<u8>,
+    /// This peer's leaf certificate, DER.
     pub cert: Vec<u8>,
+    /// The leaf's PKCS#8 private key, DER.
     pub key: Vec<u8>,
+    /// The CA's current CRL, DER; empty keeps the CRL the identity already holds.
     pub crl: Vec<u8>,
 }
 

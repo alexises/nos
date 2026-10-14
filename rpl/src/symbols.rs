@@ -7,7 +7,9 @@ use ipnet::IpNet;
 /// containment/orlonger-based for a bare `cidr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrefixListEntry {
+    /// Prefix to match.
     pub cidr: IpNet,
+    /// Inclusive `(min, max)` bounds on the candidate's own prefix length; `None` means plain containment.
     pub range: Option<(u8, u8)>,
 }
 
@@ -21,8 +23,11 @@ pub struct PrefixListEntry {
 /// group member that is itself an alias name; groups are flat, not nested.
 #[derive(Debug, Clone, Copy)]
 pub struct Symbols<'a> {
+    /// Named aliases: each a list of integer values.
     pub aliases: &'a [(&'a str, &'a [i64])],
+    /// Named groups: each a list of flat integer lists (one per member).
     pub groups: &'a [(&'a str, &'a [&'a [i64]])],
+    /// Named prefix lists.
     pub prefix_lists: &'a [(&'a str, &'a [PrefixListEntry])],
     /// Named as-path lists: each entry is one regex (see `Op::AsPathMatches`);
     /// a list matches if ANY entry does.
@@ -30,6 +35,7 @@ pub struct Symbols<'a> {
 }
 
 impl Symbols<'_> {
+    /// No aliases, groups or lists.
     pub const EMPTY: Symbols<'static> = Symbols {
         aliases: &[],
         groups: &[],
