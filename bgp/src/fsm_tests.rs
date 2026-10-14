@@ -700,11 +700,11 @@ async fn inbound_messages_map_to_their_events() {
 async fn an_update_counts_only_once_established() {
     let mut c = Cls::new().await;
     let msg = || BgpMessage::Update(update(65002, &["192.0.2.0/24"]));
-    assert!(c
-        .feed(msg(), &State::OpenConfirm(remote(true, true)))
-        .await
-        .is_none());
-    assert_eq!(c.held().await, 0, "ignored before Established");
+    assert!(matches!(
+        c.feed(msg(), &State::OpenConfirm(remote(true, true))).await,
+        Some(Event::UnexpectedUpdate)
+    ));
+    assert_eq!(c.held().await, 0, "not counted before Established");
     assert!(c
         .feed(msg(), &State::Established(remote(true, true)))
         .await
@@ -752,11 +752,16 @@ async fn crossing_the_maximum_prefix_queues_one_cease() {
 async fn end_of_rib_is_for_established_known_families_only() {
     let mut c = Cls::new().await;
     let est = State::Established(remote(true, true));
-    for (state, afi, safi) in [
-        (&State::OpenConfirm(remote(true, true)), 1, 1),
-        (&est, 1, 1),
-        (&est, 99, 99),
-    ] {
+    // Before Established it is an FSM error (RFC 4271 §6.6).
+    assert!(matches!(
+        c.feed(
+            BgpMessage::EndOfRib { afi: 1, safi: 1 },
+            &State::OpenConfirm(remote(true, true))
+        )
+        .await,
+        Some(Event::UnexpectedUpdate)
+    ));
+    for (state, afi, safi) in [(&est, 1, 1), (&est, 99, 99)] {
         assert!(c
             .feed(BgpMessage::EndOfRib { afi, safi }, state)
             .await

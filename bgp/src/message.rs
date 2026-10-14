@@ -3767,13 +3767,13 @@ mod shutdown_message_tests {
             ATTR_MULTI_EXIT_DISC,
             ATTR_ORIGINATOR_ID,
         ] {
-            let ok = attrs(&[0x40, ty, 4, 1, 2, 3, 4]).unwrap();
+            // The flags must match the RFC 7606 flag table or the attribute
+            // is rejected for its flags, not its length.
+            let f = expected_flags(ty).unwrap();
+            let ok = attrs(&[f, ty, 4, 1, 2, 3, 4]).unwrap();
             assert!(!ok.withdraw, "type {ty}");
-            assert!(attrs(&[0x40, ty, 3, 1, 2, 3]).unwrap().withdraw, "{ty}");
-            assert!(
-                attrs(&[0x40, ty, 5, 1, 2, 3, 4, 5]).unwrap().withdraw,
-                "{ty}"
-            );
+            assert!(attrs(&[f, ty, 3, 1, 2, 3]).unwrap().withdraw, "{ty}");
+            assert!(attrs(&[f, ty, 5, 1, 2, 3, 4, 5]).unwrap().withdraw, "{ty}");
         }
     }
 
