@@ -458,3 +458,26 @@ async fn drive_exits_when_the_aggregate_manager_is_gone() {
     drop(sel_tx);
     drive(port, sel_rx, &link).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn lacpdus_beyond_the_rx_budget_are_dropped_and_refill_after_a_second() {
+    let mut r = rig(true, LacpRate::Slow);
+    let sync = state_bit::SYNCHRONIZATION | ACTIVE_PARTNER;
+    for _ in 0..MAX_RX_PER_WINDOW {
+        r.port.on_frame(&partner_frame(ACTIVE_PARTNER), &r.sink);
+    }
+    assert_eq!(r.port.rx_dropped, 0);
+    let before = r.observed();
+    r.port.on_frame(&partner_frame(sync), &r.sink);
+    assert_eq!(r.port.rx_dropped, 1);
+    assert_eq!(r.observed(), before, "a dropped LACPDU changes no state");
+    // Markers have their own budget.
+    let sent = r.sink.count();
+    r.port.on_frame(&marker_request(1), &r.sink);
+    assert_eq!(r.sink.count(), sent + 1);
+
+    tokio::time::advance(TX_WINDOW).await;
+    r.port.on_frame(&partner_frame(sync), &r.sink);
+    assert_eq!(r.port.rx_dropped, 0);
+    assert_ne!(r.observed(), before);
+}

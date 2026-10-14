@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use nos_proto::{
     LacpAggregateMembers, LacpMode, LacpMuxState, LacpPortStatus, LacpRate, LacpReceiveState,
@@ -14,6 +15,7 @@ use nos_proto::{
 };
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::churn_machine::{ChurnState, CHURN_DETECTION_TIME};
@@ -22,6 +24,10 @@ use crate::mux_machine::MuxState;
 use crate::packet::state_bit;
 use crate::receive_machine::ReceiveState;
 use crate::selection::{self, PortCandidate};
+
+/// Pushes to `nos-interfaced` are at most one per this window (leading edge
+/// immediate, newest set trailing): a flapping partner can't churn rtnetlink.
+const PUSH_COALESCE: Duration = Duration::from_secs(1);
 
 /// 802.1AX default for both the system and the port priority (0x8000).
 pub const DEFAULT_PRIORITY: u16 = 32768;
@@ -291,8 +297,29 @@ async fn selection_loop(
     push_tx: mpsc::Sender<LacpAggregateMembers>,
 ) {
     let mut last_pushed: Option<Vec<String>> = None;
+    let mut last_push_at: Option<Instant> = None;
+    // Newest computed set held back by the 1 s coalescing window.
+    let mut pending: Option<Vec<String>> = None;
     loop {
-        changed.notified().await;
+        let deadline = match (&pending, last_push_at) {
+            (Some(_), Some(t)) => t + PUSH_COALESCE,
+            _ => Instant::now() + Duration::from_hours(24),
+        };
+        tokio::select! {
+            () = changed.notified() => {}
+            () = tokio::time::sleep_until(deadline), if pending.is_some() => {
+                // Trailing edge: disarmed by taking `pending`.
+                let members = pending.take().expect("guarded by pending.is_some()");
+                if last_pushed.as_ref() != Some(&members) {
+                    if !push(&push_tx, &aggregate, &members).await {
+                        return;
+                    }
+                    last_pushed = Some(members);
+                    last_push_at = Some(Instant::now());
+                }
+                continue;
+            }
+        }
 
         let snapshot: HashMap<String, PortObservation> = observations.lock().unwrap().clone();
         let priorities = port_priorities.lock().unwrap().clone();
@@ -334,26 +361,40 @@ async fn selection_loop(
             active_members.clear();
         }
 
-        if last_pushed.as_ref() != Some(&active_members) {
-            info!(
-                aggregate = %aggregate,
-                members = active_members.len(),
-                "lacp reconciled aggregate members"
-            );
-            if push_tx
-                .send(LacpAggregateMembers {
-                    aggregate: aggregate.clone(),
-                    active_members: active_members.clone(),
-                })
-                .await
-                .is_err()
-            {
-                warn!(aggregate = %aggregate, "lacp interface_client channel closed, stopping selection loop");
+        if last_pushed.as_ref() == Some(&active_members) {
+            // A->B->A inside the window: nothing to push.
+            pending = None;
+        } else if last_push_at.is_some_and(|t| t.elapsed() < PUSH_COALESCE) {
+            pending = Some(active_members);
+        } else {
+            pending = None;
+            if !push(&push_tx, &aggregate, &active_members).await {
                 return;
             }
             last_pushed = Some(active_members);
+            last_push_at = Some(Instant::now());
         }
     }
+}
+
+/// Pushes one active set; `false` when the interface client is gone.
+async fn push(
+    push_tx: &mpsc::Sender<LacpAggregateMembers>,
+    aggregate: &str,
+    members: &[String],
+) -> bool {
+    info!(aggregate = %aggregate, members = members.len(), "lacp reconciled aggregate members");
+    let sent = push_tx
+        .send(LacpAggregateMembers {
+            aggregate: aggregate.to_string(),
+            active_members: members.to_vec(),
+        })
+        .await
+        .is_ok();
+    if !sent {
+        warn!(aggregate = %aggregate, "lacp interface_client channel closed, stopping selection loop");
+    }
+    sent
 }
 
 /// Ports that belong in the bond: selected, `Distributing` and not churned.
@@ -486,5 +527,73 @@ mod tests {
 
         assert!(!set_if_changed(&tx, true));
         assert!(!rx.has_changed().unwrap());
+    }
+
+    fn obs(distributing: bool) -> PortObservation {
+        PortObservation {
+            receive_state: ReceiveState::Current,
+            mux_state: if distributing {
+                MuxState::Distributing
+            } else {
+                MuxState::Detached
+            },
+            actor_port: 1,
+            partner: None,
+            actor_churn: ChurnState::NoChurn,
+            partner_churn: ChurnState::NoChurn,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pushes_are_coalesced_to_one_per_second() {
+        let observations = Arc::new(Mutex::new(HashMap::new()));
+        let changed = Arc::new(Notify::new());
+        let selected = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = mpsc::channel(8);
+        let o = observations.clone();
+        let c = changed.clone();
+        tokio::spawn(selection_loop(
+            "bond1".into(),
+            o,
+            c,
+            selected,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU16::new(1)),
+            tx,
+        ));
+        let set = |d: bool| {
+            observations.lock().unwrap().insert("eth1".into(), obs(d));
+            changed.notify_one();
+        };
+        let settle = || tokio::time::sleep(Duration::from_millis(10));
+
+        // Leading edge: first change (empty -> empty is a push of []).
+        set(false);
+        settle().await;
+        assert_eq!(rx.try_recv().unwrap().active_members.len(), 0);
+        // Two changes inside the window: one trailing push of the latest.
+        set(true);
+        settle().await;
+        assert!(rx.try_recv().is_err());
+        set(false);
+        settle().await;
+        set(true);
+        settle().await;
+        assert!(rx.try_recv().is_err());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(rx.try_recv().unwrap().active_members, vec!["eth1"]);
+        assert!(rx.try_recv().is_err());
+        // A change after >= 1s is pushed at once; A->B->A inside the window
+        // then pushes nothing.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        set(false);
+        settle().await;
+        assert_eq!(rx.try_recv().unwrap().active_members.len(), 0);
+        set(true);
+        settle().await;
+        set(false);
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(rx.try_recv().is_err());
     }
 }

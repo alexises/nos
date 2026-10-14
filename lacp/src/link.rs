@@ -185,6 +185,10 @@ struct Port {
     wait_while_deadline: Instant,
     tx: TxState,
     marker_limiter: TxLimiter,
+    /// Inbound LACPDU budget (802.3 Annex 57A: 10 slow-protocol frames/s).
+    rx_limiter: TxLimiter,
+    /// LACPDUs dropped since the last accepted one (warned once per burst).
+    rx_dropped: u64,
     churn: Churn,
 }
 
@@ -222,6 +226,8 @@ impl Port {
             wait_while_deadline: far_future(),
             tx,
             marker_limiter: TxLimiter::new(Instant::now(), MAX_MARKER_PER_WINDOW),
+            rx_limiter: TxLimiter::new(Instant::now(), MAX_RX_PER_WINDOW),
+            rx_dropped: 0,
             churn,
         };
         port.report();
@@ -364,6 +370,19 @@ impl Port {
         let Ok(pdu) = packet::decode(bytes) else {
             return;
         };
+        // Dropped before touching any machine: a flood costs one decode.
+        if !self.rx_limiter.try_take(Instant::now()) {
+            self.rx_dropped += 1;
+            if self.rx_dropped == 1 {
+                warn!(interface = %self.config.interface, "lacp receive rate limit hit, dropping");
+            }
+            return;
+        }
+        if self.rx_dropped > 0 {
+            debug!(interface = %self.config.interface, dropped = self.rx_dropped, "lacp receive rate limit burst over");
+            self.rx_dropped = 0;
+        }
+        let before = (self.receive_state, self.mux_state, self.partner);
         self.partner = Some(pdu.actor);
         let (rs, action) = receive_machine::step(
             self.receive_state,
@@ -382,13 +401,17 @@ impl Port {
         );
         self.mux_state = ms;
         apply_mux_action(mux_action, &mut self.wait_while_deadline);
-        info!(
-            interface = %self.config.interface,
-            receive_state = ?self.receive_state,
-            mux_state = ?self.mux_state,
-            partner_system = ?pdu.actor.system,
-            "lacp lacpdu received"
-        );
+        if before == (self.receive_state, self.mux_state, self.partner) {
+            debug!(interface = %self.config.interface, "lacp lacpdu received, unchanged");
+        } else {
+            info!(
+                interface = %self.config.interface,
+                receive_state = ?self.receive_state,
+                mux_state = ?self.mux_state,
+                partner_system = ?pdu.actor.system,
+                "lacp lacpdu received"
+            );
+        }
         self.tx.update_periodic(
             &self.config.interface,
             self.config.actor_active,
@@ -646,6 +669,8 @@ const MAX_TX_PER_WINDOW: u8 = 3;
 /// Marker Responses get their own budget so a Marker flood can't starve
 /// LACPDUs; 3 + 5 stays under 802.3 Annex 57A's 10 slow-protocol frames/s.
 const MAX_MARKER_PER_WINDOW: u8 = 5;
+/// Inbound LACPDUs per `TX_WINDOW`; LACPDUs only (Markers have their own limiter).
+const MAX_RX_PER_WINDOW: u8 = 10;
 const TX_WINDOW: Duration = Duration::from_secs(1);
 
 struct TxLimiter {
