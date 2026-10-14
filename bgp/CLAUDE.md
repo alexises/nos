@@ -138,7 +138,7 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE, per-route `info!`): run
 | `session.rs`, `tcp.rs`, `collision.rs` | `SessionManager`, `diff_peers`, `ao_delta`; VRF-scoped sockets; `PeerSlot` |
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
 | `message.rs`, `evpn.rs`, `as_path.rs` | Wire codecs (`BgpCodec` is BGP, not postcard) |
-| `rib.rs`, `rib/` | Adj-RIB/Loc-RIB, decision, `aggregate.rs`, `evpn_out.rs`, `shared.rs` (`SharedRib`) |
+| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `shared` (`SharedRib`), `tests/` |
 | `rib_push_client.rs`, `fdb_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); `igp_client` polls every 2s; a `nos-ribd` restart goes unnoticed until the next change |
 | `config_client.rs`, `watchdog_client.rs`, `rib_client.rs` | Reimplemented clients (star dependency graph) |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
