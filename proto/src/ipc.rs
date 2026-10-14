@@ -24,9 +24,22 @@ pub enum Request {
     /// Opens a named transaction, creating it from `base` if it doesn't
     /// already exist, or resuming its current in-progress config unchanged
     /// (ignoring `base`) if it does.
-    OpenTransaction { name: String, base: TransactionBase },
+    OpenTransaction {
+        name: String,
+        base: TransactionBase,
+        /// The person on whose behalf `nos-restd` calls (its authenticated
+        /// REST user), for the audit log. `None` from every other client;
+        /// `nos-configd` ignores it unless the caller is `Restd` and uses
+        /// the certificate name for a `User`.
+        actor: Option<String>,
+    },
     /// Applies one edit to a named transaction's in-progress config.
-    ApplyOp { name: String, op: ConfigOp },
+    ApplyOp {
+        name: String,
+        op: ConfigOp,
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
+    },
     /// One-shot fetch of a named transaction's current in-progress config.
     GetTransaction { name: String },
     /// Validates a named transaction and, if valid, atomically promotes it
@@ -35,7 +48,12 @@ pub enum Request {
     /// `if_match` is an RFC 9110 §13.1.1 precondition: `Some(g)` refuses the
     /// commit unless the transaction's `generation` is still `g`; `None` is
     /// unconditional.
-    CommitTransaction { name: String, if_match: Option<u64> },
+    CommitTransaction {
+        name: String,
+        if_match: Option<u64>,
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
+    },
     /// Deletes a named transaction without touching the running config.
     /// `if_match` as on `CommitTransaction`.
     DiscardTransaction { name: String, if_match: Option<u64> },

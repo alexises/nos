@@ -7,10 +7,12 @@
 //! contains an encoded `/` (a static route's subnet, `10.1.0.0%2F16`) stays one
 //! segment — decoding only happens per segment, after the split.
 
+use crate::auth::PeerUser;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use axum::Json;
 use nos_proto::config_path;
 use nos_proto::{Config, ConfigDiff, Event, Request, TransactionBase, TransactionSnapshot};
@@ -127,6 +129,7 @@ fn if_match(headers: &HeaderMap) -> ApiResult<Option<u64>> {
 #[utoipa::path(post, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Open (or resume) a transaction", params(("tx" = String, Path, description = "transaction name"), ("base" = Option<String>, Query, description = "blank | current (default current)")), responses((status = 201, body = TransactionSnapshot, description = "created; `ETag` is the transaction's generation"), (status = 200, body = TransactionSnapshot, description = "resumed; `ETag` is the transaction's generation"), (status = 400, body = ErrorBody)))]
 pub async fn open(
     State(d): State<Daemons>,
+    Extension(PeerUser(actor)): Extension<PeerUser>,
     uri: Uri,
     Query(q): Query<OpenQuery>,
 ) -> ApiResult<Response> {
@@ -145,7 +148,10 @@ pub async fn open(
             )))
         }
     };
-    let snap = snapshot(d.config(Request::OpenTransaction { name, base }).await?)?;
+    let snap = snapshot(
+        d.config(Request::OpenTransaction { name, base, actor })
+            .await?,
+    )?;
     let status = if snap.resumed {
         StatusCode::OK
     } else {
@@ -250,6 +256,7 @@ pub async fn diff(State(d): State<Daemons>, uri: Uri) -> ApiResult<Json<ConfigDi
 #[utoipa::path(post, path = "/v1/transactions/{tx}/commit", tag = "transactions", summary = "Validate and commit", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; refused (412) unless it still matches")), responses((status = 200, body = CommitResult), (status = 422, body = ErrorBody, description = "validation failed; the transaction stays open"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation; the transaction stays open")))]
 pub async fn commit(
     State(d): State<Daemons>,
+    Extension(PeerUser(actor)): Extension<PeerUser>,
     uri: Uri,
     headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {
@@ -257,6 +264,7 @@ pub async fn commit(
     let if_match = if_match(&headers)?;
     match d
         .config(Request::CommitTransaction {
+            actor,
             name: name.clone(),
             if_match,
         })

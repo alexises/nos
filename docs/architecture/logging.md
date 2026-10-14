@@ -9,3 +9,6 @@ Every daemon (`nos-configd`, each `nos-bgpd`/`nos-ribd` instance, `nos-interface
 
 
 `nos_log_client::install_panic_hook()` routes panics through the same layers (stderr and `nos-logd`) before aborting; the flush is a fixed ~200 ms sleep, best effort since the channel is `try_send`. See [supervision](supervision.md).
+
+- **Source is stamped by `nos-logd` from the pushing daemon's certificate** (`nos-<daemon>` plus `[<name>]` when the certificate has one: `nos-bgpd[r1]`, `nos-interfaced`); the `source` a client wrote in a `Push` is overwritten, so a daemon cannot pass itself off as another (#400).
+- User-controlled strings (login names, transaction names) are logged Debug-escaped (`user="admin"`), so a newline or ANSI sequence in a name cannot forge a line.

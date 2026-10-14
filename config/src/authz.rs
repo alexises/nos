@@ -36,6 +36,7 @@ mod tests {
         Request::OpenTransaction {
             name: "t".into(),
             base: TransactionBase::Blank,
+            actor: None,
         }
     }
 

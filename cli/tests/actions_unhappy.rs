@@ -168,7 +168,7 @@ fn fake_configd(path: &Path, kind: Configd) {
             Request::ApplyOp { name, .. } if named(&name) || name == "noapply" => {
                 Event::Error("no".to_string())
             }
-            Request::ApplyOp { name, op } => match op.apply(&mut cfg) {
+            Request::ApplyOp { name, op, .. } => match op.apply(&mut cfg) {
                 Ok(()) => Event::Transaction(snapshot(&name, &cfg)),
                 Err(e) => Event::Error(e.to_string()),
             },

@@ -34,7 +34,7 @@ fn fake_configd(path: &Path) {
             Request::OpenTransaction { name, .. } | Request::GetTransaction { name } => {
                 Event::Transaction(snapshot(&name, &cfg))
             }
-            Request::ApplyOp { name, op } => match op.apply(&mut cfg) {
+            Request::ApplyOp { name, op, .. } => match op.apply(&mut cfg) {
                 Ok(()) => Event::Transaction(snapshot(&name, &cfg)),
                 Err(e) => Event::Error(e.to_string()),
             },

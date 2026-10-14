@@ -70,6 +70,18 @@ async fn serve(incoming: Incoming, store: LogStore) {
     handle_connection(stream, role, name, store).await;
 }
 
+/// `nos-<daemon>` plus `[<name>]` when the certificate carries a name: the
+/// shape every daemon already uses (`nos-bgpd[r1]`, `nos-interfaced`).
+fn stamped_source(role: Role, name: &str) -> String {
+    let role = role.as_str();
+    let d = if role.ends_with('d') { "" } else { "d" };
+    if name.is_empty() {
+        format!("nos-{role}{d}")
+    } else {
+        format!("nos-{role}{d}[{name}]")
+    }
+}
+
 async fn handle_connection(stream: Stream, role: Role, name: String, store: LogStore) {
     let (read_half, write_half) = split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<LogRequest>::default());
@@ -88,7 +100,12 @@ async fn handle_connection(stream: Stream, role: Role, name: String, store: LogS
             break;
         }
         match req {
-            LogRequest::Push(entry) => store.record(entry).await,
+            LogRequest::Push(mut entry) => {
+                // The source is who the certificate says, never what the
+                // sender wrote: a daemon can't pass itself off as another.
+                entry.source = stamped_source(role, &name);
+                store.record(entry).await;
+            }
             LogRequest::GetLogs { source, limit } => {
                 let logs = store.snapshot(source.as_deref(), limit).await;
                 trace!(source = ?source, limit = ?limit, count = logs.len(), "served GetLogs query");
@@ -159,6 +176,13 @@ mod tests {
     use nos_pki::PeerId;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn source_comes_from_the_certificate() {
+        assert_eq!(stamped_source(Role::Bgpd, "r1"), "nos-bgpd[r1]");
+        assert_eq!(stamped_source(Role::Interfaced, ""), "nos-interfaced");
+        assert_eq!(stamped_source(Role::Watchdog, ""), "nos-watchdogd");
+    }
 
     #[test]
     fn daemons_push_and_people_read() {

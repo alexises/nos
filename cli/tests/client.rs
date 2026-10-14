@@ -185,6 +185,7 @@ async fn open_transaction_returns_snapshot_on_success() {
     let server = tokio::spawn(serve_once(
         listener,
         Request::OpenTransaction {
+            actor: None,
             name: "demo".to_string(),
             base: TransactionBase::Blank,
         },
@@ -209,6 +210,7 @@ async fn open_transaction_returns_daemon_error() {
     let server = tokio::spawn(serve_once(
         listener,
         Request::OpenTransaction {
+            actor: None,
             name: "demo".to_string(),
             base: TransactionBase::Current,
         },
@@ -235,6 +237,7 @@ async fn apply_op_returns_snapshot_on_success() {
     let server = tokio::spawn(serve_once(
         listener,
         Request::ApplyOp {
+            actor: None,
             name: "demo".to_string(),
             op: op.clone(),
         },
@@ -259,6 +262,7 @@ async fn apply_op_returns_daemon_error() {
     let server = tokio::spawn(serve_once(
         listener,
         Request::ApplyOp {
+            actor: None,
             name: "demo".to_string(),
             op: op.clone(),
         },
@@ -320,6 +324,7 @@ async fn commit_transaction_returns_ok_on_success() {
     let server = tokio::spawn(serve_once(
         listener,
         Request::CommitTransaction {
+            actor: None,
             name: "demo".to_string(),
             if_match: None,
         },
@@ -340,6 +345,7 @@ async fn commit_transaction_returns_daemon_error() {
     let server = tokio::spawn(serve_once(
         listener,
         Request::CommitTransaction {
+            actor: None,
             name: "demo".to_string(),
             if_match: None,
         },

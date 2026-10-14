@@ -2487,6 +2487,14 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     if !running.contains("\"rest-pl\"") || !running.contains("\"hostname\":\"rest-host\"") {
         bail!("committed transaction is not in the running config");
     }
+    // The audit trail names the REST user, not just `restd`: configd's commit
+    // line and restd's request line both carry it (#400).
+    a.wait(&format!(
+        "config commit audit transaction=\"{REST_TX}\" actor=\"{E2E_USER}\""
+    ))
+    .await?;
+    a.wait(&format!("rest request user=\"{E2E_USER}\" method=POST"))
+        .await?;
     // Persisted only once saved: the real nos-configd writes its real
     // --config-file. Any later phase that restarts nos-configd boots from this
     // file (with the undo below still unsaved) rather than from the seed.
@@ -2746,7 +2754,7 @@ async fn rest_transport(a: &Router) -> anyhow::Result<()> {
         bail!("router-a: login as {E2E_USER} failed");
     };
     let client = a.rest.with_identity(&identity)?;
-    let handshake = "rest tls handshake ok user=e2e alpn=h2 kx=Some(X25519MLKEM768)";
+    let handshake = "rest tls handshake ok user=\"e2e\" alpn=h2 kx=Some(X25519MLKEM768)";
     let before = a.count(handshake);
     a.rest_with(&client, Method::GET, "/v1/interfaces", None)
         .await?;

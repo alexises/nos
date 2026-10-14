@@ -479,6 +479,7 @@ async fn open_transaction_blank_and_current_over_ipc() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "blank1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -498,6 +499,7 @@ async fn open_transaction_blank_and_current_over_ipc() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "current1".to_string(),
             base: TransactionBase::Current,
         })
@@ -527,6 +529,7 @@ async fn resume_by_reopening_over_new_connection() {
         let (mut reader, mut writer) = connect(&sock_path).await;
         writer
             .send(Request::OpenTransaction {
+                actor: None,
                 name: "t1".to_string(),
                 base: TransactionBase::Blank,
             })
@@ -536,6 +539,7 @@ async fn resume_by_reopening_over_new_connection() {
 
         writer
             .send(Request::ApplyOp {
+                actor: None,
                 name: "t1".to_string(),
                 op: ensure_op("r1"),
             })
@@ -548,6 +552,7 @@ async fn resume_by_reopening_over_new_connection() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Current,
         })
@@ -577,6 +582,7 @@ async fn apply_op_over_ipc_reflects_in_get_transaction() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -586,6 +592,7 @@ async fn apply_op_over_ipc_reflects_in_get_transaction() {
 
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: ensure_op("r1"),
         })
@@ -621,6 +628,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -629,6 +637,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
     next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: ensure_op("r1"),
         })
@@ -637,6 +646,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
     next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: set_asn_op("r1", 65001),
         })
@@ -645,6 +655,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
     next_event(&mut reader).await;
     writer
         .send(Request::CommitTransaction {
+            actor: None,
             name: "t1".to_string(),
             if_match: None,
         })
@@ -678,6 +689,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -687,6 +699,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
     // Ensure leaves asn at the invalid placeholder 0.
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: ensure_op("bad"),
         })
@@ -696,6 +709,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
 
     writer
         .send(Request::CommitTransaction {
+            actor: None,
             name: "t1".to_string(),
             if_match: None,
         })
@@ -728,6 +742,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -756,6 +771,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             if_match: Some(0),
         },
         Request::CommitTransaction {
+            actor: None,
             name: "t1".to_string(),
             if_match: Some(0),
         },
@@ -793,6 +809,7 @@ async fn commit_missing_transaction_over_ipc_returns_error() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::CommitTransaction {
+            actor: None,
             name: "missing".to_string(),
             if_match: None,
         })
@@ -814,6 +831,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
     let (mut reader, mut writer) = connect(&sock_path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -822,6 +840,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
     next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: ensure_op("r1"),
         })
@@ -840,6 +859,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
 
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -878,6 +898,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
     let (mut reader_b, mut writer_b) = connect(&sock_path).await;
     writer_b
         .send(Request::OpenTransaction {
+            actor: None,
             name: "demo".to_string(),
             base: TransactionBase::Blank,
         })
@@ -886,6 +907,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
     next_event(&mut reader_b).await;
     writer_b
         .send(Request::ApplyOp {
+            actor: None,
             name: "demo".to_string(),
             op: ensure_op("r1"),
         })
@@ -894,6 +916,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
     next_event(&mut reader_b).await;
     writer_b
         .send(Request::ApplyOp {
+            actor: None,
             name: "demo".to_string(),
             op: set_asn_op("r1", 65001),
         })
@@ -902,6 +925,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
     next_event(&mut reader_b).await;
     writer_b
         .send(Request::CommitTransaction {
+            actor: None,
             name: "demo".to_string(),
             if_match: None,
         })
@@ -952,6 +976,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
     let (mut reader_c, mut writer_c) = connect(&sock_path).await;
     writer_c
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -960,6 +985,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
     next_event(&mut reader_c).await;
     writer_c
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: ConfigOp::SetHostname("router1".to_string()),
         })
@@ -968,6 +994,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
     next_event(&mut reader_c).await;
     writer_c
         .send(Request::CommitTransaction {
+            actor: None,
             name: "t1".to_string(),
             if_match: None,
         })
@@ -999,6 +1026,7 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
     let (mut reader, mut writer) = connect(&path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -1024,6 +1052,7 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
     ] {
         writer
             .send(Request::ApplyOp {
+                actor: None,
                 name: "t1".to_string(),
                 op,
             })
@@ -1034,6 +1063,7 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
 
     writer
         .send(Request::CommitTransaction {
+            actor: None,
             name: "t1".to_string(),
             if_match: None,
         })
@@ -1071,6 +1101,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
     let (mut reader, mut writer) = connect(&path).await;
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "t1".to_string(),
             base: TransactionBase::Blank,
         })
@@ -1080,6 +1111,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
 
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: ensure_routing_table_op("rt1"),
         })
@@ -1088,6 +1120,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
     next_event(&mut reader).await;
     writer
         .send(Request::ApplyOp {
+            actor: None,
             name: "t1".to_string(),
             op: set_routing_table_bgp_instance_op("rt1", "does-not-exist"),
         })
@@ -1097,6 +1130,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
 
     writer
         .send(Request::CommitTransaction {
+            actor: None,
             name: "t1".to_string(),
             if_match: None,
         })
@@ -1152,6 +1186,7 @@ async fn a_daemon_role_can_read_but_not_edit() {
 
     writer
         .send(Request::OpenTransaction {
+            actor: None,
             name: "sneaky".into(),
             base: TransactionBase::Blank,
         })
@@ -1184,6 +1219,7 @@ async fn restd_and_users_can_edit() {
         let (mut reader, mut writer) = connect_as(&path, role, name).await;
         writer
             .send(Request::OpenTransaction {
+                actor: None,
                 name: format!("t-{role}"),
                 base: TransactionBase::Blank,
             })
@@ -1259,6 +1295,7 @@ async fn every_role_is_gated_live_for_reads_edits_and_hash_upgrades() {
 
         writer
             .send(Request::OpenTransaction {
+                actor: None,
                 name: format!("tx-{}", role.as_str()),
                 base: TransactionBase::Blank,
             })

@@ -243,7 +243,7 @@ async fn login(
     .await
     .unwrap_or((false, None));
     if !ok {
-        info!(user = %user, "login rejected");
+        info!(user = ?user, "login rejected");
         return WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string());
     }
     if let (Some(old), Some(new)) = (old, upgraded) {
@@ -259,13 +259,13 @@ async fn login(
         )
         .await
         {
-            Ok(()) => info!(user = %user, "upgraded password hash to current parameters"),
-            Err(e) => warn!(user = %user, error = %e, "could not upgrade password hash"),
+            Ok(()) => info!(user = ?user, "upgraded password hash to current parameters"),
+            Err(e) => warn!(user = ?user, error = %e, "could not upgrade password hash"),
         }
     }
     let event = issue(ctx, user, csr_der, realm);
     if matches!(event, WatchdogEvent::Issued { .. }) {
-        info!(user = %user, rest = matches!(realm, Realm::Rest), "login accepted");
+        info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
     }
     event
 }
@@ -277,12 +277,12 @@ async fn renew(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogE
         Ok(users) if users.iter().any(|u| u.name == user) => {
             let event = issue(ctx, user, csr_der, realm);
             if matches!(event, WatchdogEvent::Issued { .. }) {
-                info!(user = %user, rest = matches!(realm, Realm::Rest), "user certificate renewed");
+                info!(user = ?user, rest = matches!(realm, Realm::Rest), "user certificate renewed");
             }
             event
         }
         Ok(_) => {
-            info!(user = %user, "renewal refused, user no longer exists");
+            info!(user = ?user, "renewal refused, user no longer exists");
             WatchdogEvent::Denied("no such user".to_string())
         }
         Err(e) => {
@@ -303,7 +303,7 @@ fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogEvent {
             lifetime_secs: ctx.pki.user_lifetime.as_secs(),
         },
         Err(e) => {
-            warn!(user = %user, error = %e, "rejected a malformed certificate request");
+            warn!(user = ?user, error = %e, "rejected a malformed certificate request");
             WatchdogEvent::Denied("bad certificate request".to_string())
         }
     }

@@ -103,7 +103,7 @@ async fn serve(incoming: Incoming, store: ConfigStore) {
 /// Handles every `Request` variant except `Subscribe`/`Unsubscribe`, which
 /// the caller manages itself since they control the connection's forwarder
 /// task rather than producing a single reply `Event`.
-async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
+async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) -> Option<Event> {
     Some(match req {
         Request::Get => Event::Config(store.running_snapshot().await),
         Request::Save => match store.save_to_disk().await {
@@ -113,11 +113,15 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
                 Event::Error(e.to_string())
             }
         },
-        Request::OpenTransaction { name, base } => {
+        Request::OpenTransaction { name, base, actor } => {
+            debug!(transaction = %name, actor = ?effective_actor(caller, actor), "transaction open");
             Event::Transaction(store.open_transaction(&name, base).await)
         }
-        Request::ApplyOp { name, op } => match store.apply_op(&name, op).await {
-            Ok(snap) => Event::Transaction(snap),
+        Request::ApplyOp { name, op, actor } => match store.apply_op(&name, op).await {
+            Ok(snap) => {
+                debug!(transaction = %name, actor = ?effective_actor(caller, actor), "transaction op applied");
+                Event::Transaction(snap)
+            }
             Err(e) => {
                 debug!(transaction = %name, error = %e, "apply op failed");
                 Event::Error(e.to_string())
@@ -130,15 +134,20 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
                 Event::Error(e.to_string())
             }
         },
-        Request::CommitTransaction { name, if_match } => {
-            match store.commit_transaction(&name, if_match).await {
-                Ok(()) => Event::Committed,
-                Err(e) => {
-                    warn!(transaction = %name, error = %e, "commit failed");
-                    Event::Error(e.to_string())
-                }
+        Request::CommitTransaction {
+            name,
+            if_match,
+            actor,
+        } => match store.commit_transaction(&name, if_match).await {
+            Ok(()) => {
+                info!(transaction = ?name, actor = ?effective_actor(caller, actor), "config commit audit");
+                Event::Committed
             }
-        }
+            Err(e) => {
+                warn!(transaction = %name, error = %e, "commit failed");
+                Event::Error(e.to_string())
+            }
+        },
         Request::DiscardTransaction { name, if_match } => {
             match store.discard_transaction(&name, if_match).await {
                 Ok(()) => Event::Discarded,
@@ -177,13 +186,24 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
             match store.upgrade_password_hash(&user, &old, new).await {
                 Ok(()) => Event::Committed,
                 Err(e) => {
-                    debug!(user = %user, error = %e, "password hash upgrade refused");
+                    debug!(user = ?user, error = %e, "password hash upgrade refused");
                     Event::Error(e.to_string())
                 }
             }
         }
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
+}
+
+/// Who a transaction request is attributed to. A `User` is its certificate
+/// name, whatever the body says; `Restd` vouches for the REST user it names;
+/// anyone else has no attribution to give. Debug-printed by callers, so a
+/// hostile name can't forge a log line.
+fn effective_actor(caller: &Caller, body: Option<String>) -> String {
+    match caller.role {
+        Role::Restd => body.unwrap_or_else(|| "unknown".to_string()),
+        _ => caller.name.clone(),
+    }
 }
 
 async fn handle_connection<S>(stream: S, caller: Caller, store: ConfigStore)
@@ -262,7 +282,7 @@ where
         // `Request`'s Debug never prints a password (`UserOp` hides it).
         let shown = format!("{req:?}");
         warn!(
-            role = caller.role.as_str(), name = %caller.name,
+            role = caller.role.as_str(), name = ?caller.name,
             request = %shown.chars().take(80).collect::<String>(),
             "config request refused: this role may not send it"
         );
@@ -295,7 +315,7 @@ where
             debug!("IPC client unsubscribed");
             return ControlFlow::Continue(());
         }
-        req => match dispatch_request(store, req).await {
+        req => match dispatch_request(store, caller, req).await {
             Some(reply) => reply,
             None => return ControlFlow::Continue(()),
         },
