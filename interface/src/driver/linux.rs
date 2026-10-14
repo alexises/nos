@@ -221,7 +221,7 @@ impl LinuxInterfaceDriver {
         port_aggregate_registry_path: PathBuf,
     ) -> Result<Self, DriverError> {
         let (connection, handle, _) = rtnetlink::new_connection()?;
-        tokio::spawn(connection);
+        nos_log_client::spawn_critical("rtnetlink-connection", connection);
         let links = Arc::new(LinkHub::new(links::HUB_CAPACITY));
         tokio::spawn(run_link_watcher(links.clone()));
         Ok(Self {

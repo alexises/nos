@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx,
         ))
         .init();
+    nos_log_client::install_panic_hook();
 
     let mut initial = persistence::load_or_default(&args.config_file)
         .with_context(|| format!("failed to load config from {}", args.config_file.display()))?;

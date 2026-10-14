@@ -96,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
         .init();
+    nos_log_client::install_panic_hook();
     info!(domain = %args.domain, peer = ?identity.peer(), driver = %args.driver, "nos-fdbd starting");
 
     let listen_socket = args

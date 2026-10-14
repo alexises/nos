@@ -84,6 +84,10 @@ opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
 
+# A panic in any task must take the daemon down so the watchdog restarts it (#419).
+[profile.release]
+panic = "abort"
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 

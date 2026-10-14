@@ -240,7 +240,7 @@ pub struct LinuxRibDriver {
 impl LinuxRibDriver {
     pub fn new(registry_path: PathBuf) -> Result<Self, DriverError> {
         let (connection, handle, _) = rtnetlink::new_connection()?;
-        tokio::spawn(connection);
+        nos_log_client::spawn_critical("rtnetlink-connection", connection);
         let route_channel = RouteChannel::new()?;
         Ok(Self {
             handle,

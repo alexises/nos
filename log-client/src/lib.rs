@@ -145,3 +145,72 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
         _ = shutdown.changed() => *shutdown.borrow(),
     }
 }
+
+/// Message for a panic: `file:line`, thread and payload text.
+fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    let text = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    let at = info.location().map_or_else(
+        || "unknown location".to_string(),
+        |l| format!("{}:{}", l.file(), l.line()),
+    );
+    let thread = std::thread::current();
+    format!(
+        "panic at {at}: {text} (thread {})",
+        thread.name().unwrap_or("<unnamed>")
+    )
+}
+
+/// Replaces the default panic hook: log the panic through `tracing` (stderr
+/// and `nos-logd`), give the forwarding task a bounded moment to push it,
+/// then abort so the watchdog restarts the daemon. A panic in a spawned task
+/// would otherwise only kill that task and leave the daemon half alive (#419).
+/// Aborts in every profile; call it from daemon `main`s only, after the
+/// subscriber is initialised.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("{}", panic_message(info));
+        // ponytail: fixed sleep, the layer's channel is try_send so delivery
+        // is best-effort; a synchronous flush API if this proves lossy.
+        std::thread::sleep(Duration::from_millis(200));
+        std::process::abort();
+    }));
+}
+
+/// Spawns a task that must live as long as the process (an rtnetlink
+/// connection). If it ever completes the daemon is useless: log and exit so
+/// the watchdog restarts it. Shutdown drops the runtime, so it never trips.
+pub fn spawn_critical<F>(name: &'static str, task: F)
+where
+    F: std::future::Future + Send + 'static,
+{
+    tokio::spawn(async move {
+        task.await;
+        tracing::error!(task = name, "long-lived task ended unexpectedly, exiting");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::process::exit(1);
+    });
+}
+
+#[cfg(test)]
+mod panic_tests {
+    #[test]
+    fn message_formats_str_and_string_payloads() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |i| {
+            s.lock().unwrap().push(super::panic_message(i));
+        }));
+        let _ = std::panic::catch_unwind(|| panic!("static"));
+        let _ = std::panic::catch_unwind(|| panic!("owned {}", 1));
+        std::panic::set_hook(prev);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].contains("panic at ") && seen[0].contains(": static"));
+        assert!(seen[1].contains(": owned 1"));
+    }
+}

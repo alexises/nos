@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
         ))
         .init();
+    nos_log_client::install_panic_hook();
     info!(listen_socket = %args.listen_socket.display(), "nos-lacpd starting");
 
     let Some(config_socket) = watchdog_client::resolve_with_retry(
