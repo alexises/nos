@@ -1302,6 +1302,7 @@ fn encode_prefixes_v4(nets: &[Ipv4Net], path_ids: &[u32]) -> Vec<u8> {
 /// message actually carried that attribute — callers decide mandatory-
 /// attribute enforcement, since that depends on whether the UPDATE carries
 /// any NLRI (legacy or `mp_reach`) at all.
+#[derive(Default)]
 struct ParsedAttributes {
     origin: Option<Origin>,
     as_path: Option<AsPath>,
@@ -1353,32 +1354,185 @@ fn expected_flags(attr_type: u8) -> Option<u8> {
     }
 }
 
+/// `parse_path_attributes`' accumulator: the decoded fields plus the two
+/// 4-octet carriers (RFC 6793) merged after the walk.
+#[derive(Default)]
+struct AttrAcc {
+    out: ParsedAttributes,
+    as4_path: Option<AsPath>,
+    as4_aggregator: Option<Aggregator>,
+}
+
+/// Decodes one path attribute's `value` into `acc` — the per-type `match` of
+/// `parse_path_attributes`, split out for length (#425). A malformed value
+/// sets `acc.out.withdraw` (RFC 7606); only MP_* decode failures are errors.
+fn parse_one_attribute(
+    attr_type: u8,
+    value: &[u8],
+    add_path_afis: &HashSet<u16>,
+    two_octet_as: bool,
+    acc: &mut AttrAcc,
+) -> Result<(), WireError> {
+    match attr_type {
+        ATTR_ORIGIN => {
+            if value.len() != 1 {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            match value[0] {
+                0 => acc.out.origin = Some(Origin::Igp),
+                1 => acc.out.origin = Some(Origin::Egp),
+                2 => acc.out.origin = Some(Origin::Incomplete),
+                _ => acc.out.withdraw = true,
+            }
+        }
+        ATTR_AS_PATH => match parse_as_path(value, if two_octet_as { 2 } else { 4 }) {
+            Ok(p) => acc.out.as_path = Some(p),
+            Err(_) => acc.out.withdraw = true,
+        },
+        // RFC 7606 §7.11 / RFC 6793 §6: a malformed AS4_PATH, or one
+        // carrying confederation segments, is discarded — the route
+        // stays, with the 2-octet AS_PATH as received.
+        ATTR_AS4_PATH if two_octet_as => match parse_as_path(value, 4) {
+            Ok(p) if p.has_confed() => {
+                debug!("discarding as4_path: it carries confederation segments");
+            }
+            Ok(p) => acc.as4_path = Some(p),
+            Err(_) => debug!("discarding malformed as4_path"),
+        },
+        ATTR_NEXT_HOP => {
+            if value.len() != 4 {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.next_hop = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
+        }
+        ATTR_LOCAL_PREF => {
+            if value.len() != 4 {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.local_pref = Some(u32::from_be_bytes(value.try_into().unwrap()));
+        }
+        ATTR_MULTI_EXIT_DISC => {
+            if value.len() != 4 {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.med = Some(u32::from_be_bytes(value.try_into().unwrap()));
+        }
+        ATTR_ORIGINATOR_ID => {
+            if value.len() != 4 {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.originator_id = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
+        }
+        ATTR_CLUSTER_LIST => {
+            if !value.len().is_multiple_of(4) {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.cluster_list = value
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
+                .collect();
+        }
+        ATTR_COMMUNITY => {
+            if !value.len().is_multiple_of(4) {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.communities = value
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_be_bytes(*c))
+                .collect();
+        }
+        ATTR_EXTENDED_COMMUNITIES => {
+            if !value.len().is_multiple_of(8) {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.extended_communities = value
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_be_bytes(*c))
+                .collect();
+        }
+        ATTR_LARGE_COMMUNITY => {
+            if !value.len().is_multiple_of(12) {
+                acc.out.withdraw = true;
+                return Ok(());
+            }
+            acc.out.large_communities = value
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .map(|c| {
+                    (
+                        u32::from_be_bytes(c[0..4].try_into().unwrap()),
+                        u32::from_be_bytes(c[4..8].try_into().unwrap()),
+                        u32::from_be_bytes(c[8..12].try_into().unwrap()),
+                    )
+                })
+                .collect();
+        }
+        // RFC 7606 §7.7/§7.8: a malformed one is discarded, not a withdraw.
+        ATTR_ATOMIC_AGGREGATE => acc.out.atomic_aggregate = value.is_empty(),
+        ATTR_AGGREGATOR => {
+            acc.out.aggregator = match (value.len(), two_octet_as) {
+                (6, true) => Some(Aggregator {
+                    asn: u32::from(u16::from_be_bytes([value[0], value[1]])),
+                    router_id: Ipv4Addr::new(value[2], value[3], value[4], value[5]),
+                }),
+                (8, false) => Some(Aggregator {
+                    asn: u32::from_be_bytes(value[0..4].try_into().unwrap()),
+                    router_id: Ipv4Addr::new(value[4], value[5], value[6], value[7]),
+                }),
+                _ => None,
+            }
+        }
+        ATTR_AS4_AGGREGATOR if two_octet_as && value.len() == 8 => {
+            acc.as4_aggregator = Some(Aggregator {
+                asn: u32::from_be_bytes(value[0..4].try_into().unwrap()),
+                router_id: Ipv4Addr::new(value[4], value[5], value[6], value[7]),
+            });
+        }
+        ATTR_OTC => {
+            let Ok(v) = <[u8; 4]>::try_from(value) else {
+                acc.out.withdraw = true;
+                return Ok(());
+            };
+            acc.out.otc = Some(u32::from_be_bytes(v));
+        }
+        ATTR_PMSI_TUNNEL => acc.out.pmsi = decode_pmsi(value),
+        ATTR_MP_REACH_NLRI => acc
+            .out
+            .mp_reach
+            .push(decode_mp_reach(value, add_path_afis)?),
+        ATTR_MP_UNREACH_NLRI => acc
+            .out
+            .mp_unreach
+            .push(decode_mp_unreach(value, add_path_afis)?),
+        _ => {
+            // Unknown attribute type: skip by declared length, never an
+            // error — same philosophy as unrecognized OPEN capabilities.
+        }
+    }
+    Ok(())
+}
+
 fn parse_path_attributes(
     mut data: &[u8],
     add_path_afis: &HashSet<u16>,
     two_octet_as: bool,
 ) -> Result<ParsedAttributes, WireError> {
-    let mut origin = None;
-    let mut as_path: Option<AsPath> = None;
-    let mut as4_path: Option<AsPath> = None;
-    let mut next_hop = None;
-    let mut local_pref = None;
-    let mut med = None;
-    let mut originator_id = None;
-    let mut cluster_list = Vec::new();
-    let mut communities = Vec::new();
-    let mut extended_communities = Vec::new();
-    let mut large_communities = Vec::new();
-    let mut pmsi = None;
-    let mut atomic_aggregate = false;
-    let mut aggregator: Option<Aggregator> = None;
-    let mut as4_aggregator = None;
-    let mut otc = None;
-    let mut mp_reach = Vec::new();
-    let mut mp_unreach = Vec::new();
-    // RFC 7606 treat-as-withdraw: set by any attribute whose *content* is
-    // malformed. Framing errors (below, outside `'attr`) still reset.
-    let mut withdraw = false;
+    let mut acc = AttrAcc::default();
     // RFC 7606 §3(g): types already seen in this UPDATE.
     let mut seen = [false; 256];
 
@@ -1414,7 +1568,7 @@ fn parse_path_attributes(
                     if is_mp {
                         return Err(WireError::MalformedUpdate);
                     }
-                    withdraw = true;
+                    acc.out.withdraw = true;
                     break 'attr;
                 }
             }
@@ -1427,187 +1581,30 @@ fn parse_path_attributes(
                 debug!(attr_type, "discarding duplicate path attribute");
                 break 'attr;
             }
-            match attr_type {
-                ATTR_ORIGIN => {
-                    if value.len() != 1 {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    match value[0] {
-                        0 => origin = Some(Origin::Igp),
-                        1 => origin = Some(Origin::Egp),
-                        2 => origin = Some(Origin::Incomplete),
-                        _ => withdraw = true,
-                    }
-                }
-                ATTR_AS_PATH => match parse_as_path(value, if two_octet_as { 2 } else { 4 }) {
-                    Ok(p) => as_path = Some(p),
-                    Err(_) => withdraw = true,
-                },
-                // RFC 7606 §7.11 / RFC 6793 §6: a malformed AS4_PATH, or one
-                // carrying confederation segments, is discarded — the route
-                // stays, with the 2-octet AS_PATH as received.
-                ATTR_AS4_PATH if two_octet_as => match parse_as_path(value, 4) {
-                    Ok(p) if p.has_confed() => {
-                        debug!("discarding as4_path: it carries confederation segments");
-                    }
-                    Ok(p) => as4_path = Some(p),
-                    Err(_) => debug!("discarding malformed as4_path"),
-                },
-                ATTR_NEXT_HOP => {
-                    if value.len() != 4 {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    next_hop = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
-                }
-                ATTR_LOCAL_PREF => {
-                    if value.len() != 4 {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    local_pref = Some(u32::from_be_bytes(value.try_into().unwrap()));
-                }
-                ATTR_MULTI_EXIT_DISC => {
-                    if value.len() != 4 {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    med = Some(u32::from_be_bytes(value.try_into().unwrap()));
-                }
-                ATTR_ORIGINATOR_ID => {
-                    if value.len() != 4 {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    originator_id = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
-                }
-                ATTR_CLUSTER_LIST => {
-                    if !value.len().is_multiple_of(4) {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    cluster_list = value
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
-                        .collect();
-                }
-                ATTR_COMMUNITY => {
-                    if !value.len().is_multiple_of(4) {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    communities = value
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .map(|c| u32::from_be_bytes(*c))
-                        .collect();
-                }
-                ATTR_EXTENDED_COMMUNITIES => {
-                    if !value.len().is_multiple_of(8) {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    extended_communities = value
-                        .as_chunks::<8>()
-                        .0
-                        .iter()
-                        .map(|c| u64::from_be_bytes(*c))
-                        .collect();
-                }
-                ATTR_LARGE_COMMUNITY => {
-                    if !value.len().is_multiple_of(12) {
-                        withdraw = true;
-                        break 'attr;
-                    }
-                    large_communities = value
-                        .as_chunks::<12>()
-                        .0
-                        .iter()
-                        .map(|c| {
-                            (
-                                u32::from_be_bytes(c[0..4].try_into().unwrap()),
-                                u32::from_be_bytes(c[4..8].try_into().unwrap()),
-                                u32::from_be_bytes(c[8..12].try_into().unwrap()),
-                            )
-                        })
-                        .collect();
-                }
-                // RFC 7606 §7.7/§7.8: a malformed one is discarded, not a withdraw.
-                ATTR_ATOMIC_AGGREGATE => atomic_aggregate = value.is_empty(),
-                ATTR_AGGREGATOR => {
-                    aggregator = match (value.len(), two_octet_as) {
-                        (6, true) => Some(Aggregator {
-                            asn: u32::from(u16::from_be_bytes([value[0], value[1]])),
-                            router_id: Ipv4Addr::new(value[2], value[3], value[4], value[5]),
-                        }),
-                        (8, false) => Some(Aggregator {
-                            asn: u32::from_be_bytes(value[0..4].try_into().unwrap()),
-                            router_id: Ipv4Addr::new(value[4], value[5], value[6], value[7]),
-                        }),
-                        _ => None,
-                    }
-                }
-                ATTR_AS4_AGGREGATOR if two_octet_as && value.len() == 8 => {
-                    as4_aggregator = Some(Aggregator {
-                        asn: u32::from_be_bytes(value[0..4].try_into().unwrap()),
-                        router_id: Ipv4Addr::new(value[4], value[5], value[6], value[7]),
-                    });
-                }
-                ATTR_OTC => {
-                    let Ok(v) = <[u8; 4]>::try_from(value) else {
-                        withdraw = true;
-                        break 'attr;
-                    };
-                    otc = Some(u32::from_be_bytes(v));
-                }
-                ATTR_PMSI_TUNNEL => pmsi = decode_pmsi(value),
-                ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
-                ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
-                _ => {
-                    // Unknown attribute type: skip by declared length, never an
-                    // error — same philosophy as unrecognized OPEN capabilities.
-                }
-            }
+            parse_one_attribute(attr_type, value, add_path_afis, two_octet_as, &mut acc)?;
         }
 
         data = &data[header_len + len..];
     }
 
+    let AttrAcc {
+        mut out,
+        as4_path,
+        as4_aggregator,
+    } = acc;
     // RFC 6793 §4.2.3, see `AsPath::merge_as4`.
-    if let (Some(path), Some(as4)) = (as_path.as_mut(), as4_path) {
+    if let (Some(path), Some(as4)) = (out.as_path.as_mut(), as4_path) {
         path.merge_as4(&as4);
     }
 
     // RFC 6793 §4.2.3: AS4_AGGREGATOR replaces an AGGREGATOR holding AS_TRANS.
-    if let (Some(agg), Some(as4)) = (aggregator.as_mut(), as4_aggregator) {
+    if let (Some(agg), Some(as4)) = (out.aggregator.as_mut(), as4_aggregator) {
         if agg.asn == u32::from(AS_TRANS) {
             *agg = as4;
         }
     }
 
-    Ok(ParsedAttributes {
-        origin,
-        as_path,
-        next_hop,
-        local_pref,
-        med,
-        originator_id,
-        cluster_list,
-        communities,
-        extended_communities,
-        large_communities,
-        pmsi,
-        atomic_aggregate,
-        aggregator,
-        otc,
-        mp_reach,
-        mp_unreach,
-        withdraw,
-    })
+    Ok(out)
 }
 
 /// `flags(1) type(1) label(3) tunnel-id`; anything but ingress replication
@@ -1931,6 +1928,169 @@ fn encode_as_path(path: &AsPath, two_octet: bool) -> Vec<u8> {
     out
 }
 
+/// `AGGREGATOR` (and, RFC 6793 §4.2.2, `AS4_AGGREGATOR`), split out of
+/// `encode_path_attrs` for length (#425).
+fn encode_aggregator(out: &mut Vec<u8>, agg: Aggregator, two_octet_as: bool) {
+    let mut value = Vec::with_capacity(8);
+    if two_octet_as {
+        value.extend_from_slice(&u16::try_from(agg.asn).unwrap_or(AS_TRANS).to_be_bytes());
+    } else {
+        value.extend_from_slice(&agg.asn.to_be_bytes());
+    }
+    value.extend_from_slice(&agg.router_id.octets());
+    encode_attribute(out, ATTR_FLAG_OPTIONAL_TRANSITIVE, ATTR_AGGREGATOR, &value);
+    // RFC 6793 §4.2.2: the real AS rides along only when it was squashed.
+    if two_octet_as && agg.asn > u32::from(u16::MAX) {
+        let mut v = agg.asn.to_be_bytes().to_vec();
+        v.extend_from_slice(&agg.router_id.octets());
+        encode_attribute(out, ATTR_FLAG_OPTIONAL_TRANSITIVE, ATTR_AS4_AGGREGATOR, &v);
+    }
+}
+
+/// The attributes `encode_attributes` writes from `UpdateMessage::attributes`
+/// (everything but `PMSI_TUNNEL` and the `MP_*` batches), split out for
+/// length (#425). `has_nlri` gates `NEXT_HOP`.
+fn encode_path_attrs(
+    out: &mut Vec<u8>,
+    attrs: &PathAttributes,
+    has_nlri: bool,
+    two_octet_as: bool,
+) {
+    encode_attribute(
+        out,
+        ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+        ATTR_ORIGIN,
+        &[attrs.origin as u8],
+    );
+    encode_attribute(
+        out,
+        ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+        ATTR_AS_PATH,
+        &encode_as_path(&attrs.as_path, two_octet_as),
+    );
+    // RFC 6793 §4.2.2: the real path rides along only when some ASN was
+    // squashed to AS_TRANS — without confederation segments (§6).
+    if two_octet_as
+        && attrs
+            .as_path
+            .flat()
+            .iter()
+            .any(|&a| a > u32::from(u16::MAX))
+    {
+        let mut as4 = attrs.as_path.clone();
+        as4.strip_confed();
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_TRANSITIVE,
+            ATTR_AS4_PATH,
+            &encode_as_path(&as4, false),
+        );
+    }
+    if has_nlri {
+        encode_attribute(
+            out,
+            ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+            ATTR_NEXT_HOP,
+            &attrs.next_hop.octets(),
+        );
+    }
+    if attrs.atomic_aggregate {
+        encode_attribute(
+            out,
+            ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+            ATTR_ATOMIC_AGGREGATE,
+            &[],
+        );
+    }
+    if let Some(agg) = attrs.aggregator {
+        encode_aggregator(out, agg, two_octet_as);
+    }
+    if let Some(otc) = attrs.otc {
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_TRANSITIVE,
+            ATTR_OTC,
+            &otc.to_be_bytes(),
+        );
+    }
+    if let Some(local_pref) = attrs.local_pref {
+        encode_attribute(
+            out,
+            ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+            ATTR_LOCAL_PREF,
+            &local_pref.to_be_bytes(),
+        );
+    }
+    if let Some(med) = attrs.med {
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+            ATTR_MULTI_EXIT_DISC,
+            &med.to_be_bytes(),
+        );
+    }
+    if let Some(originator_id) = attrs.originator_id {
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+            ATTR_ORIGINATOR_ID,
+            &originator_id.octets(),
+        );
+    }
+    if !attrs.cluster_list.is_empty() {
+        let value: Vec<u8> = attrs
+            .cluster_list
+            .iter()
+            .flat_map(Ipv4Addr::octets)
+            .collect();
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+            ATTR_CLUSTER_LIST,
+            &value,
+        );
+    }
+    if !attrs.communities.is_empty() {
+        let value: Vec<u8> = attrs
+            .communities
+            .iter()
+            .flat_map(|c| c.to_be_bytes())
+            .collect();
+        encode_attribute(out, ATTR_FLAG_OPTIONAL_TRANSITIVE, ATTR_COMMUNITY, &value);
+    }
+    if !attrs.extended_communities.is_empty() {
+        let value: Vec<u8> = attrs
+            .extended_communities
+            .iter()
+            .flat_map(|c| c.to_be_bytes())
+            .collect();
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_TRANSITIVE,
+            ATTR_EXTENDED_COMMUNITIES,
+            &value,
+        );
+    }
+    if !attrs.large_communities.is_empty() {
+        let value: Vec<u8> = attrs
+            .large_communities
+            .iter()
+            .flat_map(|(ga, l1, l2)| {
+                ga.to_be_bytes()
+                    .into_iter()
+                    .chain(l1.to_be_bytes())
+                    .chain(l2.to_be_bytes())
+            })
+            .collect();
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_TRANSITIVE,
+            ATTR_LARGE_COMMUNITY,
+            &value,
+        );
+    }
+}
+
 /// Builds the whole path-attribute TLV list for one UPDATE: the legacy
 /// `ORIGIN`/`AS_PATH`/(`NEXT_HOP`)/`LOCAL_PREF` attributes (`NEXT_HOP` only
 /// when the legacy `nlri` field is non-empty), then one `MP_REACH_NLRI`/
@@ -1938,167 +2098,7 @@ fn encode_as_path(path: &AsPath, two_octet: bool) -> Vec<u8> {
 fn encode_attributes(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
     let mut out = Vec::new();
     if let Some(attrs) = &update.attributes {
-        encode_attribute(
-            &mut out,
-            ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
-            ATTR_ORIGIN,
-            &[attrs.origin as u8],
-        );
-        encode_attribute(
-            &mut out,
-            ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
-            ATTR_AS_PATH,
-            &encode_as_path(&attrs.as_path, two_octet_as),
-        );
-        // RFC 6793 §4.2.2: the real path rides along only when some ASN was
-        // squashed to AS_TRANS — without confederation segments (§6).
-        if two_octet_as
-            && attrs
-                .as_path
-                .flat()
-                .iter()
-                .any(|&a| a > u32::from(u16::MAX))
-        {
-            let mut as4 = attrs.as_path.clone();
-            as4.strip_confed();
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_TRANSITIVE,
-                ATTR_AS4_PATH,
-                &encode_as_path(&as4, false),
-            );
-        }
-        if !update.nlri.is_empty() {
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
-                ATTR_NEXT_HOP,
-                &attrs.next_hop.octets(),
-            );
-        }
-        if attrs.atomic_aggregate {
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
-                ATTR_ATOMIC_AGGREGATE,
-                &[],
-            );
-        }
-        if let Some(agg) = attrs.aggregator {
-            let mut value = Vec::with_capacity(8);
-            if two_octet_as {
-                value.extend_from_slice(&u16::try_from(agg.asn).unwrap_or(AS_TRANS).to_be_bytes());
-            } else {
-                value.extend_from_slice(&agg.asn.to_be_bytes());
-            }
-            value.extend_from_slice(&agg.router_id.octets());
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_TRANSITIVE,
-                ATTR_AGGREGATOR,
-                &value,
-            );
-            // RFC 6793 §4.2.2: the real AS rides along only when it was squashed.
-            if two_octet_as && agg.asn > u32::from(u16::MAX) {
-                let mut v = agg.asn.to_be_bytes().to_vec();
-                v.extend_from_slice(&agg.router_id.octets());
-                encode_attribute(
-                    &mut out,
-                    ATTR_FLAG_OPTIONAL_TRANSITIVE,
-                    ATTR_AS4_AGGREGATOR,
-                    &v,
-                );
-            }
-        }
-        if let Some(otc) = attrs.otc {
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_TRANSITIVE,
-                ATTR_OTC,
-                &otc.to_be_bytes(),
-            );
-        }
-        if let Some(local_pref) = attrs.local_pref {
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
-                ATTR_LOCAL_PREF,
-                &local_pref.to_be_bytes(),
-            );
-        }
-        if let Some(med) = attrs.med {
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
-                ATTR_MULTI_EXIT_DISC,
-                &med.to_be_bytes(),
-            );
-        }
-        if let Some(originator_id) = attrs.originator_id {
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
-                ATTR_ORIGINATOR_ID,
-                &originator_id.octets(),
-            );
-        }
-        if !attrs.cluster_list.is_empty() {
-            let value: Vec<u8> = attrs
-                .cluster_list
-                .iter()
-                .flat_map(Ipv4Addr::octets)
-                .collect();
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
-                ATTR_CLUSTER_LIST,
-                &value,
-            );
-        }
-        if !attrs.communities.is_empty() {
-            let value: Vec<u8> = attrs
-                .communities
-                .iter()
-                .flat_map(|c| c.to_be_bytes())
-                .collect();
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_TRANSITIVE,
-                ATTR_COMMUNITY,
-                &value,
-            );
-        }
-        if !attrs.extended_communities.is_empty() {
-            let value: Vec<u8> = attrs
-                .extended_communities
-                .iter()
-                .flat_map(|c| c.to_be_bytes())
-                .collect();
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_TRANSITIVE,
-                ATTR_EXTENDED_COMMUNITIES,
-                &value,
-            );
-        }
-        if !attrs.large_communities.is_empty() {
-            let value: Vec<u8> = attrs
-                .large_communities
-                .iter()
-                .flat_map(|(ga, l1, l2)| {
-                    ga.to_be_bytes()
-                        .into_iter()
-                        .chain(l1.to_be_bytes())
-                        .chain(l2.to_be_bytes())
-                })
-                .collect();
-            encode_attribute(
-                &mut out,
-                ATTR_FLAG_OPTIONAL_TRANSITIVE,
-                ATTR_LARGE_COMMUNITY,
-                &value,
-            );
-        }
+        encode_path_attrs(&mut out, attrs, !update.nlri.is_empty(), two_octet_as);
     }
     if let Some(pmsi) = update.attributes.as_ref().and_then(|a| a.pmsi.as_ref()) {
         encode_attribute(

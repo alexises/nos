@@ -12,13 +12,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
@@ -864,6 +864,493 @@ fn log_notification(peer: IpAddr, n: &NotificationMessage) {
     );
 }
 
+type SessionReader = FramedRead<OwnedReadHalf, BgpCodec>;
+type SessionWriter = FramedWrite<OwnedWriteHalf, BgpCodec>;
+
+/// The per-session constants `run`'s helpers read (#425): split out so the
+/// big arms of the event loop can live in their own functions.
+#[derive(Clone, Copy)]
+struct SessionCtx<'a> {
+    peer: &'a PeerContext,
+    slot: &'a Arc<PeerSlot>,
+    bgp_rib: &'a Arc<SharedRib>,
+    role: collision::Role,
+    /// Our graceful restart Restart Time, `None` when it's off here.
+    our_gr: Option<u16>,
+    replaced: &'a Arc<Notify>,
+    kind: PeerKind,
+    remote_is_ibgp: bool,
+    local_addr: Option<IpAddr>,
+    outbox_tx: &'a mpsc::UnboundedSender<OutboundUpdate>,
+    fd: RawFd,
+}
+
+impl SessionCtx<'_> {
+    /// RFC 8538: both sides advertised the N bit (we always do with GR on).
+    fn n_exchanged(&self, state: &State) -> bool {
+        self.our_gr.is_some()
+            && matches!(state, State::Established(r) if r.gr.is_some_and(|g| g.notification))
+    }
+}
+
+/// Hold/keepalive timers and what was negotiated, owned by `run`.
+struct Timers {
+    /// Doubles, before negotiation, as the OpenSent-wait timer. A configured
+    /// `local_hold_time` of 0 disarms it entirely, same as a negotiated hold
+    /// time of 0 does later via `Action::ArmHoldTimer`.
+    hold_period: Option<Duration>,
+    hold_deadline: Option<Instant>,
+    keepalive_period: Option<Duration>,
+    keepalive_deadline: Option<Instant>,
+    negotiated_hold_time: Option<u16>,
+    negotiated_keepalive: Option<u16>,
+}
+
+impl Timers {
+    fn new(local_hold_time: u16) -> Self {
+        let hold_period = if local_hold_time == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(u64::from(local_hold_time)))
+        };
+        Self {
+            hold_period,
+            hold_deadline: hold_period.map(|p| Instant::now() + p),
+            keepalive_period: None,
+            keepalive_deadline: None,
+            negotiated_hold_time: None,
+            negotiated_keepalive: None,
+        }
+    }
+}
+
+/// Builds our OPEN, including every capability this session advertises.
+async fn build_open_message(
+    cx: &SessionCtx<'_>,
+    local: &LocalIdentity,
+    ctx: &NegotiationContext,
+) -> OpenMessage {
+    let SessionCtx {
+        peer,
+        slot,
+        bgp_rib,
+        our_gr,
+        ..
+    } = *cx;
+    let mut open = message::build_open(
+        slot.peer.open_as(local.asn),
+        local.router_id,
+        peer.local_hold_time,
+    );
+    open.capabilities.extend(build_mp_capabilities(
+        &peer.address_families,
+        ctx.transport_afi,
+    ));
+    open.capabilities.push(message::Capability::RouteRefresh);
+    open.capabilities
+        .push(message::Capability::EnhancedRouteRefresh);
+    open.capabilities.push(message::Capability::ExtendedMessage);
+    if let Some(mode) = ctx.add_path {
+        // Only when configured (a route-server client defaults to
+        // `Both`): unlike the other capabilities, it changes the NLRI
+        // wire format of the whole session. One instance carries every
+        // tuple (RFC 7911 §4).
+        let tuples = peer
+            .address_families
+            .iter()
+            .filter(|&&af| af != AddressFamily::L2vpnEvpn)
+            .map(|&af| message::AddPathTuple {
+                afi: afi_of(af),
+                safi: 1,
+                send_receive: mode.send_receive(),
+            })
+            .collect();
+        open.capabilities.push(message::Capability::AddPath(tuples));
+    }
+    if let Some(role) = ctx.role {
+        open.capabilities
+            .push(message::Capability::Role(role.wire()));
+    }
+    if let Some(time) = our_gr {
+        // F = 1 only if this process already had a session with the
+        // peer, or `nos-ribd` kept our routes across a restart; R = 1
+        // while selection deferral is in progress (RFC 4724 §3).
+        let (restarting, forwarding) = {
+            let rib = bgp_rib.lock().await;
+            (rib.deferring(), rib.gr_forwarding(peer.remote_address))
+        };
+        open.capabilities
+            .push(message::Capability::GracefulRestart(gr::our_cap(
+                time,
+                &peer.address_families,
+                restarting,
+                forwarding,
+            )));
+    }
+    open
+}
+
+/// Sends one outbound update through MRAI (the `outbox_rx` arm of `run`).
+async fn send_outbound(
+    writer: &mut SessionWriter,
+    mrai: &mut crate::mrai::Mrai,
+    update: OutboundUpdate,
+) {
+    // RFC 7313 EoRR and RFC 4724 End-of-RIB must follow every
+    // route they close, so release anything MRAI holds first.
+    if matches!(
+        update,
+        OutboundUpdate::RefreshMarker {
+            subtype: message::REFRESH_EORR,
+            ..
+        } | OutboundUpdate::EndOfRib(_)
+    ) {
+        for held in mrai.drain() {
+            if let Err(e) = writer.send(outbound_update_to_message(held)).await {
+                warn!(error = %e, "could not send update");
+            }
+        }
+    }
+    if let Some(update) = mrai.push(update, Instant::now()) {
+        if let Err(e) = writer.send(outbound_update_to_message(update)).await {
+            warn!(error = %e, "could not send update");
+        }
+    }
+}
+
+/// Purges the families whose RFC 7313 stale deadline passed.
+async fn expire_stale(cx: &SessionCtx<'_>, stale_until: &mut HashMap<AddressFamily, Instant>) {
+    let SessionCtx { peer, bgp_rib, .. } = *cx;
+    let now = Instant::now();
+    let expired: Vec<AddressFamily> = stale_until
+        .iter()
+        .filter(|(_, d)| **d <= now)
+        .map(|(f, _)| *f)
+        .collect();
+    let mut rib = bgp_rib.lock().await;
+    for family in expired {
+        stale_until.remove(&family);
+        warn!(
+            peer = %peer.remote_address, afi = afi_of(family),
+            "bgp: route refresh stale timer expired, purging stale routes"
+        );
+        rib.end_refresh_in(peer.remote_address, family);
+    }
+}
+
+/// One `FsmCommand` taken off the slot's channel while `Established`.
+/// `Some(outcome)` ends the session, `None` keeps the loop going.
+async fn handle_command(
+    cx: &SessionCtx<'_>,
+    writer: &mut SessionWriter,
+    state: &State,
+    cmd: FsmCommand,
+) -> Option<FsmOutcome> {
+    let SessionCtx { peer, fd, .. } = *cx;
+    // An in-place key update that the kernel refuses (e.g.
+    // `EBUSY`: the peer still signs with a removed key)
+    // falls back to a reset; the reconnect uses the new keys.
+    let cmd = match cmd {
+        FsmCommand::UpdateAo(delta) => {
+            match crate::tcp::apply_ao_delta(fd, peer.remote_address, &delta, true) {
+                Ok(()) => {
+                    info!(
+                        peer = %peer.remote_address,
+                        added = delta.add.len(), removed = delta.remove.len(),
+                        rnext = delta.rnext_recv_id,
+                        "bgp tcp-ao keys updated in place"
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    warn!(
+                        peer = %peer.remote_address, %error,
+                        "failed to update tcp-ao keys in place, resetting session"
+                    );
+                    FsmCommand::Cease {
+                        subcode: CeaseSubcode::OtherConfigurationChange,
+                        data: Bytes::new(),
+                    }
+                }
+            }
+        }
+        other => other,
+    };
+    match cmd {
+        FsmCommand::UpdateAo(_) => unreachable!("handled above"),
+        FsmCommand::SendRouteRefresh => {
+            send_route_refresh(writer, state, peer).await;
+            None
+        }
+        FsmCommand::Cease { .. } | FsmCommand::BfdDown { .. } => {
+            let (subcode, data, force_hard) = match cmd {
+                FsmCommand::Cease { subcode, data } => (subcode, data, false),
+                FsmCommand::BfdDown { flush } => (CeaseSubcode::BfdDown, Bytes::new(), flush),
+                _ => unreachable!("matched above"),
+            };
+            // RFC 8538 §5.1: with N, a reset meant to keep
+            // nothing goes out as a Hard Reset around it.
+            let hard_reset = gr::sends_hard_reset(subcode, cx.n_exchanged(state))
+                || (force_hard && cx.n_exchanged(state));
+            let (wire_subcode, data) = if hard_reset {
+                (
+                    CeaseSubcode::HardReset as u8,
+                    message::encode_hard_reset(subcode as u8, &data),
+                )
+            } else {
+                (subcode as u8, data)
+            };
+            let _ = writer
+                .send(BgpMessage::Notification(NotificationMessage {
+                    error_code: ErrorCode::Cease as u8,
+                    error_subcode: wire_subcode,
+                    data,
+                }))
+                .await;
+            info!(
+                peer = %peer.remote_address, subcode = subcode as u8, hard_reset,
+                "sent cease notification"
+            );
+            Some(FsmOutcome::NotificationSent {
+                code: ErrorCode::Cease as u8,
+                subcode: wire_subcode,
+            })
+        }
+    }
+}
+
+/// RFC 4271 §6.8 collision handling for an OPEN that reached `OpenConfirm`;
+/// `Some` replaces the state `step` computed.
+async fn collision_override(
+    cx: &SessionCtx<'_>,
+    local: &LocalIdentity,
+    remote: RemoteInfo,
+    cease: &Arc<Notify>,
+) -> Option<(Option<State>, Vec<Action>)> {
+    if cx.slot.max_prefix_held() {
+        // RFC 4486 §4: a connection already in flight when the
+        // peer tripped its maximum-prefix limit (the other side
+        // of a collision) must not bring the session back.
+        Some((
+            None,
+            vec![
+                Action::SendNotification(
+                    ErrorCode::Cease as u8,
+                    CeaseSubcode::ConnectionRejected as u8,
+                ),
+                Action::Close,
+            ],
+        ))
+    } else {
+        apply_collision_verdict(remote, cx.role, local, cx.slot, cease.clone()).await
+    }
+}
+
+/// `Action::ReportEstablished`: applies the negotiated capabilities to the
+/// codec, registers the peer with the RIB and publishes the status.
+async fn report_established(
+    cx: &SessionCtx<'_>,
+    reader: &mut SessionReader,
+    writer: &mut SessionWriter,
+    timers: &Timers,
+    action: &Action,
+) {
+    let SessionCtx {
+        peer,
+        slot,
+        bgp_rib,
+        role,
+        our_gr,
+        replaced,
+        kind,
+        remote_is_ibgp,
+        local_addr,
+        outbox_tx,
+        fd,
+    } = *cx;
+    let Action::ReportEstablished {
+        remote_asn,
+        remote_bgp_id,
+        mp_bgp_negotiated,
+        negotiated_ipv4_unicast,
+        negotiated_ipv6_unicast,
+        negotiated_evpn,
+        add_path,
+        four_octet_as,
+        extended_message,
+        gr: remote_gr,
+        role: negotiated_role,
+    } = action
+    else {
+        unreachable!("called for ReportEstablished only")
+    };
+    // GR on here and the peer sent the capability.
+    let gr_negotiated = our_gr.and(*remote_gr);
+    slot.mark_established(role, gr_negotiated.is_some(), replaced.clone())
+        .await;
+    let mut negotiated_afs = HashSet::new();
+    if *negotiated_ipv4_unicast {
+        negotiated_afs.insert(AddressFamily::Ipv4Unicast);
+    }
+    if *negotiated_ipv6_unicast {
+        negotiated_afs.insert(AddressFamily::Ipv6Unicast);
+    }
+    if *negotiated_evpn {
+        negotiated_afs.insert(AddressFamily::L2vpnEvpn);
+    }
+    // RFC 7911 §5: each direction on its own — the
+    // decoder reads ids only where we receive them, the
+    // encoder (and the RIB) sends them only where we send.
+    let unicast = [AddressFamily::Ipv4Unicast, AddressFamily::Ipv6Unicast];
+    let mut rx_afis = HashSet::new();
+    let mut tx_afis = HashSet::new();
+    let mut add_path_tx = HashSet::new();
+    for (family, dir) in unicast.into_iter().zip(*add_path) {
+        if dir.rx {
+            rx_afis.insert(afi_of(family));
+        }
+        if dir.tx {
+            tx_afis.insert(afi_of(family));
+            add_path_tx.insert(family);
+        }
+    }
+    if slot.peer.add_path.is_some() {
+        info!(
+            peer = %peer.remote_address,
+            ipv4 = add_path[0].as_str(),
+            ipv6 = add_path[1].as_str(),
+            "add-path negotiated"
+        );
+    }
+    if let Some(ours) = negotiated_role {
+        info!(
+            peer = %peer.remote_address, local = ours.as_str(),
+            remote = ours.counterpart().as_str(),
+            "bgp role negotiated"
+        );
+    }
+    // Must be set before any further UPDATE is
+    // decoded/encoded on this connection — done here,
+    // right after Established, the same point every
+    // other negotiated-capability field is applied.
+    reader.decoder_mut().add_path_afis = rx_afis;
+    writer.encoder_mut().add_path_afis = tx_afis;
+    reader.decoder_mut().two_octet_as = !*four_octet_as;
+    writer.encoder_mut().two_octet_as = !*four_octet_as;
+    reader.decoder_mut().extended = *extended_message;
+    writer.encoder_mut().extended = *extended_message;
+    info!(
+        extended_message = *extended_message,
+        "extended message negotiated"
+    );
+    if let Some(g) = gr_negotiated {
+        info!(
+            peer = %peer.remote_address, restart_time = g.time,
+            notification = g.notification, restarting = g.restart,
+            families = ?g.families(),
+            "graceful restart negotiated"
+        );
+    }
+    // `peer_established` queues the initial dump and,
+    // toward a peer that did GR too, End-of-RIB (RFC
+    // 4724 §2) — or both later, at the end of a
+    // restarting process's selection deferral.
+    let mut rib = bgp_rib.lock().await;
+    rib.set_peer_gr(peer.remote_address, gr_negotiated);
+    rib.set_peer_damping(peer.remote_address, peer.damping);
+    rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
+    rib.set_peer_asn(peer.remote_address, *remote_asn);
+    rib.set_peer_confed(peer.remote_address, kind == PeerKind::ConfedExternal);
+    rib.set_peer_local_as(
+        peer.remote_address,
+        slot.peer.local_as.filter(|_| kind == PeerKind::External),
+    );
+    rib.set_peer_role(peer.remote_address, slot.peer.role);
+    rib.set_peer_add_path_send_count(peer.remote_address, slot.peer.add_path_send_count);
+    rib.set_peer_rpki_state(
+        peer.remote_address,
+        slot.peer.announce_rpki_state && remote_is_ibgp,
+    );
+    rib.peer_established(
+        peer.remote_address,
+        remote_is_ibgp,
+        local_addr,
+        negotiated_afs,
+        *mp_bgp_negotiated,
+        peer.next_hop,
+        peer.is_rr_client,
+        peer.is_rs_client,
+        add_path_tx,
+        peer.export_policy.clone(),
+        outbox_tx.clone(),
+    );
+    slot.status.send_modify(|s| {
+        s.state = PeerState::Established;
+        s.remote_asn = Some(*remote_asn);
+        s.remote_bgp_id = Some(*remote_bgp_id);
+        s.established_since = Some(Instant::now());
+        s.negotiated_hold_time = timers.negotiated_hold_time;
+        s.negotiated_keepalive = timers.negotiated_keepalive;
+        s.fd = Some(fd);
+    });
+    info!(
+        peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,
+        role = ?role, "bgp session established"
+    );
+}
+
+/// Executes `step`'s actions in order; returns the Notification sent, if any,
+/// and whether `ReportEstablished` registered the peer with the RIB.
+async fn run_actions(
+    cx: &SessionCtx<'_>,
+    reader: &mut SessionReader,
+    writer: &mut SessionWriter,
+    timers: &mut Timers,
+    actions: &[Action],
+) -> (Option<(u8, u8)>, bool) {
+    let mut notification_sent = None;
+    let mut registered = false;
+    for action in actions {
+        match action {
+            Action::SendKeepalive => {
+                let _ = writer.send(BgpMessage::Keepalive).await;
+            }
+            Action::SendNotification(code, subcode) => {
+                let _ = writer
+                    .send(BgpMessage::Notification(NotificationMessage {
+                        error_code: *code,
+                        error_subcode: *subcode,
+                        data: Bytes::new(),
+                    }))
+                    .await;
+                notification_sent = Some((*code, *subcode));
+                info!(
+                    peer = %cx.peer.remote_address, code = *code, subcode = *subcode,
+                    "sent notification"
+                );
+            }
+            Action::ArmHoldTimer(d) => {
+                timers.hold_period = if d.is_zero() { None } else { Some(*d) };
+                timers.hold_deadline = timers.hold_period.map(|p| Instant::now() + p);
+                // Always derived from a u16 (either the local config or
+                // the peer's OPEN), so this never actually truncates.
+                timers.negotiated_hold_time = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
+            }
+            Action::ArmKeepaliveTimer(d) => {
+                timers.keepalive_period = if d.is_zero() { None } else { Some(*d) };
+                timers.keepalive_deadline = timers.keepalive_period.map(|p| Instant::now() + p);
+                timers.negotiated_keepalive = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
+            }
+            Action::ReportEstablished { .. } => {
+                report_established(cx, reader, writer, timers, action).await;
+                registered = true;
+            }
+            Action::Close => {}
+        }
+    }
+    (notification_sent, registered)
+}
+
 pub async fn run(
     stream: TcpStream,
     role: collision::Role,
@@ -906,29 +1393,24 @@ pub async fn run(
     };
 
     let mut state = State::OpenSent;
-    // Doubles, before negotiation, as the OpenSent-wait timer. A configured
-    // `local_hold_time` of 0 disarms it entirely, same as a negotiated hold
-    // time of 0 does later via `Action::ArmHoldTimer`.
-    let mut hold_period = if peer.local_hold_time == 0 {
-        None
-    } else {
-        Some(Duration::from_secs(u64::from(peer.local_hold_time)))
-    };
-    let mut hold_deadline = hold_period.map(|p| Instant::now() + p);
-    let mut keepalive_period: Option<Duration> = None;
-    let mut keepalive_deadline: Option<Instant> = None;
-    let mut negotiated_hold_time: Option<u16> = None;
-    let mut negotiated_keepalive: Option<u16> = None;
+    let mut timers = Timers::new(peer.local_hold_time);
     let cease = Arc::new(Notify::new());
     // RFC 4724 §4.2: notified when a new connection from the peer replaces
     // this one once it is `Established` (see `collision::PeerSlot`).
     let replaced = Arc::new(Notify::new());
-    // Our graceful restart Restart Time, `None` when it's off here.
-    let our_gr = slot.peer.graceful_restart;
-    // RFC 8538: both sides advertised the N bit (we always do with GR on).
-    let n_exchanged = |state: &State| {
-        our_gr.is_some()
-            && matches!(state, State::Established(r) if r.gr.is_some_and(|g| g.notification))
+    let cx = SessionCtx {
+        peer: &peer,
+        slot: &slot,
+        bgp_rib: &bgp_rib,
+        role,
+        // Our graceful restart Restart Time, `None` when it's off here.
+        our_gr: slot.peer.graceful_restart,
+        replaced: &replaced,
+        kind,
+        remote_is_ibgp,
+        local_addr,
+        outbox_tx: &outbox_tx,
+        fd,
     };
 
     // Guarded on `is_established` rather than written unconditionally: an
@@ -963,56 +1445,7 @@ pub async fn run(
     // ...`) funnels through the same `bgp_rib.peer_disconnected` call after
     // this block, rather than returning directly.
     let outcome = 'session: {
-        let mut open = message::build_open(
-            slot.peer.open_as(local.asn),
-            local.router_id,
-            peer.local_hold_time,
-        );
-        open.capabilities.extend(build_mp_capabilities(
-            &peer.address_families,
-            ctx.transport_afi,
-        ));
-        open.capabilities.push(message::Capability::RouteRefresh);
-        open.capabilities
-            .push(message::Capability::EnhancedRouteRefresh);
-        open.capabilities.push(message::Capability::ExtendedMessage);
-        if let Some(mode) = ctx.add_path {
-            // Only when configured (a route-server client defaults to
-            // `Both`): unlike the other capabilities, it changes the NLRI
-            // wire format of the whole session. One instance carries every
-            // tuple (RFC 7911 §4).
-            let tuples = peer
-                .address_families
-                .iter()
-                .filter(|&&af| af != AddressFamily::L2vpnEvpn)
-                .map(|&af| message::AddPathTuple {
-                    afi: afi_of(af),
-                    safi: 1,
-                    send_receive: mode.send_receive(),
-                })
-                .collect();
-            open.capabilities.push(message::Capability::AddPath(tuples));
-        }
-        if let Some(role) = ctx.role {
-            open.capabilities
-                .push(message::Capability::Role(role.wire()));
-        }
-        if let Some(time) = our_gr {
-            // F = 1 only if this process already had a session with the
-            // peer, or `nos-ribd` kept our routes across a restart; R = 1
-            // while selection deferral is in progress (RFC 4724 §3).
-            let (restarting, forwarding) = {
-                let rib = bgp_rib.lock().await;
-                (rib.deferring(), rib.gr_forwarding(peer.remote_address))
-            };
-            open.capabilities
-                .push(message::Capability::GracefulRestart(gr::our_cap(
-                    time,
-                    &peer.address_families,
-                    restarting,
-                    forwarding,
-                )));
-        }
+        let open = build_open_message(&cx, &local, &ctx).await;
         if writer.send(BgpMessage::Open(open)).await.is_err() {
             break 'session FsmOutcome::TcpError;
         }
@@ -1023,8 +1456,8 @@ pub async fn run(
                     Some(Ok(bgp_msg)) => {
                         // Any well-formed inbound message proves liveness —
                         // reset the hold timer regardless of type (RFC 4271 §4.4).
-                        if let Some(period) = hold_period {
-                            hold_deadline = Some(Instant::now() + period);
+                        if let Some(period) = timers.hold_period {
+                            timers.hold_deadline = Some(Instant::now() + period);
                         }
                         match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib, &slot, &mut stale_until).await {
                             Some(event) => event,
@@ -1035,10 +1468,10 @@ pub async fn run(
                     Some(Err(e)) => Event::MalformedMessage(e),
                     None => Event::TcpFailed,
                 },
-                () = sleep_until_opt(hold_deadline) => Event::HoldTimerExpires,
-                () = sleep_until_opt(keepalive_deadline) => {
-                    if let Some(period) = keepalive_period {
-                        keepalive_deadline = Some(Instant::now() + period);
+                () = sleep_until_opt(timers.hold_deadline) => Event::HoldTimerExpires,
+                () = sleep_until_opt(timers.keepalive_deadline) => {
+                    if let Some(period) = timers.keepalive_period {
+                        timers.keepalive_deadline = Some(Instant::now() + period);
                     }
                     Event::KeepaliveTimerExpires
                 }
@@ -1048,35 +1481,11 @@ pub async fn run(
                     break 'session FsmOutcome::GrReplaced;
                 }
                 Some(update) = outbox_rx.recv() => {
-                    // RFC 7313 EoRR and RFC 4724 End-of-RIB must follow every
-                    // route they close, so release anything MRAI holds first.
-                    if matches!(update, OutboundUpdate::RefreshMarker { subtype: message::REFRESH_EORR, .. } | OutboundUpdate::EndOfRib(_)) {
-                        for held in mrai.drain() {
-                            if let Err(e) = writer.send(outbound_update_to_message(held)).await {
-                                warn!(error = %e, "could not send update");
-                            }
-                        }
-                    }
-                    if let Some(update) = mrai.push(update, Instant::now()) {
-                        if let Err(e) = writer.send(outbound_update_to_message(update)).await {
-                            warn!(error = %e, "could not send update");
-                        }
-                    }
+                    send_outbound(&mut writer, &mut mrai, update).await;
                     continue;
                 }
                 () = sleep_until_opt(stale_until.values().min().copied()) => {
-                    let now = Instant::now();
-                    let expired: Vec<AddressFamily> =
-                        stale_until.iter().filter(|(_, d)| **d <= now).map(|(f, _)| *f).collect();
-                    let mut rib = bgp_rib.lock().await;
-                    for family in expired {
-                        stale_until.remove(&family);
-                        warn!(
-                            peer = %peer.remote_address, afi = afi_of(family),
-                            "bgp: route refresh stale timer expired, purging stale routes"
-                        );
-                        rib.end_refresh_in(peer.remote_address, family);
-                    }
+                    expire_stale(&cx, &mut stale_until).await;
                     continue;
                 }
                 () = sleep_until_opt(mrai.deadline()) => {
@@ -1093,76 +1502,8 @@ pub async fn run(
                 // `slot`'s shared command receiver — the collision loser
                 // never contends for it.
                 Some(cmd) = slot.recv_command(), if matches!(state, State::Established(_)) => {
-                    // An in-place key update that the kernel refuses (e.g.
-                    // `EBUSY`: the peer still signs with a removed key)
-                    // falls back to a reset; the reconnect uses the new keys.
-                    let cmd = match cmd {
-                        FsmCommand::UpdateAo(delta) => {
-                            match crate::tcp::apply_ao_delta(fd, peer.remote_address, &delta, true) {
-                                Ok(()) => {
-                                    info!(
-                                        peer = %peer.remote_address,
-                                        added = delta.add.len(), removed = delta.remove.len(),
-                                        rnext = delta.rnext_recv_id,
-                                        "bgp tcp-ao keys updated in place"
-                                    );
-                                    continue;
-                                }
-                                Err(error) => {
-                                    warn!(
-                                        peer = %peer.remote_address, %error,
-                                        "failed to update tcp-ao keys in place, resetting session"
-                                    );
-                                    FsmCommand::Cease {
-                                        subcode: CeaseSubcode::OtherConfigurationChange,
-                                        data: Bytes::new(),
-                                    }
-                                }
-                            }
-                        }
-                        other => other,
-                    };
-                    match cmd {
-                        FsmCommand::UpdateAo(_) => unreachable!("handled above"),
-                        FsmCommand::SendRouteRefresh => {
-                            send_route_refresh(&mut writer, &state, &peer).await;
-                        }
-                        FsmCommand::Cease { .. } | FsmCommand::BfdDown { .. } => {
-                            let (subcode, data, force_hard) = match cmd {
-                                FsmCommand::Cease { subcode, data } => (subcode, data, false),
-                                FsmCommand::BfdDown { flush } => {
-                                    (CeaseSubcode::BfdDown, Bytes::new(), flush)
-                                }
-                                _ => unreachable!("matched above"),
-                            };
-                            // RFC 8538 §5.1: with N, a reset meant to keep
-                            // nothing goes out as a Hard Reset around it.
-                            let hard_reset = gr::sends_hard_reset(subcode, n_exchanged(&state))
-                                || (force_hard && n_exchanged(&state));
-                            let (wire_subcode, data) = if hard_reset {
-                                (
-                                    CeaseSubcode::HardReset as u8,
-                                    message::encode_hard_reset(subcode as u8, &data),
-                                )
-                            } else {
-                                (subcode as u8, data)
-                            };
-                            let _ = writer
-                                .send(BgpMessage::Notification(NotificationMessage {
-                                    error_code: ErrorCode::Cease as u8,
-                                    error_subcode: wire_subcode,
-                                    data,
-                                }))
-                                .await;
-                            info!(
-                                peer = %peer.remote_address, subcode = subcode as u8, hard_reset,
-                                "sent cease notification"
-                            );
-                            break 'session FsmOutcome::NotificationSent {
-                                code: ErrorCode::Cease as u8,
-                                subcode: wire_subcode,
-                            };
-                        }
+                    if let Some(outcome) = handle_command(&cx, &mut writer, &state, cmd).await {
+                        break 'session outcome;
                     }
                     continue;
                 }
@@ -1184,192 +1525,15 @@ pub async fn run(
                 _ => None,
             };
             if let Some(remote) = reached_open_confirm {
-                if slot.max_prefix_held() {
-                    // RFC 4486 §4: a connection already in flight when the
-                    // peer tripped its maximum-prefix limit (the other side
-                    // of a collision) must not bring the session back.
-                    next_state = None;
-                    actions = vec![
-                        Action::SendNotification(
-                            ErrorCode::Cease as u8,
-                            CeaseSubcode::ConnectionRejected as u8,
-                        ),
-                        Action::Close,
-                    ];
-                } else if let Some((state, lost)) =
-                    apply_collision_verdict(remote, role, &local, &slot, cease.clone()).await
-                {
+                if let Some((state, lost)) = collision_override(&cx, &local, remote, &cease).await {
                     next_state = state;
                     actions = lost;
                 }
             }
 
-            let mut notification_sent = None;
-            for action in &actions {
-                match action {
-                    Action::SendKeepalive => {
-                        let _ = writer.send(BgpMessage::Keepalive).await;
-                    }
-                    Action::SendNotification(code, subcode) => {
-                        let _ = writer
-                            .send(BgpMessage::Notification(NotificationMessage {
-                                error_code: *code,
-                                error_subcode: *subcode,
-                                data: Bytes::new(),
-                            }))
-                            .await;
-                        notification_sent = Some((*code, *subcode));
-                        info!(
-                            peer = %peer.remote_address, code = *code, subcode = *subcode,
-                            "sent notification"
-                        );
-                    }
-                    Action::ArmHoldTimer(d) => {
-                        hold_period = if d.is_zero() { None } else { Some(*d) };
-                        hold_deadline = hold_period.map(|p| Instant::now() + p);
-                        // Always derived from a u16 (either the local config or
-                        // the peer's OPEN), so this never actually truncates.
-                        negotiated_hold_time = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
-                    }
-                    Action::ArmKeepaliveTimer(d) => {
-                        keepalive_period = if d.is_zero() { None } else { Some(*d) };
-                        keepalive_deadline = keepalive_period.map(|p| Instant::now() + p);
-                        negotiated_keepalive = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
-                    }
-                    Action::ReportEstablished {
-                        remote_asn,
-                        remote_bgp_id,
-                        mp_bgp_negotiated,
-                        negotiated_ipv4_unicast,
-                        negotiated_ipv6_unicast,
-                        negotiated_evpn,
-                        add_path,
-                        four_octet_as,
-                        extended_message,
-                        gr: remote_gr,
-                        role: negotiated_role,
-                    } => {
-                        // GR on here and the peer sent the capability.
-                        let gr_negotiated = our_gr.and(*remote_gr);
-                        slot.mark_established(role, gr_negotiated.is_some(), replaced.clone())
-                            .await;
-                        let mut negotiated_afs = HashSet::new();
-                        if *negotiated_ipv4_unicast {
-                            negotiated_afs.insert(AddressFamily::Ipv4Unicast);
-                        }
-                        if *negotiated_ipv6_unicast {
-                            negotiated_afs.insert(AddressFamily::Ipv6Unicast);
-                        }
-                        if *negotiated_evpn {
-                            negotiated_afs.insert(AddressFamily::L2vpnEvpn);
-                        }
-                        // RFC 7911 §5: each direction on its own — the
-                        // decoder reads ids only where we receive them, the
-                        // encoder (and the RIB) sends them only where we send.
-                        let unicast = [AddressFamily::Ipv4Unicast, AddressFamily::Ipv6Unicast];
-                        let mut rx_afis = HashSet::new();
-                        let mut tx_afis = HashSet::new();
-                        let mut add_path_tx = HashSet::new();
-                        for (family, dir) in unicast.into_iter().zip(*add_path) {
-                            if dir.rx {
-                                rx_afis.insert(afi_of(family));
-                            }
-                            if dir.tx {
-                                tx_afis.insert(afi_of(family));
-                                add_path_tx.insert(family);
-                            }
-                        }
-                        if slot.peer.add_path.is_some() {
-                            info!(
-                                peer = %peer.remote_address,
-                                ipv4 = add_path[0].as_str(),
-                                ipv6 = add_path[1].as_str(),
-                                "add-path negotiated"
-                            );
-                        }
-                        if let Some(ours) = negotiated_role {
-                            info!(
-                                peer = %peer.remote_address, local = ours.as_str(),
-                                remote = ours.counterpart().as_str(),
-                                "bgp role negotiated"
-                            );
-                        }
-                        // Must be set before any further UPDATE is
-                        // decoded/encoded on this connection — done here,
-                        // right after Established, the same point every
-                        // other negotiated-capability field is applied.
-                        reader.decoder_mut().add_path_afis = rx_afis;
-                        writer.encoder_mut().add_path_afis = tx_afis;
-                        reader.decoder_mut().two_octet_as = !*four_octet_as;
-                        writer.encoder_mut().two_octet_as = !*four_octet_as;
-                        reader.decoder_mut().extended = *extended_message;
-                        writer.encoder_mut().extended = *extended_message;
-                        info!(
-                            extended_message = *extended_message,
-                            "extended message negotiated"
-                        );
-                        if let Some(g) = gr_negotiated {
-                            info!(
-                                peer = %peer.remote_address, restart_time = g.time,
-                                notification = g.notification, restarting = g.restart,
-                                families = ?g.families(),
-                                "graceful restart negotiated"
-                            );
-                        }
-                        // `peer_established` queues the initial dump and,
-                        // toward a peer that did GR too, End-of-RIB (RFC
-                        // 4724 §2) — or both later, at the end of a
-                        // restarting process's selection deferral.
-                        let mut rib = bgp_rib.lock().await;
-                        rib.set_peer_gr(peer.remote_address, gr_negotiated);
-                        rib.set_peer_damping(peer.remote_address, peer.damping);
-                        rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
-                        rib.set_peer_asn(peer.remote_address, *remote_asn);
-                        rib.set_peer_confed(peer.remote_address, kind == PeerKind::ConfedExternal);
-                        rib.set_peer_local_as(
-                            peer.remote_address,
-                            slot.peer.local_as.filter(|_| kind == PeerKind::External),
-                        );
-                        rib.set_peer_role(peer.remote_address, slot.peer.role);
-                        rib.set_peer_add_path_send_count(
-                            peer.remote_address,
-                            slot.peer.add_path_send_count,
-                        );
-                        rib.set_peer_rpki_state(
-                            peer.remote_address,
-                            slot.peer.announce_rpki_state && remote_is_ibgp,
-                        );
-                        rib.peer_established(
-                            peer.remote_address,
-                            remote_is_ibgp,
-                            local_addr,
-                            negotiated_afs,
-                            *mp_bgp_negotiated,
-                            peer.next_hop,
-                            peer.is_rr_client,
-                            peer.is_rs_client,
-                            add_path_tx,
-                            peer.export_policy.clone(),
-                            outbox_tx.clone(),
-                        );
-                        registered = true;
-                        slot.status.send_modify(|s| {
-                            s.state = PeerState::Established;
-                            s.remote_asn = Some(*remote_asn);
-                            s.remote_bgp_id = Some(*remote_bgp_id);
-                            s.established_since = Some(Instant::now());
-                            s.negotiated_hold_time = negotiated_hold_time;
-                            s.negotiated_keepalive = negotiated_keepalive;
-                            s.fd = Some(fd);
-                        });
-                        info!(
-                            peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,
-                            role = ?role, "bgp session established"
-                        );
-                    }
-                    Action::Close => {}
-                }
-            }
+            let (notification_sent, newly_registered) =
+                run_actions(&cx, &mut reader, &mut writer, &mut timers, &actions).await;
+            registered |= newly_registered;
 
             if let Some(s) = next_state {
                 state = s;
@@ -1386,7 +1550,7 @@ pub async fn run(
     };
 
     if registered {
-        let kind = disconnect_kind(&outcome, n_exchanged(&state));
+        let kind = disconnect_kind(&outcome, cx.n_exchanged(&state));
         bgp_rib
             .lock()
             .await
