@@ -381,6 +381,34 @@ impl LinkManager {
             .await;
     }
 
+    /// The Router-LSA flag byte (B/E/H) and RFC 7770 capability bits shared
+    /// by every area of one origination pass, split out of
+    /// `originate_router_lsas_with` for length (#425).
+    async fn router_flags_and_caps(&self, host_router: bool) -> (u8, u32) {
+        // RFC 2328 A.4.2: B when this router has a link or stub in 2+ areas;
+        // E when it originates a Type-5 (the same set
+        // `originate_as_external_lsas` reads).
+        let mut flags = 0;
+        if self.is_area_border_router().await {
+            flags |= lsa::ROUTER_FLAG_B;
+        }
+        if !self.redistribute_filtered.lock().await.is_empty() {
+            flags |= lsa::ROUTER_FLAG_E;
+        }
+        // RFC 8770 §3: in every area, ABR or not.
+        if host_router {
+            flags |= lsa::ROUTER_FLAG_H;
+        }
+        // RFC 7770 §2.4: stub-router and host-router support (honouring
+        // others' H-bit) are capabilities, always set.
+        let mut router_info_caps =
+            lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER | lsa::RI_CAP_HOST_ROUTER;
+        if self.grace_period.load(Ordering::Relaxed) != 0 {
+            router_info_caps |= lsa::RI_CAP_GR_CAPABLE;
+        }
+        (flags, router_info_caps)
+    }
+
     /// `originate_router_lsas` with an explicit RFC 6987 `max_metric`
     /// (forced on as an RFC 8770 host router). Returns whether a Router-LSA
     /// was (re)installed in some area.
@@ -420,27 +448,7 @@ impl LinkManager {
             .chain(self.lsdbs.lock().await.keys().copied())
             .collect();
 
-        // RFC 2328 A.4.2: B when this router has a link or stub in 2+ areas;
-        // E when it originates a Type-5 (the same set
-        // `originate_as_external_lsas` reads).
-        let mut flags = 0;
-        if self.is_area_border_router().await {
-            flags |= lsa::ROUTER_FLAG_B;
-        }
-        if !self.redistribute_filtered.lock().await.is_empty() {
-            flags |= lsa::ROUTER_FLAG_E;
-        }
-        // RFC 8770 §3: in every area, ABR or not.
-        if host_router {
-            flags |= lsa::ROUTER_FLAG_H;
-        }
-        // RFC 7770 §2.4: stub-router and host-router support (honouring
-        // others' H-bit) are capabilities, always set.
-        let mut router_info_caps =
-            lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER | lsa::RI_CAP_HOST_ROUTER;
-        if self.grace_period.load(Ordering::Relaxed) != 0 {
-            router_info_caps |= lsa::RI_CAP_GR_CAPABLE;
-        }
+        let (flags, router_info_caps) = self.router_flags_and_caps(host_router).await;
 
         // RFC 2328 A.4.2: V in each transit area of a fully adjacent virtual
         // link.

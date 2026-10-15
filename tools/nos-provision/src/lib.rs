@@ -1615,10 +1615,9 @@ pub const STP_PROT_PROFILE: &str = "e2e-prot";
 /// The S-BFD initiator profile `--sbfd-static-route` creates and references.
 pub const SBFD_PROFILE: &str = "sb";
 
-/// `SetTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
-/// for a profile's intervals or a route's `bfd` reference, so these go in
-/// through the generic path edit after the ops.
-pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+/// The spanning-tree half of `bfd_paths` (mode, priority, MST, the ESI guard
+/// and the `--stp-profile-*` profile), split out for length (#425).
+fn stp_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     let mut v = vec![(
         vec!["spanning-tree".to_string(), "mode".to_string()],
         Some(format!("\"{:?}\"", stp_mode(args))),
@@ -1695,6 +1694,58 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             (!args.stp_profile_detach).then(|| format!("\"{STP_PROT_PROFILE}\"")),
         ));
     }
+    v
+}
+
+/// The S-BFD initiator profile and its static-route references, split out of
+/// `bfd_paths` for length (#425).
+fn sbfd_static_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    if args.sbfd_static_route.is_empty() {
+        return Vec::new();
+    }
+    let mut v = Vec::new();
+    let sb = |field: &str| {
+        vec![
+            "bfd-profile".to_string(),
+            SBFD_PROFILE.to_string(),
+            field.to_string(),
+        ]
+    };
+    let ms = args.bfd_interval_ms.to_string();
+    v.extend([
+        (
+            sb("mode"),
+            Some(
+                serde_json::to_string(&nos_proto::schema::BfdMode::Sbfd)
+                    .expect("BfdMode serializes"),
+            ),
+        ),
+        (sb("min-tx-interval"), Some(ms.clone())),
+        (sb("min-rx-interval"), Some(ms)),
+    ]);
+    if let Some(d) = args.sbfd_remote_discriminator {
+        v.push((sb("sbfd-remote-discriminator"), Some(format!("\"{d}\""))));
+    }
+    for subnet in &args.sbfd_static_route {
+        v.push((
+            vec![
+                "static-routing-instance".to_string(),
+                args.static_routing_instance.clone(),
+                "route".to_string(),
+                subnet.to_string(),
+                "bfd".to_string(),
+            ],
+            Some(format!("\"{SBFD_PROFILE}\"")),
+        ));
+    }
+    v
+}
+
+/// `SetTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
+/// for a profile's intervals or a route's `bfd` reference, so these go in
+/// through the generic path edit after the ops.
+pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    let mut v = stp_paths(args);
     if args.bfd_bgp || args.no_bfd_bgp {
         v.push((
             vec![
@@ -1754,42 +1805,7 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
                 .map(|a| serde_json::to_string(a).expect("BfdAuth serializes")),
         ));
     }
-    if !args.sbfd_static_route.is_empty() {
-        let sb = |field: &str| {
-            vec![
-                "bfd-profile".to_string(),
-                SBFD_PROFILE.to_string(),
-                field.to_string(),
-            ]
-        };
-        let ms = args.bfd_interval_ms.to_string();
-        v.extend([
-            (
-                sb("mode"),
-                Some(
-                    serde_json::to_string(&nos_proto::schema::BfdMode::Sbfd)
-                        .expect("BfdMode serializes"),
-                ),
-            ),
-            (sb("min-tx-interval"), Some(ms.clone())),
-            (sb("min-rx-interval"), Some(ms)),
-        ]);
-        if let Some(d) = args.sbfd_remote_discriminator {
-            v.push((sb("sbfd-remote-discriminator"), Some(format!("\"{d}\""))));
-        }
-        for subnet in &args.sbfd_static_route {
-            v.push((
-                vec![
-                    "static-routing-instance".to_string(),
-                    args.static_routing_instance.clone(),
-                    "route".to_string(),
-                    subnet.to_string(),
-                    "bfd".to_string(),
-                ],
-                Some(format!("\"{SBFD_PROFILE}\"")),
-            ));
-        }
-    }
+    v.extend(sbfd_static_paths(args));
     if !args.sbfd_reflector.is_empty() || args.no_sbfd_reflector {
         v.push((
             vec!["sbfd-reflector".to_string(), "discriminator".to_string()],
@@ -1976,9 +1992,8 @@ fn apply_mst(args: &Args, config: &mut nos_proto::Config) {
     }
 }
 
-/// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
-/// one in place instead of sending path edits).
-pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
+/// The spanning-tree half of `apply_bfd`, split out for length (#425).
+fn apply_stp(args: &Args, config: &mut nos_proto::Config) {
     config.spanning_tree.mode = stp_mode(args);
     if let Some(p) = args.stp_priority {
         config.spanning_tree.priority = p;
@@ -2031,23 +2046,10 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             i.stp_port_profile = (!args.stp_profile_detach).then(|| STP_PROT_PROFILE.to_string());
         }
     }
-    for i in config
-        .bgp_instances
-        .iter_mut()
-        .filter(|i| i.name == args.bgp_instance)
-    {
-        for g in i
-            .peer_groups
-            .iter_mut()
-            .filter(|g| g.name == args.peer_group)
-        {
-            if args.bfd_bgp {
-                g.bfd = Some(BFD_PROFILE.to_string());
-            } else if args.no_bfd_bgp {
-                g.bfd = None;
-            }
-        }
-    }
+}
+
+/// The OSPF/OSPFv3 `bfd` attach of `apply_bfd`, split out for length (#425).
+fn apply_igp_bfd(args: &Args, config: &mut nos_proto::Config) {
     for i in config
         .ospf_instances
         .iter_mut()
@@ -2094,6 +2096,30 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             }
         }
     }
+}
+
+/// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
+/// one in place instead of sending path edits).
+pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
+    apply_stp(args, config);
+    for i in config
+        .bgp_instances
+        .iter_mut()
+        .filter(|i| i.name == args.bgp_instance)
+    {
+        for g in i
+            .peer_groups
+            .iter_mut()
+            .filter(|g| g.name == args.peer_group)
+        {
+            if args.bfd_bgp {
+                g.bfd = Some(BFD_PROFILE.to_string());
+            } else if args.no_bfd_bgp {
+                g.bfd = None;
+            }
+        }
+    }
+    apply_igp_bfd(args, config);
     if args.bfd_auth.is_some() || args.no_bfd_auth {
         for p in config
             .bfd_profiles
@@ -2171,6 +2197,10 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "thin linear list of ConfigOps, one block per independent flag; a test fixture, not logic"
+)]
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     let link = args.link_interface.as_ref().unwrap_or(&args.interface);
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
@@ -3876,6 +3906,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one assertion block per flag; a flat table of cases"
+    )]
     fn every_bgp_flag() {
         let ops = ops(&[
             "--mtu",
@@ -4065,6 +4099,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one assertion block per flag; a flat table of cases"
+    )]
     fn every_interface_and_l2_flag() {
         let ops = ops(&[
             "--loopback-address",
@@ -4535,6 +4573,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one refusal case per flag combination; a flat table of cases"
+    )]
     fn inconsistent_flags_are_refused() {
         let static_route = [
             "--static-route",
@@ -5685,6 +5727,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one assertion block per flag; a flat table of cases"
+    )]
     fn interface_aggregate_lldp_syslog_rest_and_user_flags() {
         let dir = tempfile::tempdir().unwrap();
         let anchor = dir.path().join("anchor.pem");

@@ -52,6 +52,13 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
 
+## Function length lint
+
+- `clippy::too_many_lines` is `warn` (denied in CI) at `too-many-lines-threshold = 150` in `clippy.toml`; nesting depth is `excessive-nesting-threshold`. Both live next to each other in `Cargo.toml`'s `[workspace.lints.clippy]`.
+- Split a long function into named helpers next to it (per phase, or per match arm); never change a log string or lock order doing so.
+- A flat one-arm-per-topic table opts out with `#[allow(clippy::too_many_lines, reason = "...")]` on that function only (`config/src/docs.rs` `command_doc`, `nos-provision`'s `build_ops`).
+- The lint counts code lines (comments and blanks excluded) and applies to `--all-targets`, so test functions are held to it too.
+
 ## Mutation testing
 
 - Run: `make mutants` (nightly; `MUTANTS_JOBS` default 2, `MUTANTS_MEM` default 20G, `MUTANTS_ARGS` for e.g. `-f rpl/src/parser.rs` or `--shard 0/8`). `CARGO_TARGET_DIR` is unset for the run so each job builds its own copy of the tree under `MUTANTS_TMPDIR` (`~/.cache/nos-mutants`, ~20 GB per job).

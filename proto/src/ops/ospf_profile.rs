@@ -152,6 +152,34 @@ pub enum OspfProfileOp {
 impl OspfProfileOp {
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
+            OspfProfileOp::Ensure { .. }
+            | OspfProfileOp::Delete { .. }
+            | OspfProfileOp::SetHelloInterval { .. }
+            | OspfProfileOp::ClearHelloInterval { .. }
+            | OspfProfileOp::SetDeadInterval { .. }
+            | OspfProfileOp::ClearDeadInterval { .. }
+            | OspfProfileOp::SetCost { .. }
+            | OspfProfileOp::ClearCost { .. }
+            | OspfProfileOp::SetPriority { .. }
+            | OspfProfileOp::ClearPriority { .. }
+            | OspfProfileOp::SetMtu { .. } => self.apply_part1(config),
+            OspfProfileOp::SetMtuIgnore { .. }
+            | OspfProfileOp::ClearMtu { .. }
+            | OspfProfileOp::SetExtendedSequenceNumbers { .. }
+            | OspfProfileOp::SetNetworkType { .. }
+            | OspfProfileOp::ClearNetworkType { .. }
+            | OspfProfileOp::SetSimpleAuth { .. }
+            | OspfProfileOp::SetCryptoKey { .. }
+            | OspfProfileOp::RemoveCryptoKey { .. }
+            | OspfProfileOp::SetCryptoCurrentKey { .. }
+            | OspfProfileOp::ClearAuth { .. } => self.apply_part2(config),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part1(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             OspfProfileOp::Ensure {
                 instance,
                 area_id,
@@ -271,6 +299,14 @@ impl OspfProfileOp {
                 find_profile_mut(config, instance, *area_id, name)?.mtu = Some(*mtu);
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part2(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             OspfProfileOp::SetMtuIgnore {
                 instance,
                 area_id,
@@ -377,6 +413,7 @@ impl OspfProfileOp {
                 find_profile_mut(config, instance, *area_id, name)?.auth = None;
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
         }
     }
 }

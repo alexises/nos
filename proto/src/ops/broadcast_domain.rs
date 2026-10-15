@@ -123,6 +123,38 @@ pub enum BroadcastDomainOp {
 impl BroadcastDomainOp {
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
+            BroadcastDomainOp::Ensure { .. }
+            | BroadcastDomainOp::AddAddress { .. }
+            | BroadcastDomainOp::RemoveAddress { .. }
+            | BroadcastDomainOp::SetRoutingTable { .. }
+            | BroadcastDomainOp::ClearRoutingTable { .. }
+            | BroadcastDomainOp::SetOspfProfile { .. }
+            | BroadcastDomainOp::ClearOspfProfile { .. }
+            | BroadcastDomainOp::SetOspfv3Profile { .. }
+            | BroadcastDomainOp::ClearOspfv3Profile { .. }
+            | BroadcastDomainOp::Delete { .. } => self.apply_part1(config),
+            BroadcastDomainOp::SetVni { .. }
+            | BroadcastDomainOp::ClearVni { .. }
+            | BroadcastDomainOp::SetRd { .. }
+            | BroadcastDomainOp::ClearRd { .. }
+            | BroadcastDomainOp::AddRouteTarget { .. }
+            | BroadcastDomainOp::RemoveRouteTarget { .. }
+            | BroadcastDomainOp::SetVtepSource { .. }
+            | BroadcastDomainOp::ClearVtepSource { .. }
+            | BroadcastDomainOp::SetMacRedistribute { .. }
+            | BroadcastDomainOp::ClearMacRedistribute { .. }
+            | BroadcastDomainOp::SetArpRedistribute { .. }
+            | BroadcastDomainOp::ClearArpRedistribute { .. }
+            | BroadcastDomainOp::SetConnectedRedistribute { .. }
+            | BroadcastDomainOp::ClearConnectedRedistribute { .. }
+            | BroadcastDomainOp::SetNeighSuppress { .. } => self.apply_part2(config),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part1(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             BroadcastDomainOp::Ensure { name } => {
                 if !config.broadcast_domains.iter().any(|d| &d.name == name) {
                     config.broadcast_domains.push(BroadcastDomain {
@@ -214,6 +246,14 @@ impl BroadcastDomainOp {
                 }
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part2(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             BroadcastDomainOp::SetVni { name, vni } => {
                 find_domain_mut(config, name)?.vni = Some(*vni);
                 Ok(())
@@ -303,6 +343,7 @@ impl BroadcastDomainOp {
                 find_domain_mut(config, name)?.neigh_suppress = *enabled;
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
         }
     }
 }

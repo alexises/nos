@@ -144,6 +144,263 @@ pub async fn run(
     info!(instance = %ctx.instance, "reconciliation loop stopped");
 }
 
+/// What one resync pass reads (shared, immutable).
+#[derive(Clone, Copy)]
+struct Env<'a> {
+    cfg: &'a nos_proto::Config,
+    watchdog_socket: &'a Path,
+    instance: &'a str,
+    links: &'a LinkManager,
+    table: &'a LinkTable,
+    state: &'a State,
+}
+
+/// What one resync pass accumulates.
+struct Wanted {
+    watched: HashSet<String>,
+    next_down: HashMap<String, &'static str>,
+    next_degraded: HashSet<String>,
+    desired_links: Vec<LinkConfig>,
+    bfd_wants: HashMap<String, nos_proto::schema::BfdProfile>,
+    desired_loopback_prefixes: HashMap<std::net::Ipv4Addr, Vec<(Ipv6Net, u16)>>,
+}
+
+/// One profile of one area, with the values every attach point shares.
+struct ProfileCtx<'a> {
+    area: &'a nos_proto::Ospfv3Area,
+    profile: &'a nos_proto::schema::Ospfv3Profile,
+    hello_interval: u16,
+    dead_interval: u16,
+    priority: u8,
+    cost: u16,
+}
+
+/// The `subinterface` attach points of one profile, split out of `resync` for
+/// length (#425).
+async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileCtx<'_>) {
+    let Env {
+        cfg,
+        watchdog_socket,
+        instance,
+        links,
+        table,
+        state,
+        ..
+    } = *env;
+    let Wanted {
+        watched,
+        next_down,
+        next_degraded,
+        desired_links,
+        bfd_wants,
+        ..
+    } = d;
+    let ProfileCtx {
+        area,
+        profile,
+        hello_interval,
+        dead_interval,
+        priority,
+        cost,
+        ..
+    } = pc;
+    let hello_interval = *hello_interval;
+    let dead_interval = *dead_interval;
+    let priority = *priority;
+    let cost = *cost;
+    for attach in subinterface_attach_points(cfg, &profile.name) {
+        let link_name = attach.display_name();
+        let Some(routing_table) = &attach.routing_table else {
+            warn!(
+                instance = %instance, link = %link_name,
+                "ospfv3 profile attached to a subinterface with no routing-table, skipping"
+            );
+            continue;
+        };
+        let kernel_interface = subinterface_kernel_interface(&attach.interface, attach.tag);
+        watched.insert(kernel_interface.clone());
+        let Some(ifindex) = gate_link(state, next_down, table, &link_name, &kernel_interface)
+        else {
+            continue;
+        };
+        let vrf = resolve_vrf(watchdog_socket, routing_table).await;
+        let link = resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await;
+        let running = if attach.has_address {
+            links.running_config(&link_name).await
+        } else {
+            None
+        };
+        let resolved = Resolved {
+            vrf,
+            link,
+            kernel_interface: Some(kernel_interface),
+        };
+        let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
+            warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf/local address not resolvable yet");
+            continue;
+        };
+        let Some(interface_id) = pick_interface_id(ifindex, &m.kernel_interface, running.as_ref())
+        else {
+            warn!(instance = %instance, link = %link_name, kernel_interface = %m.kernel_interface, "ospfv3 link's kernel interface not present yet");
+            continue;
+        };
+        note_fallback(state, next_degraded, &link_name, &fell_back);
+        if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
+            bfd_wants.insert(link_name.clone(), p);
+        }
+        desired_links.push(LinkConfig {
+            attach_point: link_name,
+            area_id: area.area_id,
+            hello_interval,
+            dead_interval,
+            vrf: m.vrf,
+            kernel_interface: m.kernel_interface,
+            interface_id,
+            link_local_address: m.link_local_address,
+            prefix: m.prefix,
+            cost,
+            network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
+            priority,
+            mtu: resolve_effective_mtu(profile, m.mtu),
+            mtu_ignore: profile.mtu_ignore,
+            auth: resolve_auth(profile),
+            instance_id: profile.instance_id.unwrap_or(0),
+        });
+    }
+}
+
+/// The `loopback` attach points of one profile, split out of `resync` for
+/// length (#425).
+async fn resolve_loopback_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileCtx<'_>) {
+    let Env {
+        cfg,
+        watchdog_socket,
+        instance,
+        ..
+    } = *env;
+    let Wanted {
+        desired_loopback_prefixes,
+        ..
+    } = d;
+    let ProfileCtx {
+        area,
+        profile,
+        cost,
+        ..
+    } = pc;
+    let cost = *cost;
+    for attach in loopback_attach_points(cfg, &profile.name) {
+        let Some(prefix) = resolve_loopback_prefix(watchdog_socket, &attach.interface).await else {
+            warn!(
+                instance = %instance, interface = %attach.interface,
+                "ospfv3 loopback prefix not resolvable yet"
+            );
+            continue;
+        };
+        desired_loopback_prefixes
+            .entry(area.area_id)
+            .or_default()
+            .push((prefix, cost));
+    }
+}
+
+/// The `broadcast_domain` attach points of one profile, split out of `resync` for
+/// length (#425).
+async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileCtx<'_>) {
+    let Env {
+        cfg,
+        watchdog_socket,
+        instance,
+        links,
+        table,
+        state,
+        ..
+    } = *env;
+    let Wanted {
+        watched,
+        next_down,
+        next_degraded,
+        desired_links,
+        bfd_wants,
+        ..
+    } = d;
+    let ProfileCtx {
+        area,
+        profile,
+        hello_interval,
+        dead_interval,
+        priority,
+        cost,
+        ..
+    } = pc;
+    let hello_interval = *hello_interval;
+    let dead_interval = *dead_interval;
+    let priority = *priority;
+    let cost = *cost;
+    for attach in broadcast_domain_attach_points(cfg, &profile.name) {
+        let link_name = attach.display_name();
+        let Some(routing_table) = &attach.routing_table else {
+            warn!(
+                instance = %instance, link = %link_name,
+                "ospfv3 profile attached to a broadcast domain with no routing-table, skipping"
+            );
+            continue;
+        };
+        let vrf = resolve_vrf(watchdog_socket, routing_table).await;
+        let bridge = resolve_broadcast_domain(watchdog_socket, &attach.name).await;
+        let running = if attach.has_address {
+            links.running_config(&link_name).await
+        } else {
+            None
+        };
+        let (link, bridge_name) = match bridge {
+            Some((l, b)) => (Some(l), Some(b)),
+            None => (None, None),
+        };
+        let resolved = Resolved {
+            vrf,
+            link,
+            kernel_interface: bridge_name,
+        };
+        let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
+            warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf/local address/bridge not resolvable yet");
+            continue;
+        };
+        watched.insert(m.kernel_interface.clone());
+        let Some(ifindex) = gate_link(state, next_down, table, &link_name, &m.kernel_interface)
+        else {
+            continue;
+        };
+        let Some(interface_id) = pick_interface_id(ifindex, &m.kernel_interface, running.as_ref())
+        else {
+            warn!(instance = %instance, link = %link_name, kernel_interface = %m.kernel_interface, "ospfv3 link's kernel bridge not present yet");
+            continue;
+        };
+        note_fallback(state, next_degraded, &link_name, &fell_back);
+        if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
+            bfd_wants.insert(link_name.clone(), p);
+        }
+        desired_links.push(LinkConfig {
+            attach_point: link_name,
+            area_id: area.area_id,
+            hello_interval,
+            dead_interval,
+            vrf: m.vrf,
+            kernel_interface: m.kernel_interface,
+            interface_id,
+            link_local_address: m.link_local_address,
+            prefix: m.prefix,
+            cost,
+            network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
+            priority,
+            mtu: resolve_effective_mtu(profile, None),
+            mtu_ignore: profile.mtu_ignore,
+            auth: resolve_auth(profile),
+            instance_id: profile.instance_id.unwrap_or(0),
+        });
+    }
+}
+
 async fn resync(ctx: &mut Ctx, state: &mut State) {
     let Ctx {
         config_socket,
@@ -154,9 +411,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         link_rx,
     } = &*ctx;
     let table = link_rx.borrow().clone();
-    let mut watched = HashSet::new();
-    let mut next_down: HashMap<String, &'static str> = HashMap::new();
-    let mut next_degraded = HashSet::new();
+    let watched = HashSet::new();
+    let next_down: HashMap<String, &'static str> = HashMap::new();
+    let next_degraded = HashSet::new();
     let cfg = match config_client::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -184,10 +441,22 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_extended_lsa(own.extended_lsa);
     links.set_graceful_restart(own.graceful_restart_grace_period);
 
-    let mut desired_links = Vec::new();
-    let mut bfd_wants: HashMap<String, nos_proto::schema::BfdProfile> = HashMap::new();
-    let mut desired_loopback_prefixes: HashMap<std::net::Ipv4Addr, Vec<(Ipv6Net, u16)>> =
-        HashMap::new();
+    let env = Env {
+        cfg: &cfg,
+        watchdog_socket,
+        instance,
+        links,
+        table: &table,
+        state,
+    };
+    let mut wanted = Wanted {
+        watched,
+        next_down,
+        next_degraded,
+        desired_links: Vec::new(),
+        bfd_wants: HashMap::new(),
+        desired_loopback_prefixes: HashMap::new(),
+    };
 
     for area in &own.areas {
         info!(
@@ -215,154 +484,17 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                 .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
             let priority = profile.priority.unwrap_or(nos_proto::PRIORITY_DEFAULT);
             let cost = profile.cost.unwrap_or(1);
-
-            for attach in subinterface_attach_points(&cfg, &profile.name) {
-                let link_name = attach.display_name();
-                let Some(routing_table) = &attach.routing_table else {
-                    warn!(
-                        instance = %instance, link = %link_name,
-                        "ospfv3 profile attached to a subinterface with no routing-table, skipping"
-                    );
-                    continue;
-                };
-                let kernel_interface = subinterface_kernel_interface(&attach.interface, attach.tag);
-                watched.insert(kernel_interface.clone());
-                let Some(ifindex) =
-                    gate_link(state, &mut next_down, &table, &link_name, &kernel_interface)
-                else {
-                    continue;
-                };
-                let vrf = resolve_vrf(watchdog_socket, routing_table).await;
-                let link =
-                    resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await;
-                let running = if attach.has_address {
-                    links.running_config(&link_name).await
-                } else {
-                    None
-                };
-                let resolved = Resolved {
-                    vrf,
-                    link,
-                    kernel_interface: Some(kernel_interface),
-                };
-                let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
-                    warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf/local address not resolvable yet");
-                    continue;
-                };
-                let Some(interface_id) =
-                    pick_interface_id(ifindex, &m.kernel_interface, running.as_ref())
-                else {
-                    warn!(instance = %instance, link = %link_name, kernel_interface = %m.kernel_interface, "ospfv3 link's kernel interface not present yet");
-                    continue;
-                };
-                note_fallback(state, &mut next_degraded, &link_name, &fell_back);
-                if let Some(p) = bfd_profile(&cfg, profile.bfd.as_deref()) {
-                    bfd_wants.insert(link_name.clone(), p);
-                }
-                desired_links.push(LinkConfig {
-                    attach_point: link_name,
-                    area_id: area.area_id,
-                    hello_interval,
-                    dead_interval,
-                    vrf: m.vrf,
-                    kernel_interface: m.kernel_interface,
-                    interface_id,
-                    link_local_address: m.link_local_address,
-                    prefix: m.prefix,
-                    cost,
-                    network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
-                    priority,
-                    mtu: resolve_effective_mtu(profile, m.mtu),
-                    mtu_ignore: profile.mtu_ignore,
-                    auth: resolve_auth(profile),
-                    instance_id: profile.instance_id.unwrap_or(0),
-                });
-            }
-
-            for attach in loopback_attach_points(&cfg, &profile.name) {
-                let Some(prefix) =
-                    resolve_loopback_prefix(watchdog_socket, &attach.interface).await
-                else {
-                    warn!(
-                        instance = %instance, interface = %attach.interface,
-                        "ospfv3 loopback prefix not resolvable yet"
-                    );
-                    continue;
-                };
-                desired_loopback_prefixes
-                    .entry(area.area_id)
-                    .or_default()
-                    .push((prefix, cost));
-            }
-
-            for attach in broadcast_domain_attach_points(&cfg, &profile.name) {
-                let link_name = attach.display_name();
-                let Some(routing_table) = &attach.routing_table else {
-                    warn!(
-                        instance = %instance, link = %link_name,
-                        "ospfv3 profile attached to a broadcast domain with no routing-table, skipping"
-                    );
-                    continue;
-                };
-                let vrf = resolve_vrf(watchdog_socket, routing_table).await;
-                let bridge = resolve_broadcast_domain(watchdog_socket, &attach.name).await;
-                let running = if attach.has_address {
-                    links.running_config(&link_name).await
-                } else {
-                    None
-                };
-                let (link, bridge_name) = match bridge {
-                    Some((l, b)) => (Some(l), Some(b)),
-                    None => (None, None),
-                };
-                let resolved = Resolved {
-                    vrf,
-                    link,
-                    kernel_interface: bridge_name,
-                };
-                let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
-                    warn!(instance = %instance, link = %link_name, "ospfv3 link's vrf/local address/bridge not resolvable yet");
-                    continue;
-                };
-                watched.insert(m.kernel_interface.clone());
-                let Some(ifindex) = gate_link(
-                    state,
-                    &mut next_down,
-                    &table,
-                    &link_name,
-                    &m.kernel_interface,
-                ) else {
-                    continue;
-                };
-                let Some(interface_id) =
-                    pick_interface_id(ifindex, &m.kernel_interface, running.as_ref())
-                else {
-                    warn!(instance = %instance, link = %link_name, kernel_interface = %m.kernel_interface, "ospfv3 link's kernel bridge not present yet");
-                    continue;
-                };
-                note_fallback(state, &mut next_degraded, &link_name, &fell_back);
-                if let Some(p) = bfd_profile(&cfg, profile.bfd.as_deref()) {
-                    bfd_wants.insert(link_name.clone(), p);
-                }
-                desired_links.push(LinkConfig {
-                    attach_point: link_name,
-                    area_id: area.area_id,
-                    hello_interval,
-                    dead_interval,
-                    vrf: m.vrf,
-                    kernel_interface: m.kernel_interface,
-                    interface_id,
-                    link_local_address: m.link_local_address,
-                    prefix: m.prefix,
-                    cost,
-                    network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
-                    priority,
-                    mtu: resolve_effective_mtu(profile, None),
-                    mtu_ignore: profile.mtu_ignore,
-                    auth: resolve_auth(profile),
-                    instance_id: profile.instance_id.unwrap_or(0),
-                });
-            }
+            let pc = ProfileCtx {
+                area,
+                profile,
+                hello_interval,
+                dead_interval,
+                priority,
+                cost,
+            };
+            resolve_subinterface_links(&env, &mut wanted, &pc).await;
+            resolve_loopback_links(&env, &mut wanted, &pc).await;
+            resolve_broadcast_domain_links(&env, &mut wanted, &pc).await;
         }
     }
 
@@ -372,6 +504,14 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
             own.redistribute_policy.as_deref(),
         ))
         .await;
+    let Wanted {
+        watched,
+        next_down,
+        next_degraded,
+        desired_links,
+        bfd_wants,
+        desired_loopback_prefixes,
+    } = wanted;
     links.set_bfd(bfd_wants);
     links
         .reconcile(desired_links, desired_loopback_prefixes, own.router_id)

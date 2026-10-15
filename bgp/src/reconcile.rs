@@ -111,6 +111,67 @@ pub async fn run(
     info!(instance = %instance, "reconciliation loop stopped");
 }
 
+/// The configured peers, each joined with its peer-group's settings, split
+/// out of `resync` for length (#425).
+fn resolve_peers(
+    own: &nos_proto::BgpInstance,
+    source_addrs: &HashMap<&str, Vec<IpAddr>>,
+    policy_cache: &mut PolicyCache,
+) -> Vec<ResolvedPeer> {
+    let mut peers: Vec<ResolvedPeer> = Vec::new();
+    for peer in &own.peers {
+        let Some(group) = own.peer_groups.iter().find(|g| g.name == peer.peer_group) else {
+            continue;
+        };
+        let source_address = source_addrs.get(group.name.as_str()).and_then(|addrs| {
+            addrs
+                .iter()
+                .find(|a| a.is_ipv4() == peer.remote_address.is_ipv4())
+                .copied()
+        });
+        peers.push(ResolvedPeer {
+            remote_address: peer.remote_address,
+            source_address,
+            remote_as: group.remote_as,
+            peer_group: peer.peer_group.clone(),
+            hold_time: group.hold_time.unwrap_or(nos_proto::HOLD_TIME_DEFAULT),
+            keepalive_interval: group.keepalive_interval,
+            connect_retry_time: group
+                .connect_retry_time
+                .map_or(fsm::CONNECT_RETRY_TIME, |s| {
+                    Duration::from_secs(u64::from(s))
+                }),
+            mrai: Duration::from_secs(u64::from(group.mrai.unwrap_or(0))),
+            route_refresh_stale_time: Duration::from_secs(u64::from(
+                group
+                    .route_refresh_stale_time
+                    .unwrap_or(nos_proto::ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS),
+            )),
+            damping: group.damping,
+            max_hops: group.max_hops,
+            auth: group.auth.as_ref().map(ResolvedAuth::from),
+            next_hop: group.next_hop,
+            address_families: group.address_families.clone(),
+            route_reflector_client: group.route_reflector_client,
+            route_server_client: group.route_server_client,
+            import_policy: policy_cache.resolve(group.import_policy.as_deref()),
+            export_policy: policy_cache.resolve(group.export_policy.as_deref()),
+            shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
+            maximum_prefix: group.maximum_prefix,
+            announce_rpki_state: group.announce_rpki_state,
+            local_as: group.local_as,
+            add_path: group.effective_add_path(),
+            add_path_send_count: group.effective_add_path_send_count(),
+            role: group.role,
+            strict_mode: group.strict_mode,
+            confed_id: own.confederation.identifier,
+            confed_member: own.confederation.is_member(group.remote_as),
+            graceful_restart: own.graceful_restart.enabled_restart_time(),
+        });
+    }
+    peers
+}
+
 async fn resync(
     config_socket: &Path,
     watchdog_socket: &Path,
@@ -186,57 +247,7 @@ async fn resync(
         }
     }
 
-    let mut peers: Vec<ResolvedPeer> = Vec::new();
-    for peer in &own.peers {
-        let Some(group) = own.peer_groups.iter().find(|g| g.name == peer.peer_group) else {
-            continue;
-        };
-        let source_address = source_addrs.get(group.name.as_str()).and_then(|addrs| {
-            addrs
-                .iter()
-                .find(|a| a.is_ipv4() == peer.remote_address.is_ipv4())
-                .copied()
-        });
-        peers.push(ResolvedPeer {
-            remote_address: peer.remote_address,
-            source_address,
-            remote_as: group.remote_as,
-            peer_group: peer.peer_group.clone(),
-            hold_time: group.hold_time.unwrap_or(nos_proto::HOLD_TIME_DEFAULT),
-            keepalive_interval: group.keepalive_interval,
-            connect_retry_time: group
-                .connect_retry_time
-                .map_or(fsm::CONNECT_RETRY_TIME, |s| {
-                    Duration::from_secs(u64::from(s))
-                }),
-            mrai: Duration::from_secs(u64::from(group.mrai.unwrap_or(0))),
-            route_refresh_stale_time: Duration::from_secs(u64::from(
-                group
-                    .route_refresh_stale_time
-                    .unwrap_or(nos_proto::ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS),
-            )),
-            damping: group.damping,
-            max_hops: group.max_hops,
-            auth: group.auth.as_ref().map(ResolvedAuth::from),
-            next_hop: group.next_hop,
-            address_families: group.address_families.clone(),
-            route_reflector_client: group.route_reflector_client,
-            route_server_client: group.route_server_client,
-            import_policy: policy_cache.resolve(group.import_policy.as_deref()),
-            export_policy: policy_cache.resolve(group.export_policy.as_deref()),
-            shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
-            maximum_prefix: group.maximum_prefix,
-            announce_rpki_state: group.announce_rpki_state,
-            local_as: group.local_as,
-            add_path: group.effective_add_path(),
-            add_path_send_count: group.effective_add_path_send_count(),
-            role: group.role,
-            strict_mode: group.strict_mode,
-            confed_id: own.confederation.identifier,
-            confed_member: own.confederation.is_member(group.remote_as),
-            graceful_restart: own.graceful_restart.enabled_restart_time(),
-        });
-    }
+    let peers = resolve_peers(own, &source_addrs, policy_cache);
 
     let local = LocalIdentity {
         asn: own.asn,
