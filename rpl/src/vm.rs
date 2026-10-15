@@ -329,11 +329,12 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     let mut sp = 0usize;
     let mut cur_local_pref = input.bgp.local_pref;
     let mut cur_med = input.bgp.med;
-    let mut cur_communities: Cow<[u32]> = Cow::Borrowed(input.bgp.communities);
-    let mut cur_extended_communities: Cow<[u64]> = Cow::Borrowed(input.bgp.extended_communities);
-    let mut cur_large_communities: Cow<[(u32, u32, u32)]> =
-        Cow::Borrowed(input.bgp.large_communities);
-    let mut cur_as_path: Cow<[u32]> = Cow::Borrowed(input.bgp.as_path);
+    let mut lists = Lists {
+        std: Cow::Borrowed(input.bgp.communities),
+        ext: Cow::Borrowed(input.bgp.extended_communities),
+        large: Cow::Borrowed(input.bgp.large_communities),
+        as_path: Cow::Borrowed(input.bgp.as_path),
+    };
     let mut cur_origin = input.bgp.origin;
     let mut next_hop_edit = NextHopSet::Unchanged;
     let mut pc = 0usize;
@@ -352,135 +353,62 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     }
 
     loop {
-        match &policy.code[pc] {
-            Op::LoadField(id) => {
-                let v = match id {
-                    FieldId::Prefix => Value::Prefix(input.prefix),
-                    FieldId::BgpOrigin => Value::Enum(cur_origin as u8),
-                    FieldId::BgpPeerAs => Value::Int(i64::from(input.bgp.peer_as)),
-                    FieldId::BgpLocalPref => Value::Int(i64::from(cur_local_pref)),
-                    FieldId::BgpLearnedViaIbgp => Value::Bool(input.bgp.learned_via_ibgp),
-                    FieldId::BgpValidationState => Value::Enum(input.bgp.validation_state as u8),
-                    _ => unreachable!("check.rs rejects LoadField for {id:?}"),
-                };
-                push!(v);
-            }
+        let op = &policy.code[pc];
+        match op {
+            Op::LoadField(id) => push!(load_field(*id, input, cur_origin, cur_local_pref)),
             Op::LoadConstInt(n) => push!(Value::Int(*n)),
             Op::LoadConstPrefix(p) => push!(Value::Prefix(*p)),
             Op::LoadConstIp(a) => push!(Value::Ip(*a)),
             Op::LoadConstEnum(e) => push!(Value::Enum(*e)),
-            Op::FieldLen(id) => {
-                let n = match id {
-                    FieldId::Prefix => i64::from(input.prefix.prefix_len()),
-                    FieldId::BgpAsPath => len_as_int(cur_as_path.len()),
-                    FieldId::BgpClusterList => len_as_int(input.bgp.cluster_list.len()),
-                    FieldId::BgpCommunities => len_as_int(cur_communities.len()),
-                    FieldId::BgpExtCommunities => len_as_int(cur_extended_communities.len()),
-                    FieldId::BgpLargeCommunities => len_as_int(cur_large_communities.len()),
-                    _ => unreachable!("check.rs rejects FieldLen for {id:?}"),
-                };
-                push!(Value::Int(n));
-            }
-            Op::ListContainsInt(id, n) => {
-                let found = match id {
-                    FieldId::BgpAsPath => cur_as_path.contains(n),
-                    _ => unreachable!("check.rs rejects ListContainsInt for {id:?}"),
-                };
-                push!(Value::Bool(found));
-            }
-            Op::ListContainsIp(id, addr) => {
-                let found = match id {
-                    FieldId::BgpClusterList => input.bgp.cluster_list.contains(addr),
-                    _ => unreachable!("check.rs rejects ListContainsIp for {id:?}"),
-                };
-                push!(Value::Bool(found));
-            }
-            Op::ListContainsCommunity(id, val) => {
-                let found = match (id, val) {
-                    (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
-                        cur_communities.contains(n)
-                    }
-                    (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
-                        cur_extended_communities.contains(n)
-                    }
-                    (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
-                        cur_large_communities.contains(&(*ga, *l1, *l2))
-                    }
-                    _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
-                };
-                push!(Value::Bool(found));
-            }
-            Op::AsPathMatches(re) => push!(Value::Bool(re.is_match(&cur_as_path))),
+            Op::FieldLen(id) => push!(Value::Int(field_len(*id, input, &lists))),
+            Op::ListContainsInt(id, n) => push!(Value::Bool(match id {
+                FieldId::BgpAsPath => lists.as_path.contains(n),
+                _ => unreachable!("check.rs rejects ListContainsInt for {id:?}"),
+            })),
+            Op::ListContainsIp(id, addr) => push!(Value::Bool(match id {
+                FieldId::BgpClusterList => input.bgp.cluster_list.contains(addr),
+                _ => unreachable!("check.rs rejects ListContainsIp for {id:?}"),
+            })),
+            Op::ListContainsCommunity(id, val) => push!(Value::Bool(lists.has(*id, val))),
+            Op::AsPathMatches(re) => push!(Value::Bool(re.is_match(&lists.as_path))),
             Op::AsPathPrepend(asn, count) => {
-                cur_as_path
+                lists
+                    .as_path
                     .to_mut()
                     .splice(0..0, std::iter::repeat_n(*asn, usize::from(*count)));
             }
             Op::OptIpEq(id, ip) => {
-                let cur = match id {
-                    FieldId::BgpNextHop => match next_hop_edit {
-                        NextHopSet::Addr(a) => Some(a),
-                        NextHopSet::SelfAddress => None,
-                        NextHopSet::Unchanged => input.bgp.next_hop,
-                    },
-                    FieldId::BgpPeer => input.bgp.peer,
-                    FieldId::BgpRouterId => input.bgp.router_id.map(IpAddr::V4),
-                    FieldId::BgpOriginatorId => input.bgp.originator_id.map(IpAddr::V4),
-                    _ => unreachable!("codegen.rs only emits OptIpEq for optional-ip fields"),
-                };
-                push!(Value::Bool(cur == Some(*ip)));
+                push!(Value::Bool(opt_ip(*id, input, next_hop_edit) == Some(*ip)));
             }
-            Op::SetOrigin => {
-                cur_origin = match pop!() {
-                    Value::Enum(0) => Origin::Igp,
-                    Value::Enum(1) => Origin::Egp,
-                    _ => Origin::Incomplete,
-                };
-            }
+            Op::SetOrigin => cur_origin = origin_from(pop!()),
             Op::SetNextHop => match pop!() {
                 Value::Ip(a) => next_hop_edit = NextHopSet::Addr(a),
                 other => unreachable!("codegen.rs guarantees an Ip here, got {other:?}"),
             },
             Op::SetNextHopSelf => next_hop_edit = NextHopSet::SelfAddress,
-            Op::Add => {
+            Op::Add | Op::Sub => {
                 let b = as_int(pop!());
                 let a = as_int(pop!());
-                push!(Value::Int(a + b));
+                push!(Value::Int(if matches!(op, Op::Add) {
+                    a + b
+                } else {
+                    a - b
+                }));
             }
-            Op::Sub => {
-                let b = as_int(pop!());
-                let a = as_int(pop!());
-                push!(Value::Int(a - b));
-            }
-            Op::CmpEq => {
+            Op::CmpEq | Op::CmpNe => {
                 let b = pop!();
                 let a = pop!();
-                push!(Value::Bool(a == b));
+                push!(Value::Bool((a == b) == matches!(op, Op::CmpEq)));
             }
-            Op::CmpNe => {
-                let b = pop!();
-                let a = pop!();
-                push!(Value::Bool(a != b));
-            }
-            Op::CmpLt => {
+            Op::CmpLt | Op::CmpLe | Op::CmpGt | Op::CmpGe => {
                 let b = as_int(pop!());
                 let a = as_int(pop!());
-                push!(Value::Bool(a < b));
-            }
-            Op::CmpLe => {
-                let b = as_int(pop!());
-                let a = as_int(pop!());
-                push!(Value::Bool(a <= b));
-            }
-            Op::CmpGt => {
-                let b = as_int(pop!());
-                let a = as_int(pop!());
-                push!(Value::Bool(a > b));
-            }
-            Op::CmpGe => {
-                let b = as_int(pop!());
-                let a = as_int(pop!());
-                push!(Value::Bool(a >= b));
+                push!(Value::Bool(match op {
+                    Op::CmpLt => a < b,
+                    Op::CmpLe => a <= b,
+                    Op::CmpGt => a > b,
+                    _ => a >= b,
+                }));
             }
             Op::PrefixIn => {
                 let network = as_prefix(pop!());
@@ -489,120 +417,225 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             }
             Op::PrefixInList(entries) => {
                 let candidate = as_prefix(pop!());
-                let found = entries.iter().any(|entry| match entry.range {
-                    None => candidate == entry.cidr,
-                    Some((min, max)) => {
-                        entry.cidr.contains(&candidate)
-                            && (min..=max).contains(&candidate.prefix_len())
-                    }
-                });
-                push!(Value::Bool(found));
+                push!(Value::Bool(prefix_in_list(entries, candidate)));
             }
-            Op::And => {
+            Op::And | Op::Or => {
                 let b = as_bool(pop!());
                 let a = as_bool(pop!());
-                push!(Value::Bool(a && b));
-            }
-            Op::Or => {
-                let b = as_bool(pop!());
-                let a = as_bool(pop!());
-                push!(Value::Bool(a || b));
+                push!(Value::Bool(if matches!(op, Op::And) {
+                    a && b
+                } else {
+                    a || b
+                }));
             }
             Op::Not => {
                 let a = as_bool(pop!());
                 push!(Value::Bool(!a));
             }
-            Op::JumpIfFalse(target) => {
-                if !as_bool(pop!()) {
-                    pc = *target;
-                    continue;
-                }
+            Op::JumpIfFalse(target) if !as_bool(pop!()) => {
+                pc = *target;
+                continue;
             }
+            Op::JumpIfFalse(_) => {}
             Op::Jump(target) => {
                 pc = *target;
                 continue;
             }
             Op::SetField(id) => {
                 let v = as_int(pop!());
-                match id {
-                    FieldId::BgpLocalPref => cur_local_pref = to_u32_saturating(v),
-                    FieldId::BgpMed => cur_med = Some(to_u32_saturating(v)),
-                    _ => unreachable!("check.rs rejects SetField for {id:?}"),
-                }
+                set_field(*id, v, &mut cur_local_pref, &mut cur_med);
             }
             Op::AddField(id) => {
                 let d = as_int(pop!());
-                match id {
-                    FieldId::BgpLocalPref => {
-                        cur_local_pref = to_u32_saturating(i64::from(cur_local_pref) + d);
-                    }
-                    FieldId::BgpMed => {
-                        cur_med = Some(to_u32_saturating(i64::from(cur_med.unwrap_or(0)) + d));
-                    }
-                    _ => unreachable!("check.rs rejects AddField for {id:?}"),
-                }
+                add_field(*id, d, &mut cur_local_pref, &mut cur_med);
             }
-            Op::CommunityAdd(id, val) => match (id, val) {
-                (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
-                    let list = cur_communities.to_mut();
-                    if !list.contains(n) {
-                        list.push(*n);
-                    }
-                }
-                (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
-                    let list = cur_extended_communities.to_mut();
-                    if !list.contains(n) {
-                        list.push(*n);
-                    }
-                }
-                (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
-                    let list = cur_large_communities.to_mut();
-                    let v = (*ga, *l1, *l2);
-                    if !list.contains(&v) {
-                        list.push(v);
-                    }
-                }
-                _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
-            },
-            Op::CommunityRemove(id, val) => match (id, val) {
-                (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
-                    cur_communities.to_mut().retain(|c| c != n);
-                }
-                (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
-                    cur_extended_communities.to_mut().retain(|c| c != n);
-                }
-                (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
-                    let v = (*ga, *l1, *l2);
-                    cur_large_communities.to_mut().retain(|c| *c != v);
-                }
-                _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
-            },
-            Op::CommunityClear(id) => match id {
-                FieldId::BgpCommunities => cur_communities.to_mut().clear(),
-                FieldId::BgpExtCommunities => cur_extended_communities.to_mut().clear(),
-                FieldId::BgpLargeCommunities => cur_large_communities.to_mut().clear(),
-                _ => unreachable!("check.rs/codegen.rs reject CommunityClear for {id:?}"),
-            },
+            Op::CommunityAdd(id, val) => lists.add(*id, val),
+            Op::CommunityRemove(id, val) => lists.remove(*id, val),
+            Op::CommunityClear(id) => lists.clear(*id),
             Op::Accept => {
                 return Verdict::Accept {
                     local_pref: cur_local_pref,
                     med: cur_med,
-                    communities: cur_communities.into_owned(),
-                    extended_communities: cur_extended_communities.into_owned(),
-                    large_communities: cur_large_communities.into_owned(),
-                    edits: Edits {
-                        as_path: match cur_as_path {
-                            Cow::Owned(v) => Some(v),
-                            Cow::Borrowed(_) => None,
-                        },
-                        origin: (cur_origin != input.bgp.origin).then_some(cur_origin),
-                        next_hop: next_hop_edit,
-                    },
+                    communities: lists.std.into_owned(),
+                    extended_communities: lists.ext.into_owned(),
+                    large_communities: lists.large.into_owned(),
+                    edits: edits(
+                        lists.as_path,
+                        cur_origin != input.bgp.origin,
+                        cur_origin,
+                        next_hop_edit,
+                    ),
                 }
             }
             Op::Reject => return Verdict::Reject,
         }
         pc += 1;
+    }
+}
+
+/// The policy-mutable lists, copy-on-write so a script that never edits one
+/// never clones it.
+struct Lists<'a> {
+    std: Cow<'a, [u32]>,
+    ext: Cow<'a, [u64]>,
+    large: Cow<'a, [(u32, u32, u32)]>,
+    as_path: Cow<'a, [u32]>,
+}
+
+impl Lists<'_> {
+    /// `Op::ListContainsCommunity`.
+    fn has(&self, id: FieldId, val: &CommunityValue) -> bool {
+        match (id, val) {
+            (FieldId::BgpCommunities, CommunityValue::Standard(n)) => self.std.contains(n),
+            (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => self.ext.contains(n),
+            (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
+                self.large.contains(&(*ga, *l1, *l2))
+            }
+            _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
+        }
+    }
+
+    /// `Op::CommunityAdd`; `Cow::to_mut` clones only on the first write.
+    fn add(&mut self, id: FieldId, val: &CommunityValue) {
+        match (id, val) {
+            (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
+                let list = self.std.to_mut();
+                if !list.contains(n) {
+                    list.push(*n);
+                }
+            }
+            (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
+                let list = self.ext.to_mut();
+                if !list.contains(n) {
+                    list.push(*n);
+                }
+            }
+            (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
+                let list = self.large.to_mut();
+                let v = (*ga, *l1, *l2);
+                if !list.contains(&v) {
+                    list.push(v);
+                }
+            }
+            _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
+        }
+    }
+
+    /// `Op::CommunityRemove`.
+    fn remove(&mut self, id: FieldId, val: &CommunityValue) {
+        match (id, val) {
+            (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
+                self.std.to_mut().retain(|c| c != n);
+            }
+            (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
+                self.ext.to_mut().retain(|c| c != n);
+            }
+            (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
+                let v = (*ga, *l1, *l2);
+                self.large.to_mut().retain(|c| *c != v);
+            }
+            _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
+        }
+    }
+
+    /// `Op::CommunityClear`.
+    fn clear(&mut self, id: FieldId) {
+        match id {
+            FieldId::BgpCommunities => self.std.to_mut().clear(),
+            FieldId::BgpExtCommunities => self.ext.to_mut().clear(),
+            FieldId::BgpLargeCommunities => self.large.to_mut().clear(),
+            _ => unreachable!("check.rs/codegen.rs reject CommunityClear for {id:?}"),
+        }
+    }
+}
+
+/// `Op::FieldLen`, split out of `run` for length.
+fn field_len(id: FieldId, input: &Input, lists: &Lists) -> i64 {
+    match id {
+        FieldId::Prefix => i64::from(input.prefix.prefix_len()),
+        FieldId::BgpAsPath => len_as_int(lists.as_path.len()),
+        FieldId::BgpClusterList => len_as_int(input.bgp.cluster_list.len()),
+        FieldId::BgpCommunities => len_as_int(lists.std.len()),
+        FieldId::BgpExtCommunities => len_as_int(lists.ext.len()),
+        FieldId::BgpLargeCommunities => len_as_int(lists.large.len()),
+        _ => unreachable!("check.rs rejects FieldLen for {id:?}"),
+    }
+}
+
+/// `Op::LoadField`, split out of `run` for length.
+fn load_field(id: FieldId, input: &Input, origin: Origin, local_pref: u32) -> Value {
+    match id {
+        FieldId::Prefix => Value::Prefix(input.prefix),
+        FieldId::BgpOrigin => Value::Enum(origin as u8),
+        FieldId::BgpPeerAs => Value::Int(i64::from(input.bgp.peer_as)),
+        FieldId::BgpLocalPref => Value::Int(i64::from(local_pref)),
+        FieldId::BgpLearnedViaIbgp => Value::Bool(input.bgp.learned_via_ibgp),
+        FieldId::BgpValidationState => Value::Enum(input.bgp.validation_state as u8),
+        _ => unreachable!("check.rs rejects LoadField for {id:?}"),
+    }
+}
+
+/// `Op::OptIpEq`'s current value, split out of `run` for length.
+fn opt_ip(id: FieldId, input: &Input, next_hop_edit: NextHopSet) -> Option<IpAddr> {
+    match id {
+        FieldId::BgpNextHop => match next_hop_edit {
+            NextHopSet::Addr(a) => Some(a),
+            NextHopSet::SelfAddress => None,
+            NextHopSet::Unchanged => input.bgp.next_hop,
+        },
+        FieldId::BgpPeer => input.bgp.peer,
+        FieldId::BgpRouterId => input.bgp.router_id.map(IpAddr::V4),
+        FieldId::BgpOriginatorId => input.bgp.originator_id.map(IpAddr::V4),
+        _ => unreachable!("codegen.rs only emits OptIpEq for optional-ip fields"),
+    }
+}
+
+/// `Op::SetOrigin`'s operand (an `Enum`), split out of `run` for length.
+fn origin_from(v: Value) -> Origin {
+    match v {
+        Value::Enum(0) => Origin::Igp,
+        Value::Enum(1) => Origin::Egp,
+        _ => Origin::Incomplete,
+    }
+}
+
+/// `Op::SetField`, split out of `run` for length.
+fn set_field(id: FieldId, v: i64, local_pref: &mut u32, med: &mut Option<u32>) {
+    match id {
+        FieldId::BgpLocalPref => *local_pref = to_u32_saturating(v),
+        FieldId::BgpMed => *med = Some(to_u32_saturating(v)),
+        _ => unreachable!("check.rs rejects SetField for {id:?}"),
+    }
+}
+
+/// `Op::AddField`, split out of `run` for length.
+fn add_field(id: FieldId, d: i64, local_pref: &mut u32, med: &mut Option<u32>) {
+    match id {
+        FieldId::BgpLocalPref => *local_pref = to_u32_saturating(i64::from(*local_pref) + d),
+        FieldId::BgpMed => *med = Some(to_u32_saturating(i64::from(med.unwrap_or(0)) + d)),
+        _ => unreachable!("check.rs rejects AddField for {id:?}"),
+    }
+}
+
+/// `Op::PrefixInList`, split out of `run` for length.
+fn prefix_in_list(entries: &[PrefixListEntry], candidate: IpNet) -> bool {
+    entries.iter().any(|entry| match entry.range {
+        None => candidate == entry.cidr,
+        Some((min, max)) => {
+            entry.cidr.contains(&candidate) && (min..=max).contains(&candidate.prefix_len())
+        }
+    })
+}
+
+/// The `Edits` of an `Accept`, split out of `run` for length.
+fn edits(as_path: Cow<[u32]>, origin_changed: bool, origin: Origin, next_hop: NextHopSet) -> Edits {
+    Edits {
+        as_path: match as_path {
+            Cow::Owned(v) => Some(v),
+            Cow::Borrowed(_) => None,
+        },
+        origin: origin_changed.then_some(origin),
+        next_hop,
     }
 }
 

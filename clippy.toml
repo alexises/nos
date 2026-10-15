@@ -8,3 +8,5 @@ disallowed-types = [
   { path = "std::process::Command", reason = "no external commands outside tools/e2e and tests; see CLAUDE.md" },
   { path = "tokio::process::Command", reason = "no external commands outside tools/e2e and tests; see CLAUDE.md" },
 ]
+
+too-many-lines-threshold = 150

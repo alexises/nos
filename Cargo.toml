@@ -103,5 +103,5 @@ missing_panics_doc        = "allow"
 # must not be split up to dodge a line count — but an arm that nests deeply has
 # stopped being a table row, so excessive_nesting stays on. Threshold lives in
 # clippy.toml.
-too_many_lines             = "allow"
+too_many_lines             = "warn"
 excessive_nesting          = "warn"
