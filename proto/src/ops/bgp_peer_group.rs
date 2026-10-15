@@ -279,6 +279,64 @@ pub enum BgpPeerGroupOp {
 impl BgpPeerGroupOp {
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
+            BgpPeerGroupOp::Ensure { .. }
+            | BgpPeerGroupOp::SetMaximumPrefix { .. }
+            | BgpPeerGroupOp::ClearMaximumPrefix { .. }
+            | BgpPeerGroupOp::SetShutdown { .. }
+            | BgpPeerGroupOp::ClearShutdown { .. }
+            | BgpPeerGroupOp::SetRemoteAs { .. }
+            | BgpPeerGroupOp::SetSourceAddress { .. }
+            | BgpPeerGroupOp::ClearSourceAddress { .. }
+            | BgpPeerGroupOp::AddAddressFamily { .. }
+            | BgpPeerGroupOp::RemoveAddressFamily { .. }
+            | BgpPeerGroupOp::Delete { .. }
+            | BgpPeerGroupOp::SetHoldTime { .. }
+            | BgpPeerGroupOp::ClearHoldTime { .. }
+            | BgpPeerGroupOp::SetKeepaliveInterval { .. } => self.apply_part1(config),
+            BgpPeerGroupOp::ClearKeepaliveInterval { .. }
+            | BgpPeerGroupOp::SetConnectRetryTime { .. }
+            | BgpPeerGroupOp::ClearConnectRetryTime { .. }
+            | BgpPeerGroupOp::SetMrai { .. }
+            | BgpPeerGroupOp::ClearMrai { .. }
+            | BgpPeerGroupOp::SetRouteRefreshStaleTime { .. }
+            | BgpPeerGroupOp::ClearRouteRefreshStaleTime { .. }
+            | BgpPeerGroupOp::SetDamping { .. }
+            | BgpPeerGroupOp::ClearDamping { .. }
+            | BgpPeerGroupOp::SetLocalAs { .. }
+            | BgpPeerGroupOp::ClearLocalAs { .. }
+            | BgpPeerGroupOp::SetAddPath { .. }
+            | BgpPeerGroupOp::ClearAddPath { .. }
+            | BgpPeerGroupOp::SetAddPathSendCount { .. }
+            | BgpPeerGroupOp::SetRole { .. }
+            | BgpPeerGroupOp::ClearRole { .. }
+            | BgpPeerGroupOp::SetStrictMode { .. }
+            | BgpPeerGroupOp::ClearAddPathSendCount { .. }
+            | BgpPeerGroupOp::SetMaxHops { .. }
+            | BgpPeerGroupOp::ClearMaxHops { .. } => self.apply_part2(config),
+            BgpPeerGroupOp::SetMd5Auth { .. }
+            | BgpPeerGroupOp::SetAoKey { .. }
+            | BgpPeerGroupOp::RemoveAoKey { .. }
+            | BgpPeerGroupOp::SetAoCurrentKey { .. }
+            | BgpPeerGroupOp::SetAoRnextKey { .. }
+            | BgpPeerGroupOp::ClearAuth { .. }
+            | BgpPeerGroupOp::SetNextHop { .. }
+            | BgpPeerGroupOp::ClearNextHop { .. }
+            | BgpPeerGroupOp::SetAnnounceRpkiState { .. }
+            | BgpPeerGroupOp::SetRouteReflectorClient { .. }
+            | BgpPeerGroupOp::ClearRouteReflectorClient { .. }
+            | BgpPeerGroupOp::SetRouteServerClient { .. }
+            | BgpPeerGroupOp::ClearRouteServerClient { .. }
+            | BgpPeerGroupOp::SetImportPolicy { .. }
+            | BgpPeerGroupOp::ClearImportPolicy { .. }
+            | BgpPeerGroupOp::SetExportPolicy { .. }
+            | BgpPeerGroupOp::ClearExportPolicy { .. } => self.apply_part3(config),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part1(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             BgpPeerGroupOp::Ensure { instance, name } => {
                 let inst = find_instance_mut(config, instance)?;
                 if !inst.peer_groups.iter().any(|g| &g.name == name) {
@@ -414,6 +472,14 @@ impl BgpPeerGroupOp {
                     Some(*keepalive_interval);
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part2(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             BgpPeerGroupOp::ClearKeepaliveInterval { instance, name } => {
                 find_group_mut(config, instance, name)?.keepalive_interval = None;
                 Ok(())
@@ -535,6 +601,14 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.max_hops = None;
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part3(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             BgpPeerGroupOp::SetMd5Auth {
                 instance,
                 name,
@@ -657,6 +731,7 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.export_policy = None;
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
         }
     }
 }

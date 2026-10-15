@@ -136,6 +136,33 @@ pub enum Ospfv3ProfileOp {
 impl Ospfv3ProfileOp {
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
+            Ospfv3ProfileOp::Ensure { .. }
+            | Ospfv3ProfileOp::Delete { .. }
+            | Ospfv3ProfileOp::SetHelloInterval { .. }
+            | Ospfv3ProfileOp::ClearHelloInterval { .. }
+            | Ospfv3ProfileOp::SetDeadInterval { .. }
+            | Ospfv3ProfileOp::ClearDeadInterval { .. }
+            | Ospfv3ProfileOp::SetCost { .. }
+            | Ospfv3ProfileOp::ClearCost { .. }
+            | Ospfv3ProfileOp::SetPriority { .. }
+            | Ospfv3ProfileOp::ClearPriority { .. }
+            | Ospfv3ProfileOp::SetMtu { .. } => self.apply_part1(config),
+            Ospfv3ProfileOp::SetMtuIgnore { .. }
+            | Ospfv3ProfileOp::ClearMtu { .. }
+            | Ospfv3ProfileOp::SetNetworkType { .. }
+            | Ospfv3ProfileOp::ClearNetworkType { .. }
+            | Ospfv3ProfileOp::SetCryptoKey { .. }
+            | Ospfv3ProfileOp::RemoveCryptoKey { .. }
+            | Ospfv3ProfileOp::SetCryptoCurrentKey { .. }
+            | Ospfv3ProfileOp::ClearAuth { .. }
+            | Ospfv3ProfileOp::SetInstanceId { .. } => self.apply_part2(config),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part1(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             Ospfv3ProfileOp::Ensure {
                 instance,
                 area_id,
@@ -255,6 +282,14 @@ impl Ospfv3ProfileOp {
                 find_profile_mut(config, instance, *area_id, name)?.mtu = Some(*mtu);
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
+        }
+    }
+
+    /// Arms of `apply`, split out for length (#425); `apply` names every variant, so a
+    /// new one still fails to compile until it is routed to a part.
+    fn apply_part2(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
             Ospfv3ProfileOp::SetMtuIgnore {
                 instance,
                 area_id,
@@ -357,6 +392,7 @@ impl Ospfv3ProfileOp {
                 find_profile_mut(config, instance, *area_id, name)?.instance_id = *instance_id;
                 Ok(())
             }
+            _ => unreachable!("routed by `apply`"),
         }
     }
 }
