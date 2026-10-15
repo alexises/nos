@@ -788,13 +788,13 @@ fn valid_max_hops(max_hops: Option<u8>) -> garde::Result {
 /// keepalives falls out of the one rule with no special case needed.
 pub(crate) fn valid_peer_group_timers(groups: &[BgpPeerGroup]) -> garde::Result {
     for group in groups {
-        if let (Some(hold), Some(keepalive)) = (group.hold_time, group.keepalive_interval) {
-            if keepalive >= hold {
-                return Err(garde::Error::new(
-                    "keepalive-interval must be less than hold-time when both are set \
+        if let (Some(hold), Some(keepalive)) = (group.hold_time, group.keepalive_interval)
+            && keepalive >= hold
+        {
+            return Err(garde::Error::new(
+                "keepalive-interval must be less than hold-time when both are set \
                      (hold-time 0 requires keepalive-interval to be left unset)",
-                ));
-            }
+            ));
         }
         if AddressFamily::ALL.iter().any(|af| {
             group.maximum_prefix.get(*af).is_some() && !group.address_families.contains(af)

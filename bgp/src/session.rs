@@ -896,14 +896,14 @@ impl SessionManager {
             );
             return;
         }
-        if let Some(hops) = slot.peer.max_hops {
-            if let Err(error) = tcp::apply_max_hops(stream.as_raw_fd(), remote, hops) {
-                warn!(
-                    instance = %self.instance, peer = %remote, %error,
-                    "cannot apply max-hops to inbound connection, dropping it"
-                );
-                return;
-            }
+        if let Some(hops) = slot.peer.max_hops
+            && let Err(error) = tcp::apply_max_hops(stream.as_raw_fd(), remote, hops)
+        {
+            warn!(
+                instance = %self.instance, peer = %remote, %error,
+                "cannot apply max-hops to inbound connection, dropping it"
+            );
+            return;
         }
         if !slot.begin(Role::Passive).await {
             debug!(
@@ -915,15 +915,14 @@ impl SessionManager {
         // An accepted socket advertises whatever the peer is signing with as
         // its RNextKeyID, not our configured rnext: set it, or a session
         // coming back passive mid-rollover never asks for the new key.
-        if let Some(ResolvedAuth::Ao(keys)) = slot.auth() {
-            if let Some(key) = ao_rnext(&keys) {
-                if let Err(error) = nos_tcp_auth::set_ao_rnext(stream.as_raw_fd(), key.recv_id) {
-                    warn!(
-                        instance = %self.instance, peer = %remote, %error,
-                        "cannot set tcp-ao rnext on inbound connection"
-                    );
-                }
-            }
+        if let Some(ResolvedAuth::Ao(keys)) = slot.auth()
+            && let Some(key) = ao_rnext(&keys)
+            && let Err(error) = nos_tcp_auth::set_ao_rnext(stream.as_raw_fd(), key.recv_id)
+        {
+            warn!(
+                instance = %self.instance, peer = %remote, %error,
+                "cannot set tcp-ao rnext on inbound connection"
+            );
         }
         info!(instance = %self.instance, peer = %remote, "accepted inbound bgp tcp session");
         let instance = self.instance.clone();

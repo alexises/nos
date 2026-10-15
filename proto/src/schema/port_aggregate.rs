@@ -316,12 +316,12 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
     // One aggregate per Ethernet Segment on a PE: two bonds claiming the same
     // ESI would make `nos-fdbd` unable to tell which port a MAC was learned on.
     for (i, agg) in aggregates.iter().enumerate() {
-        if let Some(esi) = &agg.esi {
-            if aggregates[..i].iter().any(|o| o.esi.as_ref() == Some(esi)) {
-                return Err(garde::Error::new(format!(
-                    "esi {esi} is used by more than one port aggregate"
-                )));
-            }
+        if let Some(esi) = &agg.esi
+            && aggregates[..i].iter().any(|o| o.esi.as_ref() == Some(esi))
+        {
+            return Err(garde::Error::new(format!(
+                "esi {esi} is used by more than one port aggregate"
+            )));
         }
     }
     for agg in aggregates {

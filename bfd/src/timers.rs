@@ -86,11 +86,9 @@ impl Timers {
     pub fn on_rx(&mut self, now: Instant, remote: Remote, poll: bool, final_: bool) -> RxOutcome {
         self.remote = Some(remote);
         self.last_rx = now;
-        if final_ {
-            if let Some((tx, rx)) = self.pending.take() {
-                self.desired_min_tx = tx;
-                self.required_min_rx = rx;
-            }
+        if final_ && let Some((tx, rx)) = self.pending.take() {
+            self.desired_min_tx = tx;
+            self.required_min_rx = rx;
         }
         RxOutcome { reply_final: poll }
     }

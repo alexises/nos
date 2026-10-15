@@ -110,23 +110,23 @@ fn field(
     let plain = !f.secret && f.render.is_none();
     match unwrap_option((f.kind)()) {
         Kind::List(elem) if plain => {
-            if let Kind::Struct(n) = elem() {
-                if let Some(key) = key_of(n) {
-                    let items = |v: Option<&Value>| v.and_then(Value::as_array).cloned();
-                    return list(
-                        &Ctx {
-                            f,
-                            n,
-                            key,
-                            label: &label,
-                            flat,
-                        },
-                        &items(bv).unwrap_or_default(),
-                        &items(cv).unwrap_or_default(),
-                        fields,
-                        subs,
-                    );
-                }
+            if let Kind::Struct(n) = elem()
+                && let Some(key) = key_of(n)
+            {
+                let items = |v: Option<&Value>| v.and_then(Value::as_array).cloned();
+                return list(
+                    &Ctx {
+                        f,
+                        n,
+                        key,
+                        label: &label,
+                        flat,
+                    },
+                    &items(bv).unwrap_or_default(),
+                    &items(cv).unwrap_or_default(),
+                    fields,
+                    subs,
+                );
             }
         }
         // A plain struct is a section of the field's words.

@@ -180,12 +180,11 @@ async fn follow_forever(rest: Rest, store: Arc<Mutex<Store>>) {
     loop {
         // Not yet up (or being restarted) is just "try again": `client` logs in
         // for a certificate each time it needs one.
-        if let Ok(client) = rest.client().await {
-            if let Ok(resp) = client.get(&url).send().await {
-                if resp.status().is_success() {
-                    read_stream(resp, &store).await;
-                }
-            }
+        if let Ok(client) = rest.client().await
+            && let Ok(resp) = client.get(&url).send().await
+            && resp.status().is_success()
+        {
+            read_stream(resp, &store).await;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

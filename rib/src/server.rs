@@ -123,10 +123,10 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
                 break;
             }
         };
-        if let Some(event) = event {
-            if writer.send(event).await.is_err() {
-                break;
-            }
+        if let Some(event) = event
+            && writer.send(event).await.is_err()
+        {
+            break;
         }
     }
 }

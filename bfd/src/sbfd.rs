@@ -394,10 +394,10 @@ pub async fn run(
             },
             () = tokio::time::sleep_until(deadline) => core.on_timer(now(), session::jitter_pct()),
         };
-        if let Some(p) = out {
-            if let Err(e) = path.tx.send(&p.encode()) {
-                debug!(peer = %key.peer, error = %e, "bfd sbfd send failed");
-            }
+        if let Some(p) = out
+            && let Err(e) = path.tx.send(&p.encode())
+        {
+            debug!(peer = %key.peer, error = %e, "bfd sbfd send failed");
         }
         let s = core.status();
         if s != last {

@@ -544,11 +544,11 @@ impl Daemon {
             let out = pv.tick();
             self.emit_pvst(out).await;
             self.ticks += 1;
-            if self.ticks.is_multiple_of(RESYNC_EVERY) {
-                if let Some(pv) = &self.pvst {
-                    let out = pv.all_states();
-                    self.emit_pvst(out).await;
-                }
+            if self.ticks.is_multiple_of(RESYNC_EVERY)
+                && let Some(pv) = &self.pvst
+            {
+                let out = pv.all_states();
+                self.emit_pvst(out).await;
             }
             return self.sync_links().await;
         }
@@ -561,20 +561,20 @@ impl Daemon {
         // ponytail: a full re-push every RESYNC_EVERY seconds heals a state
         // that a concurrent `nos-interfaced` resync overwrote with a stale one
         // (seen after a plan rebuild); upgrade path is an ack from interfaced.
-        if self.ticks.is_multiple_of(RESYNC_EVERY) {
-            if let Some(e) = &self.engine {
-                let out = e.all_states();
-                self.emit(out).await;
-            }
+        if self.ticks.is_multiple_of(RESYNC_EVERY)
+            && let Some(e) = &self.engine
+        {
+            let out = e.all_states();
+            self.emit(out).await;
         }
-        if self.ticks.is_multiple_of(SUMMARY_EVERY) {
-            if let Some(e) = &self.engine {
-                for (p, rt) in e.ports().iter().zip(self.rt.iter_mut()) {
-                    if rt.enabled {
-                        info!(port = %p.name, count = rt.rx, "bpdu rx");
-                    }
-                    rt.rx = 0;
+        if self.ticks.is_multiple_of(SUMMARY_EVERY)
+            && let Some(e) = &self.engine
+        {
+            for (p, rt) in e.ports().iter().zip(self.rt.iter_mut()) {
+                if rt.enabled {
+                    info!(port = %p.name, count = rt.rx, "bpdu rx");
                 }
+                rt.rx = 0;
             }
         }
         // Retries a failed socket open and notices a finished reader.

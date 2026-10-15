@@ -52,10 +52,10 @@ impl BootCounter {
                 now.max(*last).saturating_add(1)
             }
         };
-        if let Some(path) = &self.path {
-            if let Err(e) = write_count(path, next) {
-                warn!(error = %e, "cannot persist ospf boot count");
-            }
+        if let Some(path) = &self.path
+            && let Err(e) = write_count(path, next)
+        {
+            warn!(error = %e, "cannot persist ospf boot count");
         }
         *last = next;
         next

@@ -356,10 +356,10 @@ impl BgpRib {
         let mut out = HashMap::new();
         for route in self.evpn_adj_rib_in.values().flat_map(HashMap::values) {
             let nlri = &route.nlri;
-            if let Some((key, _)) = held(nlri, route.next_hop) {
-                if chosen.get(&key) != Some(&route.next_hop) {
-                    continue;
-                }
+            if let Some((key, _)) = held(nlri, route.next_hop)
+                && chosen.get(&key) != Some(&route.next_hop)
+            {
+                continue;
             }
             let (key, vni, esi) = match nlri {
                 EvpnNlri::MacIp {

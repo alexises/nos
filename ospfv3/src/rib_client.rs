@@ -46,10 +46,10 @@ mod tests {
             let (r, w) = tokio::io::split(stream);
             let mut reader = FramedRead::new(r, IpcCodec::<RibRequest>::default());
             let mut writer = FramedWrite::new(w, IpcCodec::<RibEvent>::default());
-            if let Some(Ok(req)) = reader.next().await {
-                if let Some(event) = reply(req) {
-                    let _ = writer.send(event).await;
-                }
+            if let Some(Ok(req)) = reader.next().await
+                && let Some(event) = reply(req)
+            {
+                let _ = writer.send(event).await;
             }
         });
     }

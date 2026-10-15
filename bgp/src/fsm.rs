@@ -633,18 +633,18 @@ async fn classify_inbound(
                 // the command arm send the Cease. Once only: UPDATEs read
                 // before that arm runs must not queue a second Cease, which
                 // would outlive this session in the slot's channel.
-                if let Some((family, limit, _)) = rib.check_max_prefix(peer.remote_address) {
-                    if !slot.max_prefix_held() {
-                        slot.trip_max_prefix(limit.restart_interval);
-                        slot.send_command(FsmCommand::Cease {
-                            subcode: CeaseSubcode::MaximumPrefixesReached,
-                            data: message::encode_max_prefix_data(
-                                afi_of(family),
-                                safi_of(family),
-                                limit.limit,
-                            ),
-                        });
-                    }
+                if let Some((family, limit, _)) = rib.check_max_prefix(peer.remote_address)
+                    && !slot.max_prefix_held()
+                {
+                    slot.trip_max_prefix(limit.restart_interval);
+                    slot.send_command(FsmCommand::Cease {
+                        subcode: CeaseSubcode::MaximumPrefixesReached,
+                        data: message::encode_max_prefix_data(
+                            afi_of(family),
+                            safi_of(family),
+                            limit.limit,
+                        ),
+                    });
                 }
             } else {
                 return Some(Event::UnexpectedUpdate);
@@ -1011,10 +1011,10 @@ async fn send_outbound(
             }
         }
     }
-    if let Some(update) = mrai.push(update, Instant::now()) {
-        if let Err(e) = writer.send(outbound_update_to_message(update)).await {
-            warn!(error = %e, "could not send update");
-        }
+    if let Some(update) = mrai.push(update, Instant::now())
+        && let Err(e) = writer.send(outbound_update_to_message(update)).await
+    {
+        warn!(error = %e, "could not send update");
     }
 }
 
@@ -1524,11 +1524,11 @@ pub async fn run(
                 (true, Some(State::OpenConfirm(remote))) => Some(*remote),
                 _ => None,
             };
-            if let Some(remote) = reached_open_confirm {
-                if let Some((state, lost)) = collision_override(&cx, &local, remote, &cease).await {
-                    next_state = state;
-                    actions = lost;
-                }
+            if let Some(remote) = reached_open_confirm
+                && let Some((state, lost)) = collision_override(&cx, &local, remote, &cease).await
+            {
+                next_state = state;
+                actions = lost;
             }
 
             let (notification_sent, newly_registered) =

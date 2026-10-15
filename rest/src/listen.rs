@@ -125,10 +125,8 @@ impl Listener {
             let stale = want.as_ref() != Some(&b.want)
                 || vrf_now.as_deref() != Some(b.vrf.as_str())
                 || ifindex(&b.vrf) != b.ifindex;
-            if stale {
-                if let Some(b) = bound.take() {
-                    stop(b, &self.table).await;
-                }
+            if stale && let Some(b) = bound.take() {
+                stop(b, &self.table).await;
             }
         }
         let (Some(want), None) = (want, bound.as_ref()) else {

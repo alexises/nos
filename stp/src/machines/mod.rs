@@ -405,10 +405,10 @@ pub(crate) fn rcv_info(p: &mut Port) -> RcvdInfo {
 
 /// 13.30 `recordProposal`.
 pub(crate) fn record_proposal(p: &mut Port) {
-    if let Some((pr, PortRole::Designated)) = msg_params(p) {
-        if pr.flags.has(Flags::PROPOSAL) {
-            p.proposed = true;
-        }
+    if let Some((pr, PortRole::Designated)) = msg_params(p)
+        && pr.flags.has(Flags::PROPOSAL)
+    {
+        p.proposed = true;
     }
 }
 

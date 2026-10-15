@@ -198,14 +198,14 @@ fn fields_value(
     mut words: &[&str],
 ) -> Option<Value> {
     let mut obj = start.unwrap_or_else(|| Value::Object(Map::new()));
-    if let Some(w) = words.first() {
-        if lookup(fields, words, true).is_none() {
-            let f = fields
-                .iter()
-                .find(|f| !matches!((f.kind)(), Kind::Option(_) | Kind::List(_) | Kind::Bool))?;
-            obj[f.name] = scalar(&(f.kind)(), w)?;
-            words = &words[1..];
-        }
+    if let Some(w) = words.first()
+        && lookup(fields, words, true).is_none()
+    {
+        let f = fields
+            .iter()
+            .find(|f| !matches!((f.kind)(), Kind::Option(_) | Kind::List(_) | Kind::Bool))?;
+        obj[f.name] = scalar(&(f.kind)(), w)?;
+        words = &words[1..];
     }
     while !words.is_empty() {
         let (mut hit, mut n) = lookup(fields, words, true)?;
@@ -1015,11 +1015,11 @@ mod tests {
             match kind {
                 Kind::Option(k) => walk(&k()),
                 Kind::List(k) => {
-                    if let Kind::Struct(node) = k() {
-                        if let Some(key) = node.fields.iter().find(|f| f.key) {
-                            let names = node.fields.iter().map(|f| f.name);
-                            assert_eq!(config_path::key_field(names), Some(key.name));
-                        }
+                    if let Kind::Struct(node) = k()
+                        && let Some(key) = node.fields.iter().find(|f| f.key)
+                    {
+                        let names = node.fields.iter().map(|f| f.name);
+                        assert_eq!(config_path::key_field(names), Some(key.name));
                     }
                     walk(&k());
                 }

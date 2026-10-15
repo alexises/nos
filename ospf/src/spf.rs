@@ -628,12 +628,12 @@ fn remote_lfas(
         let to_e = reverse_distances(e, routers, networks, hosts);
         let pq: Vec<(Ipv4Addr, Ipv4Addr)> = routers
             .iter()
-            .filter(|(&id, _)| id != root && id != e && !hosts.contains(&id))
-            .filter(|(&id, _)| {
+            .filter(|&(&id, _)| id != root && id != e && !hosts.contains(&id))
+            .filter(|&(&id, _)| {
                 let hops = router_hops(next_hop, Vertex::Router(id));
                 !hops.is_empty() && !hops.contains(&addr)
             })
-            .filter(|(&id, _)| {
+            .filter(|&(&id, _)| {
                 let v = Vertex::Router(id);
                 to_e.get(&v).is_some_and(|&q_e| {
                     to_root

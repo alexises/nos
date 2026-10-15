@@ -125,10 +125,10 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Arc<Co
                 break;
             }
         };
-        if let Some(event) = event {
-            if writer.send(event).await.is_err() {
-                break;
-            }
+        if let Some(event) = event
+            && writer.send(event).await.is_err()
+        {
+            break;
         }
     }
 }
@@ -206,15 +206,15 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
                 .await
                 .set_err_disabled(&port, disabled);
             info!(port = %port, disabled, "err-disabled changed");
-            if let Some(i) = iface {
-                if let Err(e) = ctx.driver.apply(&i).await {
-                    warn!(interface = %port, error = %e, "failed to apply err-disabled");
-                }
+            if let Some(i) = iface
+                && let Err(e) = ctx.driver.apply(&i).await
+            {
+                warn!(interface = %port, error = %e, "failed to apply err-disabled");
             }
-            if let Some(a) = agg {
-                if let Err(e) = ctx.driver.ensure_port_aggregate(&a).await {
-                    warn!(port_aggregate = %port, error = %e, "failed to apply err-disabled");
-                }
+            if let Some(a) = agg
+                && let Err(e) = ctx.driver.ensure_port_aggregate(&a).await
+            {
+                warn!(port_aggregate = %port, error = %e, "failed to apply err-disabled");
             }
             None
         }

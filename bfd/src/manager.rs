@@ -193,13 +193,12 @@ impl Demux {
             && !multihop
             && member.is_none()
             && !t.by_peer.contains_key(&(table.to_string(), src, multihop))
+            && let Some(hook) = t.unsolicited.clone()
         {
-            if let Some(hook) = t.unsolicited.clone() {
-                drop(t);
-                // The hook registers a session (taking this lock): look again.
-                hook(table, src, ttl, &p);
-                t = self.0.lock().unwrap();
-            }
+            drop(t);
+            // The hook registers a session (taking this lock): look again.
+            hook(table, src, ttl, &p);
+            t = self.0.lock().unwrap();
         }
         let session = if p.your_discriminator == 0 {
             t.by_peer.get(&(table.to_string(), src, multihop))
@@ -591,10 +590,10 @@ impl Manager {
         let rules = self.rules.lock().unwrap().clone();
         for r in &rules {
             for v6 in [false, true] {
-                if r.subnets.iter().any(|n| n.addr().is_ipv6() == v6) {
-                    if let Err(e) = self.net.listen(&r.table, v6).await {
-                        debug!(table = %r.table, error = %e, "bfd unsolicited listener not ready");
-                    }
+                if r.subnets.iter().any(|n| n.addr().is_ipv6() == v6)
+                    && let Err(e) = self.net.listen(&r.table, v6).await
+                {
+                    debug!(table = %r.table, error = %e, "bfd unsolicited listener not ready");
                 }
             }
         }

@@ -188,13 +188,13 @@ fn bgp_instance_exists(name: Option<&String>, ctx: &Config) -> garde::Result {
 /// the global ones) obey 802.1Q 13.25.
 fn valid_domain_stp(d: &BroadcastDomain, ctx: &Config) -> garde::Result {
     let g = &ctx.spanning_tree;
-    if let Some(id) = d.stp_instance {
-        if !g.mst_instances.iter().any(|m| m.id == id) {
-            return Err(garde::Error::new(format!(
-                "broadcast domain {}: stp-instance {id} is not defined under spanning-tree",
-                d.name
-            )));
-        }
+    if let Some(id) = d.stp_instance
+        && !g.mst_instances.iter().any(|m| m.id == id)
+    {
+        return Err(garde::Error::new(format!(
+            "broadcast domain {}: stp-instance {id} is not defined under spanning-tree",
+            d.name
+        )));
     }
     if let Some(p) = d.stp_priority {
         valid_bridge_priority(p, "stp-priority")?;

@@ -38,13 +38,12 @@ pub(super) async fn session_is(
     for _ in 0..secs * 5 {
         last = r.rest_expect(Method::GET, &path, None, 200).await?;
         let v: serde_json::Value = serde_json::from_str(&last)?;
-        if let Some(s) = v.as_array().and_then(|a| a.first()) {
-            if s["state"] == state
-                && diag.is_none_or(|d| s["diag"] == d)
-                && s["key"]["peer"] == peer
-            {
-                return Ok(());
-            }
+        if let Some(s) = v.as_array().and_then(|a| a.first())
+            && s["state"] == state
+            && diag.is_none_or(|d| s["diag"] == d)
+            && s["key"]["peer"] == peer
+        {
+            return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }

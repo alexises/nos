@@ -250,10 +250,10 @@ impl LinuxInterfaceDriver {
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
         let mut response = self.handle.clone().request(req)?;
         while let Some(m) = response.next().await {
-            if let NetlinkPayload::Error(e) = m.payload {
-                if e.raw_code() != 0 {
-                    return Err(rtnetlink::Error::NetlinkError(e).into());
-                }
+            if let NetlinkPayload::Error(e) = m.payload
+                && e.raw_code() != 0
+            {
+                return Err(rtnetlink::Error::NetlinkError(e).into());
             }
         }
         Ok(())
@@ -663,17 +663,16 @@ impl LinuxInterfaceDriver {
         let prefix = format!("{interface}.");
         let desired_tags: Vec<u16> = desired.iter().map(|(tag, _)| *tag).collect();
 
-        if !desired.is_empty() {
-            if let Some(parent) = self.find_link(interface).await? {
-                if parent_needs_up(parent.header.flags, stp.err_disabled) {
-                    self.handle
-                        .link()
-                        .set(LinkUnspec::new_with_index(physical_index).up().build())
-                        .execute()
-                        .await?;
-                    info!(interface = %interface, "brought parent link up for vlan sub-interfaces");
-                }
-            }
+        if !desired.is_empty()
+            && let Some(parent) = self.find_link(interface).await?
+            && parent_needs_up(parent.header.flags, stp.err_disabled)
+        {
+            self.handle
+                .link()
+                .set(LinkUnspec::new_with_index(physical_index).up().build())
+                .execute()
+                .await?;
+            info!(interface = %interface, "brought parent link up for vlan sub-interfaces");
         }
 
         let mut links = self.handle.link().get().execute();

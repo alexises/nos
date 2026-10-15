@@ -1161,13 +1161,13 @@ impl LinkManager {
             return;
         }
         for r in &resolved {
-            if !previous.iter().any(|p| same_but_cost(p, r)) {
-                if let Some(v) = r.virtual_link {
-                    info!(
-                        link = %r.attach_point, neighbor = %v.neighbor, local = %r.local_addr, cost = r.cost,
-                        "ospf virtual link up"
-                    );
-                }
+            if !previous.iter().any(|p| same_but_cost(p, r))
+                && let Some(v) = r.virtual_link
+            {
+                info!(
+                    link = %r.attach_point, neighbor = %v.neighbor, local = %r.local_addr, cost = r.cost,
+                    "ospf virtual link up"
+                );
             }
         }
         for p in previous.iter() {
@@ -1420,10 +1420,10 @@ impl LinkManager {
         // RFC 2328 §16.3: a transit area may hold a shorter path to a
         // backbone destination than the backbone's own (virtual-link) path.
         for candidate in transit {
-            if backbone_routes.contains(&candidate.prefix) {
-                if let Some(existing) = merged.get_mut(&candidate.prefix) {
-                    spf::apply_transit(existing, candidate);
-                }
+            if backbone_routes.contains(&candidate.prefix)
+                && let Some(existing) = merged.get_mut(&candidate.prefix)
+            {
+                spf::apply_transit(existing, candidate);
             }
         }
         // RFC 2328 §3.5: a discard route per active advertised range, so

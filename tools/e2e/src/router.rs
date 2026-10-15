@@ -147,10 +147,10 @@ impl Router {
     /// was only just started may not have it yet.
     async fn fetch_rest_ca(dock: &Dock, container: &str) -> anyhow::Result<Vec<u8>> {
         for _ in 0..60 {
-            if let Ok((0, pem)) = dock.exec(container, &["cat", REST_CA_PATH]).await {
-                if pem.contains("BEGIN CERTIFICATE") {
-                    return Ok(pem.into_bytes());
-                }
+            if let Ok((0, pem)) = dock.exec(container, &["cat", REST_CA_PATH]).await
+                && pem.contains("BEGIN CERTIFICATE")
+            {
+                return Ok(pem.into_bytes());
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }

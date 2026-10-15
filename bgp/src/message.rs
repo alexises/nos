@@ -1563,14 +1563,14 @@ fn parse_path_attributes(
             // RFC 7606 §3(c): flags conflicting with the type are a
             // treat-as-withdraw, or a reset for MP_* (no NLRI to withdraw).
             // Partial and Extended-Length are never checked.
-            if let Some(want) = expected_flags(attr_type) {
-                if flags & (ATTR_FLAG_OPTIONAL_TRANSITIVE) != want {
-                    if is_mp {
-                        return Err(WireError::MalformedUpdate);
-                    }
-                    acc.out.withdraw = true;
-                    break 'attr;
+            if let Some(want) = expected_flags(attr_type)
+                && flags & (ATTR_FLAG_OPTIONAL_TRANSITIVE) != want
+            {
+                if is_mp {
+                    return Err(WireError::MalformedUpdate);
                 }
+                acc.out.withdraw = true;
+                break 'attr;
             }
             // RFC 7606 §3(g): a repeated MP_* resets the session; any other
             // repeat keeps the first occurrence and discards the rest.
@@ -1598,10 +1598,10 @@ fn parse_path_attributes(
     }
 
     // RFC 6793 §4.2.3: AS4_AGGREGATOR replaces an AGGREGATOR holding AS_TRANS.
-    if let (Some(agg), Some(as4)) = (out.aggregator.as_mut(), as4_aggregator) {
-        if agg.asn == u32::from(AS_TRANS) {
-            *agg = as4;
-        }
+    if let (Some(agg), Some(as4)) = (out.aggregator.as_mut(), as4_aggregator)
+        && agg.asn == u32::from(AS_TRANS)
+    {
+        *agg = as4;
     }
 
     Ok(out)

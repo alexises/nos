@@ -591,11 +591,11 @@ impl Engine {
             }
         };
         self.bridge.receive(port, cist);
-        if let (Some(m), Some(mst)) = (msti, self.mst.as_mut()) {
-            if !self.bridge.ports[port].err_disabled {
-                sync_mst(&self.bridge, mst);
-                mst.receive(port, &m);
-            }
+        if let (Some(m), Some(mst)) = (msti, self.mst.as_mut())
+            && !self.bridge.ports[port].err_disabled
+        {
+            sync_mst(&self.bridge, mst);
+            mst.receive(port, &m);
         }
         self.drain()
     }
@@ -775,10 +775,12 @@ impl Engine {
         let Some(m) = self.mst.as_mut() else { return };
         for port in triggers {
             let p = &self.bridge.ports[port];
-            if p.send_rstp && p.port_enabled && !p.prot.bpdu_filter {
-                if let Bpdu::Rst(params) = build(&self.bridge, port, Tx::Rst) {
-                    cist_tx.entry(port).or_insert(params);
-                }
+            if p.send_rstp
+                && p.port_enabled
+                && !p.prot.bpdu_filter
+                && let Bpdu::Rst(params) = build(&self.bridge, port, Tx::Rst)
+            {
+                cist_tx.entry(port).or_insert(params);
             }
         }
         let mut sends: Vec<_> = cist_tx.into_iter().collect();

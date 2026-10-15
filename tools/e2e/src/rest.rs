@@ -108,10 +108,10 @@ impl Rest {
     /// use and again once the certificate is half spent.
     pub async fn client(&self) -> anyhow::Result<Client> {
         let mut session = self.session.lock().await;
-        if let Some(s) = session.as_ref() {
-            if Instant::now() < s.renew_at {
-                return Ok(s.client.clone());
-            }
+        if let Some(s) = session.as_ref()
+            && Instant::now() < s.renew_at
+        {
+            return Ok(s.client.clone());
         }
         let identity = match self.login(E2E_USER, E2E_PASSWORD).await? {
             Ok(identity) => identity,

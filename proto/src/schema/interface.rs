@@ -319,12 +319,12 @@ fn interface_name_valid(name: &String, ctx: &Config) -> garde::Result {
             "interface name must not contain '.' (reserved for subinterface addressing, e.g. eth0.100)",
         ));
     }
-    if let Some(table) = loopback_table_name(name) {
-        if !ctx.routing_tables.iter().any(|t| t.name == table) {
-            return Err(garde::Error::new(
-                "loopback interface's routing table does not exist",
-            ));
-        }
+    if let Some(table) = loopback_table_name(name)
+        && !ctx.routing_tables.iter().any(|t| t.name == table)
+    {
+        return Err(garde::Error::new(
+            "loopback interface's routing table does not exist",
+        ));
     }
     Ok(())
 }

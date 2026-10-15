@@ -58,10 +58,9 @@ fn problem_media_type(v: &mut Value) {
                 .and_then(|c| c.get("schema"))
                 .and_then(ref_name)
                 == Some("ErrorBody")
+                && let Some(c) = m.remove("application/json")
             {
-                if let Some(c) = m.remove("application/json") {
-                    m.insert(crate::error::PROBLEM_JSON.to_string(), c);
-                }
+                m.insert(crate::error::PROBLEM_JSON.to_string(), c);
             }
             m.values_mut().for_each(problem_media_type);
         }
