@@ -932,7 +932,8 @@ impl LinkManager {
                         if background.shutting_down.load(Ordering::Relaxed) {
                             continue;
                         }
-                        if let Some(router_id) = *background.router_id.lock().await {
+                        let router_id_opt = *background.router_id.lock().await;
+                        if let Some(router_id) = router_id_opt {
                             background.resolve_virtual_links(router_id).await;
                             background.originate_router_lsas(router_id).await;
                             background.originate_as_external_lsas(router_id).await;

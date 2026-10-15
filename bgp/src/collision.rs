@@ -206,7 +206,8 @@ impl PeerSlot {
     /// Records the task running this peer's passively-accepted session,
     /// replacing (and aborting) any previous one.
     pub async fn set_passive_task(&self, task: JoinHandle<()>) {
-        if let Some(previous) = self.passive_task.lock().await.replace(task) {
+        let guarded = self.passive_task.lock().await.replace(task);
+        if let Some(previous) = guarded {
             previous.abort();
         }
     }
@@ -215,7 +216,8 @@ impl PeerSlot {
     /// called when the peer is being torn down or respawned with a changed
     /// `ResolvedPeer`.
     pub async fn stop_passive(&self) {
-        if let Some(task) = self.passive_task.lock().await.take() {
+        let guarded = self.passive_task.lock().await.take();
+        if let Some(task) = guarded {
             task.abort();
         }
     }
