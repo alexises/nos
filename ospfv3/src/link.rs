@@ -1592,7 +1592,8 @@ impl LinkManager {
             loop {
                 tokio::select! {
                     _ = origination_tick.tick() => {
-                        if let Some(router_id) = *background.router_id.lock().await {
+                        let router_id_opt = *background.router_id.lock().await;
+                        if let Some(router_id) = router_id_opt {
                             background.originate_all(router_id).await;
                         }
                     }

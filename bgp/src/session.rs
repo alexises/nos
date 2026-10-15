@@ -769,12 +769,14 @@ impl SessionManager {
             }
         }
         drop(tasks);
-        if let Some((client, applier)) = self.rpki.lock().await.take() {
+        let taken = self.rpki.lock().await.take();
+        if let Some((client, applier)) = taken {
             client.task.abort();
             applier.abort();
         }
         self.peers.write().await.clear();
-        if let Some(listeners) = self.listeners.lock().await.take() {
+        let taken = self.listeners.lock().await.take();
+        if let Some(listeners) = taken {
             listeners.v4.abort();
             listeners.v6.abort();
         }
@@ -990,7 +992,8 @@ impl SessionManager {
         // the command would sit in the channel until some later session — and
         // any other connection starts from `slot.auth()`.
         for (peer, delta) in to_update {
-            if let Some(slot) = self.peers.read().await.get(&peer.remote_address).cloned() {
+            let taken = self.peers.read().await.get(&peer.remote_address).cloned();
+            if let Some(slot) = taken {
                 slot.set_auth(peer.auth.clone());
                 // ponytail: a connection still in its handshake keeps the
                 // keys it started with until the next reset; no live update
