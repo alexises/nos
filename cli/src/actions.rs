@@ -178,6 +178,105 @@ pub async fn handle_action(
         }
         Resolved::NavigateTop => Outcome::Continue(navigate_top(&mode)),
         Resolved::Navigate(path) => Outcome::Continue(navigate_to(&mode, path)),
+        Resolved::SaveRunningConfig => {
+            save_running_config(socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::OpenTransaction {
+            name,
+            base,
+            explicit_base,
+        } => Outcome::Continue(open_transaction(socket, name, base, explicit_base).await),
+        Resolved::ConfigEdit(line) => Outcome::Continue(config_edit(mode, socket, &line).await),
+        Resolved::Commit => Outcome::Continue(commit(mode, socket).await),
+        Resolved::Discard => Outcome::Continue(discard(mode, socket).await),
+        Resolved::EditPolicySource { name } => {
+            Outcome::Continue(edit_policy_source(mode, socket, name).await)
+        }
+        Resolved::ShowPolicySource { name } => {
+            show_policy_source(&mode, socket, &name).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::SetPolicySourceLine { name, line, text } => {
+            let mode = edit_policy_source_line(mode, socket, name, |lines| {
+                if line == 0 {
+                    return Err("line numbers start at 1".to_string());
+                }
+                if line <= lines.len() {
+                    lines[line - 1] = text;
+                } else if line == lines.len() + 1 {
+                    lines.push(text);
+                } else {
+                    return Err(format!(
+                        "line {line} is out of range (source has {} lines; use {} to append)",
+                        lines.len(),
+                        lines.len() + 1
+                    ));
+                }
+                Ok(())
+            })
+            .await;
+            Outcome::Continue(mode)
+        }
+        Resolved::DeletePolicySourceLine { name, line } => {
+            let mode = edit_policy_source_line(mode, socket, name, |lines| {
+                if line == 0 || line > lines.len() {
+                    return Err(format!(
+                        "line {line} is out of range (source has {} lines)",
+                        lines.len()
+                    ));
+                }
+                lines.remove(line - 1);
+                Ok(())
+            })
+            .await;
+            Outcome::Continue(mode)
+        }
+        Resolved::Diff => {
+            diff(&mode, socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::Error(msg) => {
+            eprintln!("error: {msg}");
+            Outcome::Continue(mode)
+        }
+        action @ (Resolved::ShowRunningConfig
+        | Resolved::ShowTransaction
+        | Resolved::ShowRoute { .. }
+        | Resolved::ShowFdb { .. }
+        | Resolved::ShowInterface { .. }
+        | Resolved::ShowPortAggregate { .. }
+        | Resolved::ShowLacp { .. }
+        | Resolved::ShowLldpNeighbors { .. }
+        | Resolved::ShowLldpStatistics
+        | Resolved::ShowSpanningTree
+        | Resolved::ShowSpanningTreeInstance { .. }
+        | Resolved::ShowSpanningTreeMstConfig
+        | Resolved::ShowSpanningTreeDomain { .. }
+        | Resolved::ShowSpanningTreeDetail { .. }
+        | Resolved::ShowBfdReflector
+        | Resolved::ShowBfdSessions { .. }
+        | Resolved::ShowLog { .. }
+        | Resolved::ShowBgpBrief
+        | Resolved::ShowBgpEvpn
+        | Resolved::ShowBgpRpki
+        | Resolved::ShowOspfNeigh
+        | Resolved::ShowOspfDatabase
+        | Resolved::ShowOspfv3Neigh
+        | Resolved::ShowOspfv3Database
+        | Resolved::ClearBgpSoftIn { .. }
+        | Resolved::ClearBgpPeer { .. }
+        | Resolved::ClearStpMcheck { .. }
+        | Resolved::ClearStpErrDisabled { .. }) => {
+            run_query(action, mode, socket, watchdog_socket).await
+        }
+    }
+}
+
+/// The `show`/`clear` actions of `handle_action`, split out for length
+/// (#425); `handle_action` names every variant routed here.
+async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket: &Path) -> Outcome {
+    match action {
         Resolved::ShowRunningConfig => {
             show_running_config(socket).await;
             Outcome::Continue(mode)
@@ -294,68 +393,7 @@ pub async fn handle_action(
             clear_stp_err_disabled(watchdog_socket, interface).await;
             Outcome::Continue(mode)
         }
-        Resolved::SaveRunningConfig => {
-            save_running_config(socket).await;
-            Outcome::Continue(mode)
-        }
-        Resolved::OpenTransaction {
-            name,
-            base,
-            explicit_base,
-        } => Outcome::Continue(open_transaction(socket, name, base, explicit_base).await),
-        Resolved::ConfigEdit(line) => Outcome::Continue(config_edit(mode, socket, &line).await),
-        Resolved::Commit => Outcome::Continue(commit(mode, socket).await),
-        Resolved::Discard => Outcome::Continue(discard(mode, socket).await),
-        Resolved::EditPolicySource { name } => {
-            Outcome::Continue(edit_policy_source(mode, socket, name).await)
-        }
-        Resolved::ShowPolicySource { name } => {
-            show_policy_source(&mode, socket, &name).await;
-            Outcome::Continue(mode)
-        }
-        Resolved::SetPolicySourceLine { name, line, text } => {
-            let mode = edit_policy_source_line(mode, socket, name, |lines| {
-                if line == 0 {
-                    return Err("line numbers start at 1".to_string());
-                }
-                if line <= lines.len() {
-                    lines[line - 1] = text;
-                } else if line == lines.len() + 1 {
-                    lines.push(text);
-                } else {
-                    return Err(format!(
-                        "line {line} is out of range (source has {} lines; use {} to append)",
-                        lines.len(),
-                        lines.len() + 1
-                    ));
-                }
-                Ok(())
-            })
-            .await;
-            Outcome::Continue(mode)
-        }
-        Resolved::DeletePolicySourceLine { name, line } => {
-            let mode = edit_policy_source_line(mode, socket, name, |lines| {
-                if line == 0 || line > lines.len() {
-                    return Err(format!(
-                        "line {line} is out of range (source has {} lines)",
-                        lines.len()
-                    ));
-                }
-                lines.remove(line - 1);
-                Ok(())
-            })
-            .await;
-            Outcome::Continue(mode)
-        }
-        Resolved::Diff => {
-            diff(&mode, socket).await;
-            Outcome::Continue(mode)
-        }
-        Resolved::Error(msg) => {
-            eprintln!("error: {msg}");
-            Outcome::Continue(mode)
-        }
+        _ => unreachable!("routed by handle_action"),
     }
 }
 

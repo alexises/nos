@@ -1130,6 +1130,10 @@ async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear scenario: build two areas, run, assert"
+)]
 async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix() {
     fn router_lsa(id: Ipv4Addr, link: RouterLink) -> Lsa {
         Lsa {

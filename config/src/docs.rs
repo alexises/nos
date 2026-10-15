@@ -5,6 +5,10 @@ use nos_proto::{CommandDoc, Topic};
 /// client shows this same text instead of keeping its own copy. Scoped to
 /// one topic at a time (see `nos_proto::docs::Topic`), so a client only
 /// pays for the docs it actually displays.
+#[allow(
+    clippy::too_many_lines,
+    reason = "flat one-arm-per-topic help table, authored once; splitting it only hides the table"
+)]
 pub fn command_doc(topic: Topic) -> CommandDoc {
     let (summary, detail): (&str, &str) = match topic {
         Topic::ShowRunningConfig => (

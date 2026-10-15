@@ -318,87 +318,48 @@ async fn main() -> anyhow::Result<()> {
         tasks.push(tokio::spawn(instances::manage(m, shutdown_rx.clone())));
     }
 
-    let interfaced_args = fixed_args(
+    let sup = FixedSupervision {
+        pki: &pki,
+        policy,
+        shutdown_rx: &shutdown_rx,
+        watchdog_socket: &args.listen_socket,
+        log_socket: &args.log_socket,
+    };
+    tasks.push(sup.spawn(
+        "nos-interfaced",
+        args.interfaced_bin,
+        Role::Interfaced,
         &args.interfaced_listen_socket,
-        &args.listen_socket,
-        &args.log_socket,
         args.interfaced_flags,
-    );
-    let interfaced_spec = ProcessSpec::new("nos-interfaced", args.interfaced_bin, interfaced_args)
-        .with_identity(pki.clone(), Role::Interfaced, "");
-    tasks.push(tokio::spawn(supervise_one(
-        interfaced_spec,
-        policy,
-        shutdown_rx.clone(),
-    )));
-
-    let lacpd_args = fixed_args(
-        &args.lacpd_listen_socket,
-        &args.listen_socket,
-        &args.log_socket,
-        args.lacpd_flags,
-    );
-    let lacpd_spec = ProcessSpec::new("nos-lacpd", args.lacpd_bin, lacpd_args).with_identity(
-        pki.clone(),
+    ));
+    tasks.push(sup.spawn(
+        "nos-lacpd",
+        args.lacpd_bin,
         Role::Lacpd,
-        "",
-    );
-    tasks.push(tokio::spawn(supervise_one(
-        lacpd_spec,
-        policy,
-        shutdown_rx.clone(),
-    )));
-
-    let lldpd_args = fixed_args(
-        &args.lldpd_listen_socket,
-        &args.listen_socket,
-        &args.log_socket,
-        args.lldpd_flags,
-    );
-    let lldpd_spec = ProcessSpec::new("nos-lldpd", args.lldpd_bin, lldpd_args).with_identity(
-        pki.clone(),
+        &args.lacpd_listen_socket,
+        args.lacpd_flags,
+    ));
+    tasks.push(sup.spawn(
+        "nos-lldpd",
+        args.lldpd_bin,
         Role::Lldpd,
-        "",
-    );
-    tasks.push(tokio::spawn(supervise_one(
-        lldpd_spec,
-        policy,
-        shutdown_rx.clone(),
-    )));
-
-    let bfdd_args = fixed_args(
-        &args.bfdd_listen_socket,
-        &args.listen_socket,
-        &args.log_socket,
-        args.bfdd_flags,
-    );
-    let bfdd_spec = ProcessSpec::new("nos-bfdd", args.bfdd_bin, bfdd_args).with_identity(
-        pki.clone(),
+        &args.lldpd_listen_socket,
+        args.lldpd_flags,
+    ));
+    tasks.push(sup.spawn(
+        "nos-bfdd",
+        args.bfdd_bin,
         Role::Bfdd,
-        "",
-    );
-    tasks.push(tokio::spawn(supervise_one(
-        bfdd_spec,
-        policy,
-        shutdown_rx.clone(),
-    )));
-
-    let stpd_args = fixed_args(
-        &args.stpd_listen_socket,
-        &args.listen_socket,
-        &args.log_socket,
-        args.stpd_flags,
-    );
-    let stpd_spec = ProcessSpec::new("nos-stpd", args.stpd_bin, stpd_args).with_identity(
-        pki.clone(),
+        &args.bfdd_listen_socket,
+        args.bfdd_flags,
+    ));
+    tasks.push(sup.spawn(
+        "nos-stpd",
+        args.stpd_bin,
         Role::Stpd,
-        "",
-    );
-    tasks.push(tokio::spawn(supervise_one(
-        stpd_spec,
-        policy,
-        shutdown_rx.clone(),
-    )));
+        &args.stpd_listen_socket,
+        args.stpd_flags,
+    ));
 
     let broker_task = broker::start(
         &args.listen_socket,
@@ -436,6 +397,32 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down");
     Ok(())
+}
+
+/// What every fixed daemon (`nos-interfaced`, `nos-lacpd`, `nos-lldpd`,
+/// `nos-bfdd`, `nos-stpd`) is spawned with besides its own binary, role and
+/// socket; split out of `main` for length (#425).
+struct FixedSupervision<'a> {
+    pki: &'a Arc<Pki>,
+    policy: BackoffPolicy,
+    shutdown_rx: &'a watch::Receiver<bool>,
+    watchdog_socket: &'a Path,
+    log_socket: &'a Path,
+}
+
+impl FixedSupervision<'_> {
+    fn spawn(
+        &self,
+        name: &'static str,
+        bin: PathBuf,
+        role: Role,
+        listen: &Path,
+        flags: Vec<String>,
+    ) -> tokio::task::JoinHandle<()> {
+        let args = fixed_args(listen, self.watchdog_socket, self.log_socket, flags);
+        let spec = ProcessSpec::new(name, bin, args).with_identity(self.pki.clone(), role, "");
+        tokio::spawn(supervise_one(spec, self.policy, self.shutdown_rx.clone()))
+    }
 }
 
 /// The argument vector of a single fixed daemon (`nos-interfaced`,

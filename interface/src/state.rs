@@ -372,6 +372,35 @@ impl Interfaces {
     }
 }
 
+/// Ensures every configured broadcast domain's bridge through `driver`, split
+/// out of `build_from_config` for length (#425).
+async fn ensure_broadcast_domains(
+    cfg: &Config,
+    driver: &dyn InterfaceDriver,
+) -> HashMap<String, BroadcastDomainState> {
+    let mut by_domain = HashMap::with_capacity(cfg.broadcast_domains.len());
+    for domain in &cfg.broadcast_domains {
+        let mut state = BroadcastDomainState {
+            name: domain.name.clone(),
+            addresses: domain.addresses.clone(),
+            routing_table: domain.routing_table.clone(),
+            bridge_name: None,
+            link_local_address: None,
+        };
+        match driver.ensure_broadcast_domain(&state).await {
+            Ok(bridge_name) => {
+                state.link_local_address = driver.link_local_address(&bridge_name).await;
+                state.bridge_name = Some(bridge_name);
+            }
+            Err(e) => {
+                warn!(domain = %state.name, error = %e, "failed to ensure broadcast domain bridge");
+            }
+        }
+        by_domain.insert(state.name.clone(), state);
+    }
+    by_domain
+}
+
 /// Builds a fresh `Interfaces` from a freshly fetched `Config`, applying
 /// each interface's desired state via `driver` along the way, and calling
 /// `driver.remove` for every interface present in `previous` but absent
@@ -396,26 +425,7 @@ pub async fn build_from_config(
             .map(|((_, d), s)| (d.clone(), *s))
             .collect(),
     };
-    let mut by_domain = HashMap::with_capacity(cfg.broadcast_domains.len());
-    for domain in &cfg.broadcast_domains {
-        let mut state = BroadcastDomainState {
-            name: domain.name.clone(),
-            addresses: domain.addresses.clone(),
-            routing_table: domain.routing_table.clone(),
-            bridge_name: None,
-            link_local_address: None,
-        };
-        match driver.ensure_broadcast_domain(&state).await {
-            Ok(bridge_name) => {
-                state.link_local_address = driver.link_local_address(&bridge_name).await;
-                state.bridge_name = Some(bridge_name);
-            }
-            Err(e) => {
-                warn!(domain = %state.name, error = %e, "failed to ensure broadcast domain bridge");
-            }
-        }
-        by_domain.insert(state.name.clone(), state);
-    }
+    let by_domain = ensure_broadcast_domains(cfg, driver).await;
     let domains: HashSet<String> = cfg
         .broadcast_domains
         .iter()

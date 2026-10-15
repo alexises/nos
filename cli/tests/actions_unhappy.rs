@@ -223,6 +223,10 @@ fn fake_configd(path: &Path, kind: Configd) {
 }
 
 /// A lab whose watchdog, daemons and `nos-configd` behave as asked.
+#[allow(
+    clippy::too_many_lines,
+    reason = "fixture builder: one linear block per fake daemon"
+)]
 fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
     shared().install("user", "admin");
     let dir = tempfile::tempdir().unwrap();
