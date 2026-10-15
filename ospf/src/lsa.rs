@@ -180,7 +180,7 @@ pub const MAX_LINK_METRIC: u16 = 0xFFFF;
 
 /// RFC 2328 §12.4 / Appendix B's `MinLSInterval` — the minimum age a
 /// self-originated instance must reach before it may be re-originated with
-/// changed content (see `link::install_self_originated`).
+/// changed content (see `link::originate::install_self_originated`).
 pub const MIN_LS_INTERVAL: u16 = 5;
 
 /// RFC 2328 §12.1.6's `InitialSequenceNumber` — every self-originated LSA
@@ -190,7 +190,7 @@ pub const INITIAL_SEQUENCE_NUMBER: i32 = i32::MIN + 1;
 /// RFC 2328 §12.1.6's `MaxSequenceNumber` — an LSA that reaches it must be
 /// flushed (prematurely aged) before being re-originated at
 /// `INITIAL_SEQUENCE_NUMBER`; `0x8000_0000` in between is reserved and must
-/// never be produced (see `link::install_self_originated`).
+/// never be produced (see `link::originate::install_self_originated`).
 pub const MAX_SEQUENCE_NUMBER: i32 = i32::MAX;
 
 /// Identifies one LSA instance's slot in the database, independent of its

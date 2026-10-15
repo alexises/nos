@@ -540,7 +540,7 @@ fn send_hello(
 }
 
 /// Returns whether this Hello caused a broadcast link to leave `Waiting`
-/// early — mirrors `ospf::link::handle_hello`'s shape, `source`/`address`
+/// early — mirrors `ospf::link::rx::handle_hello`'s shape, `source`/`address`
 /// now `Ipv6Addr`, and records the neighbor's own `interface_id` from the
 /// Hello (needed for SPF next-hop derivation, see `NeighborInfo`).
 #[allow(clippy::too_many_arguments)]
@@ -1017,7 +1017,7 @@ fn retransmit_pending(
     }
 }
 
-/// Mirrors `ospf::link::flood_full_neighbors`'s `ponytail:` periodic-resend
+/// Mirrors `ospf::link::flood::flood_full_neighbors`'s `ponytail:` periodic-resend
 /// design exactly, same rationale.
 async fn flood_full_neighbors(
     socket: &LinkSocket,
@@ -1091,7 +1091,7 @@ fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
     });
 }
 
-/// RFC 4222 §2 recommendation 2 — mirrors `ospf::link::note_alive`.
+/// RFC 4222 §2 recommendation 2 — mirrors `ospf::link::flood::note_alive`.
 fn note_alive(
     cfg: &LinkConfig,
     status: &StatusHandle,
@@ -1317,7 +1317,7 @@ fn run_election(cfg: &LinkConfig, local_router_id: Ipv4Addr, status: &StatusHand
 
     // Re-logs whenever the reported role *or* the dr/bdr router-ids behind
     // it change — not just on an `InterfaceState` variant change. Mirrors
-    // `ospf::link::run_election`'s identical fix; see its own doc comment
+    // `ospf::link::rx::run_election`'s identical fix; see its own doc comment
     // for the full rationale (a router can stay `DrOther`/`Backup` across
     // more than one election pass while a neighbor's declared role is
     // still converging, which would otherwise freeze the log on a stale,
@@ -2442,7 +2442,7 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
 /// RFC 5340 §4.4.3.2's Router-LSA link entries for every currently-running
 /// link in one area — one point-to-point entry per link with at least one
 /// neighbor, one transit-network entry per link with a resolved DR. Unlike
-/// `ospf::link::router_lsa_links`, never a stub-network entry: v3's
+/// `ospf::link::originate::router_lsa_links`, never a stub-network entry: v3's
 /// Router-LSA has nowhere to carry a prefix at all (see the module doc
 /// comment) — every prefix instead comes from
 /// `LinkManager::originate_intra_area_prefix_lsas`.
@@ -2493,7 +2493,7 @@ fn router_lsa_links(
 
 /// Installs a self-originated LSA if `body` actually changed since what's
 /// held, bumping the sequence number by one — mirrors
-/// `ospf::link::install_self_originated` exactly, minus the `options`
+/// `ospf::link::originate::install_self_originated` exactly, minus the `options`
 /// header field (v3's header carries none — see `lsa::LsaHeader`). Returns
 /// the key, originated whether or not anything had to be reinstalled.
 fn install_self_originated(
@@ -2539,7 +2539,7 @@ fn install_self_originated(
     key
 }
 
-/// RFC 2328 §14.1 premature aging — `ospf::link::withdraw_self_originated`:
+/// RFC 2328 §14.1 premature aging — `ospf::link::originate::withdraw_self_originated`:
 /// flushes one of this router's own LSAs by reinstalling it at `MAX_AGE`
 /// with its sequence number unchanged, so `lsa::is_newer`'s `MaxAge`
 /// tie-break makes every neighbor accept it; `Lsdb`'s `MaxAge` hold keeps it
@@ -2583,7 +2583,7 @@ fn withdraw_undesired(lsdb: &mut Lsdb, local_router_id: Ipv4Addr, desired: &Hash
 }
 
 /// Evaluates `prefix` against a redistribute `policy` —
-/// `ospf::link::passes_redistribute_policy` with an IPv6 prefix: a
+/// `ospf::link::originate::passes_redistribute_policy` with an IPv6 prefix: a
 /// redistribute policy has no `this.bgp.*` to read, so those are empty.
 fn passes_redistribute_policy(prefix: Ipv6Net, policy: &CompiledPolicy) -> bool {
     let input = nos_rpl::Input {
