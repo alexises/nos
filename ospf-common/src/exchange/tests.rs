@@ -947,3 +947,277 @@ fn master_discards_duplicate_in_full() {
     dup.master = true;
     assert_eq!(dbd_in(&mut adj, NeighborState::Full, &dup), []);
 }
+
+// LSR/LSU/LSAck, moved from both daemons' `exchange` tests. Each daemon
+// keeps only the tests of its own closures.
+
+fn lsa_id(id: u32, seq: i32) -> L {
+    L(H {
+        id,
+        seq,
+        age: 0,
+        checksum: 0,
+    })
+}
+
+const SEQ1: i32 = 0x8000_0001u32.cast_signed();
+
+/// Runs one LSU into `area`/`link`/`as_scope`: scope by id (100s are
+/// link-local, 200s AS, anything else area), ids 900+ discarded, id 500
+/// exempt from the `MaxAge` discard.
+fn lsu_at(
+    adj: &mut AdjacencyData,
+    area: &mut Lsdb<L>,
+    link: &mut Lsdb<L>,
+    as_scope: Option<&mut Lsdb<L>>,
+    lsas: &[L],
+    now: Instant,
+) -> (Vec<Action>, Vec<H>) {
+    let mut stores = Stores {
+        area,
+        link_local: link,
+        as_scope,
+    };
+    on_lsu_received(
+        adj,
+        &mut stores,
+        lsas,
+        now,
+        |h| match h.id / 100 {
+            1 => Scope::LinkLocal,
+            2 => Scope::As,
+            _ => Scope::Area,
+        },
+        |h| h.id >= 900,
+        |h| h.id == 500,
+    )
+}
+
+fn lsu(adj: &mut AdjacencyData, area: &mut Lsdb<L>, lsas: &[L]) -> (Vec<Action>, Vec<H>) {
+    lsu_at(adj, area, &mut Lsdb::new(), None, lsas, Instant::now())
+}
+
+#[test]
+fn lsr_for_held_lsas_sends_one_lsu_from_whichever_store_holds_each() {
+    let mut adj = AdjacencyData::default();
+    let (mut area, mut link) = (Lsdb::new(), Lsdb::new());
+    area.install(lsa_id(1, SEQ1));
+    link.install(lsa_id(101, SEQ1));
+    let actions = on_lsr_received(&mut adj, &[&area, &link], &[1, 101]);
+    assert!(matches!(&actions[..], [Action::SendLsu(lsas)] if lsas.len() == 2));
+    assert!(adj.retransmission_list.contains_key(&1));
+    assert!(adj.retransmission_list.contains_key(&101));
+    assert_eq!(on_lsr_received(&mut adj, &[&area], &[]), []);
+}
+
+#[test]
+fn lsr_for_unknown_lsa_triggers_seq_number_mismatch() {
+    let mut adj = AdjacencyData::default();
+    let mut area = Lsdb::new();
+    area.install(lsa_id(1, SEQ1));
+    // 101 lives in another link's store, so it is not servable here.
+    assert_eq!(
+        on_lsr_received(&mut adj, &[&area, &Lsdb::new()], &[1, 101]),
+        vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
+    );
+    assert!(adj.retransmission_list.is_empty());
+}
+
+#[test]
+fn lsu_installs_and_acks_and_clears_request_list() {
+    let mut adj = AdjacencyData {
+        request_list: vec![1],
+        ..Default::default()
+    };
+    let mut area = Lsdb::new();
+    let l = lsa_id(1, SEQ1);
+    let (actions, newly_installed) = lsu(&mut adj, &mut area, std::slice::from_ref(&l));
+    assert_eq!(adj.request_list, []);
+    assert!(area.get(&1).is_some());
+    assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
+    assert_eq!(newly_installed, vec![l.0]);
+    // RFC 2328 §13.5: the ack goes out on the next sweep, as one packet.
+    assert_eq!(
+        take_pending_acks(&mut adj),
+        Some(Action::SendLsAck(vec![l.0]))
+    );
+    assert_eq!(take_pending_acks(&mut adj), None);
+}
+
+#[test]
+fn lsu_with_stale_duplicate_is_acked_but_not_reported_as_newly_installed() {
+    let mut adj = AdjacencyData::default();
+    let mut area = Lsdb::new();
+    let l = lsa_id(1, SEQ1);
+    area.install(l.clone());
+    let (actions, newly_installed) = lsu(&mut adj, &mut area, std::slice::from_ref(&l));
+    assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
+    assert_eq!(adj.pending_acks, vec![l.0]);
+    assert_eq!(newly_installed, []);
+}
+
+#[test]
+fn lsu_without_emptying_request_list_does_not_fire_loading_done() {
+    let mut adj = AdjacencyData {
+        request_list: vec![1, 2],
+        ..Default::default()
+    };
+    let l = lsa_id(1, SEQ1);
+    let (actions, newly_installed) = lsu(&mut adj, &mut Lsdb::new(), std::slice::from_ref(&l));
+    assert_eq!(adj.request_list, vec![2]);
+    assert_eq!(actions, []);
+    assert_eq!(newly_installed, vec![l.0]);
+}
+
+/// RFC 2328 §13 step 4: an unheld `MaxAge` LSA is acked but not installed,
+/// unless this adjacency asked for it or `exempt_max_age` says so.
+#[test]
+fn lsu_with_unheld_max_age_lsa_is_acked_but_discarded() {
+    let mut l = lsa_id(1, SEQ1);
+    l.0.age = MAX_AGE;
+    let mut adj = AdjacencyData::default();
+    let mut area = Lsdb::new();
+    let (actions, newly_installed) = lsu(&mut adj, &mut area, std::slice::from_ref(&l));
+    assert!(area.get(&1).is_none());
+    assert_eq!(newly_installed, []);
+    assert!(!actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
+    assert_eq!(adj.pending_acks, vec![l.0]);
+
+    let mut adj = AdjacencyData {
+        request_list: vec![1],
+        ..Default::default()
+    };
+    let (_, newly_installed) = lsu(&mut adj, &mut area, std::slice::from_ref(&l));
+    assert_eq!(newly_installed, vec![l.0]);
+    assert_eq!(adj.request_list, []);
+
+    let mut exempt = lsa_id(500, SEQ1);
+    exempt.0.age = MAX_AGE;
+    let (_, newly_installed) = lsu(
+        &mut AdjacencyData::default(),
+        &mut area,
+        std::slice::from_ref(&exempt),
+    );
+    assert_eq!(newly_installed, vec![exempt.0]);
+}
+
+/// A flushed copy (same sequence/checksum, age `MaxAge`) of a held LSA
+/// supersedes it: `is_newer`'s `MaxAge` tie-break.
+#[test]
+fn lsu_with_max_age_copy_of_held_lsa_supersedes_it() {
+    let mut area = Lsdb::new();
+    let l = lsa_id(1, SEQ1);
+    area.install(l.clone());
+    let mut flushed = l;
+    flushed.0.age = MAX_AGE;
+    let (_, newly_installed) = lsu(
+        &mut AdjacencyData::default(),
+        &mut area,
+        std::slice::from_ref(&flushed),
+    );
+    assert_eq!(newly_installed, vec![flushed.0]);
+    assert_eq!(area.get(&1).unwrap().0.age, MAX_AGE);
+}
+
+/// RFC 2328 §13.5: acks from several LSUs accumulate into one `LSAck`.
+#[test]
+fn lsu_acks_accumulate_across_lsus_until_taken() {
+    let mut adj = AdjacencyData::default();
+    let mut area = Lsdb::new();
+    let (first, second) = (lsa_id(1, SEQ1), lsa_id(2, SEQ1));
+    for l in [&first, &second] {
+        lsu(&mut adj, &mut area, std::slice::from_ref(l));
+    }
+    assert_eq!(
+        take_pending_acks(&mut adj),
+        Some(Action::SendLsAck(vec![first.0, second.0]))
+    );
+}
+
+/// RFC 2328 §13 step 5a: a newer instance within `MinLSArrival` of the last
+/// received one is discarded: not installed, not acked, and not counted as
+/// answering a request.
+#[test]
+fn lsu_with_newer_instance_too_soon_is_discarded_without_ack() {
+    let first = lsa_id(1, SEQ1);
+    let second = lsa_id(1, SEQ1 + 1);
+    let mut adj = AdjacencyData {
+        request_list: vec![1],
+        ..Default::default()
+    };
+    let mut area = Lsdb::new();
+    let t0 = Instant::now();
+    area.install_received(first, t0);
+    let run = |adj: &mut AdjacencyData, area: &mut Lsdb<L>, at| {
+        lsu_at(
+            adj,
+            area,
+            &mut Lsdb::new(),
+            None,
+            std::slice::from_ref(&second),
+            at,
+        )
+    };
+    let (actions, newly_installed) = run(&mut adj, &mut area, t0 + crate::lsdb::MIN_LS_ARRIVAL / 2);
+    assert_eq!(newly_installed, []);
+    assert_eq!(adj.pending_acks, []);
+    assert_eq!(actions, []);
+    assert_eq!(adj.request_list, vec![1]);
+    assert_eq!(area.get(&1).unwrap().0.seq, SEQ1);
+
+    let (actions, newly_installed) = run(&mut adj, &mut area, t0 + crate::lsdb::MIN_LS_ARRIVAL);
+    assert_eq!(newly_installed, vec![second.0]);
+    assert_eq!(adj.pending_acks, vec![second.0]);
+    assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
+}
+
+/// `scope` routes each LSA of one LSU to its store; `discard` drops one
+/// unacked.
+#[test]
+fn lsu_routes_each_lsa_to_its_scope_store_and_drops_discarded_unacked() {
+    let mut adj = AdjacencyData::default();
+    let (mut area, mut link, mut as_scope) = (Lsdb::new(), Lsdb::new(), Lsdb::new());
+    let lsas = [
+        lsa_id(1, SEQ1),
+        lsa_id(101, SEQ1),
+        lsa_id(201, SEQ1),
+        lsa_id(901, SEQ1),
+    ];
+    let (_, installed) = lsu_at(
+        &mut adj,
+        &mut area,
+        &mut link,
+        Some(&mut as_scope),
+        &lsas,
+        Instant::now(),
+    );
+    assert_eq!(installed.len(), 3);
+    assert_eq!(adj.pending_acks.len(), 3);
+    for (store, held) in [(&area, 1), (&link, 101), (&as_scope, 201)] {
+        let ids: Vec<u32> = store.headers().iter().map(|h| h.id).collect();
+        assert_eq!(ids, [held]);
+    }
+}
+
+/// `Scope::As` without an AS store is a caller bug: a debug build asserts.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "Scope::As without an AS store")]
+fn lsu_as_scope_without_as_store_asserts() {
+    lsu(
+        &mut AdjacencyData::default(),
+        &mut Lsdb::new(),
+        &[lsa_id(201, SEQ1)],
+    );
+}
+
+#[test]
+fn lsack_clears_retransmission_list() {
+    let l = lsa_id(1, SEQ1);
+    let mut adj = AdjacencyData {
+        retransmission_list: HashMap::from([(1, Arc::new(l.clone()))]),
+        ..Default::default()
+    };
+    on_lsack_received(&mut adj, &[l.0]);
+    assert!(adj.retransmission_list.is_empty());
+}

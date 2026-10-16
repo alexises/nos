@@ -775,7 +775,7 @@ async fn handle_lsu(
         let mut lsdb = stores.area.lock().await;
         let mut link_local_lsdb = stores.link.lock().await;
         let mut as_lsdb = stores.as_scope.lock().await;
-        exchange::on_lsu_received(
+        let result = exchange::on_lsu_received(
             &mut adj,
             &mut lsdb,
             &mut link_local_lsdb,
@@ -783,7 +783,16 @@ async fn handle_lsu(
             lsu,
             // tokio's clock, so paused-time tests see MinLSArrival pass.
             tokio::time::Instant::now().into_std(),
-        )
+        );
+        // A Grace-LSA is acted on at once and never held: a copy left in the
+        // LSDB would be offered back to the restarted router and flooded to
+        // us again. Removed under the same lock the install took (as v2).
+        for l in &lsu.lsas {
+            if matches!(l.body, LsaBody::Grace(_)) && result.1.contains(&l.header) {
+                link_local_lsdb.remove(&l.header.key());
+            }
+        }
+        result
     };
     if adj.pending_acks_since.is_none() && !adj.pending_acks.is_empty() {
         adj.pending_acks_since = Some(std::time::Instant::now());
@@ -804,9 +813,6 @@ async fn handle_lsu(
         let LsaBody::Grace(body) = grace.body else {
             continue;
         };
-        // Acted on at once, never held: a copy left in the LSDB would be
-        // offered back to the restarted router and flooded to us again.
-        stores.link.lock().await.remove(&grace.header.key());
         on_grace_lsa(cfg, status, &grace.header, body);
     }
 

@@ -11,10 +11,10 @@
 //! link from its effective MTU (`mtu_based_max_headers`) unless a daemon's
 //! `--dbd-max-headers` test/debug flag overrides it.
 //!
-//! Where the families differ (stub/NSSA scope, opaque LSAs, the DBD Options
-//! value, the header overhead) the daemon passes a closure or a `Params`
-//! value; the LSR/LSU handlers stay in the daemons (their store layouts
-//! differ).
+//! Also the LSR/LSU/LSAck handling (RFC 2328 §10.7, §13, §13.5). Where the
+//! families differ (stub/NSSA scope, opaque LSAs, store routing, the Grace
+//! exemption, the DBD Options value, the header overhead) the daemon passes
+//! a closure or a `Params`/`Stores` value.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
@@ -22,8 +22,8 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::lsa::{Lsa, LsaHeader};
-use crate::lsdb::Key;
+use crate::lsa::{Lsa, LsaHeader, MAX_AGE};
+use crate::lsdb::{InstallOutcome, Key, Lsdb};
 use crate::neighbor::{Event, NeighborState};
 
 /// The LSA header's wire length, identical in RFC 2328 and RFC 5340.
@@ -480,6 +480,133 @@ pub fn on_lsack_received<L: Lsa>(adj: &mut AdjacencyData<L>, acked: &[L::Header]
     for header in acked {
         adj.retransmission_list.remove(&header.key());
     }
+}
+
+/// Which store a received LSA belongs in (`on_lsu_received`'s `scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Area,
+    /// v2 type 9 (RFC 5250), v3 Link-LSA (RFC 5340 §4.5.1): this link's
+    /// own store, so no other link floods it.
+    LinkLocal,
+    /// v3 only (RFC 5340 §4.5.1): the router's one AS-scope store.
+    As,
+}
+
+/// The stores one link's LSU lands in. v2 has no AS-scope store (`None`).
+pub struct Stores<'a, L: Lsa> {
+    pub area: &'a mut Lsdb<L>,
+    pub link_local: &'a mut Lsdb<L>,
+    pub as_scope: Option<&'a mut Lsdb<L>>,
+}
+
+/// Handles one received LSR: looks every requested key up in `stores`, in
+/// order (a key lives in only one). A key held nowhere is RFC 2328 §10.7's
+/// `BadLSReq`: the databases have diverged, so negotiation restarts
+/// (`SeqNumberMismatch`) rather than sending a partial answer. Otherwise
+/// sends everything found as one LSU and keeps it on the retransmission list
+/// until acked (`on_lsack_received`).
+pub fn on_lsr_received<L: Lsa>(
+    adj: &mut AdjacencyData<L>,
+    stores: &[&Lsdb<L>],
+    requests: &[Key<L>],
+) -> Vec<Action<L>> {
+    let mut found = Vec::with_capacity(requests.len());
+    for key in requests {
+        match stores.iter().find_map(|s| s.get(key)) {
+            Some(l) => found.push(l),
+            None => return vec![Action::NeighborEvent(Event::SeqNumberMismatch)],
+        }
+    }
+    if found.is_empty() {
+        return Vec::new();
+    }
+    for l in &found {
+        adj.retransmission_list.insert(l.header().key(), l.clone());
+    }
+    vec![Action::SendLsu(found)]
+}
+
+/// Handles one received LSU (RFC 2328 §13): installs every carried LSA into
+/// the store `scope` picks, clears now-satisfied requests, and queues an ack
+/// for every LSA, newer or not (an ack for a stale instance still stops the
+/// sender retransmitting it). Fires `LoadingDone` once the request list is
+/// empty. Returns the actions plus the headers *actually*
+/// installed/superseded, so the daemon logs nothing for the duplicates its
+/// own periodic resend produces.
+///
+/// - `discard`: dropped, neither installed nor acked (§13 step 3; v2: out of
+///   stub/NSSA scope, v3: S2/S1 reserved).
+/// - `exempt_max_age`: skips §13 step 4 (v3 Grace-LSA: never held, and its
+///   `MaxAge` copy is what ends a grace).
+///
+/// Acks are delayed (§13.5): queued on `adj.pending_acks` for the daemon's
+/// `RXMT_INTERVAL` sweep (`take_pending_acks`), never returned as
+/// `SendLsAck`. `ponytail:` the RFC's direct-ack cases key off "was this LSA
+/// flooded back out", which periodic-resend flooding has no equivalent of,
+/// so every ack is delayed.
+pub fn on_lsu_received<L, FS, FD, FE>(
+    adj: &mut AdjacencyData<L>,
+    stores: &mut Stores<'_, L>,
+    lsas: &[L],
+    now: Instant,
+    scope: FS,
+    discard: FD,
+    exempt_max_age: FE,
+) -> (Vec<Action<L>>, Vec<L::Header>)
+where
+    L: Lsa,
+    FS: Fn(&L::Header) -> Scope,
+    FD: Fn(&L::Header) -> bool,
+    FE: Fn(&L::Header) -> bool,
+{
+    let mut newly_installed = Vec::new();
+    for l in lsas {
+        let h = *l.header();
+        if discard(&h) {
+            continue;
+        }
+        let store = match scope(&h) {
+            Scope::Area => &mut *stores.area,
+            Scope::LinkLocal => &mut *stores.link_local,
+            Scope::As => {
+                // A caller bug (v2 never says `As`): drop unacked rather
+                // than crash the daemon.
+                debug_assert!(stores.as_scope.is_some(), "Scope::As without an AS store");
+                let Some(s) = stores.as_scope.as_deref_mut() else {
+                    continue;
+                };
+                s
+            }
+        };
+        let key = h.key();
+        // §13 step 4: a MaxAge instance of an LSA held nowhere here is acked
+        // and discarded, unless this adjacency requested it. Without this,
+        // two routers each holding a flushed copy for `MAX_AGE_HOLD_TICKS`
+        // would reinstall each other's echo forever.
+        if h.age() >= MAX_AGE
+            && !exempt_max_age(&h)
+            && store.get(&key).is_none()
+            && !adj.request_list.contains(&key)
+        {
+            adj.pending_acks.push(h);
+            continue;
+        }
+        match store.install_received(l.clone(), now) {
+            // §13 step 5a (`MinLSArrival`): neither acked nor answering a
+            // request; the sender's retransmission brings it back.
+            InstallOutcome::TooSoon => continue,
+            InstallOutcome::Rejected => {}
+            InstallOutcome::Installed | InstallOutcome::Superseded => newly_installed.push(h),
+        }
+        adj.pending_acks.push(h);
+        adj.request_list.retain(|k| *k != key);
+    }
+    let mut actions = Vec::new();
+    if adj.request_list.is_empty() {
+        actions.push(Action::NeighborEvent(Event::LoadingDone));
+    }
+    (actions, newly_installed)
 }
 
 /// RFC 2328 §10.8: request any LSA the neighbor's summary lists that this
