@@ -779,7 +779,15 @@ async fn handle_lsu(
         let mut lsdb = stores.area.lock().await;
         let mut link_local_lsdb = stores.link.lock().await;
         let mut as_lsdb = stores.as_scope.lock().await;
-        exchange::on_lsu_received(&mut adj, &mut lsdb, &mut link_local_lsdb, &mut as_lsdb, lsu)
+        exchange::on_lsu_received(
+            &mut adj,
+            &mut lsdb,
+            &mut link_local_lsdb,
+            &mut as_lsdb,
+            lsu,
+            // tokio's clock, so paused-time tests see MinLSArrival pass.
+            tokio::time::Instant::now().into_std(),
+        )
     };
     for header in &newly_installed {
         info!(

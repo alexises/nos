@@ -9,3 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio   = { workspace = true, features = ["macros", "rt"] }

@@ -166,7 +166,7 @@ const ROUTER_LINK_LEN: usize = 12;
 
 /// RFC 2328 §13.1's `MaxAge` (seconds) — an LSA at this age is being flushed
 /// and, per §13.1's tie-break, always treated as the newer instance.
-pub const MAX_AGE: u16 = 3600;
+pub use nos_ospf_common::lsa::MAX_AGE;
 
 /// RFC 2328 §14's `LSRefreshTime` (seconds) — a self-originated LSA is
 /// reoriginated once its own age reaches this, even with unchanged content,
@@ -318,6 +318,41 @@ pub enum LsaBody {
 pub struct Lsa {
     pub header: LsaHeader,
     pub body: LsaBody,
+}
+
+impl nos_ospf_common::lsa::LsaHeader for LsaHeader {
+    type Key = LsaKey;
+    fn key(&self) -> LsaKey {
+        LsaHeader::key(self)
+    }
+    fn seq(&self) -> i32 {
+        self.sequence_number
+    }
+    fn age(&self) -> u16 {
+        self.age
+    }
+    fn set_age(&mut self, age: u16) {
+        self.age = age;
+    }
+    fn checksum(&self) -> u16 {
+        self.checksum
+    }
+    fn length(&self) -> u16 {
+        self.length
+    }
+    fn advertising_router(&self) -> Ipv4Addr {
+        self.advertising_router
+    }
+}
+
+impl nos_ospf_common::lsa::Lsa for Lsa {
+    type Header = LsaHeader;
+    fn header(&self) -> &LsaHeader {
+        &self.header
+    }
+    fn header_mut(&mut self) -> &mut LsaHeader {
+        &mut self.header
+    }
 }
 
 pub(crate) fn encode_lsa_header(buf: &mut Vec<u8>, header: &LsaHeader) {
@@ -634,17 +669,7 @@ fn lsa_checksum(without_age: &[u8]) -> u16 {
 /// and checksum are the same content regardless of stored age, so there's no
 /// ambiguity left for `MaxAgeDiff` to resolve.
 pub fn is_newer(a: &LsaHeader, b: &LsaHeader) -> Ordering {
-    if a.sequence_number != b.sequence_number {
-        return a.sequence_number.cmp(&b.sequence_number);
-    }
-    if a.checksum != b.checksum {
-        return a.checksum.cmp(&b.checksum);
-    }
-    match (a.age == MAX_AGE, b.age == MAX_AGE) {
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        _ => Ordering::Equal,
-    }
+    nos_ospf_common::lsa::LsaHeader::is_newer(a, b)
 }
 
 #[cfg(test)]
