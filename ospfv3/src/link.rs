@@ -295,6 +295,8 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         retransmission_list: HashMap::new(),
         last_dbd_sent: Some(dbd.clone()),
         summary_remaining: std::collections::VecDeque::new(),
+        pending_acks: Vec::new(),
+        pending_acks_since: None,
     };
     (adj, dbd)
 }
@@ -467,6 +469,7 @@ pub async fn run(
             Some(address) = bfd_rx.recv() => kill_bfd_neighbor(&cfg, &status, address),
             _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status);
+                flush_pending_acks(&socket, &cfg, local_router_id, &status);
                 flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status).await;
             }
         }
@@ -789,6 +792,9 @@ async fn handle_lsu(
             tokio::time::Instant::now().into_std(),
         )
     };
+    if adj.pending_acks_since.is_none() && !adj.pending_acks.is_empty() {
+        adj.pending_acks_since = Some(std::time::Instant::now());
+    }
     for header in &newly_installed {
         info!(
             link = %cfg.attach_point, neighbor = %lsu.router_id,
@@ -963,6 +969,48 @@ fn execute_actions(
         if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, &payload) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospfv3 packet");
         }
+    }
+}
+
+/// RFC 2328 §13.5 delayed acknowledgment (as `ospf::link::flood`'s): sends
+/// each neighbor's queued acks (`AdjacencyData::pending_acks`) as one
+/// `LSAck` on the `RXMT_INTERVAL` sweep.
+fn flush_pending_acks(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+) {
+    let mut flushes = Vec::new();
+    status.send_if_modified(|s| {
+        for (neighbor_id, info) in &mut s.neighbors {
+            let Some(adj) = &mut info.adjacency else {
+                continue;
+            };
+            let held = adj.pending_acks_since;
+            if let Some(action) = exchange::take_pending_acks(adj) {
+                flushes.push((*neighbor_id, held, action));
+            }
+        }
+        // Nothing here changes what origination snapshots.
+        false
+    });
+    for (neighbor_id, held, action) in flushes {
+        if let exchange::Action::SendLsAck(headers) = &action {
+            info!(
+                link = %cfg.attach_point, neighbor = %neighbor_id, acked = headers.len(),
+                delayed_ms = held.map_or(0, |t| t.elapsed().as_millis()),
+                "ospfv3 lsack sent"
+            );
+        }
+        execute_actions(
+            socket,
+            cfg,
+            local_router_id,
+            status,
+            neighbor_id,
+            vec![action],
+        );
     }
 }
 

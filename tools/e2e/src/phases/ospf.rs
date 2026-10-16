@@ -2723,6 +2723,7 @@ fn either_form(legacy: u16, extended: u16, pat: impl Fn(u16) -> String) -> Strin
 /// over the real adjacencies and its SPFs push two real kernel routes.
 /// Dropping the OSPFv3 rule alone prematurely ages only its LSA (the Type-5
 /// and its route stay); dropping the OSPF rule then flushes the Type-5.
+/// Also checks router-b's OSPFv3 acks are delayed (RFC 2328 §13.5).
 /// Leaves the table with no redistribute rule.
 pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
@@ -2799,7 +2800,12 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     a.provision(&["--clear-redistribute-to-ospf"]).await?;
     a.wait_new(v2_aged, v2_aged0, 30).await?;
     b.wait_new(&v2_flushed_pat, v2_flushed0, 30).await?;
-    b.wait_new(&v2_removed, v2_removed0, 30).await
+    b.wait_new(&v2_removed, v2_removed0, 30).await?;
+
+    // RFC 2328 §13.5 delayed acknowledgment, as `asbr` checks for OSPFv2:
+    // some batch is held a second or more before router-b's sweep sends it.
+    b.wait_new("ospfv3 lsack sent.*delayed_ms=[1-9][0-9][0-9][0-9]", 0, 30)
+        .await
 }
 
 /// RFC 5340 ABR (requires `ospfv3`): router-b's IPv6 loopback joins a second
