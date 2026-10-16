@@ -11,7 +11,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 ## Shared with OSPFv3
 
 - `nos-ospf-common` holds the pure RFC 2328 §9.4 DR/BDR election and §10.5 neighbor FSM (`neighbor::step`, `election::elect`) for both daemons; no NOS dependencies. `run_election`'s candidate pool takes every neighbor at `TwoWay` or later, or a router alone on the segment re-elects itself the moment its only neighbor passes `TwoWay`.
-- `nos-ospf-common::exchange` holds the DBD exchange, the delayed-ack queue and `LSAck` handling for both daemons (#430); `exchange.rs` here supplies v2's closures (`in_area_scope`, `is_opaque`) and `Params` (`dbd_options(stub)`, the peer's O-bit) and keeps `on_lsr_received`/`on_lsu_received`.
+- `nos-ospf-common::exchange` holds the DBD exchange, LSR/LSU handling, the delayed-ack queue and `LSAck` handling for both daemons (#430, #431); `exchange.rs` here only supplies v2's closures (`in_area_scope`, `is_opaque`, type-9 to the link store), `Params` (`dbd_options(stub)`, the peer's O-bit) and its two stores (no AS store).
 - The `link::LinkSocket`/`LinkManager::with_opener` test seam, the `biased;` select and the RFC 3623/5187 helper rules are mirrored in `ospfv3/`; change one, check the other.
 
 ## Link and exchange rules

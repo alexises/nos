@@ -1,8 +1,9 @@
 //! `OSPFv3`'s side of the RFC 2328 §10.6-10.8 exchange (RFC 5340 keeps it
-//! unchanged). The DBD negotiation, summary pagination, delayed-ack queue
-//! and `LSAck` handling are `nos_ospf_common::exchange`'s, shared with
-//! `nos-ospfd`; this module keeps the LSR/LSU handlers, whose store layout is
-//! v3's (area, link-local and AS-scope stores, RFC 5340 §4.5.1).
+//! unchanged) and §13 flooding receive. The machine is
+//! `nos_ospf_common::exchange`'s, shared with `nos-ospfd`; this module only
+//! supplies v3's closures (S2/S1 scope, the Grace-LSA `MaxAge` exemption)
+//! and store layout (area, link-local and AS-scope stores, RFC 5340
+//! §4.5.1).
 
 use std::time::Instant;
 
@@ -13,7 +14,7 @@ pub use nos_ospf_common::exchange::{
 
 use crate::lsa::{self, Lsa, LsaHeader};
 use crate::lsdb::Lsdb;
-use crate::neighbor::{Event, NeighborState};
+use crate::neighbor::NeighborState;
 use crate::packet::{DbdPacket, LsrPacket, LsuPacket};
 
 pub type AdjacencyData = common::AdjacencyData<Lsa>;
@@ -39,11 +40,9 @@ pub fn on_dbd_received(
     common::on_dbd_received(adj, state, p, dbd, local_lsdb_headers, |_| true, |_| false)
 }
 
-/// Handles one received LSR: looks up every requested LSA in the link's
-/// area store, its own link-local store or the AS-scope store (a key only
-/// ever lives in one — see `on_lsu_received`). If any requested LSA isn't held, that's RFC 2328
-/// §10.7's `BadLSReq` — negotiation restarts from scratch rather than
-/// sending a partial/wrong answer.
+/// `nos_ospf_common::exchange::on_lsr_received` over v3's stores: the
+/// link's area store, its own link-local store, then the AS-scope store (a
+/// key only ever lives in one).
 pub fn on_lsr_received(
     adj: &mut AdjacencyData,
     area_lsdb: &Lsdb,
@@ -51,37 +50,15 @@ pub fn on_lsr_received(
     as_lsdb: &Lsdb,
     lsr: &LsrPacket,
 ) -> Vec<Action> {
-    let mut found = Vec::with_capacity(lsr.requests.len());
-    for key in &lsr.requests {
-        let held = area_lsdb
-            .get(key)
-            .or_else(|| link_local_lsdb.get(key))
-            .or_else(|| as_lsdb.get(key));
-        match held {
-            Some(l) => found.push(l),
-            None => return vec![Action::NeighborEvent(Event::SeqNumberMismatch)],
-        }
-    }
-    if found.is_empty() {
-        return Vec::new();
-    }
-    for l in &found {
-        adj.retransmission_list.insert(l.header.key(), l.clone());
-    }
-    vec![Action::SendLsu(found)]
+    common::on_lsr_received(adj, &[area_lsdb, link_local_lsdb, as_lsdb], &lsr.requests)
 }
 
-/// Handles one received LSU: installs every carried LSA — a link-local-scoped
-/// one (RFC 5340 §4.5.1, Link-LSA/E-Link-LSA) into this link's own
-/// `link_local_lsdb`, an AS-scoped one (AS-External-LSA) into `as_lsdb`,
-/// anything else into the area's `area_lsdb`; one LSU legitimately mixes
-/// them — clears any now-satisfied entries from the
-/// request list, and queues an ack for every LSA in `adj.pending_acks`
-/// (delayed, RFC 2328 §13.5; `ponytail:` every ack is delayed, as in
-/// `ospf::exchange`). Fires `LoadingDone` once the request
-/// list is fully drained. Returns the actions to carry out alongside the
-/// headers that were *actually* installed/superseded (excluding rejected
-/// duplicates).
+/// `nos_ospf_common::exchange::on_lsu_received` with v3's closures: a
+/// link-local-scoped LSA (RFC 5340 §4.5.1, Link-LSA) lands in this link's
+/// own store, an AS-scoped one (AS-External-LSA) in `as_lsdb`, anything else
+/// in the area's; S2/S1 "reserved" is discarded unacked (§4.5 step 3); a
+/// Grace-LSA is exempt from the `MaxAge` discard (never held: `handle_lsu`
+/// acts on it at once, and its `MaxAge` copy is what ends a grace).
 pub fn on_lsu_received(
     adj: &mut AdjacencyData,
     area_lsdb: &mut Lsdb,
@@ -90,63 +67,36 @@ pub fn on_lsu_received(
     lsu: &LsuPacket,
     now: Instant,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
-    let acked = &mut adj.pending_acks;
-    let mut newly_installed = Vec::new();
-    for l in &lsu.lsas {
-        // RFC 5340 §4.5 step (3): S2/S1 "reserved" is discarded, not acked.
-        if lsa::is_reserved_scope(l.header.lsa_type) {
-            continue;
-        }
-        let store = if lsa::is_link_local_scope(l.header.lsa_type) {
-            &mut *link_local_lsdb
-        } else if lsa::is_as_scope(l.header.lsa_type) {
-            &mut *as_lsdb
-        } else {
-            &mut *area_lsdb
-        };
-        let key = l.header.key();
-        // RFC 2328 §13 step 4 (`ospf::exchange::on_lsu_received`): a MaxAge
-        // instance of an LSA held nowhere here, and not requested, is acked
-        // and discarded — otherwise two routers each holding a flushed copy
-        // for `lsdb::MAX_AGE_HOLD_TICKS` would reinstall each other's echo
-        // forever. A Grace-LSA is exempt: it is never held (`handle_lsu`
-        // acts on it at once), and its MaxAge copy is what ends a grace.
-        if l.header.age >= lsa::MAX_AGE
-            && l.header.lsa_type != lsa::LSA_TYPE_GRACE
-            && store.get(&key).is_none()
-            && !adj.request_list.contains(&key)
-        {
-            acked.push(l.header);
-            continue;
-        }
-        match store.install_received(l.clone(), now) {
-            // RFC 2328 §13 step 5a (`MinLSArrival`): discarded, and neither
-            // acknowledged nor treated as answering a request — the
-            // sender's retransmission brings it back.
-            crate::lsdb::InstallOutcome::TooSoon => continue,
-            crate::lsdb::InstallOutcome::Rejected => {}
-            crate::lsdb::InstallOutcome::Installed | crate::lsdb::InstallOutcome::Superseded => {
-                newly_installed.push(l.header);
+    let mut stores = common::Stores {
+        area: area_lsdb,
+        link_local: link_local_lsdb,
+        as_scope: Some(as_lsdb),
+    };
+    common::on_lsu_received(
+        adj,
+        &mut stores,
+        &lsu.lsas,
+        now,
+        |h| {
+            if lsa::is_link_local_scope(h.lsa_type) {
+                common::Scope::LinkLocal
+            } else if lsa::is_as_scope(h.lsa_type) {
+                common::Scope::As
+            } else {
+                common::Scope::Area
             }
-        }
-        acked.push(l.header);
-        adj.request_list.retain(|k| *k != key);
-    }
-    let mut actions = Vec::new();
-    if adj.request_list.is_empty() {
-        actions.push(Action::NeighborEvent(Event::LoadingDone));
-    }
-    (actions, newly_installed)
+        },
+        |h| lsa::is_reserved_scope(h.lsa_type),
+        |h| h.lsa_type == lsa::LSA_TYPE_GRACE,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::net::Ipv4Addr;
-    use std::sync::Arc;
 
     use super::*;
-    use crate::packet::LsAckPacket;
+    use crate::neighbor::Event;
 
     #[test]
     fn mtu_derived_budget() {
@@ -209,23 +159,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lsr_for_held_lsa_sends_lsu_and_tracks_retransmission() {
-        let mut adj = AdjacencyData::default();
-        let mut lsdb = Lsdb::new();
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
-        lsdb.install(l.clone());
-        let lsr = LsrPacket {
-            router_id: router_id("9.9.9.10"),
-            area_id: Ipv4Addr::UNSPECIFIED,
-            requests: vec![l.header.key()],
-        };
-        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &Lsdb::new(), &lsr);
-        assert_eq!(actions.len(), 1);
-        assert!(matches!(&actions[0], Action::SendLsu(lsas) if lsas.len() == 1));
-        assert!(adj.retransmission_list.contains_key(&l.header.key()));
-    }
-
     fn link_lsa(seq: i32) -> Lsa {
         let mut l = full_lsa("1.1.1.1", seq);
         l.header.lsa_type = lsa::LSA_TYPE_LINK;
@@ -261,134 +194,6 @@ mod tests {
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
-        );
-    }
-
-    #[test]
-    fn lsr_for_unknown_lsa_triggers_seq_number_mismatch() {
-        let mut adj = AdjacencyData::default();
-        let lsdb = Lsdb::new();
-        let lsr = LsrPacket {
-            router_id: router_id("9.9.9.10"),
-            area_id: Ipv4Addr::UNSPECIFIED,
-            requests: vec![header("1.1.1.1", 1).key()],
-        };
-        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &Lsdb::new(), &lsr);
-        assert_eq!(
-            actions,
-            vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
-        );
-    }
-
-    #[test]
-    fn lsu_installs_and_acks_and_clears_request_list() {
-        let mut adj = AdjacencyData {
-            request_list: vec![header("1.1.1.1", 1).key()],
-            ..Default::default()
-        };
-        let mut lsdb = Lsdb::new();
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
-        let lsu = LsuPacket {
-            router_id: router_id("9.9.9.10"),
-            area_id: Ipv4Addr::UNSPECIFIED,
-            lsas: vec![l.clone()],
-        };
-        let (actions, newly_installed) = on_lsu_received(
-            &mut adj,
-            &mut lsdb,
-            &mut Lsdb::new(),
-            &mut Lsdb::new(),
-            &lsu,
-            Instant::now(),
-        );
-        assert_eq!(adj.request_list, []);
-        assert!(lsdb.get(&l.header.key()).is_some());
-        assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
-        assert_eq!(newly_installed, vec![l.header]);
-        // Delayed (RFC 2328 §13.5): queued, sent by the next flush.
-        assert_eq!(
-            take_pending_acks(&mut adj),
-            Some(Action::SendLsAck(vec![l.header]))
-        );
-        assert_eq!(take_pending_acks(&mut adj), None);
-    }
-
-    /// RFC 2328 §13 step 5a: a newer instance within `MIN_LS_ARRIVAL` of the
-    /// last received one is dropped unacked and its request stays pending.
-    #[test]
-    fn lsu_drops_too_soon_instance_unacked() {
-        let first = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
-        let second = full_lsa("1.1.1.1", 0x8000_0002u32.cast_signed());
-        let mut adj = AdjacencyData {
-            request_list: vec![second.header.key()],
-            ..Default::default()
-        };
-        let mut lsdb = Lsdb::new();
-        let t0 = Instant::now();
-        lsdb.install_received(first.clone(), t0);
-        let lsu = LsuPacket {
-            router_id: router_id("9.9.9.10"),
-            area_id: Ipv4Addr::UNSPECIFIED,
-            lsas: vec![second.clone()],
-        };
-        let run = |adj: &mut AdjacencyData, lsdb: &mut Lsdb, at: Instant| {
-            on_lsu_received(adj, lsdb, &mut Lsdb::new(), &mut Lsdb::new(), &lsu, at)
-        };
-        let (_, newly_installed) = run(&mut adj, &mut lsdb, t0 + crate::lsdb::MIN_LS_ARRIVAL / 2);
-        assert_eq!(newly_installed, []);
-        assert_eq!(adj.pending_acks, []);
-        assert_eq!(adj.request_list, vec![second.header.key()]);
-        assert_eq!(
-            lsdb.get(&first.header.key())
-                .unwrap()
-                .header
-                .sequence_number,
-            first.header.sequence_number
-        );
-        let (_, newly_installed) = run(&mut adj, &mut lsdb, t0 + crate::lsdb::MIN_LS_ARRIVAL);
-        assert_eq!(newly_installed, vec![second.header]);
-        assert_eq!(adj.pending_acks, vec![second.header]);
-    }
-
-    /// RFC 2328 §13 step 4: an unrequested `MaxAge` LSA with no held copy is
-    /// acked but not installed; with a held copy, it supersedes it.
-    #[test]
-    fn lsu_discards_unheld_max_age_lsa() {
-        let mut adj = AdjacencyData::default();
-        let mut lsdb = Lsdb::new();
-        let live = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
-        let mut flushed = live.clone();
-        flushed.header.age = lsa::MAX_AGE;
-        let lsu = LsuPacket {
-            router_id: router_id("9.9.9.10"),
-            area_id: Ipv4Addr::UNSPECIFIED,
-            lsas: vec![flushed.clone()],
-        };
-        let (_, newly_installed) = on_lsu_received(
-            &mut adj,
-            &mut lsdb,
-            &mut Lsdb::new(),
-            &mut Lsdb::new(),
-            &lsu,
-            Instant::now(),
-        );
-        assert_eq!(newly_installed, []);
-        assert!(lsdb.get(&flushed.header.key()).is_none());
-        assert_eq!(adj.pending_acks, vec![flushed.header]);
-
-        lsdb.install(live);
-        let (_, newly_installed) = on_lsu_received(
-            &mut adj,
-            &mut lsdb,
-            &mut Lsdb::new(),
-            &mut Lsdb::new(),
-            &lsu,
-            Instant::now(),
-        );
-        assert_eq!(newly_installed, vec![flushed.header]);
-        assert_eq!(
-            lsdb.get(&flushed.header.key()).unwrap().header.age,
-            lsa::MAX_AGE
         );
     }
 
@@ -471,19 +276,33 @@ mod tests {
         assert_eq!(adj.pending_acks.len(), 4);
     }
 
+    /// RFC 5187: an unheld `MaxAge` Grace-LSA is installed (it ends a
+    /// grace), where any other unheld `MaxAge` LSA is only acked.
     #[test]
-    fn lsack_clears_retransmission_list() {
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
-        let mut adj = AdjacencyData {
-            retransmission_list: HashMap::from([(l.header.key(), Arc::new(l.clone()))]),
-            ..Default::default()
+    fn unheld_max_age_grace_lsa_is_not_discarded() {
+        let mk = |t: u16| {
+            let mut l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+            l.header.lsa_type = t;
+            l.header.age = lsa::MAX_AGE;
+            l.body = lsa::LsaBody::Opaque(vec![9; 8]);
+            l
         };
-        let ack = LsAckPacket {
+        let (grace, router) = (mk(lsa::LSA_TYPE_GRACE), mk(lsa::LSA_TYPE_ROUTER));
+        let lsu = LsuPacket {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
-            lsa_headers: vec![l.header],
+            lsas: vec![grace.clone(), router],
         };
-        on_lsack_received(&mut adj, &ack.lsa_headers);
-        assert!(adj.retransmission_list.is_empty());
+        let mut adj = AdjacencyData::default();
+        let (_, installed) = on_lsu_received(
+            &mut adj,
+            &mut Lsdb::new(),
+            &mut Lsdb::new(),
+            &mut Lsdb::new(),
+            &lsu,
+            Instant::now(),
+        );
+        assert_eq!(installed, vec![grace.header]);
+        assert_eq!(adj.pending_acks.len(), 2);
     }
 }
