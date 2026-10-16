@@ -11,6 +11,7 @@ pub mod config_client;
 pub mod exchange;
 pub mod interface_client;
 pub mod link;
+#[path = "../../ospf/src/link_client.rs"]
 pub mod link_client;
 pub mod lsa;
 pub mod lsdb;
@@ -22,5 +23,8 @@ pub mod server;
 pub mod socket;
 pub mod spf;
 pub mod watchdog_client;
+
+/// Daemon name in the shared `link_client` log lines.
+pub const DAEMON: &str = "ospfv3";
 
 pub use nos_ospf_common::{bfd, election, neighbor};
