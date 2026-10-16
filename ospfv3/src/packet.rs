@@ -337,23 +337,9 @@ pub struct HelloPacket {
     pub neighbors: Vec<Ipv4Addr>,
 }
 
-/// One Database Description packet's contents (§A.3.3), driving RFC 2328
-/// §10.6-10.8's master/slave negotiation and summary-list exchange
-/// (unchanged by RFC 5340 beyond the widened LSA-type field inside
-/// `lsa_headers`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct DbdPacket {
-    pub router_id: Ipv4Addr,
-    pub area_id: Ipv4Addr,
-    /// Low 24 bits only.
-    pub options: u32,
-    pub interface_mtu: u16,
-    pub init: bool,
-    pub more: bool,
-    pub master: bool,
-    pub dd_sequence_number: u32,
-    pub lsa_headers: Vec<LsaHeader>,
-}
+/// One Database Description packet's contents (§A.3.3): the shared
+/// `nos_ospf_common::exchange::Dbd`; `options` uses its low 24 bits only.
+pub type DbdPacket = nos_ospf_common::exchange::Dbd<LsaHeader>;
 
 /// One Link State Request packet's contents (§A.3.4).
 #[derive(Debug, Clone, PartialEq, Eq)]

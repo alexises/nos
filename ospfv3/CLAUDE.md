@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 
 ## Layout
 
-`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client`. DR/BDR election and the neighbor FSM come from `nos-ospf-common`. The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s, and signs RFC 7166 trailers like the real socket.
+`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client`. DR/BDR election, the neighbor FSM, the LSDB and the DBD exchange (`exchange` keeps only LSR/LSU) come from `nos-ospf-common`. Acks are delayed and batched like v2 (`pending_acks`, `flush_pending_acks` on the 5s `RXMT_INTERVAL` sweep). The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s, and signs RFC 7166 trailers like the real socket.
 
 ## Rules
 

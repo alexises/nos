@@ -230,23 +230,10 @@ pub struct HelloPacket {
     pub neighbors: Vec<Ipv4Addr>,
 }
 
-/// One Database Description packet's contents (RFC 2328 Appendix A.3.3),
-/// driving §10.6-10.8's master/slave negotiation and summary-list exchange.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DbdPacket {
-    pub router_id: Ipv4Addr,
-    pub area_id: Ipv4Addr,
-    pub interface_mtu: u16,
-    pub options: u8,
-    /// "I"nit bit: this is the first packet in the exchange.
-    pub init: bool,
-    /// "M"ore bit: the sender has more summary list entries to send.
-    pub more: bool,
-    /// "MS" bit: the sender considers itself master for this exchange.
-    pub master: bool,
-    pub dd_sequence_number: u32,
-    pub lsa_headers: Vec<LsaHeader>,
-}
+/// One Database Description packet's contents (RFC 2328 Appendix A.3.3):
+/// the shared `nos_ospf_common::exchange::Dbd`, whose `options` carries v2's
+/// 8-bit Options in its low byte.
+pub type DbdPacket = nos_ospf_common::exchange::Dbd<LsaHeader>;
 
 /// One Link State Request packet's contents (RFC 2328 Appendix A.3.4) — the
 /// LSAs the sender is missing and wants a full copy of via LSU.
@@ -350,7 +337,7 @@ pub fn encode_dbd(pkt: &DbdPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     let mut body =
         Vec::with_capacity(DBD_BODY_FIXED_LEN + pkt.lsa_headers.len() * lsa::LSA_HEADER_LEN);
     body.extend_from_slice(&pkt.interface_mtu.to_be_bytes());
-    body.push(pkt.options);
+    body.push(pkt.options.to_be_bytes()[3]);
     let mut flags = 0u8;
     if pkt.init {
         flags |= DBD_FLAG_INIT;
@@ -380,7 +367,7 @@ pub fn decode_dbd(data: &[u8], auth: &AuthPolicy<'_>) -> Result<DbdPacket, Packe
         return Err(PacketError::TruncatedBody);
     }
     let interface_mtu = u16::from_be_bytes([body[0], body[1]]);
-    let options = body[2];
+    let options = u32::from(body[2]);
     let flags = body[3];
     let dd_sequence_number = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
 
