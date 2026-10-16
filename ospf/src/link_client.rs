@@ -96,12 +96,15 @@ pub async fn stream(socket: &Path, tx: &watch::Sender<LinkTable>) {
     if writer.send(InterfaceRequest::SubscribeLinks).await.is_err() {
         return;
     }
-    info!("ospf link stream connected");
+    info!("{} link stream connected", crate::DAEMON);
     tx.send_if_modified(|t| !std::mem::replace(&mut t.connected, true));
     while let Some(Ok(event)) = reader.next().await {
         tx.send_if_modified(|t| apply(t, event));
     }
-    warn!("ospf link stream lost, keeping last link table");
+    warn!(
+        "{} link stream lost, keeping last link table",
+        crate::DAEMON
+    );
     tx.send_if_modified(|t| std::mem::replace(&mut t.connected, false));
 }
 

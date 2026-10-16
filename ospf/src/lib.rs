@@ -2,6 +2,9 @@
 // point-to-point and broadcast (RFC 2328 DR/BDR election) links (see
 // ospf/CLAUDE.md)
 
+/// Daemon name in the `link_client` log lines (shared with `nos-ospfv3`).
+pub const DAEMON: &str = "ospf";
+
 pub mod bfd_client;
 pub mod boot;
 pub mod config_client;

@@ -55,7 +55,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 ## Wiring and tests
 
-- `config_client`, `watchdog_client`, `rib_client`, `interface_client` and `link_client` are reimplemented here, not shared (star dependency graph).
+- `config_client`, `watchdog_client`, `rib_client`, `interface_client` are reimplemented here, not shared (star dependency graph); `link_client.rs` is the exception: `nos-ospfv3d` `#[path]`-includes it, log prefix from `crate::DAEMON`.
 - `nos-watchdogd` gives each instance `--listen-socket` (`/run/nos/ospf-<name>.sock`, `EndpointKind::OspfInstance`); `server.rs` serves `GetNeighbors`/`GetDatabase` and takes `ribd`'s fire-and-forget `RedistributeRoutes` (`docs/architecture/endpoint-broker.md`).
 - `tests/server.rs` drives the live IPC role gate over mTLS (#364, deny = closed with no frame; ribd feed = stays open).
 - `reconcile_tests.rs` drives `resync`/`run` against `nos-test-support`'s fake configd/watchdog/ribd/interfaced (`Fakes::start`) and a real `LinkManager` over `link::tests::wire` (#342); a service left out of `Fakes::start` is the "unreachable" branch.
