@@ -196,6 +196,9 @@ impl Dock {
                 // instead of just its own container.
                 memory: Some(2 << 30),
                 memory_swap: Some(2 << 30),
+                // Mirrors docker-compose.yml: read-only rootfs, writable /tmp.
+                readonly_rootfs: Some(true),
+                tmpfs: Some(HashMap::from([("/tmp".to_string(), String::new())])),
                 network_mode: Some(network.to_string()),
                 ..Default::default()
             }),

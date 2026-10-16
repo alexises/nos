@@ -20,6 +20,11 @@ To bump:
 
 The release `Dockerfile` floats on `rust:1-slim-bookworm`, harmless since release builds don't use `-D warnings`.
 
+**Image hardening (#405)**:
+- Both base images are pinned by manifest-list digest (tag kept beside it); `.github/dependabot.yml` (docker ecosystem, weekly) bumps them. apt packages stay unpinned (DL3008 ignored): pinned versions break on every bookworm security update.
+- File capabilities are `=ep` (the inheritable bit is dead weight for a non-root exec).
+- `watchdog` and `cli` run with `read_only: true` and a `/tmp` tmpfs; state lives in the `/run/nos` and `/var/lib/nos` volumes. `nos-e2e` mirrors this in `Dock::start` (it does not use compose).
+
 `watchdog/tests/system.rs` is the unprivileged whole-stack smoke test: the real `nos-watchdogd` supervising every real daemon (`--driver noop`, every socket and state file under a temp dir — `--run-dir` moves the per-instance `<prefix>-<name>.sock` sockets off `/run/nos`), provisioned by the real `nos-provision`, reconfigured, then stopped with SIGTERM. It needs every daemon binary built next to `nos-watchdogd`, which is why each daemon crate has at least one integration test (`tests/bin.rs` where nothing else existed); a single-package run without them skips.
 
 **Fake IPC servers for tests** (`nos-test-support`, #347):
