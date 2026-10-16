@@ -617,10 +617,10 @@ fn collect_prefix_routes(
         if vertex == Vertex::Router(root) {
             continue;
         }
-        if let Vertex::Network(network_id) = vertex {
-            if root_attached_to_network(root, routers, network_id) {
-                continue;
-            }
+        if let Vertex::Network(network_id) = vertex
+            && root_attached_to_network(root, routers, network_id)
+        {
+            continue;
         }
         let Some(&d) = dist.get(&vertex) else {
             continue;
@@ -721,10 +721,9 @@ fn asbr_distance(
     if routers
         .get(&asbr)
         .is_some_and(|r| r.flags & lsa::ROUTER_FLAG_E != 0)
+        && let Some(via) = graph.router(asbr)
     {
-        if let Some(via) = graph.router(asbr) {
-            return Some((via, asbr));
-        }
+        return Some((via, asbr));
     }
     inter_area_routers
         .iter()

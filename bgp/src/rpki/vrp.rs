@@ -72,13 +72,12 @@ impl VrpTable {
                 continue;
             };
             covered = true;
-            if let Some(origin) = origin {
-                if set
+            if let Some(origin) = origin
+                && set
                     .iter()
                     .any(|&(max_len, asn)| asn == origin && asn != 0 && len <= max_len)
-                {
-                    return ValidationState::Valid;
-                }
+            {
+                return ValidationState::Valid;
             }
         }
         if covered {

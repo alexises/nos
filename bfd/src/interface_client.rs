@@ -82,11 +82,10 @@ pub async fn run(
             msg = rx.recv() => {
                 let Some(msg) = msg else { return };
                 cache.insert(msg.aggregate.clone(), msg.up_members.clone());
-                if let Some(w) = writer.as_mut() {
-                    if send_push(w, msg.aggregate, msg.up_members).await.is_err() {
+                if let Some(w) = writer.as_mut()
+                    && send_push(w, msg.aggregate, msg.up_members).await.is_err() {
                         writer = None;
                     }
-                }
             }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {

@@ -61,10 +61,10 @@ pub async fn run(
     mut rx: mpsc::UnboundedReceiver<LogEntry>,
     queued: Arc<AtomicUsize>,
 ) {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if let Err(e) = fs::create_dir_all(parent) {
-            warn!(error = %e, path = %parent.display(), "failed to create log store directory");
-        }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        warn!(error = %e, path = %parent.display(), "failed to create log store directory");
     }
 
     let Ok(mut file) = OpenOptions::new()

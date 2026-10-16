@@ -478,11 +478,10 @@ impl Client {
                 frame = reader.next() => frame,
                 () = sleep_until(refresh_at.unwrap_or_else(Instant::now)), if refresh_at.is_some() => {
                     refresh_at = Some(Instant::now() + secs(self.intervals.refresh));
-                    if let Some(session) = session_id {
-                        if writer.send(Pdu::SerialQuery { session, serial }).await.is_err() {
+                    if let Some(session) = session_id
+                        && writer.send(Pdu::SerialQuery { session, serial }).await.is_err() {
                             return End::Closed;
                         }
-                    }
                     continue;
                 }
                 () = sleep_until(expire_at.unwrap_or_else(Instant::now)), if expire_at.is_some() => {
@@ -597,14 +596,13 @@ impl Client {
                     );
                 }
                 Pdu::SerialNotify { .. } => {
-                    if let (Some(session), None) = (session_id, &work) {
-                        if writer
+                    if let (Some(session), None) = (session_id, &work)
+                        && writer
                             .send(Pdu::SerialQuery { session, serial })
                             .await
                             .is_err()
-                        {
-                            return End::Closed;
-                        }
+                    {
+                        return End::Closed;
                     }
                 }
                 Pdu::CacheReset => {

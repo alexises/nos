@@ -147,12 +147,12 @@ pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result 
                 "point-to-multipoint is not supported for OSPFv3",
             ));
         }
-        if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval) {
-            if dead <= hello {
-                return Err(garde::Error::new(
-                    "dead-interval must be greater than hello-interval when both are set",
-                ));
-            }
+        if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval)
+            && dead <= hello
+        {
+            return Err(garde::Error::new(
+                "dead-interval must be greater than hello-interval when both are set",
+            ));
         }
     }
     Ok(())

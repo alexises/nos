@@ -124,10 +124,10 @@ impl LinuxFdbDriver {
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
         let mut response = self.handle.clone().request(req)?;
         while let Some(m) = response.next().await {
-            if let NetlinkPayload::Error(e) = m.payload {
-                if e.raw_code() != 0 {
-                    return Err(rtnetlink::Error::NetlinkError(e).into());
-                }
+            if let NetlinkPayload::Error(e) = m.payload
+                && e.raw_code() != 0
+            {
+                return Err(rtnetlink::Error::NetlinkError(e).into());
             }
         }
         Ok(())
@@ -860,10 +860,10 @@ impl FdbDriver for LinuxFdbDriver {
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
         let mut response = self.handle.clone().request(req)?;
         while let Some(m) = response.next().await {
-            if let NetlinkPayload::Error(e) = m.payload {
-                if e.raw_code() != 0 {
-                    return Err(rtnetlink::Error::NetlinkError(e).into());
-                }
+            if let NetlinkPayload::Error(e) = m.payload
+                && e.raw_code() != 0
+            {
+                return Err(rtnetlink::Error::NetlinkError(e).into());
             }
         }
         Ok(())
@@ -920,10 +920,10 @@ impl FdbDriver for LinuxFdbDriver {
                 vxlan_idx,
             ) {
                 let port = m.header.ifindex;
-                if let std::collections::hash_map::Entry::Vacant(v) = names.entry(port) {
-                    if let Some(name) = self.link_name(port).await? {
-                        v.insert(name);
-                    }
+                if let std::collections::hash_map::Entry::Vacant(v) = names.entry(port)
+                    && let Some(name) = self.link_name(port).await?
+                {
+                    v.insert(name);
                 }
                 out.insert(mac, names.get(&port).cloned().unwrap_or_default());
             }

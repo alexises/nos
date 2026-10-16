@@ -27,53 +27,50 @@ pub fn sync_routing_table_refs(config: &mut Config) {
         instance.redistribute_policy = None;
     }
     for table in &config.routing_tables {
-        if let Some(bgp_instance) = &table.bgp_instance {
-            if let Some(instance) = config
+        if let Some(bgp_instance) = &table.bgp_instance
+            && let Some(instance) = config
                 .bgp_instances
                 .iter_mut()
                 .find(|i| &i.name == bgp_instance)
-            {
-                instance.routing_table = Some(table.name.clone());
-                instance.redistribute_policy = table
-                    .redistribute
-                    .iter()
-                    .find(|r| r.to == RedistributeTarget::Bgp)
-                    .and_then(|r| r.policy.clone());
-            }
+        {
+            instance.routing_table = Some(table.name.clone());
+            instance.redistribute_policy = table
+                .redistribute
+                .iter()
+                .find(|r| r.to == RedistributeTarget::Bgp)
+                .and_then(|r| r.policy.clone());
         }
-        if let Some(ospf_instance) = &table.ospf_instance {
-            if let Some(instance) = config
+        if let Some(ospf_instance) = &table.ospf_instance
+            && let Some(instance) = config
                 .ospf_instances
                 .iter_mut()
                 .find(|i| &i.name == ospf_instance)
-            {
-                instance.routing_table = Some(table.name.clone());
-                instance.redistribute_policy = table
-                    .redistribute
-                    .iter()
-                    .find(|r| r.to == RedistributeTarget::Ospf)
-                    .and_then(|r| r.policy.clone());
-                let ospf_rule = table
-                    .redistribute
-                    .iter()
-                    .find(|r| r.to == RedistributeTarget::Ospf);
-                instance.redistribute_metric = ospf_rule.and_then(|r| r.metric);
-                instance.redistribute_metric_type = ospf_rule.and_then(|r| r.metric_type);
-            }
+        {
+            instance.routing_table = Some(table.name.clone());
+            instance.redistribute_policy = table
+                .redistribute
+                .iter()
+                .find(|r| r.to == RedistributeTarget::Ospf)
+                .and_then(|r| r.policy.clone());
+            let ospf_rule = table
+                .redistribute
+                .iter()
+                .find(|r| r.to == RedistributeTarget::Ospf);
+            instance.redistribute_metric = ospf_rule.and_then(|r| r.metric);
+            instance.redistribute_metric_type = ospf_rule.and_then(|r| r.metric_type);
         }
-        if let Some(ospfv3_instance) = &table.ospfv3_instance {
-            if let Some(instance) = config
+        if let Some(ospfv3_instance) = &table.ospfv3_instance
+            && let Some(instance) = config
                 .ospfv3_instances
                 .iter_mut()
                 .find(|i| &i.name == ospfv3_instance)
-            {
-                instance.routing_table = Some(table.name.clone());
-                instance.redistribute_policy = table
-                    .redistribute
-                    .iter()
-                    .find(|r| r.to == RedistributeTarget::Ospfv3)
-                    .and_then(|r| r.policy.clone());
-            }
+        {
+            instance.routing_table = Some(table.name.clone());
+            instance.redistribute_policy = table
+                .redistribute
+                .iter()
+                .find(|r| r.to == RedistributeTarget::Ospfv3)
+                .and_then(|r| r.policy.clone());
         }
     }
 }

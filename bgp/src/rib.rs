@@ -1322,15 +1322,15 @@ impl BgpRib {
                     self.adj_rib_out.entry(peer).or_default().insert(prefix);
                 }
                 None => {
-                    if let Some(sent) = self.adj_rib_out.get_mut(&peer) {
-                        if sent.remove(&prefix) {
-                            let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                            let _ = outbox.tx.send(OutboundUpdate::Withdraw(
-                                prefix,
-                                outbox.mp_bgp_negotiated,
-                                None,
-                            ));
-                        }
+                    if let Some(sent) = self.adj_rib_out.get_mut(&peer)
+                        && sent.remove(&prefix)
+                    {
+                        let outbox = self.peer_outboxes.get(&peer).expect("just listed");
+                        let _ = outbox.tx.send(OutboundUpdate::Withdraw(
+                            prefix,
+                            outbox.mp_bgp_negotiated,
+                            None,
+                        ));
                     }
                 }
             }

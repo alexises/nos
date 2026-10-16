@@ -209,10 +209,10 @@ impl AuthState {
         sec: Option<&AuthSection>,
         detect: Option<Duration>,
     ) -> Result<(), AuthError> {
-        if let (Some(last), Some(d)) = (self.last_ok, detect) {
-            if now.saturating_duration_since(last) > d * SILENCE_DETECTIONS {
-                self.seq_known = false;
-            }
+        if let (Some(last), Some(d)) = (self.last_ok, detect)
+            && now.saturating_duration_since(last) > d * SILENCE_DETECTIONS
+        {
+            self.seq_known = false;
         }
         let Some(cfg) = &self.cfg else {
             return if sec.is_some() {

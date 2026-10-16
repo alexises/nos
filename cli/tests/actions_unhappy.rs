@@ -7,6 +7,10 @@
 //! reachable by coverage, not captured (#345, decision 1). This is a test
 //! binary of its own because `EDITOR` is process-global.
 
+#![allow(
+    unsafe_code,
+    reason = "edition 2024: set_var is unsafe; tests set EDITOR/PATH on purpose"
+)]
 #![allow(clippy::excessive_nesting, clippy::match_wildcard_for_single_variants)]
 
 mod common;
@@ -730,7 +734,8 @@ if this.bgp.as_path in TRANSIT:
 accept
 EOF"#,
     );
-    std::env::set_var("EDITOR", &good);
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::set_var("EDITOR", &good) };
     let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
     assert!(
@@ -740,7 +745,8 @@ EOF"#,
 
     // A script that does not compile is discarded.
     let bad = editor(tools.path(), "bad", r#"echo 'this is not rpl' > "$1""#);
-    std::env::set_var("EDITOR", &bad);
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::set_var("EDITOR", &bad) };
     let (_, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(
         policy_source(&lab).await.contains("TRANSIT"),
@@ -748,26 +754,33 @@ EOF"#,
     );
 
     // An editor that fails, and one that cannot be started.
-    std::env::set_var("EDITOR", "false");
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::set_var("EDITOR", "false") };
     let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
-    std::env::set_var("EDITOR", "/nonexistent/editor");
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::set_var("EDITOR", "/nonexistent/editor") };
     let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
 
     // The transaction vanishes while the editor runs: nothing is applied.
-    std::env::set_var("EDITOR", &good);
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::set_var("EDITOR", &good) };
     let flaky = world(Wd::Resolves, Daemons::Populated, Configd::Healthy);
     let flaky_policy = configuration("flaky", &["policy-definition", "p1"], false);
     let (mode, _) = run(&flaky, flaky_policy.clone(), &["edit source"], leave_open).await;
     assert_eq!(mode, flaky_policy);
 
     // The fallbacks: no $EDITOR means $VISUAL, then nano (absent here: an error).
-    std::env::remove_var("EDITOR");
-    std::env::set_var("VISUAL", "true");
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::remove_var("EDITOR") };
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::set_var("VISUAL", "true") };
     let (_, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    std::env::remove_var("VISUAL");
-    std::env::set_var("PATH", tools.path());
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::remove_var("VISUAL") };
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    unsafe { std::env::set_var("PATH", tools.path()) };
     let (mode, _) = run(&lab, policy, &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
 }

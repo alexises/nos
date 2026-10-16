@@ -788,10 +788,10 @@ impl Fdb {
                 for i in &items {
                     self.uninstall(&old, i).await;
                 }
-                if ready.as_ref().map(|r| r.vni) != Some(old.vni) {
-                    if let Err(e) = self.driver.remove_vxlan(old.vni).await {
-                        warn!(domain = %self.domain, error = %e, "failed to remove the old vxlan device");
-                    }
+                if ready.as_ref().map(|r| r.vni) != Some(old.vni)
+                    && let Err(e) = self.driver.remove_vxlan(old.vni).await
+                {
+                    warn!(domain = %self.domain, error = %e, "failed to remove the old vxlan device");
                 }
                 g.local.clear();
                 g.local_neigh.clear();
@@ -1089,15 +1089,15 @@ impl Fdb {
         }
         match self.driver.set_local_bias(vni, peers).await {
             Ok(()) => {
-                if *peers != g.bias_peers {
-                    if let Some(r) = &g.ready {
-                        info!(
-                            domain = %self.domain, vtep = %r.vtep,
-                            peers = %join_ips(&peers.keys().copied().collect::<Vec<_>>()),
-                            segments = %format!("{:#06x}", peers.values().fold(0u16, |a, b| a | b)),
-                            "local bias set"
-                        );
-                    }
+                if *peers != g.bias_peers
+                    && let Some(r) = &g.ready
+                {
+                    info!(
+                        domain = %self.domain, vtep = %r.vtep,
+                        peers = %join_ips(&peers.keys().copied().collect::<Vec<_>>()),
+                        segments = %format!("{:#06x}", peers.values().fold(0u16, |a, b| a | b)),
+                        "local bias set"
+                    );
                 }
                 g.bias_peers.clone_from(peers);
                 true

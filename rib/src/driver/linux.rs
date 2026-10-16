@@ -505,10 +505,10 @@ impl LinuxRibDriver {
             .build();
         let mut v4 = self.handle.route().get(v4_filter).execute();
         while let Some(route) = v4.try_next().await? {
-            if route.header.table == table_id_u8 {
-                if let Some((slot, gateways)) = extract_route(&route) {
-                    out.push((slot, gateways, route));
-                }
+            if route.header.table == table_id_u8
+                && let Some((slot, gateways)) = extract_route(&route)
+            {
+                out.push((slot, gateways, route));
             }
         }
 
@@ -517,10 +517,10 @@ impl LinuxRibDriver {
             .build();
         let mut v6 = self.handle.route().get(v6_filter).execute();
         while let Some(route) = v6.try_next().await? {
-            if route.header.table == table_id_u8 {
-                if let Some((slot, gateways)) = extract_route(&route) {
-                    out.push((slot, gateways, route));
-                }
+            if route.header.table == table_id_u8
+                && let Some((slot, gateways)) = extract_route(&route)
+            {
+                out.push((slot, gateways, route));
             }
         }
 

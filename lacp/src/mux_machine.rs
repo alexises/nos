@@ -60,10 +60,10 @@ pub fn step(state: MuxState, event: Event) -> (MuxState, Action) {
     // A just-deselected port always falls back to `Detached` and clears its
     // own advertised sync bit, regardless of which active state it was in —
     // checked first so the per-state arms below never need to repeat it.
-    if let Event::SelectionChanged { selected: false } = event {
-        if state != MuxState::Detached {
-            return (MuxState::Detached, Action::SetActorSynchronized(false));
-        }
+    if let Event::SelectionChanged { selected: false } = event
+        && state != MuxState::Detached
+    {
+        return (MuxState::Detached, Action::SetActorSynchronized(false));
     }
 
     match (state, event) {

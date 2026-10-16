@@ -289,12 +289,12 @@ pub(crate) fn valid_profile_timers(profiles: &[OspfProfile]) -> garde::Result {
                     "extended-sequence-numbers requires crypto auth with hmac-sha keys only",
                 ));
             }
-        } else if let Some(OspfAuth::Crypto { keys }) = &p.auth {
-            if keys.iter().any(|k| k.key_id > CLASSIC_KEY_ID_MAX) {
-                return Err(garde::Error::new(
-                    "crypto key-id must be 0-255 unless extended-sequence-numbers is enabled",
-                ));
-            }
+        } else if let Some(OspfAuth::Crypto { keys }) = &p.auth
+            && keys.iter().any(|k| k.key_id > CLASSIC_KEY_ID_MAX)
+        {
+            return Err(garde::Error::new(
+                "crypto key-id must be 0-255 unless extended-sequence-numbers is enabled",
+            ));
         }
         valid_intervals(p.hello_interval, p.dead_interval)?;
     }

@@ -61,15 +61,14 @@ impl AsPath {
     /// paths compare equal however they were split on the wire. Sets never
     /// merge: two sets are two hops.
     pub fn push_segment(&mut self, kind: SegKind, mut asns: &[u32]) {
-        if matches!(kind, SegKind::Sequence | SegKind::ConfedSequence) {
-            if let Some((k, n)) = self.segs.last_mut() {
-                if *k == kind {
-                    let take = (MAX_SEGMENT_LEN - usize::from(*n)).min(asns.len());
-                    *n += u8::try_from(take).unwrap_or(0);
-                    self.asns.extend_from_slice(&asns[..take]);
-                    asns = &asns[take..];
-                }
-            }
+        if matches!(kind, SegKind::Sequence | SegKind::ConfedSequence)
+            && let Some((k, n)) = self.segs.last_mut()
+            && *k == kind
+        {
+            let take = (MAX_SEGMENT_LEN - usize::from(*n)).min(asns.len());
+            *n += u8::try_from(take).unwrap_or(0);
+            self.asns.extend_from_slice(&asns[..take]);
+            asns = &asns[take..];
         }
         for c in asns.chunks(MAX_SEGMENT_LEN) {
             self.segs

@@ -50,12 +50,12 @@ fn valid_entries(entries: &[PrefixListEntry]) -> garde::Result {
         return Err(garde::Error::new("must have at least one entry"));
     }
     for entry in entries {
-        if let Some((min, max)) = entry.range {
-            if min < entry.cidr.prefix_len() || min > max || max > entry.cidr.max_prefix_len() {
-                return Err(garde::Error::new(
+        if let Some((min, max)) = entry.range
+            && (min < entry.cidr.prefix_len() || min > max || max > entry.cidr.max_prefix_len())
+        {
+            return Err(garde::Error::new(
                     "range must narrow the entry's cidr: cidr length <= min <= max <= address family's max length",
                 ));
-            }
         }
     }
     Ok(())

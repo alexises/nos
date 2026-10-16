@@ -620,10 +620,10 @@ pub async fn run(
                 too_big = false;
             }
         }
-        if let (Some((_, payload)), Some(e)) = (core.echo_due(now()), echo.as_ref()) {
-            if let Err(err) = e.tx.send(&payload) {
-                debug!(peer = %key.peer, error = %err, "bfd echo send failed");
-            }
+        if let (Some((_, payload)), Some(e)) = (core.echo_due(now()), echo.as_ref())
+            && let Err(err) = e.tx.send(&payload)
+        {
+            debug!(peer = %key.peer, error = %err, "bfd echo send failed");
         }
         let s = core.status();
         if s != last {
@@ -731,10 +731,10 @@ mod tests {
                 (&mut self.b, false)
             };
             let out = core.on_timer(self.now, 100);
-            if let Some((seq, _)) = core.echo_due(self.now) {
-                if self.echo_ok {
-                    core.on_echo(self.now, Looped::Seq(seq));
-                }
+            if let Some((seq, _)) = core.echo_due(self.now)
+                && self.echo_ok
+            {
+                core.on_echo(self.now, Looped::Seq(seq));
             }
             if let Some(p) = out {
                 Self::deliver(self.now, from_a, &mut self.a, &mut self.b, p);

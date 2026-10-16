@@ -202,10 +202,10 @@ pub(crate) fn valid_area_settings(area: &OspfArea) -> garde::Result {
         }
         ospf_profile::valid_auth(v.auth.as_ref())?;
         // No extended sequence numbers here, so only a classic one-octet key id.
-        if let Some(OspfAuth::Crypto { keys }) = &v.auth {
-            if keys.iter().any(|k| k.key_id > 255) {
-                return Err(garde::Error::new("crypto key-id must be 0-255"));
-            }
+        if let Some(OspfAuth::Crypto { keys }) = &v.auth
+            && keys.iter().any(|k| k.key_id > 255)
+        {
+            return Err(garde::Error::new("crypto key-id must be 0-255"));
         }
         ospf_profile::valid_intervals(v.hello_interval, v.dead_interval)?;
     }
