@@ -376,16 +376,14 @@ pub(super) async fn handle_dbd(
     let mut local_lsdb_headers = lsdb.lock().await.headers();
     local_lsdb_headers.extend(link_local_lsdb.lock().await.headers());
     local_lsdb_headers.retain(|h| h.age < lsa::MAX_AGE);
-    let actions = exchange::on_dbd_received(
-        &mut adj,
-        old_state,
+    let params = exchange::Params {
         local_router_id,
-        dbd.router_id,
-        dbd,
-        &local_lsdb_headers,
-        dbd_max_headers,
-        cfg.mtu,
-    );
+        max_headers: dbd_max_headers,
+        mtu: cfg.mtu,
+        dbd_options: exchange::dbd_options(cfg.stub),
+        peer_opaque_capable: exchange::peer_opaque_capable(dbd),
+    };
+    let actions = exchange::on_dbd_received(&mut adj, old_state, &params, dbd, &local_lsdb_headers);
 
     Some(finish_neighbor_event(
         cfg,
@@ -513,7 +511,7 @@ pub(super) fn handle_lsack(status: &StatusHandle, ack: &LsAckPacket) {
     else {
         return;
     };
-    exchange::on_lsack_received(&mut adj, ack);
+    exchange::on_lsack_received(&mut adj, &ack.lsa_headers);
     status.send_modify(|s| {
         if let Some(info) = s.neighbors.get_mut(&ack.router_id) {
             info.adjacency = Some(adj.clone());
@@ -594,8 +592,7 @@ pub(super) fn finish_neighbor_event(
 }
 
 /// Carries out the I/O side of an `exchange::Action` list — sending
-/// packets. `NeighborEvent` is already applied to state by the caller;
-/// `InstallAndFlood` lands in a later stage (cross-link flooding).
+/// packets. `NeighborEvent` is already applied to state by the caller.
 pub(super) fn execute_actions(
     socket: &LinkSocket,
     cfg: &LinkConfig,
@@ -668,7 +665,7 @@ pub(super) fn execute_actions(
                     &auth,
                 ),
             ),
-            exchange::Action::NeighborEvent(_) | exchange::Action::InstallAndFlood(_) => continue,
+            exchange::Action::NeighborEvent(_) => continue,
         };
         if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospf packet");

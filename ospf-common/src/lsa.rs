@@ -3,6 +3,7 @@
 //! RFC 5340 differ there), so these traits carry identity only.
 
 use std::cmp::Ordering;
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::net::Ipv4Addr;
 
@@ -10,10 +11,10 @@ use std::net::Ipv4Addr;
 pub const MAX_AGE: u16 = 3600;
 
 /// The 20-byte common LSA header, as far as the database cares.
-pub trait LsaHeader: Copy {
+pub trait LsaHeader: Copy + Debug + PartialEq {
     /// The `(type, link-state id, advertising router)` slot; `lsa_type` is a
     /// `u8` in v2 and a `u16` in v3, hence an associated type.
-    type Key: Copy + Eq + Hash;
+    type Key: Copy + Eq + Hash + Debug;
     fn key(&self) -> Self::Key;
     fn seq(&self) -> i32;
     fn age(&self) -> u16;
@@ -43,7 +44,7 @@ pub trait LsaHeader: Copy {
 }
 
 /// A whole LSA: a header plus a family-specific body the database never reads.
-pub trait Lsa: Clone {
+pub trait Lsa: Clone + Debug + PartialEq {
     type Header: LsaHeader;
     fn header(&self) -> &Self::Header;
     fn header_mut(&mut self) -> &mut Self::Header;

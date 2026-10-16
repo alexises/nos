@@ -289,14 +289,9 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         lsa_headers: Vec::new(),
     };
     let adj = AdjacencyData {
-        is_master: false,
         dd_sequence_number: seed,
-        request_list: Vec::new(),
-        retransmission_list: HashMap::new(),
         last_dbd_sent: Some(dbd.clone()),
-        summary_remaining: std::collections::VecDeque::new(),
-        pending_acks: Vec::new(),
-        pending_acks_since: None,
+        ..AdjacencyData::default()
     };
     (adj, dbd)
 }
@@ -712,16 +707,14 @@ async fn handle_dbd(
     // invite an LSR that fails (BadLSReq) once it's evicted.
     let mut local_lsdb_headers = stores.headers().await;
     local_lsdb_headers.retain(|h| h.age < lsa::MAX_AGE);
-    let actions = exchange::on_dbd_received(
-        &mut adj,
-        old_state,
+    let params = exchange::Params {
         local_router_id,
-        dbd.router_id,
-        dbd,
-        &local_lsdb_headers,
-        dbd_max_headers,
-        cfg.mtu,
-    );
+        max_headers: dbd_max_headers,
+        mtu: cfg.mtu,
+        dbd_options: link_options(cfg),
+        peer_opaque_capable: false,
+    };
+    let actions = exchange::on_dbd_received(&mut adj, old_state, &params, dbd, &local_lsdb_headers);
 
     Some(finish_neighbor_event(
         cfg,
@@ -837,7 +830,7 @@ fn handle_lsack(status: &StatusHandle, ack: &LsAckPacket) {
     else {
         return;
     };
-    exchange::on_lsack_received(&mut adj, ack);
+    exchange::on_lsack_received(&mut adj, &ack.lsa_headers);
     status.send_modify(|s| {
         if let Some(info) = s.neighbors.get_mut(&ack.router_id) {
             info.adjacency = Some(adj.clone());
@@ -929,8 +922,7 @@ fn execute_actions(
     };
     for action in actions {
         let (kind, payload) = match action {
-            exchange::Action::SendDbd(mut pkt) => {
-                pkt.options = link_options(cfg);
+            exchange::Action::SendDbd(pkt) => {
                 if !pkt.init && pkt.more {
                     info!(
                         link = %cfg.attach_point, neighbor = %neighbor_id,
@@ -1027,14 +1019,10 @@ fn retransmit_pending(
         // in answer to the master's duplicate (`exchange`), never on a timer.
         if let (NeighborState::ExStart | NeighborState::Exchange, Some(dbd)) =
             (info.state, &adj.last_dbd_sent)
+            && let Err(e) =
+                socket.send_unicast(info.address, cfg.interface_id, &packet::encode_dbd(dbd))
         {
-            let mut dbd = dbd.clone();
-            dbd.options = link_options(cfg);
-            if let Err(e) =
-                socket.send_unicast(info.address, cfg.interface_id, &packet::encode_dbd(&dbd))
-            {
-                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 dbd");
-            }
+            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 dbd");
         }
         if !matches!(
             info.state,

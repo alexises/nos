@@ -8,6 +8,7 @@ Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS d
 - `bfd`: `bfd_wanted`, the neighbor-state rule for which neighbors get a BFD session.
 - `lsa`: the `LsaHeader` and `Lsa` traits, `MAX_AGE`, and the RFC 2328 §13.1 `is_newer` ordering (a provided method of `LsaHeader`).
 - `lsdb`: the generic `Lsdb<L: Lsa>` store, `InstallOutcome`, `MIN_LS_ARRIVAL`, `MAX_AGE_HOLD_TICKS`.
+- `exchange`: the RFC 2328 §10.6-10.8 DBD exchange (`Dbd<H>`, `AdjacencyData<L>`, `Action<L>`, `Params`, `on_dbd_received`), the §13.5 delayed-ack queue (`take_pending_acks`), `on_lsack_received`, `mtu_based_max_headers`/`mtu_acceptable`.
 
 ## Rules
 
@@ -18,8 +19,10 @@ Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS d
 - **Two install paths**: `install` (self-originated, paced by `MinLSInterval` elsewhere) and `install_received` (flooding, paced by `MIN_LS_ARRIVAL`; `TooSoon` means not installed, not acked, not counted as answering a request). `remove` and eviction also clear the pacing clock.
 - A flushed (`MAX_AGE`) entry is held `MAX_AGE_HOLD_TICKS` ticks so the periodic full-LSDB resend can carry it to every neighbor before it is evicted; a superseding install restarts the hold.
 - `Lsdb` fires its `Notify` on every change that can alter SPF input (install, remove, evict), never on a rejected install.
+- **Exchange closures**: `on_dbd_received` takes `in_scope` (v2 `lsa::in_area_scope`, v3 always true; an out-of-scope header in a DBD is `SeqNumberMismatch` and is never summarized) and `is_opaque` (v2 RFC 5250, v3 never). Per-link values go in `Params`; `dbd_options` stamps every DBD reply/poll, so v3 sends `link_options` (AT-bit included) in all of them.
+- **What stays in the daemons**: `on_lsr_received`/`on_lsu_received` (store layouts and scope routing differ), `start_negotiation` (reads `LinkConfig`), and the `Dbd` codec. Each daemon aliases `DbdPacket`, `AdjacencyData`, `Action` and wraps `on_dbd_received` with its closures. `Action` has no `InstallAndFlood`: flooding is the periodic resend.
 
 ## Tests
 
-- `lsa::test_lsa` is a ~20-line `Lsa`/`LsaHeader` (a `u32` key) so store and ordering tests need no daemon types. Daemon-side tests only cover their trait impls and the aliases.
+- `lsa::test_lsa` is a ~20-line `Lsa`/`LsaHeader` (a `u32` key) so store, ordering and exchange tests need no daemon types (`exchange/tests.rs` keeps the pre-#430 positional call through a shim). Daemon-side tests cover their trait impls, aliases and closures (stub/NSSA, opaque, v3 DBD options).
 - Behaviour that needs a kernel or two processes belongs in a `nos-ospf*` test or a `nos-e2e` phase (`docs/e2e-phases.md`), not here.

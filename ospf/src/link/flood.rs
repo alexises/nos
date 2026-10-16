@@ -137,7 +137,7 @@ pub(super) fn retransmit_pending(
 /// and some wasted bandwidth on a lab-scale LSDB. This is the permanent
 /// design, not a placeholder: nothing in this NOS consumes the LSDB in a
 /// time-sensitive way yet (no SPF/route computation), so real event-driven
-/// flooding (`exchange::Action::InstallAndFlood`) would add real complexity
+/// flooding would add real complexity
 /// (threading a fan-out channel through every link task) for a latency bound
 /// nothing needs tightened. Revisit once a SPF phase makes convergence speed
 /// actually matter.
