@@ -17,6 +17,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::lsa::{self, Lsa, LsaHeader, LsaKey};
 use crate::lsdb::Lsdb;
@@ -410,6 +411,7 @@ pub fn on_lsu_received(
     link_local_lsdb: &mut Lsdb,
     as_lsdb: &mut Lsdb,
     lsu: &LsuPacket,
+    now: Instant,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let mut acked = Vec::with_capacity(lsu.lsas.len());
     let mut newly_installed = Vec::new();
@@ -440,11 +442,15 @@ pub fn on_lsu_received(
             acked.push(l.header);
             continue;
         }
-        if !matches!(
-            store.install(l.clone()),
-            crate::lsdb::InstallOutcome::Rejected
-        ) {
-            newly_installed.push(l.header);
+        match store.install_received(l.clone(), now) {
+            // RFC 2328 §13 step 5a (`MinLSArrival`): discarded, and neither
+            // acknowledged nor treated as answering a request — the
+            // sender's retransmission brings it back.
+            crate::lsdb::InstallOutcome::TooSoon => continue,
+            crate::lsdb::InstallOutcome::Rejected => {}
+            crate::lsdb::InstallOutcome::Installed | crate::lsdb::InstallOutcome::Superseded => {
+                newly_installed.push(l.header);
+            }
         }
         acked.push(l.header);
         adj.request_list.retain(|k| *k != key);
@@ -1113,6 +1119,7 @@ mod tests {
             &mut Lsdb::new(),
             &mut Lsdb::new(),
             &lsu,
+            Instant::now(),
         );
         assert_eq!(adj.request_list, []);
         assert!(lsdb.get(&l.header.key()).is_some());
@@ -1124,6 +1131,44 @@ mod tests {
             ]
         );
         assert_eq!(newly_installed, vec![l.header]);
+    }
+
+    /// RFC 2328 §13 step 5a: a newer instance within `MIN_LS_ARRIVAL` of the
+    /// last received one is dropped unacked and its request stays pending.
+    #[test]
+    fn lsu_drops_too_soon_instance_unacked() {
+        let first = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        let second = full_lsa("1.1.1.1", 0x8000_0002u32.cast_signed());
+        let mut adj = AdjacencyData {
+            request_list: vec![second.header.key()],
+            ..Default::default()
+        };
+        let mut lsdb = Lsdb::new();
+        let t0 = Instant::now();
+        lsdb.install_received(first.clone(), t0);
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![second.clone()],
+        };
+        let run = |adj: &mut AdjacencyData, lsdb: &mut Lsdb, at: Instant| {
+            on_lsu_received(adj, lsdb, &mut Lsdb::new(), &mut Lsdb::new(), &lsu, at)
+        };
+        let (actions, newly_installed) =
+            run(&mut adj, &mut lsdb, t0 + crate::lsdb::MIN_LS_ARRIVAL / 2);
+        assert_eq!(newly_installed, []);
+        assert_eq!(actions[0], Action::SendLsAck(vec![]));
+        assert_eq!(adj.request_list, vec![second.header.key()]);
+        assert_eq!(
+            lsdb.get(&first.header.key())
+                .unwrap()
+                .header
+                .sequence_number,
+            first.header.sequence_number
+        );
+        let (actions, newly_installed) = run(&mut adj, &mut lsdb, t0 + crate::lsdb::MIN_LS_ARRIVAL);
+        assert_eq!(newly_installed, vec![second.header]);
+        assert_eq!(actions[0], Action::SendLsAck(vec![second.header]));
     }
 
     /// RFC 2328 §13 step 4: an unrequested `MaxAge` LSA with no held copy is
@@ -1146,6 +1191,7 @@ mod tests {
             &mut Lsdb::new(),
             &mut Lsdb::new(),
             &lsu,
+            Instant::now(),
         );
         assert_eq!(newly_installed, []);
         assert!(lsdb.get(&flushed.header.key()).is_none());
@@ -1158,6 +1204,7 @@ mod tests {
             &mut Lsdb::new(),
             &mut Lsdb::new(),
             &lsu,
+            Instant::now(),
         );
         assert_eq!(newly_installed, vec![flushed.header]);
         assert_eq!(
@@ -1183,8 +1230,14 @@ mod tests {
         let mut lsu = lsu;
         lsu.lsas.push(external.clone());
         let mut as_scope = Lsdb::new();
-        let (_, newly_installed) =
-            on_lsu_received(&mut adj, &mut area, &mut link_local, &mut as_scope, &lsu);
+        let (_, newly_installed) = on_lsu_received(
+            &mut adj,
+            &mut area,
+            &mut link_local,
+            &mut as_scope,
+            &lsu,
+            Instant::now(),
+        );
         assert_eq!(newly_installed.len(), 3);
         assert!(as_scope.get(&external.header.key()).is_some());
         assert!(area.get(&external.header.key()).is_none());
@@ -1219,8 +1272,14 @@ mod tests {
                 reserved.clone(),
             ],
         };
-        let (actions, installed) =
-            on_lsu_received(&mut adj, &mut area, &mut link_local, &mut as_scope, &lsu);
+        let (actions, installed) = on_lsu_received(
+            &mut adj,
+            &mut area,
+            &mut link_local,
+            &mut as_scope,
+            &lsu,
+            Instant::now(),
+        );
         assert_eq!(installed.len(), 4);
         assert!(area.get(&u_area.header.key()).is_some());
         assert!(as_scope.get(&u_as.header.key()).is_some());
