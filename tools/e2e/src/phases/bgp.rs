@@ -1,6 +1,7 @@
 //! BGP phases: sessions, redistribution, authentication, RPL policy, and the
 //! reflector / route-server topologies.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -2927,6 +2928,27 @@ async fn local_bias_readback(
     bridge_port_flood(w, container, bond, !non_df).await
 }
 
+/// The local-bias tc state with hit counters on both segment PEs, for a failed
+/// BUM count (#460): which of marking, port drop or another path let a frame by.
+async fn bias_counters(w: &World, bonds: [&str; 2], vxlan: &str) -> String {
+    let mut out = String::new();
+    for (router, bond) in ["router-a", "router-b"].into_iter().zip(bonds) {
+        for (dev, hook) in [(bond, "egress"), (vxlan, "ingress")] {
+            let shown = w
+                .dock
+                .in_netns(
+                    NETNS_HELPER_IMAGE,
+                    router,
+                    &["tc", "-s", "filter", "show", "dev", dev, hook],
+                )
+                .await
+                .unwrap_or_else(|e| e.to_string());
+            let _ = write!(out, "\n{router} {dev} {hook}:\n{shown}");
+        }
+    }
+    out
+}
+
 /// One ARP broadcast, as `(CE eth0, CE eth1, host)` request counts: sent by the
 /// CE out of its `link` (`Some`; `eth0` is its link to router-a, `eth1` to
 /// router-b) or by the host (`None`). The CE's counts are what arrived *in* on
@@ -4409,13 +4431,18 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     // link to router-a (non-DF), router-a floods it to router-b, and router-b
     // — the DF — used to send it back out of the segment.
     log("local bias: the CE's broadcast out of its link to router-a is not echoed back through router-b (the DF), and the host gets it once");
+    // The link flaps and DF re-elections above rewrote the filters: read them
+    // back again, so a missing one fails here by name rather than as a count.
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B, true).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A, false).await?;
     let (echo_a, echo_b, host) = arp_broadcast(w, Some("eth0")).await?;
     if (echo_a, echo_b, host) != (0, 0, 1) {
         bail!(
             "the CE's own broadcast came back {echo_a}x on its link to router-a and {echo_b}x on \
              its link to router-b, and reached the host {host}x; expected 0, 0 and 1\n\
-             captures: {}",
-            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
+             captures: {}\ntc:{}",
+            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?,
+            bias_counters(w, [&bond_a, &bond_b], &vxlan).await
         );
     }
 
@@ -5221,9 +5248,10 @@ async fn kernel_c(w: &World, mac: &str) -> anyhow::Result<(String, String)> {
 /// `evpn-v6`: no BUM from the CE once the host's address is resolved —
 /// static neighbours both ways and no IPv6 on the CE (no ND/MLD). Not for
 /// nos's sake: each CE link crosses a docker network, a *learning* bridge.
-/// A broadcast the CE sends through one PE comes back to it through the DF
-/// (no local bias, see docs/protocols/evpn-vxlan.md "Implementation notes"), and that docker bridge then learns the
-/// CE's MAC behind the PE's side and drops every unicast the PE sends it. A
+/// A broadcast the CE sends through one PE that comes back to it through the
+/// other (a PE not set up yet, or local bias missing, see
+/// docs/protocols/evpn-vxlan.md "Implementation notes") makes that docker bridge
+/// learn the CE's MAC behind the PE's side and drop every unicast the PE sends it. A
 /// direct link has no such switch in between. IPv6 goes before the CE's bond
 /// is built (`dataplane_ce`), so the bond never sends any.
 async fn quiet_ce(w: &World) -> anyhow::Result<()> {
@@ -5358,8 +5386,6 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
         .await?;
-    w.dock.start_host(CE_HOST, HOST_IMAGE, NET_CE_A).await?;
-    w.dock.network_connect(NET_CE_B, CE_HOST).await;
     w.dock.start_host(H_HOST, HOST_IMAGE, NET_H).await?;
 
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
@@ -5392,6 +5418,18 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
         "df elected domain={EVPN_DOMAIN} esi={ESI} port={bond_a} role=df algorithm=modulo ac_df=true pes={V6_A},{V6_B}"
     ))
     .await?;
+    let bond_b = bond_name(b, "bond1").await?;
+    b.wait(&format!(
+        "df elected domain={EVPN_DOMAIN} esi={ESI} port={bond_b} role=non-df algorithm=modulo ac_df=true pes={V6_A},{V6_B}"
+    ))
+    .await?;
+    // #460: the CE comes up only now. A fresh container's IPv6 RS/MLD burst
+    // that a PE floods back before its segment port is set up teaches that
+    // CE link's docker bridge the CE's MAC behind the PE, for 300s.
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, V6_B, false).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, V6_A, true).await?;
+    w.dock.start_host(CE_HOST, HOST_IMAGE, NET_CE_A).await?;
+    w.dock.network_connect(NET_CE_B, CE_HOST).await;
 
     log("the CE bonds its two links; the host takes an address; they ping across the IPv6 VXLAN");
     quiet_ce(w).await?;
@@ -5406,7 +5444,6 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     // learns nothing locally, yet must deliver what router-c balances onto
     // it — its pin does.
     log("the segment PE the CE doesn't send through pins its MAC to its own bond");
-    let bond_b = bond_name(b, "bond1").await?;
     let pin =
         |bond: &str| format!("remote mac pinned domain={EVPN_DOMAIN} mac={ce_mac} port={bond}");
     let mut pinned = false;
@@ -5472,8 +5509,9 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     if (echo_a, echo_b, host) != (0, 0, 1) {
         bail!(
             "the CE's own broadcast came back {echo_a}x on its link to router-a and {echo_b}x on \
-             its link to router-b, and reached the host {host}x; expected 0, 0 and 1\ncaptures: {}",
-            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
+             its link to router-b, and reached the host {host}x; expected 0, 0 and 1\ncaptures: {}\ntc:{}",
+            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?,
+            bias_counters(w, [&bond_a, &bond_b], &vxlan).await
         );
     }
 

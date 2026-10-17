@@ -44,6 +44,7 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 - Local bias (RFC 8365 §8.3.1, #24) **replaces** "non-DF refuses all BUM". BUM reaching an all-active segment port P: from a local access port, deliver always; from the VXLAN port, from a PE on P's segment, drop always; from any other PE, deliver only when P is the DF. Unknown unicast keeps the DF rule; single-active is excluded.
 - **Order is the safety property** (`sync_df`): egress filters, then ingress marking, then the multicast/broadcast flood flags open. A missing piece degrades to duplicates, never loss. If tc setup fails the port keeps DF-only flooding (`local_bias: false`, warning `local bias unavailable, df-only flooding`).
 - The mark is `0xE5000000|bitmap(P)` (mask `0xFF00FFFF`); 16 all-active segments per domain, the 17th is DF-only.
+- `enc_src_ip` only matches with tunnel metadata on: `set_local_bias` keeps a `nop` `tun_id` fib rule per domain (#460). A flower `enc_*` filter alone does not turn it on.
 - Ceilings are `ponytail:` comments: search `ponytail:` in `fdb/src` (no ES-Import filtering, HRW only cross-checked nos-to-nos, 255 nexthops + groups per domain, 16 segments, reserved mark bits, `del_segment_mac`).
 
 ## Modules
