@@ -225,18 +225,22 @@ fn untagged(word: &str, args: &[&str], interface: &Value) -> Option<SugarOut> {
     Some(SugarOut::Words(words.map(str::to_string).collect()))
 }
 
+/// Sugar: `address ...` on a physical interface means `subinterface 0 address ...`.
 pub fn untagged_address(_: Verb, args: &[&str], interface: &Value) -> Option<SugarOut> {
     untagged("address", args, interface)
 }
 
+/// Sugar: `routing-table ...` on a physical interface means `subinterface 0 routing-table ...`.
 pub fn untagged_routing_table(_: Verb, args: &[&str], interface: &Value) -> Option<SugarOut> {
     untagged("routing-table", args, interface)
 }
 
+/// Sugar: `ospf ...` on a physical interface means `subinterface 0 ospf ...`.
 pub fn untagged_ospf(_: Verb, args: &[&str], interface: &Value) -> Option<SugarOut> {
     untagged("ospf", args, interface)
 }
 
+/// Sugar: `ospfv3 ...` on a physical interface means `subinterface 0 ospfv3 ...`.
 pub fn untagged_ospfv3(_: Verb, args: &[&str], interface: &Value) -> Option<SugarOut> {
     untagged("ospfv3", args, interface)
 }

@@ -15,10 +15,12 @@ use nos_proto_derive::Cli;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum RedistributeSource {
     #[default]
+    /// Locally configured static routes.
     Static,
 }
 
 impl RedistributeSource {
+    /// The CLI spelling of the source.
     pub fn as_str(&self) -> &'static str {
         match self {
             RedistributeSource::Static => "static",
@@ -38,13 +40,16 @@ impl std::fmt::Display for RedistributeSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum RedistributeTarget {
     #[default]
+    /// Redistribute into a BGP instance.
     Bgp,
+    /// Redistribute into an `OSPFv2` instance.
     Ospf,
     /// Appended last: postcard encodes variants by index.
     Ospfv3,
 }
 
 impl RedistributeTarget {
+    /// The CLI spelling of the target.
     pub fn as_str(&self) -> &'static str {
         match self {
             RedistributeTarget::Bgp => "bgp",
@@ -69,8 +74,10 @@ impl std::fmt::Display for RedistributeTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct Redistribute {
     #[cli(topic = RoutingTableRedistribute)]
+    /// Protocol the redistributed routes come from.
     pub from: RedistributeSource,
     #[cli(key)]
+    /// Protocol receiving the routes; the key, so at most one rule per target.
     pub to: RedistributeTarget,
     /// Names a `PolicyDefinition` (or the built-in `accept-all`/`deny-all`)
     /// to filter redistributed routes through before they reach BGP.
@@ -102,8 +109,10 @@ pub struct Redistribute {
 pub struct RestApi {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(topic = RoutingTableRestApi)]
+    /// Address the REST listener binds inside the VRF; no wildcard.
     pub address: IpAddr,
     #[cli(topic = RoutingTableRestApi)]
+    /// TCP port of the REST listener.
     pub port: u16,
 }
 
@@ -186,18 +195,22 @@ pub struct RoutingTable {
         custom(|n, ctx: &Config| unique_in(n, &ctx.routing_tables, |t| &t.name))
     )]
     #[cli(key)]
+    /// Table name, 1 to 64 characters; also the VRF name.
     pub name: String,
 
     #[garde(custom(|bi: &Option<String>, ctx: &Config| bgp_instance_reference_valid(bi.as_ref(), ctx)))]
     #[cli(topic = RoutingTableBgpInstance)]
+    /// BGP instance bound to this table, if any.
     pub bgp_instance: Option<String>,
 
     #[garde(custom(|sri: &Option<String>, ctx: &Config| static_routing_instance_reference_valid(sri.as_ref(), ctx)))]
     #[cli(topic = RoutingTableStaticRoutingInstance)]
+    /// Static routing instance bound to this table, if any.
     pub static_routing_instance: Option<String>,
 
     #[garde(custom(|oi: &Option<String>, ctx: &Config| ospf_instance_reference_valid(oi.as_ref(), ctx)))]
     #[cli(topic = RoutingTableOspfInstance)]
+    /// `OSPFv2` instance bound to this table, if any.
     pub ospf_instance: Option<String>,
 
     /// Same shape as `ospf_instance`, associating this table with an

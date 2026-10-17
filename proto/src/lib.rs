@@ -37,7 +37,6 @@ pub mod paths;
 /// Wire types spoken to and by `nos-ribd`: route sources, pushes, lookups.
 pub mod rib;
 /// The configuration schema: every object an operator can configure.
-#[allow(missing_docs)] // removed by the schema sub-issue of #428
 pub mod schema;
 pub mod stp;
 /// Field validators shared by the config ops.

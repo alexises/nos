@@ -19,6 +19,7 @@ pub struct Ospfv3Area {
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Area id in dotted-quad form; 0.0.0.0 is the backbone.
     pub area_id: Ipv4Addr,
 
     #[garde(
@@ -26,6 +27,7 @@ pub struct Ospfv3Area {
         custom(|profiles, _ctx: &Config| ospfv3_profile::valid_profile_timers(profiles))
     )]
     #[cli(topic = Ospfv3Profile)]
+    /// Interface profiles declared in this area, referenced by an interface's `ospfv3` attachment.
     pub profiles: Vec<Ospfv3Profile>,
 }
 

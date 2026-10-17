@@ -44,10 +44,12 @@ pub struct LldpSettings {
 }
 
 impl LldpSettings {
+    /// Transmit interval in seconds: the configured one, else `TX_INTERVAL_DEFAULT_SECS`.
     pub fn effective_interval_secs(&self) -> u16 {
         self.tx_interval_secs.unwrap_or(TX_INTERVAL_DEFAULT_SECS)
     }
 
+    /// Hold multiplier: the configured one, else `TX_HOLD_DEFAULT`.
     pub fn effective_hold(&self) -> u8 {
         self.tx_hold.unwrap_or(TX_HOLD_DEFAULT)
     }
@@ -135,6 +137,7 @@ pub enum LldpDestination {
 }
 
 impl LldpDestination {
+    /// The destination MAC address LLDPDUs are sent to.
     pub const fn mac(self) -> [u8; 6] {
         let last = match self {
             LldpDestination::NearestBridge => 0x0E,
@@ -153,6 +156,7 @@ impl LldpDestination {
         }
     }
 
+    /// Inverse of `name`; `None` for an unknown spelling.
     pub fn from_name(name: &str) -> Option<Self> {
         [Self::NearestBridge, Self::NonTpmr, Self::CustomerBridge]
             .into_iter()

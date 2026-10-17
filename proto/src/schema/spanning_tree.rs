@@ -7,11 +7,17 @@ use nos_proto_derive::Cli;
 use super::{Config, VlanTag};
 use serde::{Deserialize, Serialize};
 
+/// Default bridge priority (802.1Q 13.26.3).
 pub const PRIORITY_DEFAULT: u16 = 32768;
+/// Default Hello Time, seconds.
 pub const HELLO_TIME_DEFAULT: u8 = 2;
+/// Default Max Age, seconds.
 pub const MAX_AGE_DEFAULT: u8 = 20;
+/// Default Forward Delay, seconds.
 pub const FORWARD_DELAY_DEFAULT: u8 = 15;
+/// Default Transmit Hold Count, BPDUs per second.
 pub const TX_HOLD_COUNT_DEFAULT: u8 = 6;
+/// Default MSTP hop budget of a BPDU.
 pub const MAX_HOPS_DEFAULT: u8 = 20;
 /// An MST region carries at most 64 instances besides the CIST (802.1Q 13.8).
 pub const MST_INSTANCES_MAX: usize = 64;
@@ -23,9 +29,13 @@ pub const MST_INSTANCES_MAX: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum StpMode {
     #[default]
+    /// Rapid spanning tree: one tree for all VLANs.
     Rstp,
+    /// Multiple spanning tree (802.1s): VLANs mapped onto MST instances.
     Mstp,
+    /// One rapid spanning tree per VLAN of a broadcast domain.
     RapidPvst,
+    /// Spanning tree off.
     Disabled,
 }
 
@@ -34,7 +44,9 @@ pub enum StpMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum StpForceVersion {
     #[default]
+    /// Legacy STP behaviour (802.1D).
     Stp,
+    /// RSTP behaviour (802.1w).
     Rstp,
 }
 
@@ -45,9 +57,11 @@ pub enum StpForceVersion {
 pub struct StpRegion {
     #[serde(default)]
     #[cli(topic = SpanningTreeRegion)]
+    /// Region name; bridges join one region only when name and revision match.
     pub name: String,
     #[serde(default)]
     #[cli(topic = SpanningTreeRegion)]
+    /// Region revision number.
     pub revision: u16,
 }
 
@@ -56,9 +70,11 @@ pub struct StpRegion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct MstInstance {
     #[cli(key)]
+    /// MST instance id; the key.
     pub id: u16,
     #[serde(default = "priority_default")]
     #[cli(topic = SpanningTreeMstInstancePriority)]
+    /// Bridge priority in this instance, a multiple of 4096.
     pub priority: u16,
 }
 
@@ -73,9 +89,11 @@ impl Default for MstInstance {
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+/// Bridge-wide spanning-tree parameters; there is exactly one per device.
 pub struct SpanningTree {
     #[serde(default)]
     #[cli(topic = SpanningTreeMode)]
+    /// The protocol the bridge runs.
     pub mode: StpMode,
 
     /// Bridge priority: a multiple of 4096, 0..=61440.
@@ -110,14 +128,17 @@ pub struct SpanningTree {
 
     #[serde(default)]
     #[cli(topic = SpanningTreeForceVersion)]
+    /// Protocol version forced on every port; `None` negotiates.
     pub force_version: Option<StpForceVersion>,
 
     #[serde(default)]
     #[cli(topic = SpanningTreeRegion)]
+    /// MST region identity.
     pub region: StpRegion,
 
     #[serde(default)]
     #[cli(topic = SpanningTreeMstInstance, words = "mst-instance")]
+    /// MST instances and this bridge's priority in each.
     pub mst_instances: Vec<MstInstance>,
 }
 

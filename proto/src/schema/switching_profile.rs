@@ -13,7 +13,9 @@ use nos_proto_derive::Cli;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum VlanTag {
     #[default]
+    /// Frames carry no VLAN tag.
     Untagged,
+    /// Frames carry this 802.1Q tag, 1 to 4094.
     Dot1q(u16),
 }
 
@@ -25,10 +27,12 @@ pub enum VlanTag {
 pub struct SwitchingProfileMember {
     #[garde(custom(|bd: &String, ctx: &Config| broadcast_domain_reference_valid(bd, ctx)))]
     #[cli(key)]
+    /// Name of the member `BroadcastDomain`; the key.
     pub broadcast_domain: String,
 
     #[garde(custom(|t: &VlanTag, _ctx: &Config| valid_vlan_tag(*t)))]
     #[cli(topic = SwitchingProfileMember)]
+    /// How the member's frames are tagged on the port.
     pub tag: VlanTag,
 
     /// Spanning-tree port cost for the ports using this membership; `None`:
@@ -79,10 +83,12 @@ pub struct SwitchingProfile {
         custom(|n, ctx: &Config| unique_in(n, &ctx.switching_profiles, |p| &p.name))
     )]
     #[cli(key)]
+    /// Profile name, 1 to 64 characters, unique among switching profiles.
     pub name: String,
 
     #[garde(dive, custom(|members, _ctx: &Config| unique_broadcast_domains(members)))]
     #[cli(topic = SwitchingProfileMember, words = "broadcast-domain")]
+    /// Broadcast domains a port using this profile carries.
     pub members: Vec<SwitchingProfileMember>,
 }
 

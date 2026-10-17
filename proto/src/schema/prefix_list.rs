@@ -20,8 +20,10 @@ use super::sugar;
 pub struct PrefixListEntry {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(topic = PrefixListEntry)]
+    /// Base prefix of the entry.
     pub cidr: IpNet,
     #[cli(topic = PrefixListEntry, sugar(word = "orlonger", with = sugar::orlonger, topic = PrefixListEntry), sugar(word = "upto", with = sugar::upto, topic = PrefixListEntry))]
+    /// Prefix-length range `(min, max)` that matches within `cidr`; `None` is an exact match.
     pub range: Option<(u8, u8)>,
 }
 
@@ -36,10 +38,12 @@ pub struct PrefixList {
         custom(|n, ctx: &Config| unique_in(n, &ctx.prefix_lists, |p| &p.name))
     )]
     #[cli(key)]
+    /// List name, 1 to 64 characters, unique among prefix lists.
     pub name: String,
 
     #[garde(custom(|e: &Vec<PrefixListEntry>, _ctx: &Config| valid_entries(e)))]
     #[cli(topic = PrefixListEntry)]
+    /// Entries, any of which may match.
     pub entries: Vec<PrefixListEntry>,
 }
 

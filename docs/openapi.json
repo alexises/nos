@@ -14,9 +14,11 @@
         "description": "A named set of AS-path regexes, referenced by bare name from an RPL\nscript's `this.bgp.as_path in NAME`. Each pattern is matched against the\npath rendered as space-separated ASNs, with `_` as the Cisco-style\nboundary (see `nos_rpl::AsPathRegexes`); the list matches if ANY pattern\ndoes.",
         "properties": {
           "name": {
+            "description": "List name, 1 to 64 characters, unique among AS-path lists.",
             "type": "string"
           },
           "patterns": {
+            "description": "Regexes over the space-separated ASN path with `_` as boundary; a path matches when any one matches. Never empty.",
             "items": {
               "type": "string"
             },
@@ -33,15 +35,18 @@
         "description": "RFC 5880 §4.2/§4.3 authentication section: the method picks the\n`AuthType`, `key_id` is the wire Auth Key ID.",
         "properties": {
           "key": {
+            "description": "Shared secret, stored clear-text like every config value.",
             "type": "string"
           },
           "key_id": {
+            "description": "Auth Key ID carried in each packet (RFC 5880 §4.2/§4.3); both ends must agree.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "method": {
-            "$ref": "#/components/schemas/BfdAuthMethod"
+            "$ref": "#/components/schemas/BfdAuthMethod",
+            "description": "Mechanism, which fixes the `AuthType` on the wire."
           }
         },
         "required": [
@@ -52,6 +57,7 @@
         "type": "object"
       },
       "BfdAuthMethod": {
+        "description": "BFD authentication mechanism (RFC 5880 §4.2 and §4.3).",
         "enum": [
           "SimplePassword",
           "KeyedMd5",
@@ -99,6 +105,7 @@
             ]
           },
           "detect_multiplier": {
+            "description": "Detection multiplier (RFC 5880 §6.8.4): detection time is this times the negotiated interval. At least 1.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -126,6 +133,7 @@
             "type": "integer"
           },
           "minimum_ttl": {
+            "description": "Lowest received IP TTL / Hop Limit a session accepts (RFC 5881 §5 GTSM); lower packets are dropped.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -135,6 +143,7 @@
             "description": "`sbfd`: Seamless BFD initiator (RFC 7880/7881): probes a reflector\nthat keeps no per-session state. Excludes `echo-mode`, `padded-pdu-size`\nand `auth` (not built for S-BFD yet)."
           },
           "name": {
+            "description": "Profile name, 1 to 64 characters, unique among BFD profiles; the key sessions reference.",
             "type": "string"
           },
           "padded_pdu_size": {
@@ -310,6 +319,7 @@
             "type": "boolean"
           },
           "prefix": {
+            "description": "Aggregate prefix to originate; the key.",
             "type": "string"
           },
           "summary_only": {
@@ -334,26 +344,33 @@
         "description": "One TCP-AO key. `send_id`/`recv_id` identify it on the wire (RFC 5925's\n`KeyID`/`RNextKeyID`); `is_current` marks the key a new connection starts\nsigning with (exactly one key must have this set; on a live session the\npeer's `RNextKeyID` decides, RFC 5925 §7.5.2); `is_rnext` optionally asks\nthe peer to switch to this key next, for rotation without a dropped\nsession (applied to the live session in place); `exclude_options` (RFC 5925 §5.2, `#[serde(default)]`\nso pre-existing on-disk config still loads as today's always-include\nbehavior) excludes TCP options from this key's MAC coverage — both peers\nmust agree, or authentication fails.",
         "properties": {
           "algorithm": {
-            "$ref": "#/components/schemas/BgpAoAlgorithm"
+            "$ref": "#/components/schemas/BgpAoAlgorithm",
+            "description": "MAC algorithm of this key."
           },
           "exclude_options": {
+            "description": "Leave TCP options out of the MAC computation.",
             "type": "boolean"
           },
           "is_current": {
+            "description": "Whether this key signs outgoing segments.",
             "type": "boolean"
           },
           "is_rnext": {
+            "description": "Whether this key is advertised as the next one to switch to (`RNextKeyID`).",
             "type": "boolean"
           },
           "key": {
+            "description": "Master key, stored clear-text like every config value.",
             "type": "string"
           },
           "recv_id": {
+            "description": "`RecvID`: the `KeyID` expected in the peer's TCP-AO option.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "send_id": {
+            "description": "`SendID`: the `KeyID` this side puts in the TCP-AO option (0 to 255); the list key.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -379,6 +396,7 @@
                 "description": "RFC 2385 TCP MD5 signature — a single shared password.",
                 "properties": {
                   "password": {
+                    "description": "Password the TCP MD5 signature option is keyed with.",
                     "type": "string"
                   }
                 },
@@ -400,6 +418,7 @@
                 "description": "RFC 5925 TCP Authentication Option — one or more keys, supporting\nrotation via `send_id`/`recv_id` and the `is_current`/`is_rnext`\nflags.",
                 "properties": {
                   "keys": {
+                    "description": "The keychain; `is_current` and `is_rnext` drive rotation.",
                     "items": {
                       "$ref": "#/components/schemas/BgpAoKey"
                     },
@@ -423,6 +442,7 @@
         "description": "RFC 5065 §2: the confederation identifier (`None`: not in a\nconfederation) and the other member ASes (`peers`) — a peer-group whose\n`remote_as` is one of them is a confederation-external peer, not an\nexternal one.",
         "properties": {
           "identifier": {
+            "description": "AS number the outside world sees for the whole confederation (RFC 5065); `None` means no confederation.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -431,6 +451,7 @@
             ]
           },
           "peers": {
+            "description": "AS numbers of the other member sub-ASes, reached over confederation eBGP.",
             "items": {
               "format": "int32",
               "minimum": 0,
@@ -445,21 +466,25 @@
         "description": "RFC 2439 route flap damping of routes received from a peer-group, all times\nin seconds. A route's penalty rises on each flap, halves every `half_life`,\nsuppresses the route at `>= suppress` and releases it below `reuse`; it\nnever exceeds the ceiling implied by `max_suppress`. `Default` is RFC 7196's\nconservative recommendation. eBGP peer-groups only (`bgp_instance`).",
         "properties": {
           "half_life": {
+            "description": "Seconds for the penalty to halve.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "max_suppress": {
+            "description": "Longest time in seconds a route can stay suppressed.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "reuse": {
+            "description": "Penalty below which a suppressed route is released again.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "suppress": {
+            "description": "Penalty at or above which a route is suppressed.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -511,6 +536,7 @@
         "type": "object"
       },
       "BgpInstance": {
+        "description": "One BGP speaker: identity, peer-groups and peers; served by one `nos-bgpd` process.",
         "properties": {
           "aggregates": {
             "description": "RFC 4271 §9.2.2.2 aggregates this instance originates while some\nmore specific route is in its Loc-RIB.",
@@ -520,6 +546,7 @@
             "type": "array"
           },
           "asn": {
+            "description": "Local AS number, 1 to 4294967294 (RFC 6793 reserves 0 and 4294967295).",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -549,15 +576,18 @@
             ]
           },
           "name": {
+            "description": "Instance name, 1 to 64 characters, unique among BGP instances.",
             "type": "string"
           },
           "peer_groups": {
+            "description": "Session templates; their timers are validated together.",
             "items": {
               "$ref": "#/components/schemas/BgpPeerGroup"
             },
             "type": "array"
           },
           "peers": {
+            "description": "Neighbors, each naming one entry of `peer_groups`.",
             "items": {
               "$ref": "#/components/schemas/BgpPeer"
             },
@@ -571,6 +601,7 @@
             ]
           },
           "router_id": {
+            "description": "BGP identifier sent in OPEN (RFC 4271 §4.2).",
             "type": "string"
           },
           "routing_table": {
@@ -601,14 +632,17 @@
         "description": "Vendor `local-as` (IOS/Junos; no RFC): the AS this group's peers see\ninstead of the instance's own (its `asn`, or the confederation\nidentifier). The OPEN carries `asn`; outbound `AS_PATH` gets `[asn, own]`\n(`[asn]` with `replace_as`); a received path gets `asn` prepended unless\n`no_prepend`, and holding `asn` counts as a loop for this group's routes.\nExternal (non-confederation eBGP) peer-groups only\n(`bgp_instance::valid_route_reflection_and_server`).",
         "properties": {
           "asn": {
+            "description": "AS number this group's peers see instead of the instance's own; carried in OPEN.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "no_prepend": {
+            "description": "Do not prepend `asn` to the `AS_PATH` of received routes.",
             "type": "boolean"
           },
           "replace_as": {
+            "description": "Advertise `[asn]` only instead of `[asn, own]`.",
             "type": "boolean"
           }
         },
@@ -623,7 +657,8 @@
           "ipv4": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/BgpPrefixLimit"
+                "$ref": "#/components/schemas/BgpPrefixLimit",
+                "description": "Limit for IPv4 unicast; `None` is unlimited."
               },
               {
                 "type": "null"
@@ -633,7 +668,8 @@
           "ipv6": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/BgpPrefixLimit"
+                "$ref": "#/components/schemas/BgpPrefixLimit",
+                "description": "Limit for IPv6 unicast; `None` is unlimited."
               },
               {
                 "type": "null"
@@ -643,7 +679,8 @@
           "l2vpn_evpn": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/BgpPrefixLimit"
+                "$ref": "#/components/schemas/BgpPrefixLimit",
+                "description": "Limit for L2VPN EVPN; `None` is unlimited."
               },
               {
                 "type": "null"
@@ -657,9 +694,11 @@
         "description": "Associates a remote address with a peer-group, by name — the bulk of\nsession config (remote-as, source-address, address-families) lives on\nthe referenced `BgpPeerGroup`, not here.",
         "properties": {
           "peer_group": {
+            "description": "Name of the `BgpPeerGroup` that supplies this peer's settings; must exist.",
             "type": "string"
           },
           "remote_address": {
+            "description": "Neighbor address; the key, unique across every BGP instance.",
             "type": "string"
           },
           "shutdown": {
@@ -681,6 +720,7 @@
         "type": "object"
       },
       "BgpPeerGroup": {
+        "description": "Session settings shared by every `BgpPeer` that names this group.",
         "properties": {
           "add_path": {
             "oneOf": [
@@ -703,6 +743,7 @@
             ]
           },
           "address_families": {
+            "description": "Families to negotiate; non-empty, no duplicates.",
             "items": {
               "$ref": "#/components/schemas/AddressFamily"
             },
@@ -816,6 +857,7 @@
             ]
           },
           "name": {
+            "description": "Group name, 1 to 64 characters, unique within the instance.",
             "type": "string"
           },
           "next_hop": {
@@ -830,6 +872,7 @@
             ]
           },
           "remote_as": {
+            "description": "Expected remote AS, 1 to 4294967294; equal to the local ASN means iBGP.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -876,7 +919,8 @@
           "source_address": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/SourceAddress"
+                "$ref": "#/components/schemas/SourceAddress",
+                "description": "Transport source address, resolved by `nos-bgpd` at runtime; `None` lets the kernel choose."
               },
               {
                 "type": "null"
@@ -901,16 +945,19 @@
         "description": "One address family's RFC 4486 §4 maximum-prefix limit: more than `limit`\naccepted (post-import-policy) prefixes from one peer closes the session\nwith Cease/Maximum Number of Prefixes Reached, unless `warning_only`.\n`restart_interval` (seconds) re-allows the session after that long; `0`\nkeeps the peer down until `clear bgp <instance> <peer>` or a shut/no-shut.",
         "properties": {
           "limit": {
+            "description": "Maximum number of prefixes accepted from the peer for the family.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "restart_interval": {
+            "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "warning_only": {
+            "description": "Log when the limit is exceeded instead of closing the session.",
             "type": "boolean"
           }
         },
@@ -944,6 +991,7 @@
         "description": "Administrative shutdown (RFC 4486 Cease/Administrative Shutdown). While set\non a peer-group, or on an individual `BgpPeer` (which overrides the group),\nno session is opened or accepted; an established one is closed with a\nNOTIFICATION carrying `message` as an RFC 9003 shutdown communication.",
         "properties": {
           "message": {
+            "description": "Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.",
             "type": [
               "string",
               "null"
@@ -956,6 +1004,7 @@
         "description": "A named L2 broadcast domain. `SwitchingProfile` references it for L2\nmembership; `addresses`/`routing_table` independently make the domain's\nown bridge device an SVI (switch virtual interface) — a routed L3\nattachment point for the domain as a whole, the same flat shape as a\nloopback `Interface`'s L3 config (no VLAN/tag concept applies to a\ndomain's own bridge, so there's nothing for per-tag addressing to buy\nit). The bridge device and whatever interfaces are enslaved into it as L2\nmembers are separate Linux links, so there is no conflict between this\nand any member's own VRF assignment.",
         "properties": {
           "addresses": {
+            "description": "Addresses of the domain's bridge device (SVI); empty for a pure L2 domain.",
             "items": {
               "$ref": "#/components/schemas/InterfaceAddress"
             },
@@ -983,6 +1032,7 @@
             ]
           },
           "name": {
+            "description": "Domain name, 1 to 64 characters, unique among broadcast domains.",
             "type": "string"
           },
           "neigh_suppress": {
@@ -1025,12 +1075,14 @@
             "type": "array"
           },
           "routing_table": {
+            "description": "Routing table (VRF) the bridge device joins, if any.",
             "type": [
               "string",
               "null"
             ]
           },
           "stp_forward_delay": {
+            "description": "Forward Delay in seconds for this domain's bridge; `None` uses the spanning-tree default.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -1057,6 +1109,7 @@
             ]
           },
           "stp_max_age": {
+            "description": "Max Age in seconds for this domain's bridge; `None` uses the spanning-tree default.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -1154,9 +1207,11 @@
         "description": "A named community value (standard/extended/large — inferred from\n`value`'s own colon-literal shape, same as an inline literal in a\nscript), referenced by bare name from an RPL policy script's\n`.contains(..)`/`.add(..)`/`.remove(..)` — see root `CLAUDE.md`'s RPL\nsection.",
         "properties": {
           "name": {
+            "description": "Alias name, 1 to 64 characters, unique among aliases.",
             "type": "string"
           },
           "value": {
+            "description": "Colon-separated community literal such as `65000:100`.",
             "type": "string"
           }
         },
@@ -1170,12 +1225,14 @@
         "description": "A named, flat set of `community-alias` names and/or inline literals,\nreferenced by bare name from an RPL script the same way a\n`CommunityAlias` is. `.contains(..)` matches if ANY member matches\n(standard community-list OR semantics); `.add(..)`/`.remove(..)` apply to\nevery member. No nesting — a member must be an existing alias name or a\nliteral, never another group's name (not requested, see root\n`CLAUDE.md`'s RPL section).",
         "properties": {
           "members": {
+            "description": "Names of the `CommunityAlias` entries in the group; each must exist.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "name": {
+            "description": "Group name, 1 to 64 characters, unique among groups.",
             "type": "string"
           }
         },
@@ -1186,8 +1243,10 @@
         "type": "object"
       },
       "Config": {
+        "description": "The whole device configuration: each field is one top-level section, and `validate` checks the cross-references between them.",
         "properties": {
           "as_path_lists": {
+            "description": "Named AS-path regex lists that RPL scripts match with `this.bgp.as_path in NAME`.",
             "items": {
               "$ref": "#/components/schemas/AsPathList"
             },
@@ -1201,33 +1260,39 @@
             "type": "array"
           },
           "bgp_instances": {
+            "description": "BGP speakers; each gets its own `nos-bgpd` process.",
             "items": {
               "$ref": "#/components/schemas/BgpInstance"
             },
             "type": "array"
           },
           "broadcast_domains": {
+            "description": "L2 segments that switching profiles and EVPN VNIs refer to.",
             "items": {
               "$ref": "#/components/schemas/BroadcastDomain"
             },
             "type": "array"
           },
           "community_aliases": {
+            "description": "Named community literals that RPL scripts can use by name.",
             "items": {
               "$ref": "#/components/schemas/CommunityAlias"
             },
             "type": "array"
           },
           "community_groups": {
+            "description": "Named lists of community aliases that RPL scripts can use by name.",
             "items": {
               "$ref": "#/components/schemas/CommunityGroup"
             },
             "type": "array"
           },
           "hostname": {
+            "description": "System hostname: 1 to 253 characters, hostname charset only.",
             "type": "string"
           },
           "interfaces": {
+            "description": "Interfaces `nos-interfaced` configures; any interface not listed is left alone.",
             "items": {
               "$ref": "#/components/schemas/Interface"
             },
@@ -1242,36 +1307,42 @@
             "description": "Log export (remote syslog). `serde(default)` so on-disk config saved\nbefore this field existed still loads."
           },
           "ospf_instances": {
+            "description": "`OSPFv2` speakers; each gets its own `nos-ospfd` process.",
             "items": {
               "$ref": "#/components/schemas/OspfInstance"
             },
             "type": "array"
           },
           "ospfv3_instances": {
+            "description": "`OSPFv3` speakers; each gets its own `nos-ospfv3d` process.",
             "items": {
               "$ref": "#/components/schemas/Ospfv3Instance"
             },
             "type": "array"
           },
           "policy_definitions": {
+            "description": "RPL scripts that peer-groups reference by name as import/export policy.",
             "items": {
               "$ref": "#/components/schemas/PolicyDefinition"
             },
             "type": "array"
           },
           "port_aggregates": {
+            "description": "Link aggregations of physical ports (static or LACP).",
             "items": {
               "$ref": "#/components/schemas/PortAggregate"
             },
             "type": "array"
           },
           "prefix_lists": {
+            "description": "Named prefix lists that RPL scripts match with `this.prefix in NAME`.",
             "items": {
               "$ref": "#/components/schemas/PrefixList"
             },
             "type": "array"
           },
           "routing_tables": {
+            "description": "VRFs; each binds BGP, static, OSPF and `OSPFv3` instances and may pin the REST API.",
             "items": {
               "$ref": "#/components/schemas/RoutingTable"
             },
@@ -1286,6 +1357,7 @@
             "description": "Bridge-wide spanning-tree parameters (inert until `nos-stpd`).\n`serde(default)` so on-disk config saved before this field existed\nstill loads."
           },
           "static_routing_instances": {
+            "description": "Static route sets, each attached to a routing table by name.",
             "items": {
               "$ref": "#/components/schemas/StaticRoutingInstance"
             },
@@ -1299,6 +1371,7 @@
             "type": "array"
           },
           "switching_profiles": {
+            "description": "VLAN membership profiles an interface attaches with `switching-profile`.",
             "items": {
               "$ref": "#/components/schemas/SwitchingProfile"
             },
@@ -1835,6 +1908,7 @@
         "description": "A named network interface. For a loopback interface (see\n`LOOPBACK_PREFIX`), `addresses`/`routing_table` carry its (flat) L3\nconfig directly, exactly as before this type gained subinterfaces — a\nloopback has no VLAN/dot1q concept, so there's nothing for per-tag\naddressing to buy it. For every other (physical) interface, `addresses`\nmust be empty and `routing_table` must be unset: all of its L3 config\nlives under `subinterfaces` instead, tag 0 for the untagged/native case\n(what used to be these same flat fields) — see `valid_addressing_split`.\n\n`switching_profile`, if set, names a `SwitchingProfile` trunking this\ninterface into one or more `BroadcastDomain`s — unchanged, still a\nphysical-interface-level field regardless of `subinterfaces`. A tag\nclaimed by an L2 `switching_profile` member and a tag claimed by an L3\n`Subinterface` are mutually exclusive on the same interface: Linux only\nallows one master device per link (physical or per-tag sub-link), and an\nL2 member wants that link's master to be the domain's bridge while an L3\nsubinterface wants it to be a VRF. See\n`valid_subinterface_and_switching_profile_tags`, wired one level up on\n`Config.interfaces` (`valid_interfaces`) since it needs to see sibling\nfields — the same reason `RoutingTable`'s redistribute rule is wired on\n`Config.routing_tables`.",
         "properties": {
           "addresses": {
+            "description": "Addresses on the link itself (the loopback case); a physical interface carries L3 config on subinterfaces.",
             "items": {
               "$ref": "#/components/schemas/InterfaceAddress"
             },
@@ -1875,6 +1949,7 @@
             ]
           },
           "name": {
+            "description": "Kernel interface name; `loopback-<table>` is a routing table's loopback.",
             "type": "string"
           },
           "ospf_profile": {
@@ -1899,6 +1974,7 @@
             ]
           },
           "routing_table": {
+            "description": "Routing table (VRF) the link joins, if any.",
             "type": [
               "string",
               "null"
@@ -1912,12 +1988,14 @@
             ]
           },
           "subinterfaces": {
+            "description": "L3 attachment points of a physical interface, one per VLAN tag.",
             "items": {
               "$ref": "#/components/schemas/Subinterface"
             },
             "type": "array"
           },
           "switching_profile": {
+            "description": "`SwitchingProfile` that makes this interface an L2 switch port.",
             "type": [
               "string",
               "null"
@@ -1935,9 +2013,11 @@
         "description": "One address on an interface, with an optional label. The label is\nstored from commit time onward but not yet applied to the kernel by any\ndriver (no `ip addr ... label` call) — schema/plumbing only for now.",
         "properties": {
           "address": {
+            "description": "Address with prefix length, e.g. `192.0.2.1/24`; the key.",
             "type": "string"
           },
           "label": {
+            "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
             "type": [
               "string",
               "null"
@@ -2650,11 +2730,13 @@
         "description": "One MST instance and this bridge's priority in it.",
         "properties": {
           "id": {
+            "description": "MST instance id; the key.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "priority": {
+            "description": "Bridge priority in this instance, a multiple of 4096.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -2716,6 +2798,7 @@
         "description": "One OSPF area within an `OspfInstance`, keyed by its dotted-quad area id\n(e.g. `0.0.0.0` for the backbone). Unique only within its owning\ninstance — never referenced from outside `OspfInstance`, unlike\n`OspfProfile.name` — so uniqueness is enforced on the parent's `areas`\nfield (`ospf_instance::unique_area_ids`), not here.",
         "properties": {
           "area_id": {
+            "description": "Area id in dotted-quad form; 0.0.0.0 is the backbone.",
             "type": "string"
           },
           "area_type": {
@@ -2731,6 +2814,7 @@
             "type": "boolean"
           },
           "profiles": {
+            "description": "Interface profiles declared in this area, referenced by an interface's `ospf` attachment.",
             "items": {
               "$ref": "#/components/schemas/OspfProfile"
             },
@@ -2770,6 +2854,7 @@
         "description": "One RFC 2328 §3.5 area address range, keyed by `cidr`.",
         "properties": {
           "cidr": {
+            "description": "The summarised address range; the key.",
             "type": "string"
           },
           "not_advertise": {
@@ -2803,6 +2888,7 @@
                 "description": "RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,\ncarried directly in the OSPF header's 8-byte Authentication field.",
                 "properties": {
                   "password": {
+                    "description": "The password, at most 8 bytes.",
                     "type": "string"
                   }
                 },
@@ -2824,6 +2910,7 @@
                 "description": "RFC 2328 Appendix D.3 / RFC 5709 — one or more keys, supporting\nrotation via `key_id`/`is_current`, mirroring `BgpAoKey`.",
                 "properties": {
                   "keys": {
+                    "description": "The keychain; `is_current` selects the signing key, the rest allow rotation.",
                     "items": {
                       "$ref": "#/components/schemas/OspfCryptoKey"
                     },
@@ -2858,15 +2945,19 @@
         "description": "One cryptographic auth key, shared by `OspfProfile.auth` (RFC 2328 D.3)\nand `Ospfv3Profile.auth` (RFC 7166). `key_id` is the wire Key ID — 16\nbits, RFC 7166's Security Association ID width; RFC 7474's `AuType` 3 Key\nID is 32 bits, but RFC 2328's classic `AuType` 2 field is one octet, so\n`valid_profile_timers` caps a non-extended `OSPFv2` key at 255 (the type\nitself doesn't). `is_current` marks the key actively signing outgoing\npackets (exactly one key must have this set) — every configured key is\nstill accepted on receive, looked up by the wire's own Key ID (RFC 2328\nD.5), which is how graceful key rollover works without dropping the\nadjacency.",
         "properties": {
           "algorithm": {
-            "$ref": "#/components/schemas/OspfCryptoAlgorithm"
+            "$ref": "#/components/schemas/OspfCryptoAlgorithm",
+            "description": "HMAC algorithm of this key."
           },
           "is_current": {
+            "description": "Whether this key signs outgoing packets.",
             "type": "boolean"
           },
           "key": {
+            "description": "Shared secret, stored clear-text like every config value.",
             "type": "string"
           },
           "key_id": {
+            "description": "Key id carried in the authentication trailer; the list key.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -2926,6 +3017,7 @@
             ]
           },
           "name": {
+            "description": "Instance name, 1 to 64 characters, unique among `OSPFv2` instances.",
             "type": "string"
           },
           "prefix_suppression": {
@@ -2962,6 +3054,7 @@
             "type": "boolean"
           },
           "router_id": {
+            "description": "OSPF router id (RFC 2328 §C.1), written as a dotted-quad.",
             "type": "string"
           },
           "routing_table": {
@@ -3058,6 +3151,7 @@
             "type": "boolean"
           },
           "name": {
+            "description": "Profile name, unique within its area.",
             "type": "string"
           },
           "network_type": {
@@ -3119,6 +3213,7 @@
             ]
           },
           "router_id": {
+            "description": "Router id of the far end of the virtual link; the key.",
             "type": "string"
           }
         },
@@ -3131,9 +3226,11 @@
         "description": "One `OSPFv3` area within an `Ospfv3Instance`, keyed by its dotted-quad area\nid — mirrors `OspfArea` exactly. Unique only within its owning instance,\nenforced on the parent's `areas` field (`ospfv3_instance::unique_area_ids`).",
         "properties": {
           "area_id": {
+            "description": "Area id in dotted-quad form; 0.0.0.0 is the backbone.",
             "type": "string"
           },
           "profiles": {
+            "description": "Interface profiles declared in this area, referenced by an interface's `ospfv3` attachment.",
             "items": {
               "$ref": "#/components/schemas/Ospfv3Profile"
             },
@@ -3170,6 +3267,7 @@
             ]
           },
           "name": {
+            "description": "Instance name, 1 to 64 characters, unique among `OSPFv3` instances.",
             "type": "string"
           },
           "redistribute_policy": {
@@ -3180,6 +3278,7 @@
             ]
           },
           "router_id": {
+            "description": "32-bit router id (RFC 5340 §2.1), written as an IPv4 dotted-quad.",
             "type": "string"
           },
           "routing_table": {
@@ -3267,6 +3366,7 @@
             "type": "boolean"
           },
           "name": {
+            "description": "Profile name, unique within its area.",
             "type": "string"
           },
           "network_type": {
@@ -3299,9 +3399,11 @@
         "description": "A named RPL script (see `docs/architecture/rpl.md`), referenced by name from a `BgpPeerGroup`'s `import_policy`/\n`export_policy`. Only the source text crosses the wire/IPC — each\nconsumer (`nos-bgpd`) compiles and caches its own bytecode locally,\nmatching the existing \"each daemon re-resolves its own state from config\ndiffs\" idiom, rather than `nos-proto` carrying a bytecode wire format.",
         "properties": {
           "name": {
+            "description": "Policy name, unique, and never the reserved `accept-all` or `deny-all`.",
             "type": "string"
           },
           "source": {
+            "description": "RPL source text, compiled at commit time and again by each consumer.",
             "type": "string"
           }
         },
@@ -3366,9 +3468,11 @@
             "type": "integer"
           },
           "mode": {
-            "$ref": "#/components/schemas/PortAggregateMode"
+            "$ref": "#/components/schemas/PortAggregateMode",
+            "description": "Static bond or LACP (802.1AX) with its negotiation parameters."
           },
           "mtu": {
+            "description": "Bond MTU in bytes; `None` keeps the kernel default.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -3377,6 +3481,7 @@
             ]
           },
           "name": {
+            "description": "Bond name, 1 to 64 characters, unique among interfaces and aggregates.",
             "type": "string"
           },
           "redundancy_mode": {
@@ -3540,12 +3645,14 @@
         "description": "A named set of prefix-match entries, referenced by bare name from an RPL\nscript's `this.prefix in NAME`.",
         "properties": {
           "entries": {
+            "description": "Entries, any of which may match.",
             "items": {
               "$ref": "#/components/schemas/PrefixListEntry"
             },
             "type": "array"
           },
           "name": {
+            "description": "List name, 1 to 64 characters, unique among prefix lists.",
             "type": "string"
           }
         },
@@ -3559,9 +3666,11 @@
         "description": "One `prefix-list` entry. `range: None` means exact match — this exact\nprefix+length only; `Some((min, max))` means \"contained within `cidr`,\nwith the candidate's own length in `[min, max]`\". Deliberately different\nfrom the existing `this.prefix in <cidr>` operator, which stays\ncontainment/orlonger-based for a bare CIDR — see root `CLAUDE.md`'s RPL\nsection.",
         "properties": {
           "cidr": {
+            "description": "Base prefix of the entry.",
             "type": "string"
           },
           "range": {
+            "description": "Prefix-length range `(min, max)` that matches within `cidr`; `None` is an exact match.",
             "items": false,
             "prefixItems": [
               {
@@ -3611,7 +3720,8 @@
         "description": "`redistribute bgp`). The table holds a list keyed by `to`\n`redistribute from static to bgp`). The table holds a list keyed by `to`\n(at most one rule per target), so static routes can feed BGP, OSPF and\n`OSPFv3` at once; an `Option<Redistribute>` from before the list is still\nread from disk (`deserialize_redistribute`).",
         "properties": {
           "from": {
-            "$ref": "#/components/schemas/RedistributeSource"
+            "$ref": "#/components/schemas/RedistributeSource",
+            "description": "Protocol the redistributed routes come from."
           },
           "metric": {
             "description": "OSPF external metric (1..=16777215) for the AS-external-LSAs this\nrule originates; `None` = 20. Only valid with `to ospf`.",
@@ -3639,7 +3749,8 @@
             ]
           },
           "to": {
-            "$ref": "#/components/schemas/RedistributeTarget"
+            "$ref": "#/components/schemas/RedistributeTarget",
+            "description": "Protocol receiving the routes; the key, so at most one rule per target."
           }
         },
         "required": [
@@ -3781,9 +3892,11 @@
         "description": "Where `nos-restd` listens for a routing table: one specific address\ninside the table's VRF. There is deliberately no wildcard — an\nunauthenticated management API must be pinned to one reachable address.\nWhether the address is actually configured on an interface in the VRF is\noperational state, not validated at commit: `nos-restd` retries the bind.",
         "properties": {
           "address": {
+            "description": "Address the REST listener binds inside the VRF; no wildcard.",
             "type": "string"
           },
           "port": {
+            "description": "TCP port of the REST listener.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -3857,6 +3970,7 @@
         "description": "A named routing table, optionally associated with one BGP instance and\none static routing instance. The reference lives only on the table —\n`BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)\nreference them.",
         "properties": {
           "bgp_instance": {
+            "description": "BGP instance bound to this table, if any.",
             "type": [
               "string",
               "null"
@@ -3867,9 +3981,11 @@
             "description": "EVPN IP-VRF: this table's L3 VNI. `serde(default)` like `rest_api`.\n`#[garde(skip)]`: checked by `valid_table_evpn` (it needs the other\ntables and the broadcast domains)."
           },
           "name": {
+            "description": "Table name, 1 to 64 characters; also the VRF name.",
             "type": "string"
           },
           "ospf_instance": {
+            "description": "`OSPFv2` instance bound to this table, if any.",
             "type": [
               "string",
               "null"
@@ -3901,6 +4017,7 @@
             ]
           },
           "static_routing_instance": {
+            "description": "Static routing instance bound to this table, if any.",
             "type": [
               "string",
               "null"
@@ -3970,9 +4087,11 @@
         "description": "One RPKI-to-Router cache (RFC 8210), keyed by its address.",
         "properties": {
           "address": {
+            "description": "Address of the RPKI-to-Router cache; the key.",
             "type": "string"
           },
           "port": {
+            "description": "TCP port of the cache, `RPKI_RTR_PORT_DEFAULT` unless set.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -4131,9 +4250,11 @@
                 "description": "An explicitly named interface.",
                 "properties": {
                   "interface": {
+                    "description": "Interface whose address becomes the session's local address.",
                     "type": "string"
                   },
                   "label": {
+                    "description": "Selects one of the interface's addresses; `None` requires exactly one.",
                     "type": [
                       "string",
                       "null"
@@ -4158,6 +4279,7 @@
                 "description": "This peer-group's owning `BgpInstance`'s own loopback interface\n(`loopback-<table>`, where `<table>` is that instance's\n`routing_table`) — so no interface name needs to be spelled out.\nInvalid (an error, not a fallback) for an instance with no owning\nrouting table, exactly like `BgpInstance.routing_table` itself.",
                 "properties": {
                   "label": {
+                    "description": "Selects one of the loopback's addresses; `None` requires exactly one.",
                     "type": [
                       "string",
                       "null"
@@ -4175,11 +4297,13 @@
         ]
       },
       "SpanningTree": {
+        "description": "Bridge-wide spanning-tree parameters; there is exactly one per device.",
         "properties": {
           "force_version": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/StpForceVersion"
+                "$ref": "#/components/schemas/StpForceVersion",
+                "description": "Protocol version forced on every port; `None` negotiates."
               },
               {
                 "type": "null"
@@ -4211,9 +4335,11 @@
             "type": "integer"
           },
           "mode": {
-            "$ref": "#/components/schemas/StpMode"
+            "$ref": "#/components/schemas/StpMode",
+            "description": "The protocol the bridge runs."
           },
           "mst_instances": {
+            "description": "MST instances and this bridge's priority in each.",
             "items": {
               "$ref": "#/components/schemas/MstInstance"
             },
@@ -4226,7 +4352,8 @@
             "type": "integer"
           },
           "region": {
-            "$ref": "#/components/schemas/StpRegion"
+            "$ref": "#/components/schemas/StpRegion",
+            "description": "MST region identity."
           },
           "tx_hold_count": {
             "description": "BPDUs a port may send per second, 1..=10.",
@@ -4248,9 +4375,11 @@
             ]
           },
           "gateway": {
+            "description": "Next-hop address, in the same family as `subnet`.",
             "type": "string"
           },
           "subnet": {
+            "description": "Destination prefix; the key within the instance.",
             "type": "string"
           }
         },
@@ -4264,9 +4393,11 @@
         "description": "A named container of static routes. Carries no reference to any routing\ntable — only `RoutingTable.static_routing_instance` names it, never the\nother way around.",
         "properties": {
           "name": {
+            "description": "Instance name, 1 to 64 characters, unique among static routing instances.",
             "type": "string"
           },
           "routes": {
+            "description": "Routes of this instance, keyed by destination prefix.",
             "items": {
               "$ref": "#/components/schemas/StaticRoute"
             },
@@ -4697,6 +4828,7 @@
         "description": "This port's cost and priority in one MST instance, which must exist in\n`spanning-tree mst-instance`.",
         "properties": {
           "cost": {
+            "description": "Administrative path cost in this instance; `None` derives it from link speed.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -4705,11 +4837,13 @@
             ]
           },
           "id": {
+            "description": "MST instance id; the key.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "priority": {
+            "description": "Port priority in this instance, a multiple of 16.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -4721,6 +4855,7 @@
         "type": "object"
       },
       "StpPortProfile": {
+        "description": "Per-port spanning-tree settings that a switching profile attaches to ports.",
         "properties": {
           "bpdu_filter": {
             "description": "Neither send nor process BPDUs on this port.",
@@ -4749,22 +4884,26 @@
             ]
           },
           "edge_port": {
-            "$ref": "#/components/schemas/EdgePort"
+            "$ref": "#/components/schemas/EdgePort",
+            "description": "Edge-port (`PortFast`) behaviour."
           },
           "link_type": {
-            "$ref": "#/components/schemas/LinkType"
+            "$ref": "#/components/schemas/LinkType",
+            "description": "Link type that governs the rapid transitions."
           },
           "loop_guard": {
             "description": "Block the port when BPDUs stop arriving instead of forwarding.",
             "type": "boolean"
           },
           "mst_instances": {
+            "description": "Per-instance cost and priority overrides.",
             "items": {
               "$ref": "#/components/schemas/StpPortMstInstance"
             },
             "type": "array"
           },
           "name": {
+            "description": "Profile name, 1 to 64 characters, unique among port profiles.",
             "type": "string"
           },
           "priority": {
@@ -4791,9 +4930,11 @@
         "description": "The MST region identity (802.1Q 13.8): bridges only share an MSTI tree\nwhen name and revision match.",
         "properties": {
           "name": {
+            "description": "Region name; bridges join one region only when name and revision match.",
             "type": "string"
           },
           "revision": {
+            "description": "Region revision number.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -4968,6 +5109,7 @@
         "description": "One VLAN-scoped L3 attachment point on a physical `Interface`. `tag == 0`\nis the untagged/native case — what used to be `Interface.addresses`/\n`routing_table` directly, before L3 config moved under per-tag\nsubinterfaces. `1..=4094` is a real 802.1q tag, realized by\n`nos-interfaced`'s Linux driver as its own `<interface>.<tag>` kernel\nsub-interface (the same convention already used for a `Dot1q`\nswitching-profile member). A tag used by a `Subinterface` here and a tag\nused by the same interface's `switching_profile` (an `Untagged` member\nclaims tag 0, a `Dot1q(n)` member claims tag `n`) must be disjoint — see\n`valid_subinterface_and_switching_profile_tags`. Loopback interfaces\nnever have any `Subinterface`s — see `valid_addressing_split`.",
         "properties": {
           "addresses": {
+            "description": "Addresses on this subinterface, no duplicates.",
             "items": {
               "$ref": "#/components/schemas/InterfaceAddress"
             },
@@ -4995,12 +5137,14 @@
             ]
           },
           "routing_table": {
+            "description": "Routing table (VRF) the subinterface joins, if any.",
             "type": [
               "string",
               "null"
             ]
           },
           "tag": {
+            "description": "802.1Q VLAN id of the subinterface; 0 is the untagged attachment.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -5053,12 +5197,14 @@
         "description": "A named, trunk-style container mapping multiple broadcast domains to\ntheir dot1q tagging. Will be assigned to a future \"switched interface\"\nconfig object — not modeled yet.",
         "properties": {
           "members": {
+            "description": "Broadcast domains a port using this profile carries.",
             "items": {
               "$ref": "#/components/schemas/SwitchingProfileMember"
             },
             "type": "array"
           },
           "name": {
+            "description": "Profile name, 1 to 64 characters, unique among switching profiles.",
             "type": "string"
           }
         },
@@ -5072,6 +5218,7 @@
         "description": "One broadcast domain's membership in a `SwitchingProfile`, tagged as\neither a specific dot1q VLAN or untagged.",
         "properties": {
           "broadcast_domain": {
+            "description": "Name of the member `BroadcastDomain`; the key.",
             "type": "string"
           },
           "stp_cost": {
@@ -5093,7 +5240,8 @@
             ]
           },
           "tag": {
-            "$ref": "#/components/schemas/VlanTag"
+            "$ref": "#/components/schemas/VlanTag",
+            "description": "How the member's frames are tagged on the port."
           }
         },
         "required": [
@@ -5146,6 +5294,7 @@
             ]
           },
           "name": {
+            "description": "Collector name, unique among syslog servers.",
             "type": "string"
           },
           "port": {
@@ -5218,6 +5367,7 @@
         "type": "object"
       },
       "SyslogTransport": {
+        "description": "How a syslog server is reached.",
         "enum": [
           "Udp",
           "Tcp",
@@ -5264,6 +5414,7 @@
         "description": "A local user who may log in to `nos-cli` and call the REST API (HTTP\nBasic). Every user is a full administrator — there are no roles.",
         "properties": {
           "name": {
+            "description": "Login name, 1 to 64 characters, unique among users.",
             "type": "string"
           },
           "password": {
@@ -5312,14 +5463,17 @@
         "description": "A dot1q tag, or the absence of one. `Dot1q`'s value is restricted to\n`1..=4094` — 802.1Q reserves 0 and 4095.",
         "oneOf": [
           {
+            "description": "Frames carry no VLAN tag.",
             "enum": [
               "Untagged"
             ],
             "type": "string"
           },
           {
+            "description": "Frames carry this 802.1Q tag, 1 to 4094.",
             "properties": {
               "Dot1q": {
+                "description": "Frames carry this 802.1Q tag, 1 to 4094.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -7136,6 +7290,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named AS-path regex lists that RPL scripts match with `this.bgp.as_path in NAME`.",
                   "items": {
                     "$ref": "#/components/schemas/AsPathList"
                   },
@@ -7178,6 +7333,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Named AS-path regex lists that RPL scripts match with `this.bgp.as_path in NAME`.",
                 "items": {
                   "$ref": "#/components/schemas/AsPathList"
                 },
@@ -7192,6 +7348,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named AS-path regex lists that RPL scripts match with `this.bgp.as_path in NAME`.",
                   "items": {
                     "$ref": "#/components/schemas/AsPathList"
                   },
@@ -7362,6 +7519,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Regexes over the space-separated ASN path with `_` as boundary; a path matches when any one matches. Never empty.",
                   "items": {
                     "type": "string"
                   },
@@ -7413,6 +7571,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Regexes over the space-separated ASN path with `_` as boundary; a path matches when any one matches. Never empty.",
                 "items": {
                   "type": "string"
                 },
@@ -7427,6 +7586,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Regexes over the space-separated ASN path with `_` as boundary; a path matches when any one matches. Never empty.",
                   "items": {
                     "type": "string"
                   },
@@ -7951,6 +8111,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Shared secret, stored clear-text like every config value.",
                   "type": "string"
                 }
               }
@@ -7999,6 +8160,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Shared secret, stored clear-text like every config value.",
                 "type": "string"
               }
             }
@@ -8010,6 +8172,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Shared secret, stored clear-text like every config value.",
                   "type": "string"
                 }
               }
@@ -8064,6 +8227,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Auth Key ID carried in each packet (RFC 5880 §4.2/§4.3); both ends must agree.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -8114,6 +8278,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Auth Key ID carried in each packet (RFC 5880 §4.2/§4.3); both ends must agree.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -8127,6 +8292,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Auth Key ID carried in each packet (RFC 5880 §4.2/§4.3); both ends must agree.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -8183,7 +8349,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BfdAuthMethod"
+                  "$ref": "#/components/schemas/BfdAuthMethod",
+                  "description": "Mechanism, which fixes the `AuthType` on the wire."
                 }
               }
             },
@@ -8231,7 +8398,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BfdAuthMethod"
+                "$ref": "#/components/schemas/BfdAuthMethod",
+                "description": "Mechanism, which fixes the `AuthType` on the wire."
               }
             }
           },
@@ -8242,7 +8410,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BfdAuthMethod"
+                  "$ref": "#/components/schemas/BfdAuthMethod",
+                  "description": "Mechanism, which fixes the `AuthType` on the wire."
                 }
               }
             },
@@ -8296,6 +8465,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Detection multiplier (RFC 5880 §6.8.4): detection time is this times the negotiated interval. At least 1.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -8346,6 +8516,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Detection multiplier (RFC 5880 §6.8.4): detection time is this times the negotiated interval. At least 1.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -8359,6 +8530,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Detection multiplier (RFC 5880 §6.8.4): detection time is this times the negotiated interval. At least 1.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -8897,6 +9069,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Lowest received IP TTL / Hop Limit a session accepts (RFC 5881 §5 GTSM); lower packets are dropped.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -8947,6 +9120,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Lowest received IP TTL / Hop Limit a session accepts (RFC 5881 §5 GTSM); lower packets are dropped.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -8960,6 +9134,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Lowest received IP TTL / Hop Limit a session accepts (RFC 5881 §5 GTSM); lower packets are dropped.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -9620,6 +9795,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "BGP speakers; each gets its own `nos-bgpd` process.",
                   "items": {
                     "$ref": "#/components/schemas/BgpInstance"
                   },
@@ -9662,6 +9838,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "BGP speakers; each gets its own `nos-bgpd` process.",
                 "items": {
                   "$ref": "#/components/schemas/BgpInstance"
                 },
@@ -9676,6 +9853,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "BGP speakers; each gets its own `nos-bgpd` process.",
                   "items": {
                     "$ref": "#/components/schemas/BgpInstance"
                   },
@@ -10343,6 +10521,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Local AS number, 1 to 4294967294 (RFC 6793 reserves 0 and 4294967295).",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -10393,6 +10572,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Local AS number, 1 to 4294967294 (RFC 6793 reserves 0 and 4294967295).",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -10406,6 +10586,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Local AS number, 1 to 4294967294 (RFC 6793 reserves 0 and 4294967295).",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -10703,6 +10884,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "AS number the outside world sees for the whole confederation (RFC 5065); `None` means no confederation.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -10756,6 +10938,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "AS number the outside world sees for the whole confederation (RFC 5065); `None` means no confederation.",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -10772,6 +10955,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "AS number the outside world sees for the whole confederation (RFC 5065); `None` means no confederation.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -10831,6 +11015,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "AS numbers of the other member sub-ASes, reached over confederation eBGP.",
                   "items": {
                     "format": "int32",
                     "minimum": 0,
@@ -10884,6 +11069,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "AS numbers of the other member sub-ASes, reached over confederation eBGP.",
                 "items": {
                   "format": "int32",
                   "minimum": 0,
@@ -10900,6 +11086,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "AS numbers of the other member sub-ASes, reached over confederation eBGP.",
                   "items": {
                     "format": "int32",
                     "minimum": 0,
@@ -11843,6 +12030,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Neighbors, each naming one entry of `peer_groups`.",
                   "items": {
                     "$ref": "#/components/schemas/BgpPeer"
                   },
@@ -11894,6 +12082,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Neighbors, each naming one entry of `peer_groups`.",
                 "items": {
                   "$ref": "#/components/schemas/BgpPeer"
                 },
@@ -11908,6 +12097,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Neighbors, each naming one entry of `peer_groups`.",
                   "items": {
                     "$ref": "#/components/schemas/BgpPeer"
                   },
@@ -11965,6 +12155,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Session templates; their timers are validated together.",
                   "items": {
                     "$ref": "#/components/schemas/BgpPeerGroup"
                   },
@@ -12016,6 +12207,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Session templates; their timers are validated together.",
                 "items": {
                   "$ref": "#/components/schemas/BgpPeerGroup"
                 },
@@ -12030,6 +12222,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Session templates; their timers are validated together.",
                   "items": {
                     "$ref": "#/components/schemas/BgpPeerGroup"
                   },
@@ -12474,6 +12667,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Families to negotiate; non-empty, no duplicates.",
                   "items": {
                     "$ref": "#/components/schemas/AddressFamily"
                   },
@@ -12534,6 +12728,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Families to negotiate; non-empty, no duplicates.",
                 "items": {
                   "$ref": "#/components/schemas/AddressFamily"
                 },
@@ -12548,6 +12743,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Families to negotiate; non-empty, no duplicates.",
                   "items": {
                     "$ref": "#/components/schemas/AddressFamily"
                   },
@@ -13385,6 +13581,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds for the penalty to halve.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -13444,6 +13641,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Seconds for the penalty to halve.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -13457,6 +13655,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds for the penalty to halve.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -13513,6 +13712,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Longest time in seconds a route can stay suppressed.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -13572,6 +13772,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Longest time in seconds a route can stay suppressed.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -13585,6 +13786,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Longest time in seconds a route can stay suppressed.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -13641,6 +13843,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Penalty below which a suppressed route is released again.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -13700,6 +13903,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Penalty below which a suppressed route is released again.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -13713,6 +13917,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Penalty below which a suppressed route is released again.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -13769,6 +13974,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Penalty at or above which a route is suppressed.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -13828,6 +14034,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Penalty at or above which a route is suppressed.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -13841,6 +14048,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Penalty at or above which a route is suppressed.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -14570,6 +14778,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "AS number this group's peers see instead of the instance's own; carried in OPEN.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -14629,6 +14838,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "AS number this group's peers see instead of the instance's own; carried in OPEN.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -14642,6 +14852,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "AS number this group's peers see instead of the instance's own; carried in OPEN.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -14698,6 +14909,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Do not prepend `asn` to the `AS_PATH` of received routes.",
                   "type": "boolean"
                 }
               }
@@ -14755,6 +14967,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Do not prepend `asn` to the `AS_PATH` of received routes.",
                 "type": "boolean"
               }
             }
@@ -14766,6 +14979,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Do not prepend `asn` to the `AS_PATH` of received routes.",
                   "type": "boolean"
                 }
               }
@@ -14820,6 +15034,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Advertise `[asn]` only instead of `[asn, own]`.",
                   "type": "boolean"
                 }
               }
@@ -14877,6 +15092,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Advertise `[asn]` only instead of `[asn, own]`.",
                 "type": "boolean"
               }
             }
@@ -14888,6 +15104,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Advertise `[asn]` only instead of `[asn, own]`.",
                   "type": "boolean"
                 }
               }
@@ -15207,7 +15424,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                  "$ref": "#/components/schemas/BgpPrefixLimit",
+                  "description": "Limit for IPv4 unicast; `None` is unlimited."
                 }
               }
             },
@@ -15264,7 +15482,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BgpPrefixLimit"
+                "$ref": "#/components/schemas/BgpPrefixLimit",
+                "description": "Limit for IPv4 unicast; `None` is unlimited."
               }
             }
           },
@@ -15275,7 +15494,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                  "$ref": "#/components/schemas/BgpPrefixLimit",
+                  "description": "Limit for IPv4 unicast; `None` is unlimited."
                 }
               }
             },
@@ -15329,6 +15549,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Maximum number of prefixes accepted from the peer for the family.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -15388,6 +15609,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Maximum number of prefixes accepted from the peer for the family.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -15401,6 +15623,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Maximum number of prefixes accepted from the peer for the family.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -15457,6 +15680,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -15516,6 +15740,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -15529,6 +15754,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -15585,6 +15811,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Log when the limit is exceeded instead of closing the session.",
                   "type": "boolean"
                 }
               }
@@ -15642,6 +15869,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Log when the limit is exceeded instead of closing the session.",
                 "type": "boolean"
               }
             }
@@ -15653,6 +15881,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Log when the limit is exceeded instead of closing the session.",
                   "type": "boolean"
                 }
               }
@@ -15707,7 +15936,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                  "$ref": "#/components/schemas/BgpPrefixLimit",
+                  "description": "Limit for IPv6 unicast; `None` is unlimited."
                 }
               }
             },
@@ -15764,7 +15994,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BgpPrefixLimit"
+                "$ref": "#/components/schemas/BgpPrefixLimit",
+                "description": "Limit for IPv6 unicast; `None` is unlimited."
               }
             }
           },
@@ -15775,7 +16006,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                  "$ref": "#/components/schemas/BgpPrefixLimit",
+                  "description": "Limit for IPv6 unicast; `None` is unlimited."
                 }
               }
             },
@@ -15829,6 +16061,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Maximum number of prefixes accepted from the peer for the family.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -15888,6 +16121,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Maximum number of prefixes accepted from the peer for the family.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -15901,6 +16135,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Maximum number of prefixes accepted from the peer for the family.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -15957,6 +16192,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -16016,6 +16252,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -16029,6 +16266,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -16085,6 +16323,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Log when the limit is exceeded instead of closing the session.",
                   "type": "boolean"
                 }
               }
@@ -16142,6 +16381,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Log when the limit is exceeded instead of closing the session.",
                 "type": "boolean"
               }
             }
@@ -16153,6 +16393,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Log when the limit is exceeded instead of closing the session.",
                   "type": "boolean"
                 }
               }
@@ -16207,7 +16448,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                  "$ref": "#/components/schemas/BgpPrefixLimit",
+                  "description": "Limit for L2VPN EVPN; `None` is unlimited."
                 }
               }
             },
@@ -16264,7 +16506,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BgpPrefixLimit"
+                "$ref": "#/components/schemas/BgpPrefixLimit",
+                "description": "Limit for L2VPN EVPN; `None` is unlimited."
               }
             }
           },
@@ -16275,7 +16518,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                  "$ref": "#/components/schemas/BgpPrefixLimit",
+                  "description": "Limit for L2VPN EVPN; `None` is unlimited."
                 }
               }
             },
@@ -16329,6 +16573,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Maximum number of prefixes accepted from the peer for the family.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -16388,6 +16633,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Maximum number of prefixes accepted from the peer for the family.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -16401,6 +16647,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Maximum number of prefixes accepted from the peer for the family.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -16457,6 +16704,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -16516,6 +16764,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -16529,6 +16778,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -16585,6 +16835,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Log when the limit is exceeded instead of closing the session.",
                   "type": "boolean"
                 }
               }
@@ -16642,6 +16893,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Log when the limit is exceeded instead of closing the session.",
                 "type": "boolean"
               }
             }
@@ -16653,6 +16905,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Log when the limit is exceeded instead of closing the session.",
                   "type": "boolean"
                 }
               }
@@ -16972,6 +17225,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Expected remote AS, 1 to 4294967294; equal to the local ASN means iBGP.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -17031,6 +17285,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Expected remote AS, 1 to 4294967294; equal to the local ASN means iBGP.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -17044,6 +17299,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Expected remote AS, 1 to 4294967294; equal to the local ASN means iBGP.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -17740,6 +17996,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.",
                   "type": [
                     "string",
                     "null"
@@ -17800,6 +18057,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.",
                 "type": [
                   "string",
                   "null"
@@ -17814,6 +18072,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.",
                   "type": [
                     "string",
                     "null"
@@ -17871,7 +18130,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SourceAddress"
+                  "$ref": "#/components/schemas/SourceAddress",
+                  "description": "Transport source address, resolved by `nos-bgpd` at runtime; `None` lets the kernel choose."
                 }
               }
             },
@@ -17928,7 +18188,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SourceAddress"
+                "$ref": "#/components/schemas/SourceAddress",
+                "description": "Transport source address, resolved by `nos-bgpd` at runtime; `None` lets the kernel choose."
               }
             }
           },
@@ -17939,7 +18200,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SourceAddress"
+                  "$ref": "#/components/schemas/SourceAddress",
+                  "description": "Transport source address, resolved by `nos-bgpd` at runtime; `None` lets the kernel choose."
                 }
               }
             },
@@ -18240,6 +18502,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Name of the `BgpPeerGroup` that supplies this peer's settings; must exist.",
                   "type": "string"
                 }
               }
@@ -18297,6 +18560,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Name of the `BgpPeerGroup` that supplies this peer's settings; must exist.",
                 "type": "string"
               }
             }
@@ -18308,6 +18572,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Name of the `BgpPeerGroup` that supplies this peer's settings; must exist.",
                   "type": "string"
                 }
               }
@@ -18487,6 +18752,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.",
                   "type": [
                     "string",
                     "null"
@@ -18547,6 +18813,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.",
                 "type": [
                   "string",
                   "null"
@@ -18561,6 +18828,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.",
                   "type": [
                     "string",
                     "null"
@@ -18743,6 +19011,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "BGP identifier sent in OPEN (RFC 4271 §4.2).",
                   "type": "string"
                 }
               }
@@ -18791,6 +19060,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "BGP identifier sent in OPEN (RFC 4271 §4.2).",
                 "type": "string"
               }
             }
@@ -18802,6 +19072,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "BGP identifier sent in OPEN (RFC 4271 §4.2).",
                   "type": "string"
                 }
               }
@@ -19228,6 +19499,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "TCP port of the cache, `RPKI_RTR_PORT_DEFAULT` unless set.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -19287,6 +19559,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "TCP port of the cache, `RPKI_RTR_PORT_DEFAULT` unless set.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -19300,6 +19573,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "TCP port of the cache, `RPKI_RTR_PORT_DEFAULT` unless set.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -19487,6 +19761,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "L2 segments that switching profiles and EVPN VNIs refer to.",
                   "items": {
                     "$ref": "#/components/schemas/BroadcastDomain"
                   },
@@ -19529,6 +19804,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "L2 segments that switching profiles and EVPN VNIs refer to.",
                 "items": {
                   "$ref": "#/components/schemas/BroadcastDomain"
                 },
@@ -19543,6 +19819,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "L2 segments that switching profiles and EVPN VNIs refer to.",
                   "items": {
                     "$ref": "#/components/schemas/BroadcastDomain"
                   },
@@ -19713,6 +19990,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses of the domain's bridge device (SVI); empty for a pure L2 domain.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -19764,6 +20042,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Addresses of the domain's bridge device (SVI); empty for a pure L2 domain.",
                 "items": {
                   "$ref": "#/components/schemas/InterfaceAddress"
                 },
@@ -19778,6 +20057,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses of the domain's bridge device (SVI); empty for a pure L2 domain.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -19957,6 +20237,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -20017,6 +20298,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                 "type": [
                   "string",
                   "null"
@@ -20031,6 +20313,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -21448,6 +21731,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the bridge device joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -21499,6 +21783,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Routing table (VRF) the bridge device joins, if any.",
                 "type": [
                   "string",
                   "null"
@@ -21513,6 +21798,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the bridge device joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -21570,6 +21856,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Forward Delay in seconds for this domain's bridge; `None` uses the spanning-tree default.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -21623,6 +21910,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Forward Delay in seconds for this domain's bridge; `None` uses the spanning-tree default.",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -21639,6 +21927,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Forward Delay in seconds for this domain's bridge; `None` uses the spanning-tree default.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -21960,6 +22249,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Max Age in seconds for this domain's bridge; `None` uses the spanning-tree default.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -22013,6 +22303,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Max Age in seconds for this domain's bridge; `None` uses the spanning-tree default.",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -22029,6 +22320,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Max Age in seconds for this domain's bridge; `None` uses the spanning-tree default.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -22540,6 +22832,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named community literals that RPL scripts can use by name.",
                   "items": {
                     "$ref": "#/components/schemas/CommunityAlias"
                   },
@@ -22582,6 +22875,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Named community literals that RPL scripts can use by name.",
                 "items": {
                   "$ref": "#/components/schemas/CommunityAlias"
                 },
@@ -22596,6 +22890,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named community literals that RPL scripts can use by name.",
                   "items": {
                     "$ref": "#/components/schemas/CommunityAlias"
                   },
@@ -22766,6 +23061,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Colon-separated community literal such as `65000:100`.",
                   "type": "string"
                 }
               }
@@ -22814,6 +23110,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Colon-separated community literal such as `65000:100`.",
                 "type": "string"
               }
             }
@@ -22825,6 +23122,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Colon-separated community literal such as `65000:100`.",
                   "type": "string"
                 }
               }
@@ -22879,6 +23177,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named lists of community aliases that RPL scripts can use by name.",
                   "items": {
                     "$ref": "#/components/schemas/CommunityGroup"
                   },
@@ -22921,6 +23220,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Named lists of community aliases that RPL scripts can use by name.",
                 "items": {
                   "$ref": "#/components/schemas/CommunityGroup"
                 },
@@ -22935,6 +23235,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named lists of community aliases that RPL scripts can use by name.",
                   "items": {
                     "$ref": "#/components/schemas/CommunityGroup"
                   },
@@ -23105,6 +23406,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Names of the `CommunityAlias` entries in the group; each must exist.",
                   "items": {
                     "type": "string"
                   },
@@ -23156,6 +23458,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Names of the `CommunityAlias` entries in the group; each must exist.",
                 "items": {
                   "type": "string"
                 },
@@ -23170,6 +23473,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Names of the `CommunityAlias` entries in the group; each must exist.",
                   "items": {
                     "type": "string"
                   },
@@ -23391,6 +23695,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "System hostname: 1 to 253 characters, hostname charset only.",
                   "type": "string"
                 }
               }
@@ -23430,6 +23735,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "System hostname: 1 to 253 characters, hostname charset only.",
                 "type": "string"
               }
             }
@@ -23441,6 +23747,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "System hostname: 1 to 253 characters, hostname charset only.",
                   "type": "string"
                 }
               }
@@ -23495,6 +23802,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Interfaces `nos-interfaced` configures; any interface not listed is left alone.",
                   "items": {
                     "$ref": "#/components/schemas/Interface"
                   },
@@ -23537,6 +23845,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Interfaces `nos-interfaced` configures; any interface not listed is left alone.",
                 "items": {
                   "$ref": "#/components/schemas/Interface"
                 },
@@ -23551,6 +23860,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Interfaces `nos-interfaced` configures; any interface not listed is left alone.",
                   "items": {
                     "$ref": "#/components/schemas/Interface"
                   },
@@ -23721,6 +24031,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses on the link itself (the loopback case); a physical interface carries L3 config on subinterfaces.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -23772,6 +24083,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Addresses on the link itself (the loopback case); a physical interface carries L3 config on subinterfaces.",
                 "items": {
                   "$ref": "#/components/schemas/InterfaceAddress"
                 },
@@ -23786,6 +24098,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses on the link itself (the loopback case); a physical interface carries L3 config on subinterfaces.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -23965,6 +24278,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -24025,6 +24339,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                 "type": [
                   "string",
                   "null"
@@ -24039,6 +24354,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -25197,6 +25513,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the link joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -25248,6 +25565,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Routing table (VRF) the link joins, if any.",
                 "type": [
                   "string",
                   "null"
@@ -25262,6 +25580,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the link joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -25444,6 +25763,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "L3 attachment points of a physical interface, one per VLAN tag.",
                   "items": {
                     "$ref": "#/components/schemas/Subinterface"
                   },
@@ -25495,6 +25815,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "L3 attachment points of a physical interface, one per VLAN tag.",
                 "items": {
                   "$ref": "#/components/schemas/Subinterface"
                 },
@@ -25509,6 +25830,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "L3 attachment points of a physical interface, one per VLAN tag.",
                   "items": {
                     "$ref": "#/components/schemas/Subinterface"
                   },
@@ -25688,6 +26010,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses on this subinterface, no duplicates.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -25748,6 +26071,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Addresses on this subinterface, no duplicates.",
                 "items": {
                   "$ref": "#/components/schemas/InterfaceAddress"
                 },
@@ -25762,6 +26086,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses on this subinterface, no duplicates.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -25950,6 +26275,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -26019,6 +26345,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                 "type": [
                   "string",
                   "null"
@@ -26033,6 +26360,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -26492,6 +26820,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the subinterface joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -26552,6 +26881,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Routing table (VRF) the subinterface joins, if any.",
                 "type": [
                   "string",
                   "null"
@@ -26566,6 +26896,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the subinterface joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -26623,6 +26954,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`SwitchingProfile` that makes this interface an L2 switch port.",
                   "type": [
                     "string",
                     "null"
@@ -26674,6 +27006,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "`SwitchingProfile` that makes this interface an L2 switch port.",
                 "type": [
                   "string",
                   "null"
@@ -26688,6 +27021,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`SwitchingProfile` that makes this interface an L2 switch port.",
                   "type": [
                     "string",
                     "null"
@@ -28988,6 +29322,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`OSPFv2` speakers; each gets its own `nos-ospfd` process.",
                   "items": {
                     "$ref": "#/components/schemas/OspfInstance"
                   },
@@ -29030,6 +29365,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "`OSPFv2` speakers; each gets its own `nos-ospfd` process.",
                 "items": {
                   "$ref": "#/components/schemas/OspfInstance"
                 },
@@ -29044,6 +29380,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`OSPFv2` speakers; each gets its own `nos-ospfd` process.",
                   "items": {
                     "$ref": "#/components/schemas/OspfInstance"
                   },
@@ -29836,6 +30173,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Interface profiles declared in this area, referenced by an interface's `ospf` attachment.",
                   "items": {
                     "$ref": "#/components/schemas/OspfProfile"
                   },
@@ -29896,6 +30234,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Interface profiles declared in this area, referenced by an interface's `ospf` attachment.",
                 "items": {
                   "$ref": "#/components/schemas/OspfProfile"
                 },
@@ -29910,6 +30249,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Interface profiles declared in this area, referenced by an interface's `ospf` attachment.",
                   "items": {
                     "$ref": "#/components/schemas/OspfProfile"
                   },
@@ -34002,6 +34342,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "OSPF router id (RFC 2328 §C.1), written as a dotted-quad.",
                   "type": "string"
                 }
               }
@@ -34050,6 +34391,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "OSPF router id (RFC 2328 §C.1), written as a dotted-quad.",
                 "type": "string"
               }
             }
@@ -34061,6 +34403,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "OSPF router id (RFC 2328 §C.1), written as a dotted-quad.",
                   "type": "string"
                 }
               }
@@ -34240,6 +34583,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`OSPFv3` speakers; each gets its own `nos-ospfv3d` process.",
                   "items": {
                     "$ref": "#/components/schemas/Ospfv3Instance"
                   },
@@ -34282,6 +34626,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "`OSPFv3` speakers; each gets its own `nos-ospfv3d` process.",
                 "items": {
                   "$ref": "#/components/schemas/Ospfv3Instance"
                 },
@@ -34296,6 +34641,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`OSPFv3` speakers; each gets its own `nos-ospfv3d` process.",
                   "items": {
                     "$ref": "#/components/schemas/Ospfv3Instance"
                   },
@@ -34713,6 +35059,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Interface profiles declared in this area, referenced by an interface's `ospfv3` attachment.",
                   "items": {
                     "$ref": "#/components/schemas/Ospfv3Profile"
                   },
@@ -34773,6 +35120,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Interface profiles declared in this area, referenced by an interface's `ospfv3` attachment.",
                 "items": {
                   "$ref": "#/components/schemas/Ospfv3Profile"
                 },
@@ -34787,6 +35135,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Interface profiles declared in this area, referenced by an interface's `ospfv3` attachment.",
                   "items": {
                     "$ref": "#/components/schemas/Ospfv3Profile"
                   },
@@ -35267,7 +35616,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OspfCryptoAlgorithm"
+                  "$ref": "#/components/schemas/OspfCryptoAlgorithm",
+                  "description": "HMAC algorithm of this key."
                 }
               }
             },
@@ -35342,7 +35692,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/OspfCryptoAlgorithm"
+                "$ref": "#/components/schemas/OspfCryptoAlgorithm",
+                "description": "HMAC algorithm of this key."
               }
             }
           },
@@ -35353,7 +35704,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OspfCryptoAlgorithm"
+                  "$ref": "#/components/schemas/OspfCryptoAlgorithm",
+                  "description": "HMAC algorithm of this key."
                 }
               }
             },
@@ -35407,6 +35759,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Whether this key signs outgoing packets.",
                   "type": "boolean"
                 }
               }
@@ -35482,6 +35835,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Whether this key signs outgoing packets.",
                 "type": "boolean"
               }
             }
@@ -35493,6 +35847,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Whether this key signs outgoing packets.",
                   "type": "boolean"
                 }
               }
@@ -35547,6 +35902,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Shared secret, stored clear-text like every config value.",
                   "type": "string"
                 }
               }
@@ -35622,6 +35978,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Shared secret, stored clear-text like every config value.",
                 "type": "string"
               }
             }
@@ -35633,6 +35990,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Shared secret, stored clear-text like every config value.",
                   "type": "string"
                 }
               }
@@ -37364,6 +37722,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "32-bit router id (RFC 5340 §2.1), written as an IPv4 dotted-quad.",
                   "type": "string"
                 }
               }
@@ -37412,6 +37771,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "32-bit router id (RFC 5340 §2.1), written as an IPv4 dotted-quad.",
                 "type": "string"
               }
             }
@@ -37423,6 +37783,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "32-bit router id (RFC 5340 §2.1), written as an IPv4 dotted-quad.",
                   "type": "string"
                 }
               }
@@ -37602,6 +37963,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "RPL scripts that peer-groups reference by name as import/export policy.",
                   "items": {
                     "$ref": "#/components/schemas/PolicyDefinition"
                   },
@@ -37644,6 +38006,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "RPL scripts that peer-groups reference by name as import/export policy.",
                 "items": {
                   "$ref": "#/components/schemas/PolicyDefinition"
                 },
@@ -37658,6 +38021,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "RPL scripts that peer-groups reference by name as import/export policy.",
                   "items": {
                     "$ref": "#/components/schemas/PolicyDefinition"
                   },
@@ -37828,6 +38192,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "RPL source text, compiled at commit time and again by each consumer.",
                   "type": "string"
                 }
               }
@@ -37876,6 +38241,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "RPL source text, compiled at commit time and again by each consumer.",
                 "type": "string"
               }
             }
@@ -37887,6 +38253,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "RPL source text, compiled at commit time and again by each consumer.",
                   "type": "string"
                 }
               }
@@ -37941,6 +38308,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Link aggregations of physical ports (static or LACP).",
                   "items": {
                     "$ref": "#/components/schemas/PortAggregate"
                   },
@@ -37983,6 +38351,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Link aggregations of physical ports (static or LACP).",
                 "items": {
                   "$ref": "#/components/schemas/PortAggregate"
                 },
@@ -37997,6 +38366,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Link aggregations of physical ports (static or LACP).",
                   "items": {
                     "$ref": "#/components/schemas/PortAggregate"
                   },
@@ -39152,7 +39522,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PortAggregateMode"
+                  "$ref": "#/components/schemas/PortAggregateMode",
+                  "description": "Static bond or LACP (802.1AX) with its negotiation parameters."
                 }
               }
             },
@@ -39200,7 +39571,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PortAggregateMode"
+                "$ref": "#/components/schemas/PortAggregateMode",
+                "description": "Static bond or LACP (802.1AX) with its negotiation parameters."
               }
             }
           },
@@ -39211,7 +39583,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PortAggregateMode"
+                  "$ref": "#/components/schemas/PortAggregateMode",
+                  "description": "Static bond or LACP (802.1AX) with its negotiation parameters."
                 }
               }
             },
@@ -39265,6 +39638,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Bond MTU in bytes; `None` keeps the kernel default.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -39318,6 +39692,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Bond MTU in bytes; `None` keeps the kernel default.",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -39334,6 +39709,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Bond MTU in bytes; `None` keeps the kernel default.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -39881,6 +40257,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses on this subinterface, no duplicates.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -39941,6 +40318,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Addresses on this subinterface, no duplicates.",
                 "items": {
                   "$ref": "#/components/schemas/InterfaceAddress"
                 },
@@ -39955,6 +40333,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Addresses on this subinterface, no duplicates.",
                   "items": {
                     "$ref": "#/components/schemas/InterfaceAddress"
                   },
@@ -40143,6 +40522,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -40212,6 +40592,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                 "type": [
                   "string",
                   "null"
@@ -40226,6 +40607,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.",
                   "type": [
                     "string",
                     "null"
@@ -40685,6 +41067,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the subinterface joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -40745,6 +41128,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Routing table (VRF) the subinterface joins, if any.",
                 "type": [
                   "string",
                   "null"
@@ -40759,6 +41143,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routing table (VRF) the subinterface joins, if any.",
                   "type": [
                     "string",
                     "null"
@@ -40941,6 +41326,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named prefix lists that RPL scripts match with `this.prefix in NAME`.",
                   "items": {
                     "$ref": "#/components/schemas/PrefixList"
                   },
@@ -40983,6 +41369,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Named prefix lists that RPL scripts match with `this.prefix in NAME`.",
                 "items": {
                   "$ref": "#/components/schemas/PrefixList"
                 },
@@ -40997,6 +41384,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Named prefix lists that RPL scripts match with `this.prefix in NAME`.",
                   "items": {
                     "$ref": "#/components/schemas/PrefixList"
                   },
@@ -41167,6 +41555,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Entries, any of which may match.",
                   "items": {
                     "$ref": "#/components/schemas/PrefixListEntry"
                   },
@@ -41218,6 +41607,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Entries, any of which may match.",
                 "items": {
                   "$ref": "#/components/schemas/PrefixListEntry"
                 },
@@ -41232,6 +41622,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Entries, any of which may match.",
                   "items": {
                     "$ref": "#/components/schemas/PrefixListEntry"
                   },
@@ -41411,6 +41802,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Prefix-length range `(min, max)` that matches within `cidr`; `None` is an exact match.",
                   "items": false,
                   "prefixItems": [
                     {
@@ -41484,6 +41876,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Prefix-length range `(min, max)` that matches within `cidr`; `None` is an exact match.",
                 "items": false,
                 "prefixItems": [
                   {
@@ -41511,6 +41904,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Prefix-length range `(min, max)` that matches within `cidr`; `None` is an exact match.",
                   "items": false,
                   "prefixItems": [
                     {
@@ -41706,6 +42100,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "VRFs; each binds BGP, static, OSPF and `OSPFv3` instances and may pin the REST API.",
                   "items": {
                     "$ref": "#/components/schemas/RoutingTable"
                   },
@@ -41748,6 +42143,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "VRFs; each binds BGP, static, OSPF and `OSPFv3` instances and may pin the REST API.",
                 "items": {
                   "$ref": "#/components/schemas/RoutingTable"
                 },
@@ -41762,6 +42158,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "VRFs; each binds BGP, static, OSPF and `OSPFv3` instances and may pin the REST API.",
                   "items": {
                     "$ref": "#/components/schemas/RoutingTable"
                   },
@@ -41932,6 +42329,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "BGP instance bound to this table, if any.",
                   "type": [
                     "string",
                     "null"
@@ -41983,6 +42381,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "BGP instance bound to this table, if any.",
                 "type": [
                   "string",
                   "null"
@@ -41997,6 +42396,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "BGP instance bound to this table, if any.",
                   "type": [
                     "string",
                     "null"
@@ -43161,6 +43561,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`OSPFv2` instance bound to this table, if any.",
                   "type": [
                     "string",
                     "null"
@@ -43212,6 +43613,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "`OSPFv2` instance bound to this table, if any.",
                 "type": [
                   "string",
                   "null"
@@ -43226,6 +43628,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "`OSPFv2` instance bound to this table, if any.",
                   "type": [
                     "string",
                     "null"
@@ -43655,7 +44058,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RedistributeSource"
+                  "$ref": "#/components/schemas/RedistributeSource",
+                  "description": "Protocol the redistributed routes come from."
                 }
               }
             },
@@ -43712,7 +44116,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RedistributeSource"
+                "$ref": "#/components/schemas/RedistributeSource",
+                "description": "Protocol the redistributed routes come from."
               }
             }
           },
@@ -43723,7 +44128,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RedistributeSource"
+                  "$ref": "#/components/schemas/RedistributeSource",
+                  "description": "Protocol the redistributed routes come from."
                 }
               }
             },
@@ -44307,6 +44713,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Address the REST listener binds inside the VRF; no wildcard.",
                   "type": "string"
                 }
               }
@@ -44355,6 +44762,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Address the REST listener binds inside the VRF; no wildcard.",
                 "type": "string"
               }
             }
@@ -44366,6 +44774,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Address the REST listener binds inside the VRF; no wildcard.",
                   "type": "string"
                 }
               }
@@ -44420,6 +44829,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "TCP port of the REST listener.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -44470,6 +44880,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "TCP port of the REST listener.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -44483,6 +44894,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "TCP port of the REST listener.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -44539,6 +44951,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Static routing instance bound to this table, if any.",
                   "type": [
                     "string",
                     "null"
@@ -44590,6 +45003,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Static routing instance bound to this table, if any.",
                 "type": [
                   "string",
                   "null"
@@ -44604,6 +45018,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Static routing instance bound to this table, if any.",
                   "type": [
                     "string",
                     "null"
@@ -45333,7 +45748,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StpForceVersion"
+                  "$ref": "#/components/schemas/StpForceVersion",
+                  "description": "Protocol version forced on every port; `None` negotiates."
                 }
               }
             },
@@ -45372,7 +45788,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StpForceVersion"
+                "$ref": "#/components/schemas/StpForceVersion",
+                "description": "Protocol version forced on every port; `None` negotiates."
               }
             }
           },
@@ -45383,7 +45800,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StpForceVersion"
+                  "$ref": "#/components/schemas/StpForceVersion",
+                  "description": "Protocol version forced on every port; `None` negotiates."
                 }
               }
             },
@@ -45889,7 +46307,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StpMode"
+                  "$ref": "#/components/schemas/StpMode",
+                  "description": "The protocol the bridge runs."
                 }
               }
             },
@@ -45928,7 +46347,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StpMode"
+                "$ref": "#/components/schemas/StpMode",
+                "description": "The protocol the bridge runs."
               }
             }
           },
@@ -45939,7 +46359,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StpMode"
+                  "$ref": "#/components/schemas/StpMode",
+                  "description": "The protocol the bridge runs."
                 }
               }
             },
@@ -45993,6 +46414,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "MST instances and this bridge's priority in each.",
                   "items": {
                     "$ref": "#/components/schemas/MstInstance"
                   },
@@ -46035,6 +46457,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "MST instances and this bridge's priority in each.",
                 "items": {
                   "$ref": "#/components/schemas/MstInstance"
                 },
@@ -46049,6 +46472,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "MST instances and this bridge's priority in each.",
                   "items": {
                     "$ref": "#/components/schemas/MstInstance"
                   },
@@ -46219,6 +46643,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Bridge priority in this instance, a multiple of 4096.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -46269,6 +46694,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Bridge priority in this instance, a multiple of 4096.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -46282,6 +46708,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Bridge priority in this instance, a multiple of 4096.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -46451,7 +46878,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StpRegion"
+                  "$ref": "#/components/schemas/StpRegion",
+                  "description": "MST region identity."
                 }
               }
             },
@@ -46490,7 +46918,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StpRegion"
+                "$ref": "#/components/schemas/StpRegion",
+                "description": "MST region identity."
               }
             }
           },
@@ -46501,7 +46930,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StpRegion"
+                  "$ref": "#/components/schemas/StpRegion",
+                  "description": "MST region identity."
                 }
               }
             },
@@ -46555,6 +46985,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Region name; bridges join one region only when name and revision match.",
                   "type": "string"
                 }
               }
@@ -46594,6 +47025,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Region name; bridges join one region only when name and revision match.",
                 "type": "string"
               }
             }
@@ -46605,6 +47037,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Region name; bridges join one region only when name and revision match.",
                   "type": "string"
                 }
               }
@@ -46659,6 +47092,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Region revision number.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -46700,6 +47134,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Region revision number.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -46713,6 +47148,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Region revision number.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -46882,6 +47318,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Static route sets, each attached to a routing table by name.",
                   "items": {
                     "$ref": "#/components/schemas/StaticRoutingInstance"
                   },
@@ -46924,6 +47361,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Static route sets, each attached to a routing table by name.",
                 "items": {
                   "$ref": "#/components/schemas/StaticRoutingInstance"
                 },
@@ -46938,6 +47376,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Static route sets, each attached to a routing table by name.",
                   "items": {
                     "$ref": "#/components/schemas/StaticRoutingInstance"
                   },
@@ -47108,6 +47547,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routes of this instance, keyed by destination prefix.",
                   "items": {
                     "$ref": "#/components/schemas/StaticRoute"
                   },
@@ -47159,6 +47599,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Routes of this instance, keyed by destination prefix.",
                 "items": {
                   "$ref": "#/components/schemas/StaticRoute"
                 },
@@ -47173,6 +47614,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Routes of this instance, keyed by destination prefix.",
                   "items": {
                     "$ref": "#/components/schemas/StaticRoute"
                   },
@@ -47486,6 +47928,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Next-hop address, in the same family as `subnet`.",
                   "type": "string"
                 }
               }
@@ -47543,6 +47986,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Next-hop address, in the same family as `subnet`.",
                 "type": "string"
               }
             }
@@ -47554,6 +47998,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Next-hop address, in the same family as `subnet`.",
                   "type": "string"
                 }
               }
@@ -48331,7 +48776,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EdgePort"
+                  "$ref": "#/components/schemas/EdgePort",
+                  "description": "Edge-port (`PortFast`) behaviour."
                 }
               }
             },
@@ -48379,7 +48825,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EdgePort"
+                "$ref": "#/components/schemas/EdgePort",
+                "description": "Edge-port (`PortFast`) behaviour."
               }
             }
           },
@@ -48390,7 +48837,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EdgePort"
+                  "$ref": "#/components/schemas/EdgePort",
+                  "description": "Edge-port (`PortFast`) behaviour."
                 }
               }
             },
@@ -48444,7 +48892,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LinkType"
+                  "$ref": "#/components/schemas/LinkType",
+                  "description": "Link type that governs the rapid transitions."
                 }
               }
             },
@@ -48492,7 +48941,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/LinkType"
+                "$ref": "#/components/schemas/LinkType",
+                "description": "Link type that governs the rapid transitions."
               }
             }
           },
@@ -48503,7 +48953,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LinkType"
+                  "$ref": "#/components/schemas/LinkType",
+                  "description": "Link type that governs the rapid transitions."
                 }
               }
             },
@@ -48673,6 +49124,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Per-instance cost and priority overrides.",
                   "items": {
                     "$ref": "#/components/schemas/StpPortMstInstance"
                   },
@@ -48724,6 +49176,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Per-instance cost and priority overrides.",
                 "items": {
                   "$ref": "#/components/schemas/StpPortMstInstance"
                 },
@@ -48738,6 +49191,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Per-instance cost and priority overrides.",
                   "items": {
                     "$ref": "#/components/schemas/StpPortMstInstance"
                   },
@@ -48917,6 +49371,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Administrative path cost in this instance; `None` derives it from link speed.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -48979,6 +49434,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Administrative path cost in this instance; `None` derives it from link speed.",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -48995,6 +49451,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Administrative path cost in this instance; `None` derives it from link speed.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -49054,6 +49511,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Port priority in this instance, a multiple of 16.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -49113,6 +49571,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Port priority in this instance, a multiple of 16.",
                 "format": "int32",
                 "minimum": 0,
                 "type": "integer"
@@ -49126,6 +49585,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Port priority in this instance, a multiple of 16.",
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
@@ -49536,6 +49996,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "VLAN membership profiles an interface attaches with `switching-profile`.",
                   "items": {
                     "$ref": "#/components/schemas/SwitchingProfile"
                   },
@@ -49578,6 +50039,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "VLAN membership profiles an interface attaches with `switching-profile`.",
                 "items": {
                   "$ref": "#/components/schemas/SwitchingProfile"
                 },
@@ -49592,6 +50054,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "VLAN membership profiles an interface attaches with `switching-profile`.",
                   "items": {
                     "$ref": "#/components/schemas/SwitchingProfile"
                   },
@@ -49762,6 +50225,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Broadcast domains a port using this profile carries.",
                   "items": {
                     "$ref": "#/components/schemas/SwitchingProfileMember"
                   },
@@ -49813,6 +50277,7 @@
           "content": {
             "application/json": {
               "schema": {
+                "description": "Broadcast domains a port using this profile carries.",
                 "items": {
                   "$ref": "#/components/schemas/SwitchingProfileMember"
                 },
@@ -49827,6 +50292,7 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "description": "Broadcast domains a port using this profile carries.",
                   "items": {
                     "$ref": "#/components/schemas/SwitchingProfileMember"
                   },
@@ -50286,7 +50752,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/VlanTag"
+                  "$ref": "#/components/schemas/VlanTag",
+                  "description": "How the member's frames are tagged on the port."
                 }
               }
             },
@@ -50343,7 +50810,8 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/VlanTag"
+                "$ref": "#/components/schemas/VlanTag",
+                "description": "How the member's frames are tagged on the port."
               }
             }
           },
@@ -50354,7 +50822,8 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/VlanTag"
+                  "$ref": "#/components/schemas/VlanTag",
+                  "description": "How the member's frames are tagged on the port."
                 }
               }
             },

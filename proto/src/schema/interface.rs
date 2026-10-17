@@ -38,8 +38,10 @@ pub fn loopback_table_name(name: &str) -> Option<&str> {
 pub struct InterfaceAddress {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Address with prefix length, e.g. `192.0.2.1/24`; the key.
     pub address: IpNet,
     #[cli(topic = InterfaceAddress)]
+    /// Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.
     pub label: Option<String>,
 }
 
@@ -60,14 +62,17 @@ pub struct InterfaceAddress {
 pub struct Subinterface {
     #[garde(custom(|t: &u16, _ctx: &Config| valid_subinterface_tag(*t)))]
     #[cli(key)]
+    /// 802.1Q VLAN id of the subinterface; 0 is the untagged attachment.
     pub tag: u16,
 
     #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]
     #[cli(topic = InterfaceAddress)]
+    /// Addresses on this subinterface, no duplicates.
     pub addresses: Vec<InterfaceAddress>,
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
     #[cli(topic = InterfaceRoutingTable)]
+    /// Routing table (VRF) the subinterface joins, if any.
     pub routing_table: Option<String>,
 
     /// If set, names an `OspfProfile` this subinterface joins OSPF under.
@@ -189,14 +194,17 @@ pub struct Interface {
         custom(|n, ctx: &Config| interface_name_valid(n, ctx))
     )]
     #[cli(key)]
+    /// Kernel interface name; `loopback-<table>` is a routing table's loopback.
     pub name: String,
 
     #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]
     #[cli(topic = InterfaceAddress)]
+    /// Addresses on the link itself (the loopback case); a physical interface carries L3 config on subinterfaces.
     pub addresses: Vec<InterfaceAddress>,
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
     #[cli(topic = InterfaceRoutingTable)]
+    /// Routing table (VRF) the link joins, if any.
     pub routing_table: Option<String>,
 
     /// If set, names an `OspfProfile` this loopback interface joins OSPF
@@ -217,6 +225,7 @@ pub struct Interface {
 
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
     #[cli(topic = InterfaceSwitchingProfile)]
+    /// `SwitchingProfile` that makes this interface an L2 switch port.
     pub switching_profile: Option<String>,
 
     /// If set, names a `PortAggregate` this interface is a static bonded
@@ -293,6 +302,7 @@ pub struct Interface {
         sugar(word = "ospf", with = sugar::untagged_ospf, topic = InterfaceOspfProfile),
         sugar(word = "ospfv3", with = sugar::untagged_ospfv3, topic = InterfaceOspfv3Profile)
     )]
+    /// L3 attachment points of a physical interface, one per VLAN tag.
     pub subinterfaces: Vec<Subinterface>,
 }
 

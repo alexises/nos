@@ -19,10 +19,12 @@ pub struct BgpPeer {
     #[garde(custom(|addr, ctx: &Config| unique_remote_address(addr, ctx)))]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Neighbor address; the key, unique across every BGP instance.
     pub remote_address: IpAddr,
 
     #[garde(custom(|name, ctx: &Config| peer_group_exists(name, ctx)))]
     #[cli(topic = BgpPeer)]
+    /// Name of the `BgpPeerGroup` that supplies this peer's settings; must exist.
     pub peer_group: String,
 
     /// Overrides the peer-group's own `shutdown` — see `BgpShutdown`.

@@ -20,10 +20,12 @@ pub struct CommunityAlias {
         custom(|n, ctx: &Config| unique_in(n, &ctx.community_aliases, |a| &a.name))
     )]
     #[cli(key)]
+    /// Alias name, 1 to 64 characters, unique among aliases.
     pub name: String,
 
     #[garde(custom(|v: &String, _ctx: &Config| valid_community_value(v)))]
     #[cli(topic = CommunityAliasValue)]
+    /// Colon-separated community literal such as `65000:100`.
     pub value: String,
 }
 

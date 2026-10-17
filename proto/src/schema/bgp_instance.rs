@@ -13,23 +13,27 @@ use nos_proto_derive::Cli;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
+/// One BGP speaker: identity, peer-groups and peers; served by one `nos-bgpd` process.
 pub struct BgpInstance {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.bgp_instances, |i| &i.name))
     )]
     #[cli(key)]
+    /// Instance name, 1 to 64 characters, unique among BGP instances.
     pub name: String,
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(topic = BgpInstanceRouterId)]
+    /// BGP identifier sent in OPEN (RFC 4271 §4.2).
     pub router_id: Ipv4Addr,
 
     // RFC 6793: ASN 0 and 4_294_967_295 are reserved.
     #[garde(range(min = 1, max = 4_294_967_294u32))]
     #[cli(topic = BgpInstanceAsn)]
+    /// Local AS number, 1 to 4294967294 (RFC 6793 reserves 0 and 4294967295).
     pub asn: u32,
 
     #[garde(
@@ -37,10 +41,12 @@ pub struct BgpInstance {
         custom(|groups, _ctx: &Config| bgp_peer_group::valid_peer_group_timers(groups))
     )]
     #[cli(topic = BgpPeerGroup)]
+    /// Session templates; their timers are validated together.
     pub peer_groups: Vec<BgpPeerGroup>,
 
     #[garde(dive)]
     #[cli(topic = BgpPeer)]
+    /// Neighbors, each naming one entry of `peer_groups`.
     pub peers: Vec<BgpPeer>,
 
     /// RFC 4456 route reflector cluster id. `None` resolves to this
@@ -136,9 +142,11 @@ fn rpki_rtr_port_default() -> u16 {
 pub struct RpkiCache {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Address of the RPKI-to-Router cache; the key.
     pub address: IpAddr,
     #[serde(default = "rpki_rtr_port_default")]
     #[cli(topic = BgpInstanceRpkiCachePort)]
+    /// TCP port of the cache, `RPKI_RTR_PORT_DEFAULT` unless set.
     pub port: u16,
     /// Lower is preferred (RFC 8210 §10).
     #[serde(default)]
@@ -176,6 +184,7 @@ fn valid_rpki_caches(caches: &[RpkiCache]) -> garde::Result {
 pub struct BgpAggregate {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Aggregate prefix to originate; the key.
     pub prefix: IpNet,
     /// Carry the contributors' ASNs as an `AS_SET` instead of setting
     /// `ATOMIC_AGGREGATE`.
@@ -219,9 +228,11 @@ fn valid_aggregates(aggregates: &[BgpAggregate]) -> garde::Result {
 pub struct BgpConfederation {
     #[serde(default)]
     #[cli(topic = BgpInstanceConfederationIdentifier)]
+    /// AS number the outside world sees for the whole confederation (RFC 5065); `None` means no confederation.
     pub identifier: Option<u32>,
     #[serde(default)]
     #[cli(topic = BgpInstanceConfederationPeer)]
+    /// AS numbers of the other member sub-ASes, reached over confederation eBGP.
     pub peers: Vec<u32>,
 }
 
@@ -273,9 +284,11 @@ impl BgpGracefulRestart {
     pub fn enabled_restart_time(&self) -> Option<u16> {
         (!self.disabled).then(|| self.restart_time.unwrap_or(GR_RESTART_TIME_DEFAULT))
     }
+    /// Seconds a restarted peer's routes stay stale, `GR_STALE_TIME_DEFAULT` unless set.
     pub fn stale_time(&self) -> u16 {
         self.stale_time.unwrap_or(GR_STALE_TIME_DEFAULT)
     }
+    /// Seconds to wait for End-of-RIB before route selection, 360 unless set.
     pub fn selection_deferral_time(&self) -> u16 {
         self.selection_deferral_time
             .unwrap_or(GR_SELECTION_DEFERRAL_TIME_DEFAULT)
