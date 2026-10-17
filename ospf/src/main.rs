@@ -2,17 +2,15 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_log_client::ForwardingLayer;
+
+use nos_daemon::{bootstrap, watchdog};
 use nos_ospf::boot::{self, BootCounter};
 use nos_ospf::link::LinkManager;
-use nos_ospf::{reconcile, rib_push_client, server, watchdog_client};
-use nos_pki::Identity;
+use nos_ospf::{reconcile, rib_push_client, server};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "nos-ospfd", about = "NOS OSPF daemon")]
@@ -68,8 +66,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
-    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
+    let identity = bootstrap::identity()?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Log forwarding gets its own shutdown signal, flipped only once the
@@ -77,23 +74,15 @@ async fn main() -> anyhow::Result<()> {
     // 2328 §14.1 flush, whose log lines would otherwise never reach
     // `nos-logd` (the forwarding loop stops as soon as its signal flips).
     let (log_shutdown_tx, log_shutdown_rx) = watch::channel(false);
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace")),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .with(ForwardingLayer::install(
-            format!("nos-ospfd[{}]", args.instance),
-            args.log_socket.clone(),
-            identity.clone(),
-            log_shutdown_rx,
-        ))
-        .init();
-    nos_log_client::install_panic_hook();
+    bootstrap::init_tracing(
+        format!("nos-ospfd[{}]", args.instance),
+        args.log_socket.clone(),
+        identity.clone(),
+        log_shutdown_rx,
+    );
     info!(instance = %args.instance, "nos-ospfd starting");
 
-    let Some(config_socket) = watchdog_client::resolve_with_retry(
+    let Some(config_socket) = watchdog::resolve_with_retry(
         &args.watchdog_socket,
         ServiceRef::Config,
         &mut shutdown_rx.clone(),

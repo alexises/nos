@@ -1810,6 +1810,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "nos-log-client",
+ "nos-pki",
+ "nos-proto",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nos-e2e"
 version = "0.1.0"
 dependencies = [
@@ -1983,6 +2001,7 @@ dependencies = [
  "ipnet",
  "libc",
  "md-5",
+ "nos-daemon",
  "nos-log-client",
  "nos-ospf-common",
  "nos-pki",
@@ -2020,6 +2039,7 @@ dependencies = [
  "ipnet",
  "libc",
  "nix",
+ "nos-daemon",
  "nos-l2-socket",
  "nos-log-client",
  "nos-ospf-common",

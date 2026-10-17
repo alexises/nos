@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 ## Scope
 
-`nos-ospfd` resolves its instance, areas and profiles from `nos-configd` and runs RFC 2328 on every `Subinterface.ospf_profile` (point-to-point) and `BroadcastDomain.ospf_profile` (broadcast, DR/BDR) attach point: raw protocol-89 socket, Hello to `Full`, per-area LSDB, SPF pushed to `nos-ribd` (`RibRequest::PushOspfRoutes`). A loopback (`Interface.ospf_profile`) has no peer and is log-only: it only feeds `LinkManager.stub_networks`. Modules: `main`, `config_client`, `watchdog_client`, `rib_client`, `interface_client`, `link_client`, `packet`, `lsa`, `lsdb`, `exchange`, `neighbor`, `election`, `socket`, `link` (+ `link/{rx,flood,grace,originate}.rs` and `link/tests/`, split from one file in #424), `spf`, `rib_push_client`, `reconcile`, `server`, `boot`.
+`nos-ospfd` resolves its instance, areas and profiles from `nos-configd` and runs RFC 2328 on every `Subinterface.ospf_profile` (point-to-point) and `BroadcastDomain.ospf_profile` (broadcast, DR/BDR) attach point: raw protocol-89 socket, Hello to `Full`, per-area LSDB, SPF pushed to `nos-ribd` (`RibRequest::PushOspfRoutes`). A loopback (`Interface.ospf_profile`) has no peer and is log-only: it only feeds `LinkManager.stub_networks`. Modules: `main`, `rib_client`, `interface_client`, `link_client`, `packet`, `lsa`, `lsdb`, `exchange`, `neighbor`, `election`, `socket`, `link` (+ `link/{rx,flood,grace,originate}.rs` and `link/tests/`, split from one file in #424), `spf`, `rib_push_client`, `reconcile`, `server`, `boot`.
 
 ## Shared with OSPFv3
 
@@ -55,7 +55,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 ## Wiring and tests
 
-- `config_client`, `watchdog_client`, `rib_client`, `interface_client` are reimplemented here, not shared (star dependency graph); `link_client.rs` is the exception: `nos-ospfv3d` `#[path]`-includes it, log prefix from `crate::DAEMON`.
+- Config/watchdog clients, the one-shot IPC skeleton and the `main()` tracing bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`); `rib_client`/`interface_client` are thin typed wrappers over `nos_daemon::ipc::one_shot`. `link_client.rs` is shared differently: `nos-ospfv3d` `#[path]`-includes it, log prefix from `crate::DAEMON`.
 - `nos-watchdogd` gives each instance `--listen-socket` (`/run/nos/ospf-<name>.sock`, `EndpointKind::OspfInstance`); `server.rs` serves `GetNeighbors`/`GetDatabase` and takes `ribd`'s fire-and-forget `RedistributeRoutes` (`docs/architecture/endpoint-broker.md`).
 - `tests/server.rs` drives the live IPC role gate over mTLS (#364, deny = closed with no frame; ribd feed = stays open).
 - `reconcile_tests.rs` drives `resync`/`run` against `nos-test-support`'s fake configd/watchdog/ribd/interfaced (`Fakes::start`) and a real `LinkManager` over `link::tests::wire` (#342); a service left out of `Fakes::start` is the "unreachable" branch.
