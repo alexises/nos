@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/nos-horizontal-dark.svg">
+    <img src="docs/assets/logo/nos-horizontal.svg" alt="NOS" width="420">
+  </picture>
+</p>
+
 # NOS — a network operating system built from scratch in Rust
 
 NOS is a multi-process router operating system: one OS process per routing
