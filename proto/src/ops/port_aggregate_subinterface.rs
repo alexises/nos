@@ -15,55 +15,92 @@ use super::OpError;
 /// `mode` has no sensible implicit default).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortAggregateSubinterfaceOp {
+    /// Creates the port-aggregate subinterface if it does not exist (idempotent).
     Ensure {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Adds address `address` to the port-aggregate subinterface.
     AddAddress {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Address in CIDR notation assigned to the subinterface.
         address: IpNet,
+        /// Optional label tagging the address.
         label: Option<String>,
     },
+    /// Removes address `address` from the port-aggregate subinterface.
     RemoveAddress {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Address in CIDR notation assigned to the subinterface.
         address: IpNet,
     },
+    /// Sets the routing table of the port-aggregate subinterface to `routing_table`.
     SetRoutingTable {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the routing table (VRF) to attach to.
         routing_table: String,
     },
+    /// Clears the routing table of the port-aggregate subinterface so it reverts to the default.
     ClearRoutingTable {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Sets the OSPF profile of the port-aggregate subinterface to `ospf_profile`.
     SetOspfProfile {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the OSPF profile to attach.
         ospf_profile: String,
     },
+    /// Clears the OSPF profile of the port-aggregate subinterface so it reverts to the default.
     ClearOspfProfile {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Sets the `OSPFv3` profile of the port-aggregate subinterface to `ospfv3_profile`.
     SetOspfv3Profile {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
+    /// Clears the `OSPFv3` profile of the port-aggregate subinterface so it reverts to the default.
     ClearOspfv3Profile {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Deletes the port-aggregate subinterface and everything nested under it.
     Delete {
+        /// Name of the port aggregate.
         port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
 }
 
 impl PortAggregateSubinterfaceOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             PortAggregateSubinterfaceOp::Ensure {

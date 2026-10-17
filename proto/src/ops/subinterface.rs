@@ -22,69 +22,108 @@ pub enum SubinterfaceOp {
     /// `edit interface <name>.<tag>`'s "create if missing, else navigate to
     /// it" semantics.
     Ensure {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
     /// Upserts by address, mirroring `InterfaceOp::AddAddress`.
     AddAddress {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Address in CIDR notation assigned to the subinterface.
         address: IpNet,
+        /// Optional label tagging the address.
         label: Option<String>,
     },
+    /// Removes address `address` from the subinterface.
     RemoveAddress {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Address in CIDR notation assigned to the subinterface.
         address: IpNet,
     },
+    /// Sets the routing table of the subinterface to `routing_table`.
     SetRoutingTable {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the routing table (VRF) to attach to.
         routing_table: String,
     },
+    /// Clears the routing table of the subinterface so it reverts to the default.
     ClearRoutingTable {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
     /// Upserts the subinterface entry (and its parent `Interface`), mirroring
     /// `SetRoutingTable`.
     SetOspfProfile {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the OSPF profile to attach.
         ospf_profile: String,
     },
+    /// Clears the OSPF profile of the subinterface so it reverts to the default.
     ClearOspfProfile {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
     /// Same shape as `SetOspfProfile`/`ClearOspfProfile`, joining `OSPFv3`
     /// (RFC 5340) instead.
     SetOspfv3Profile {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
+    /// Clears the `OSPFv3` profile of the subinterface so it reverts to the default.
     ClearOspfv3Profile {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
     /// RFC 9468 unsolicited BFD under the named `BfdProfile`.
     SetBfdUnsolicited {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Unsolicited-BFD settings (RFC 9468).
         bfd_unsolicited: String,
     },
+    /// Clears the BFD unsolicited of the subinterface so it reverts to the default.
     ClearBfdUnsolicited {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Deletes the subinterface and everything nested under it.
     Delete {
+        /// Name of the parent interface.
         interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
 }
 
 impl SubinterfaceOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             SubinterfaceOp::Ensure { interface, tag } => {

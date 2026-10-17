@@ -14,50 +14,82 @@ pub enum LoggingOp {
     /// Creates the collector (address `0.0.0.0`, which commit refuses until
     /// set) if missing; no-op if present.
     EnsureSyslog {
+        /// Name of the syslog server this op targets.
         name: String,
     },
+    /// Removes syslog from the syslog server.
     RemoveSyslog {
+        /// Name of the syslog server this op targets.
         name: String,
     },
+    /// Sets the syslog address of the syslog server to `address`.
     SetSyslogAddress {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// IP address of the syslog server.
         address: IpAddr,
     },
+    /// Sets the syslog port of the syslog server to `port`.
     SetSyslogPort {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// Server port; `None` selects the transport default.
         port: Option<u16>,
     },
+    /// Sets the syslog transport of the syslog server to `transport`.
     SetSyslogTransport {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// Transport protocol: UDP, TCP or TLS.
         transport: SyslogTransport,
     },
+    /// Sets the syslog routing table of the syslog server to `routing_table`.
     SetSyslogRoutingTable {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// Routing table (VRF) the server is reached through; `None` selects the default.
         routing_table: Option<String>,
     },
+    /// Sets the syslog level of the syslog server to `level`.
     SetSyslogLevel {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// Minimum severity forwarded; `None` reverts to the default.
         level: Option<LogLevel>,
     },
+    /// Sets the syslog facility of the syslog server to `facility`.
     SetSyslogFacility {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// Syslog facility; `None` reverts to the default.
         facility: Option<SyslogFacility>,
     },
     /// Creates the `tls` block if missing.
     SetSyslogTlsTrustAnchor {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// PEM-encoded certificate or key.
         pem: Option<String>,
     },
+    /// Sets the syslog TLS fingerprint of the syslog server to `fingerprint`.
     SetSyslogTlsFingerprint {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// Pinned SHA-256 fingerprint of the server certificate; `None` clears it.
         fingerprint: Option<String>,
     },
+    /// Sets the syslog TLS server name of the syslog server to `server_name`.
     SetSyslogTlsServerName {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// Name checked against the server certificate; `None` clears it.
         server_name: Option<String>,
     },
+    /// Sets the syslog TLS allow TLS 1.2 of the syslog server to `allow`.
     SetSyslogTlsAllowTls12 {
+        /// Name of the syslog server this op targets.
         name: String,
+        /// `true` allows TLS 1.2 as a fallback to TLS 1.3.
         allow: bool,
     },
 }
@@ -80,6 +112,7 @@ impl LoggingOp {
         }
     }
 
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         let list = &mut config.logging.syslog;
         let name = self.name();

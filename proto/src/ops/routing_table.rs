@@ -17,68 +17,106 @@ pub enum RoutingTableOp {
     /// Backs `edit routing-table <name>`'s "create if missing, else
     /// navigate to it" semantics.
     Ensure {
+        /// Name of the routing table this op targets.
         name: String,
     },
+    /// Sets the BGP instance of the routing table to `bgp_instance`.
     SetBgpInstance {
+        /// Name of the routing table this op targets.
         name: String,
+        /// Name of the BGP instance to bind.
         bgp_instance: String,
     },
+    /// Clears the BGP instance of the routing table so it reverts to the default.
     ClearBgpInstance {
+        /// Name of the routing table this op targets.
         name: String,
     },
+    /// Sets the static routing instance of the routing table to `static_routing_instance`.
     SetStaticRoutingInstance {
+        /// Name of the routing table this op targets.
         name: String,
+        /// Name of the static routing instance to bind.
         static_routing_instance: String,
     },
+    /// Clears the static routing instance of the routing table so it reverts to the default.
     ClearStaticRoutingInstance {
+        /// Name of the routing table this op targets.
         name: String,
     },
+    /// Sets the redistribute of the routing table to `redistribute`.
     SetRedistribute {
+        /// Name of the routing table this op targets.
         name: String,
+        /// Which protocols are redistributed into the table.
         redistribute: Redistribute,
     },
     /// Removes the rule for target `to`.
     ClearRedistribute {
+        /// Name of the routing table this op targets.
         name: String,
+        /// Destination protocol of the redistribution.
         to: RedistributeTarget,
     },
+    /// Deletes the routing table and everything nested under it.
     Delete {
+        /// Name of the routing table this op targets.
         name: String,
     },
+    /// Sets the OSPF instance of the routing table to `ospf_instance`.
     SetOspfInstance {
+        /// Name of the routing table this op targets.
         name: String,
+        /// Name of the OSPF instance to bind.
         ospf_instance: String,
     },
+    /// Clears the OSPF instance of the routing table so it reverts to the default.
     ClearOspfInstance {
+        /// Name of the routing table this op targets.
         name: String,
     },
+    /// Sets the `OSPFv3` instance of the routing table to `ospfv3_instance`.
     SetOspfv3Instance {
+        /// Name of the routing table this op targets.
         name: String,
+        /// Name of the `OSPFv3` instance to bind.
         ospfv3_instance: String,
     },
+    /// Clears the `OSPFv3` instance of the routing table so it reverts to the default.
     ClearOspfv3Instance {
+        /// Name of the routing table this op targets.
         name: String,
     },
     /// Pins `nos-restd` to this table, listening on `address:port` in its VRF.
     SetRestApi {
+        /// Name of the routing table this op targets.
         name: String,
+        /// IP address of the entry.
         address: IpAddr,
+        /// Port number or member port, per the op.
         port: u16,
     },
+    /// Clears the REST API of the routing table so it reverts to the default.
     ClearRestApi {
+        /// Name of the routing table this op targets.
         name: String,
     },
     /// Sets (replaces) the table's whole EVPN L3 VNI config.
     SetEvpn {
+        /// Name of the routing table this op targets.
         name: String,
+        /// EVPN settings of the table.
         evpn: RoutingTableEvpn,
     },
+    /// Clears the EVPN of the routing table so it reverts to the default.
     ClearEvpn {
+        /// Name of the routing table this op targets.
         name: String,
     },
 }
 
 impl RoutingTableOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             RoutingTableOp::Ensure { name } => {

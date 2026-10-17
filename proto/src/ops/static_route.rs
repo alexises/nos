@@ -17,17 +17,24 @@ use super::OpError;
 pub enum StaticRouteOp {
     /// Creates the route if missing, else repoints its gateway.
     Set {
+        /// Name of the static routing instance owning the target.
         instance: String,
+        /// Destination prefix of the route.
         subnet: IpNet,
+        /// Next-hop gateway address.
         gateway: IpAddr,
     },
+    /// Deletes the static route and everything nested under it.
     Delete {
+        /// Name of the static routing instance owning the target.
         instance: String,
+        /// Destination prefix of the route.
         subnet: IpNet,
     },
 }
 
 impl StaticRouteOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             StaticRouteOp::Set {

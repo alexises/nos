@@ -18,109 +18,186 @@ pub enum OspfProfileOp {
     /// <name> area <area-id> profile <profile-name>`'s "create if missing,
     /// else navigate to it" semantics.
     Ensure {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
+    /// Deletes the OSPF profile and everything nested under it.
     Delete {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
+    /// Sets the hello interval of the OSPF profile to `hello_interval`.
     SetHelloInterval {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// Hello interval in seconds (RFC 2328 §9.5).
         hello_interval: u16,
     },
+    /// Clears the hello interval of the OSPF profile so it reverts to the default.
     ClearHelloInterval {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
+    /// Sets the dead interval of the OSPF profile to `dead_interval`.
     SetDeadInterval {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// Router dead interval in seconds (RFC 2328 §9.5).
         dead_interval: u16,
     },
+    /// Clears the dead interval of the OSPF profile so it reverts to the default.
     ClearDeadInterval {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
+    /// Sets the cost of the OSPF profile to `cost`.
     SetCost {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// Interface output cost (RFC 2328 §A.3.2).
         cost: u16,
     },
+    /// Clears the cost of the OSPF profile so it reverts to the default.
     ClearCost {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
+    /// Sets the priority of the OSPF profile to `priority`.
     SetPriority {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// Router priority for DR/BDR election (0 makes the router ineligible).
         priority: u8,
     },
+    /// Clears the priority of the OSPF profile so it reverts to the default.
     ClearPriority {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
+    /// Sets the MTU of the OSPF profile to `mtu`.
     SetMtu {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// MTU advertised in database descriptions (RFC 2328 §10.6).
         mtu: u16,
     },
     /// Toggles the RFC 2328 §10.6 DBD Interface MTU check.
     SetMtuIgnore {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Clears the MTU of the OSPF profile so it reverts to the default.
     ClearMtu {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
     /// Toggles RFC 7474 extended cryptographic sequence numbers.
     SetExtendedSequenceNumbers {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Sets the network type of the OSPF profile to `network_type`.
     SetNetworkType {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// OSPF network type (point-to-point, broadcast, ...).
         network_type: NetworkType,
     },
+    /// Clears the network type of the OSPF profile so it reverts to the default.
     ClearNetworkType {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
     /// Sets `auth` to a simple password, replacing any crypto keys (RFC
     /// 2328's Simple and Cryptographic auth types are mutually exclusive).
     SetSimpleAuth {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// Password for the entry.
         password: String,
     },
     /// Upserts one crypto key by `key_id`. If `auth` isn't already `Crypto`
     /// (unset, or `Simple`), starts a fresh key list with just this key.
     SetCryptoKey {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// The authentication key entry.
         key: OspfCryptoKey,
     },
     /// Removes one crypto key by `key_id`. No-op if `auth` isn't `Crypto` or
@@ -128,28 +205,40 @@ pub enum OspfProfileOp {
     /// the list becomes empty; commit-time validation rejects an empty
     /// `Crypto` list, so an explicit `ClearAuth` is required for that case.
     RemoveCryptoKey {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// Key ID selecting the cryptographic key (RFC 2328 App. D).
         key_id: u16,
     },
     /// Marks one existing crypto key as the current key, clearing the flag
     /// on every other key in the list.
     SetCryptoCurrentKey {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
+        /// Key ID selecting the cryptographic key (RFC 2328 App. D).
         key_id: u16,
     },
     /// Unsets `auth` entirely, regardless of which mechanism was set.
     ClearAuth {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
         name: String,
     },
 }
 
 impl OspfProfileOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             OspfProfileOp::Ensure { .. }

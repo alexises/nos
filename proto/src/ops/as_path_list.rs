@@ -16,22 +16,32 @@ pub enum AsPathListOp {
     /// name; no-op if it does. Backs `edit as-path-list <name>`'s
     /// "create if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the AS-path list this op targets.
         name: String,
     },
+    /// Adds pattern `pattern` to the AS-path list.
     AddPattern {
+        /// Name of the AS-path list this op targets.
         name: String,
+        /// Regular expression matched against the AS path.
         pattern: String,
     },
+    /// Removes pattern `pattern` from the AS-path list.
     RemovePattern {
+        /// Name of the AS-path list this op targets.
         name: String,
+        /// Regular expression matched against the AS path.
         pattern: String,
     },
+    /// Deletes the AS-path list and everything nested under it.
     Delete {
+        /// Name of the AS-path list this op targets.
         name: String,
     },
 }
 
 impl AsPathListOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             AsPathListOp::Ensure { name } => {

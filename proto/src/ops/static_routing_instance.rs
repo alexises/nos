@@ -14,14 +14,18 @@ pub enum StaticRoutingInstanceOp {
     /// Backs `edit static-routing-instance <name>`'s "create if missing,
     /// else navigate to it" semantics.
     Ensure {
+        /// Name of the static routing instance this op targets.
         name: String,
     },
+    /// Deletes the static routing instance and everything nested under it.
     Delete {
+        /// Name of the static routing instance this op targets.
         name: String,
     },
 }
 
 impl StaticRoutingInstanceOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             StaticRoutingInstanceOp::Ensure { name } => {

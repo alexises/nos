@@ -10,26 +10,36 @@ use super::OpError;
 /// no name to look up and nothing here can fail structurally.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LldpOp {
+    /// Sets the transmit interval of the global LLDP settings to `secs`.
     SetTxInterval {
+        /// Interval between LLDPDUs in seconds.
         secs: u16,
     },
+    /// Clears the transmit interval of the global LLDP settings so it reverts to the default.
     ClearTxInterval,
+    /// Sets the transmit hold of the global LLDP settings to `hold`.
     SetTxHold {
+        /// Hold multiplier: TTL = transmit interval x this value.
         hold: u8,
     },
+    /// Clears the transmit hold of the global LLDP settings so it reverts to the default.
     ClearTxHold,
     /// Adds one address; adding one already listed does nothing.
     AddManagementAddress {
+        /// Management address advertised in the Management Address TLV.
         address: IpAddr,
     },
     /// Clears every address.
     ClearManagementAddress,
+    /// Removes management address `address` from the global LLDP settings.
     RemoveManagementAddress {
+        /// Management address advertised in the Management Address TLV.
         address: IpAddr,
     },
 }
 
 impl LldpOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         let lldp = &mut config.lldp;
         match self {

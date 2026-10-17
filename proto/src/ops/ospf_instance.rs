@@ -15,53 +15,74 @@ pub enum OspfInstanceOp {
     /// already exist by name; no-op if it does. Backs `edit ospf instance
     /// <name>`'s "create if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the OSPF instance this op targets.
         name: String,
     },
+    /// Sets the router ID of the OSPF instance to `router_id`.
     SetRouterId {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// Router ID of the instance (dotted-quad).
         router_id: Ipv4Addr,
     },
     /// Sets (`Some`) or clears (`None`) the RFC 3623 grace period.
     SetGracefulRestartGracePeriod {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// Grace period in seconds (RFC 3623 / RFC 5187).
         grace_period: Option<u16>,
     },
     /// Turns RFC 6860 prefix suppression on or off.
     SetPrefixSuppression {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
     /// Sets (`Some`) or clears (`None`) RFC 6987's on-startup period.
     SetMaxMetricOnStartup {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// Duration in seconds.
         seconds: Option<u32>,
     },
     /// Sets (`Some`) or clears (`None`) RFC 6987's on-shutdown hold.
     SetMaxMetricOnShutdown {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// Duration in seconds.
         seconds: Option<u8>,
     },
     /// Turns RFC 6987's administrative max-metric on or off.
     SetMaxMetricAdministrative {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
     /// Turns RFC 8770's host router (H-bit) on or off.
     SetHostRouter {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
     /// Turns RFC 7490 remote LFA on or off.
     SetRemoteLfa {
+        /// Name of the OSPF instance this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Deletes the OSPF instance and everything nested under it.
     Delete {
+        /// Name of the OSPF instance this op targets.
         name: String,
     },
 }
 
 impl OspfInstanceOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             OspfInstanceOp::Ensure { name } => {

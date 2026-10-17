@@ -16,22 +16,32 @@ pub enum PrefixListOp {
     /// by name; no-op if it does. Backs `edit prefix-list <name>`'s "create
     /// if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the prefix list this op targets.
         name: String,
     },
+    /// Adds entry `entry` to the prefix list.
     AddEntry {
+        /// Name of the prefix list this op targets.
         name: String,
+        /// The prefix-list entry (prefix, length range, action).
         entry: PrefixListEntry,
     },
+    /// Removes entry `entry` from the prefix list.
     RemoveEntry {
+        /// Name of the prefix list this op targets.
         name: String,
+        /// The prefix-list entry (prefix, length range, action).
         entry: PrefixListEntry,
     },
+    /// Deletes the prefix list and everything nested under it.
     Delete {
+        /// Name of the prefix list this op targets.
         name: String,
     },
 }
 
 impl PrefixListOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             PrefixListOp::Ensure { name } => {

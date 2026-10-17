@@ -13,10 +13,14 @@ use super::OpError;
 pub enum UserOp {
     /// Creates the user if missing, then sets its password.
     SetPassword {
+        /// Login name of the user.
         name: String,
+        /// Plaintext password, argon2id-hashed by `nos-configd` before storage.
         password: String,
     },
+    /// Deletes the user and everything nested under it.
     Delete {
+        /// Login name of the user.
         name: String,
     },
 }
@@ -36,6 +40,7 @@ impl fmt::Debug for UserOp {
 }
 
 impl UserOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             UserOp::SetPassword { name, password } => {

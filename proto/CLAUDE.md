@@ -67,4 +67,4 @@ For a single always-present scalar with exactly one possible edit (e.g. `hostnam
 
 Details: [schema reference](../docs/schema-reference.md), [IPC protocols](../docs/ipc-protocols.md).
 
-- `missing_docs` is on for `nos-proto` (except `schema/`, `ops/` for now, #428): document every new pub item.
+- `missing_docs` is on for all of `nos-proto`: document every new pub item (variant fields included, #428).
