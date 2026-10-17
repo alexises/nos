@@ -20,6 +20,7 @@ Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-v
 - Per peer, an active retry loop plus one shared passive listener (`0.0.0.0:179` + `[::]:179`), both scoped into the VRF by `SO_BINDTODEVICE` (`tcp.rs`).
 - Skip dialing while `PeerSlot::is_established` (either role), or every tick causes a collision.
 - Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`) and each `tcp::connect` is bounded by it, so an unanswered SYN (`SYN_SENT` flake, #158) can't hold the Active role ~2 min.
+- Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease wait, so nothing redials (#444); not in `clear_peer`.
 - **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In/`peer_outbox` outlive the session and routes stay in the Loc-RIB.
 
 ## Session authentication
@@ -44,7 +45,7 @@ Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-v
 
 ## Aggregation (#78)
 
-All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; the aggregate is a local candidate in `BgpRib.aggregated`, next-hop-self and never pushed to `nos-ribd` (no discard route); a route-server client's `propagate_add_path` view is untouched. Ceilings are `ponytail:` comments there. `ATOMIC_AGGREGATE`/`AGGREGATOR` pass through verbatim; RPL cannot read them. A loop-dropped received route is an implicit withdraw (`withdraw_announced`).
+All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; the aggregate is a local candidate in `BgpRib.aggregated`, next-hop-self and never pushed to `nos-ribd` (no discard route); a route-server client's `propagate_add_path` view is untouched. `ATOMIC_AGGREGATE`/`AGGREGATOR` pass through verbatim; RPL cannot read them.
 
 ## Malformed UPDATE (RFC 7606)
 

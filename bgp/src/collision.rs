@@ -170,6 +170,10 @@ pub struct PeerSlot {
     /// holds it until `clear_max_prefix`. A shut/no-shut or config change
     /// replaces the whole slot, which releases it too.
     max_prefix_hold: std::sync::Mutex<Option<(Instant, u16)>>,
+    /// Set once the slot is being taken down (shutdown or peer removal):
+    /// `active_connect_loop` must not redial during the Cease grace, or the
+    /// fresh session ends in a bare abort instead of the Cease (#444, #455).
+    stopping: std::sync::atomic::AtomicBool,
 }
 
 impl PeerSlot {
@@ -185,7 +189,18 @@ impl PeerSlot {
             command_rx: Mutex::new(command_rx),
             passive_task: Mutex::new(None),
             max_prefix_hold: std::sync::Mutex::new(None),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Quiesces the slot: no further outbound dial (see `stopping`).
+    pub fn stop(&self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The peer's current auth (see the `auth` field).

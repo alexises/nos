@@ -758,6 +758,16 @@ impl SessionManager {
     /// Called once when `crate::reconcile::run`'s loop exits on shutdown.
     pub async fn shutdown(&self) {
         let slots: Vec<Arc<PeerSlot>> = self.peers.read().await.values().cloned().collect();
+        // Quiesce first: nothing may be accepted or redialed during the Cease
+        // grace. Already-accepted passive sessions are their own tasks and
+        // still get their Cease.
+        for slot in &slots {
+            slot.stop();
+        }
+        if let Some(listeners) = self.listeners.lock().await.take() {
+            listeners.v4.abort();
+            listeners.v6.abort();
+        }
         futures::future::join_all(slots.iter().map(|slot| {
             cease_established(slot, CeaseSubcode::AdministrativeShutdown, Bytes::new())
         }))
@@ -775,11 +785,6 @@ impl SessionManager {
             applier.abort();
         }
         self.peers.write().await.clear();
-        let taken = self.listeners.lock().await.take();
-        if let Some(listeners) = taken {
-            listeners.v4.abort();
-            listeners.v6.abort();
-        }
     }
 
     async fn rebind_listeners(self: &Arc<Self>, vrf: &VrfRequirement, desired: &[ResolvedPeer]) {
@@ -1012,6 +1017,9 @@ impl SessionManager {
         let mut stopped = Vec::new();
         for addr in &to_stop {
             let slot = self.peers.write().await.remove(addr);
+            if let Some(slot) = &slot {
+                slot.stop();
+            }
             let (subcode, data) = cease_reason(current.get(addr), desired.get(addr));
             stopped.push((*addr, slot, subcode, data));
         }
@@ -1166,15 +1174,25 @@ fn cease_reason(
 /// Asks an `Established` session to send a Cease and close, and waits (up to
 /// `CEASE_GRACE`) for it to end. A no-op for a peer that isn't established.
 async fn cease_established(slot: &PeerSlot, subcode: CeaseSubcode, data: Bytes) {
-    if !slot.is_established().await || !slot.send_command(FsmCommand::Cease { subcode, data }) {
-        return;
-    }
-    let _ = tokio::time::timeout(CEASE_GRACE, async {
-        while slot.is_established().await {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    async fn pass(slot: &PeerSlot, subcode: CeaseSubcode, data: Bytes) {
+        if !slot.is_established().await || !slot.send_command(FsmCommand::Cease { subcode, data }) {
+            return;
         }
-    })
-    .await;
+        let _ = tokio::time::timeout(CEASE_GRACE, async {
+            while slot.is_established().await {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+    }
+    pass(slot, subcode, data.clone()).await;
+    // A dial already in flight when the slot was stopped may have come up
+    // meanwhile: Cease it too. ponytail: a handshake finishing after this
+    // second pass is closed bare; waiting for "no connection in handshake"
+    // would make shutdown wait on a hung SYN.
+    if slot.is_stopping() {
+        pass(slot, subcode, data).await;
+    }
 }
 
 /// Which of a `Listeners`' two raw fds matches `addr`'s IP version —
@@ -1318,7 +1336,7 @@ async fn active_connect_loop(
     loop {
         let current_vrf = vrf.borrow().clone();
         if let VrfRequirement::Resolved(vrf_name) = current_vrf {
-            if slot.is_established().await || slot.max_prefix_held() {
+            if slot.is_stopping() || slot.is_established().await || slot.max_prefix_held() {
                 // Already up (via either role) — dialing out again would
                 // just create a pointless collision the existing session
                 // would win anyway. Wait for the retry interval (or a VRF
