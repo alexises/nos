@@ -112,6 +112,7 @@ fn desired_links(cfg: &Config, chassis_mac: [u8; 6]) -> Vec<LinkConfig> {
             transmit: i.lldp_transmit,
             receive: i.lldp_receive,
             system_name: cfg.hostname.clone(),
+            system_description: cfg.lldp.effective_system_description().to_string(),
             chassis_mac,
             tx_interval: Duration::from_secs(u64::from(cfg.lldp.effective_interval_secs())),
             ttl_secs: cfg.lldp.effective_ttl_secs(),
@@ -365,6 +366,12 @@ mod tests {
         // Any of them changing restarts the link.
         cfg.lldp.tx_hold = None;
         assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
+        assert_eq!(before[0].system_description, "nos");
+        let mut changed = cfg.clone();
+        changed.lldp.system_description = Some("edge".to_string());
+        let after = desired_links(&changed, [2, 0, 0, 0, 0, 1]);
+        assert_eq!(after[0].system_description, "edge");
+        assert_ne!(desired_links(&cfg, [2, 0, 0, 0, 0, 1]), after);
     }
 
     #[test]

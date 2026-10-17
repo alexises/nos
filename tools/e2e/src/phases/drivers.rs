@@ -771,10 +771,10 @@ pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
 pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let learned_a = |extra: &str| {
-        format!("lldp neighbor learned interface=eth1 .* system_name=router-b{extra}")
+        format!("lldp neighbor learned interface=eth1 .* system_name=router-b system_description=.*{extra}")
     };
     let learned_b = |extra: &str| {
-        format!("lldp neighbor learned interface=eth1 .* system_name=router-a{extra}")
+        format!("lldp neighbor learned interface=eth1 .* system_name=router-a system_description=.*{extra}")
     };
     let shutdown = "lldp neighbor removed interface=eth1 .* reason=\"shutdown\"";
     // Each router advertises its container name as its System Name.
@@ -800,19 +800,14 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     b.provision(&host("router-b", &on)).await?;
 
     log("waiting for both routers' nos-lldpd to learn the other over the real veth");
-    // ttl=120 is the 802.1AB default (tx-interval 30 x tx-hold 4).
-    a.wait_new(
-        &learned_a(" ttl=120").replace(".* system_name", ".* port_id=eth1 system_name"),
-        base_a,
-        60,
-    )
-    .await?;
-    b.wait_new(
-        &learned_b(" ttl=120").replace(".* system_name", ".* port_id=eth1 system_name"),
-        base_b,
-        60,
-    )
-    .await?;
+    // ttl=120 is the 802.1AB default (tx-interval 30 x tx-hold 4), and the
+    // System Description defaults to a bare "nos" (no version).
+    let dflt = |p: String| {
+        p.replace(".* system_name", ".* port_id=eth1 system_name")
+            .replace("system_description=.* ttl", "system_description=nos ttl")
+    };
+    a.wait_new(&dflt(learned_a(" ttl=120")), base_a, 60).await?;
+    b.wait_new(&dflt(learned_b(" ttl=120")), base_b, 60).await?;
     // Link start and the new neighbor each open a fast-start burst: all four
     // frames go out within seconds (at 1s spacing), not one per 30s interval.
     a.wait_new(burst_done, burst_a, 15).await?;
@@ -877,6 +872,17 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait_new(&only_b, base_ob, 60).await?;
+
+    // The System Description knob: router-b learns router-a's custom text
+    // (the link restarts on the change).
+    let custom = learned_b(" ttl=15").replace("description=.* ttl", "description=e2e-edge ttl");
+    let base_custom = b.count(&custom);
+    a.provision(&host(
+        "router-a",
+        &["--lldp-system-description", "e2e-edge"],
+    ))
+    .await?;
+    b.wait_new(&custom, base_custom, 60).await?;
 
     lldp_org_tlvs(w).await?;
 
