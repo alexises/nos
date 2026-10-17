@@ -2127,6 +2127,14 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     );
 
     w.dock.container_remove("router-f").await;
+    // Give eth1 back: left attached, router-a's eth1 is this FRR network's
+    // veth-less NIC, so `link_veths` (ospfv3's second link) reuses it in place
+    // of a veth to router-b and that adjacency never forms (#456).
+    w.dock.network_disconnect(NET_OSPF_FRR, "router-a").await;
+    // Likewise the `redistribute from static to ospf` rule set above:
+    // `ospfv3-asbr` waits for a *new* Type-5 origination, and re-applying an
+    // identical rule originates nothing.
+    a.provision(&["--clear-redistribute-to-ospf"]).await?;
     Ok(())
 }
 
@@ -3631,7 +3639,11 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     b.provision_flags(&with(&s.base_b, &[off, s.loopback.clone()].concat()))
         .await?;
     a.assert_quiet(&torn, torn_a, 3).await?;
-    a.assert_quiet(&s.full_a, full_a, 0).await
+    a.assert_quiet(&s.full_a, full_a, 0).await?;
+    // Leave no loopback behind: `ospfv3-lfa` re-provisions this very prefix
+    // and waits for a *new* route add, which an identical config never gives.
+    b.provision(&[&format!("--clear-{}-loopback-profile", s.daemon)])
+        .await
 }
 
 /// `ospf-bfd` (#288), on the `ospf` lab.
