@@ -17,12 +17,17 @@ use crate::schema::{BfdAuthMethod, BfdProfile};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionKey {
+    /// Routing table (VRF) the session runs in.
     pub table: String,
+    /// Remote system's address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub peer: IpAddr,
+    /// Local source address, if pinned.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub local: Option<IpAddr>,
+    /// Egress interface, required for single-hop sessions on link-local addresses.
     pub interface: Option<String>,
+    /// Whether this is a multihop session (RFC 5883) rather than single-hop (RFC 5881).
     pub multihop: bool,
     /// RFC 7130 micro-BFD: the `PortAggregate` this session probes a member of
     /// (`interface` is the member, `table` is empty). Appended last for postcard.
@@ -34,9 +39,13 @@ pub struct SessionKey {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BfdState {
+    /// `AdminDown` (RFC 5880 section 4.1): administratively held down.
     AdminDown,
+    /// `Down`: no session, or the remote reported Down.
     Down,
+    /// `Init`: the remote is heard but has not yet seen us.
     Init,
+    /// `Up`: bidirectional connectivity confirmed.
     Up,
 }
 
@@ -51,6 +60,7 @@ impl BfdState {
         }
     }
 
+    /// Decodes the 2-bit State field of a BFD control packet (RFC 5880 section 4.1).
     pub const fn from_code(c: u8) -> Option<Self> {
         Some(match c {
             0 => BfdState::AdminDown,
@@ -77,14 +87,23 @@ impl fmt::Display for BfdState {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BfdDiag {
+    /// No diagnostic (code 0, RFC 5880 section 4.1).
     NoDiagnostic,
+    /// Control Detection Time Expired (code 1).
     ControlDetectionTimeExpired,
+    /// Echo Function Failed (code 2).
     EchoFunctionFailed,
+    /// Neighbor Signaled Session Down (code 3).
     NeighborSignaledSessionDown,
+    /// Forwarding Plane Reset (code 4).
     ForwardingPlaneReset,
+    /// Path Down (code 5).
     PathDown,
+    /// Concatenated Path Down (code 6).
     ConcatenatedPathDown,
+    /// Administratively Down (code 7).
     AdministrativelyDown,
+    /// Reverse Concatenated Path Down (code 8).
     ReverseConcatenatedPathDown,
 }
 
@@ -104,6 +123,7 @@ impl BfdDiag {
         }
     }
 
+    /// Decodes the 5-bit Diagnostic field of a BFD control packet (RFC 5880 section 4.1).
     pub const fn from_code(c: u8) -> Option<Self> {
         Some(match c {
             0 => BfdDiag::NoDiagnostic,
@@ -140,10 +160,15 @@ impl fmt::Display for BfdDiag {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BfdSessionView {
+    /// Session identity.
     pub key: SessionKey,
+    /// Current session state.
     pub state: BfdState,
+    /// Diagnostic for the last state change.
     pub diag: BfdDiag,
+    /// My Discriminator (RFC 5880 section 6.8.1).
     pub local_discriminator: u32,
+    /// Your Discriminator learned from the peer; zero until heard.
     pub remote_discriminator: u32,
     /// Negotiated transmit interval, microseconds.
     pub tx_interval_us: u32,
@@ -151,6 +176,7 @@ pub struct BfdSessionView {
     pub detection_time_us: u32,
     /// The configured authentication (never the key), `None` when off.
     pub auth_method: Option<BfdAuthMethod>,
+    /// Key ID of the authentication key in use, if the session is authenticated (RFC 5880 section 6.7).
     pub auth_key_id: Option<u8>,
     /// Packets dropped by RFC 5880 §6.7 authentication since the session started.
     pub auth_failures: u64,
@@ -171,8 +197,10 @@ pub struct BfdSessionView {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BfdSessionKind {
+    /// A regular BFD session (RFC 5880).
     #[default]
     Classical,
+    /// A Seamless BFD initiator session (RFC 7880).
     SbfdInitiator,
     /// RFC 9468: created by an unsolicited packet, owned by no client.
     Unsolicited,
@@ -220,27 +248,39 @@ pub struct ReflectorView {
     pub received: u64,
     /// Replies sent.
     pub replied: u64,
+    /// Packets the S-BFD reflector discarded, by cause.
     pub discarded: ReflectorDiscards,
 }
 
+/// Requests to `nos-bfdd`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BfdRequest {
     /// Start (or refresh) a session; the reply stream is `BfdEvent::State`.
     Register {
+        /// Routing table (VRF) of the session.
         table: String,
+        /// Remote system's address.
         #[cfg_attr(feature = "openapi", schema(value_type = String))]
         peer: IpAddr,
+        /// Local source address, if pinned.
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
         local: Option<IpAddr>,
+        /// Egress interface, required for single-hop sessions on link-local addresses.
         interface: Option<String>,
+        /// The `bfd-profile` the session takes its timers and authentication from.
         profile: BfdProfile,
+        /// Whether this is a multihop session (RFC 5883) rather than single-hop (RFC 5881).
         multihop: bool,
     },
+    /// Stop tracking a session.
     Deregister {
+        /// Session identity.
         key: SessionKey,
     },
+    /// Query sessions, optionally filtered by peer.
     GetSessions {
+        /// Only sessions to this peer.
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
         peer: Option<IpAddr>,
     },
@@ -248,19 +288,26 @@ pub enum BfdRequest {
     GetReflector,
 }
 
+/// Events and replies from `nos-bfdd`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BfdEvent {
+    /// A session changed state.
     State {
+        /// Session identity.
         key: SessionKey,
+        /// Current session state.
         state: BfdState,
+        /// Diagnostic for the last state change.
         diag: BfdDiag,
         /// The C bit (RFC 5880 §4.1) set at both ends: the local session and
         /// the last packet received. RFC 5882 §4.3: only then is a BFD Down a
         /// forwarding failure a graceful restart must not outlive.
         control_plane_independent: bool,
     },
+    /// Reply to `GetSessions`.
     Sessions(Vec<BfdSessionView>),
+    /// Reply to the reflector query: S-BFD reflector counters.
     Reflector(ReflectorView),
 }
 

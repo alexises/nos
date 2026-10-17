@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouteSourceKind {
+    /// A statically configured route.
     Static,
+    /// A route learned via BGP.
     Bgp,
+    /// A route learned via OSPF.
     Ospf,
     /// A directly-connected prefix, derived by `nos-ribd` from the
     /// addresses `nos-interfaced` applied in this table.
@@ -24,10 +27,12 @@ pub enum RouteSourceKind {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvpnRouteInfo {
+    /// Remote VTEP the route is tunnelled to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub vtep: IpAddr,
     /// `aa:bb:cc:dd:ee:ff`.
     pub router_mac: String,
+    /// VXLAN VNI of the tunnel.
     pub vni: u32,
 }
 
@@ -39,6 +44,7 @@ pub struct RouteEntry {
     /// multipath (ECMP) route, installed as one kernel route.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub gateways: Vec<IpAddr>,
+    /// Protocol that produced the route.
     pub source: RouteSourceKind,
     /// Pre-computed backup next hop, installed in the kernel at a higher
     /// metric so it takes over the instant the primary is withdrawn.
@@ -62,8 +68,10 @@ pub struct RouteEntry {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrefixRoutes {
+    /// The destination prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
+    /// All candidate routes for the prefix.
     pub candidates: Vec<RouteEntry>,
 }
 
@@ -75,6 +83,7 @@ pub struct PrefixRoutes {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BgpRoute {
+    /// The destination prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
     /// The best path's next hop plus every multipath sibling's
@@ -93,8 +102,11 @@ pub struct BgpRoute {
 /// `Add`/`Remove` for each subsequent change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BgpRouteUpdate {
+    /// The complete route set, replacing any previous one.
     Full(Vec<BgpRoute>),
+    /// One route added or changed.
     Add(BgpRoute),
+    /// One route withdrawn.
     Remove(IpNet),
 }
 
@@ -105,6 +117,7 @@ pub enum BgpRouteUpdate {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OspfRoute {
+    /// The destination prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
     /// Every equal-cost next hop (RFC 2328 §16.1 2(d)), non-empty unless
@@ -149,8 +162,11 @@ pub struct OspfRoute {
 /// `Full`-on-connect-then-incremental shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OspfRouteUpdate {
+    /// The complete route set, replacing any previous one.
     Full(Vec<OspfRoute>),
+    /// One route added or changed.
     Add(OspfRoute),
+    /// One route withdrawn.
     Remove(IpNet),
 }
 
@@ -165,7 +181,10 @@ pub enum RibRequest {
     /// candidate list, prefixes in ascending CIDR order.
     GetRoutes,
     /// One-shot: longest-prefix-match lookup for one destination address.
-    Lookup { addr: IpAddr },
+    Lookup {
+        /// Address to look up.
+        addr: IpAddr,
+    },
     /// One-shot: this table's Linux VRF interface name, if its driver has
     /// allocated/created one. The only cross-daemon consumer today is
     /// `nos-interfaced`'s Linux driver, resolving which device to enslave
@@ -218,6 +237,7 @@ pub enum RibRequest {
 /// Reply to `GetEvpnIrb`: what a MAC+IP route needs to be symmetric.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvpnIrb {
+    /// L3 VNI of the IP-VRF (RFC 9135), if any.
     pub l3_vni: u32,
     /// The IP-VRF's Router's MAC (`brv<l3-vni>`'s address).
     pub router_mac: [u8; 6],

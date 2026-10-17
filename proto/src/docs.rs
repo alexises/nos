@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 /// audience — the schema's doc comments are the REST API's.
 macro_rules! topics {
     ($($(#[$m:meta])* $v:ident,)*) => {
+        /// Identifies what one command documents; see the macro's docs above.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        /// Identifies what one command documents.
         pub enum Topic {
             $($(#[$m])* $v,)*
         }
@@ -497,6 +499,7 @@ topics! {
 /// specific to each client and doesn't belong here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandDoc {
+    /// The topic this documentation belongs to.
     pub topic: Topic,
     /// One-line description.
     pub summary: String,

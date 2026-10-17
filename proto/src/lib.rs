@@ -1,29 +1,46 @@
+//! Shared wire types, IPC codec and config schema for every NOS process.
+#![warn(missing_docs)]
+
 // `#[derive(Cli)]` emits `::nos_proto::…` paths, which must resolve here too.
 extern crate self as nos_proto;
 
 pub mod bfd;
 pub mod bgp;
+/// Watchdog endpoint broker: roles, service references and the watchdog wire types.
 pub mod broker;
 pub mod cli;
+/// IPC framing codec: 4-byte little-endian length prefix plus postcard payload.
 pub mod codec;
 pub mod config_path;
+/// State derived from the config after an edit (routing-table cross references).
 pub mod derive;
+/// Config diffs between two configs, scoped per supervised daemon.
 pub mod diff;
+/// Help-topic and command-documentation wire types served by `nos-configd`.
 pub mod docs;
 pub mod evpn_id;
 pub mod fdb;
+/// Wire types spoken to and by `nos-interfaced`: status, requests, events.
 pub mod interface;
+/// Request, response and event types spoken to `nos-configd`.
 pub mod ipc;
 pub mod lacp;
 pub mod lldp;
+/// Wire types of `nos-logd`: levels, entries, requests.
 pub mod log;
+/// Config edit operations (`ConfigOp`) and their application to a `Config`.
+#[allow(missing_docs)] // removed by the ops sub-issue of #428
 pub mod ops;
 pub mod ospf;
 pub mod ospfv3;
 pub mod paths;
+/// Wire types spoken to and by `nos-ribd`: route sources, pushes, lookups.
 pub mod rib;
+/// The configuration schema: every object an operator can configure.
+#[allow(missing_docs)] // removed by the schema sub-issue of #428
 pub mod schema;
 pub mod stp;
+/// Field validators shared by the config ops.
 pub mod validators;
 
 pub use bfd::{

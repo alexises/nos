@@ -19,12 +19,19 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfNeighborState {
+    /// No Hellos received (RFC 2328 section 10.1).
     Down,
+    /// A Hello was received but our router ID is not in it.
     Init,
+    /// Bidirectional communication established.
     TwoWay,
+    /// Negotiating master/slave and the initial DD sequence number.
     ExStart,
+    /// Exchanging Database Description packets.
     Exchange,
+    /// Requesting LSAs the neighbor has and we lack.
     Loading,
+    /// Databases synchronised; the adjacency is complete.
     Full,
 }
 
@@ -36,10 +43,15 @@ pub enum OspfNeighborState {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinkInterfaceState {
+    /// Point-to-point interface (RFC 2328 section 9.1).
     PointToPoint,
+    /// Waiting to learn the DR/BDR.
     Waiting,
+    /// This router is the Designated Router.
     Dr,
+    /// This router is the Backup Designated Router.
     Backup,
+    /// Neither DR nor BDR.
     DrOther,
 }
 
@@ -53,17 +65,22 @@ pub struct NeighborSummary {
     /// `reconcile::attach_points_for`'s existing `"<interface>.<tag>"`/
     /// `"broadcast-domain:<name>"` convention.
     pub link: String,
+    /// Area the interface belongs to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
+    /// State of the local interface.
     pub interface_state: LinkInterfaceState,
     /// Known once at least one Hello has been received on this link.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub neighbor_router_id: Option<Ipv4Addr>,
+    /// Neighbor state (RFC 2328 section 10.1).
     pub state: OspfNeighborState,
     /// Seconds since the last Hello was received from this neighbor. `None`
     /// if none has ever been received.
     pub last_hello_secs: Option<u64>,
+    /// `HelloInterval` in seconds (RFC 2328 section 9.5).
     pub hello_interval: u16,
+    /// `RouterDeadInterval` in seconds.
     pub dead_interval: u16,
     /// This link's own configured Router Priority — mirrors how
     /// `hello_interval`/`dead_interval` already report the *local* link's
@@ -77,6 +94,7 @@ pub struct NeighborSummary {
     /// election.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub dr: Option<Ipv4Addr>,
+    /// Backup Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub bdr: Option<Ipv4Addr>,
 }
@@ -87,15 +105,22 @@ pub struct NeighborSummary {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LsaSummary {
+    /// Area the LSA belongs to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
+    /// LS type (RFC 2328 section A.4.1).
     pub lsa_type: u8,
+    /// Link State ID.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub link_state_id: Ipv4Addr,
+    /// Advertising Router ID.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub advertising_router: Ipv4Addr,
+    /// LS sequence number.
     pub sequence_number: i32,
+    /// LS age in seconds.
     pub age: u16,
+    /// LS checksum.
     pub checksum: u16,
     /// An AS-external/NSSA-external LSA's metric (low 24 bits); `None` for
     /// every other type.
@@ -135,6 +160,8 @@ pub enum OspfRequest {
 /// Messages sent from `nos-ospfd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum OspfEvent {
+    /// Reply with the neighbors.
     Neighbors(Vec<NeighborSummary>),
+    /// Reply with the LSDB summary.
     Database(Vec<LsaSummary>),
 }

@@ -113,6 +113,7 @@ pub fn parse_mac(text: &str) -> Option<[u8; 6]> {
     parse_colon_hex(text).filter(|m: &[u8; 6]| m[0] & 1 == 0)
 }
 
+/// Renders an ESI as ten colon-separated hex octets (RFC 7432 section 5).
 #[must_use]
 pub fn format_esi(esi: &Esi) -> String {
     esi.iter()
@@ -151,6 +152,7 @@ pub fn parse_esi_label(c: u64) -> Option<bool> {
 
 /// RFC 8584 §2.2 DF Alg values.
 pub const DF_ALG_MODULO: u8 = 0;
+/// DF election algorithm code for Highest Random Weight (RFC 8584 section 3.2).
 pub const DF_ALG_HRW: u8 = 1;
 
 /// The DF Election extended community (RFC 8584 §2.2, type 0x06 subtype 0x06)

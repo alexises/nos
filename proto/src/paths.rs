@@ -8,12 +8,16 @@
 //! socket (the one address every other client must still know up front in
 //! order to resolve everything else).
 
+/// Default socket path of `nos-configd`.
 pub const DEFAULT_CONFIG_SOCKET: &str = "/run/nos/config.sock";
+/// Default socket path of `nos-logd`.
 pub const DEFAULT_LOG_SOCKET: &str = "/run/nos/log.sock";
+/// Default socket path of `nos-watchdogd`.
 pub const DEFAULT_WATCHDOG_SOCKET: &str = "/run/nos/watchdog.sock";
 
 /// Where `nos-watchdogd` publishes the public trust anchor every IPC client
 /// bootstraps from (`--pki-dir`). Public by design: it authenticates the
 /// watchdog to a client, and grants nothing.
 pub const DEFAULT_PKI_DIR: &str = "/run/nos/pki";
+/// Default path of the IPC CA certificate.
 pub const DEFAULT_PKI_CA: &str = "/run/nos/pki/ca.crt";

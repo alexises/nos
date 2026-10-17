@@ -106,25 +106,40 @@ impl AsRef<str> for Role {
 /// on the wire — it lives in the certificate — so no serde derive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
+    /// `nos-watchdogd`.
     Watchdog,
+    /// `nos-configd`.
     Configd,
+    /// `nos-logd`.
     Logd,
+    /// `nos-bgpd`.
     Bgpd,
+    /// `nos-ribd`.
     Ribd,
+    /// `nos-ospfd`.
     Ospfd,
+    /// `nos-ospfv3d`.
     Ospfv3d,
+    /// `nos-interfaced`.
     Interfaced,
+    /// `nos-lacpd`.
     Lacpd,
+    /// `nos-lldpd`.
     Lldpd,
+    /// `nos-fdbd`.
     Fdbd,
+    /// `nos-restd`.
     Restd,
+    /// `nos-bfdd`.
     Bfdd,
+    /// `nos-stpd`.
     Stpd,
     /// A person, authenticated by login; the certificate's name is the username.
     User,
 }
 
 impl Role {
+    /// Every role, in declaration order.
     pub const ALL: [Role; 15] = [
         Role::Watchdog,
         Role::Configd,
@@ -143,6 +158,7 @@ impl Role {
         Role::User,
     ];
 
+    /// The role's name as used in `nos://<role>/<name>` identities.
     pub const fn as_str(self) -> &'static str {
         match self {
             Role::Watchdog => "watchdog",
@@ -163,6 +179,7 @@ impl Role {
         }
     }
 
+    /// Parses a role name; the inverse of `as_str`.
     pub fn parse(s: &str) -> Option<Role> {
         Role::ALL.into_iter().find(|r| r.as_str() == s)
     }
@@ -186,36 +203,55 @@ pub const INVALID_CREDENTIALS: &str = "invalid credentials";
 pub enum WatchdogRequest {
     /// One-shot: resolve where to reach the given service right now.
     /// Requires a client certificate.
-    ResolveEndpoint { service: ServiceRef },
+    ResolveEndpoint {
+        /// The service to resolve.
+        service: ServiceRef,
+    },
     /// The only request an unauthenticated peer may send: prove who you are
     /// with a local user's password and get a short-lived client certificate
     /// for the public key in `csr_der` (the private key never leaves the
     /// caller). Answered with `Issued` or `Denied`.
     Login {
+        /// Login name.
         user: String,
+        /// Cleartext password, verified against the local-user hash.
         password: String,
+        /// DER-encoded certificate signing request.
         csr_der: Vec<u8>,
     },
     /// Trade a still-valid `user` certificate for a fresh one on the key in
     /// `csr_der`, with no password. Refused if the user no longer exists.
-    RenewCert { csr_der: Vec<u8> },
+    RenewCert {
+        /// DER-encoded certificate signing request.
+        csr_der: Vec<u8>,
+    },
     /// `nos-restd` only: a TLS *server* certificate for its listener, valid
     /// for `addresses`, on the key in `csr_der`. Answered with `RestServerCert`.
     IssueRestServerCert {
+        /// Addresses to put in the certificate's SAN.
         addresses: Vec<IpAddr>,
+        /// DER-encoded certificate signing request.
         csr_der: Vec<u8>,
     },
     /// `nos-restd` only, on behalf of a REST client: `Login`, but the
     /// certificate is issued by the REST CA (`Issued`). The failed-login
     /// throttle is `nos-restd`'s, not the broker connection's.
     RestLogin {
+        /// Login name.
         user: String,
+        /// Cleartext password, verified against the local-user hash.
         password: String,
+        /// DER-encoded certificate signing request.
         csr_der: Vec<u8>,
     },
     /// `nos-restd` only: `RenewCert` for a REST client whose still-valid
     /// certificate `nos-restd` has just verified. Refused if the user is gone.
-    RestRenew { user: String, csr_der: Vec<u8> },
+    RestRenew {
+        /// Login name.
+        user: String,
+        /// DER-encoded certificate signing request.
+        csr_der: Vec<u8>,
+    },
 }
 
 // Manual `Debug`: a `Login` is one log line away from leaking a password.
@@ -262,7 +298,9 @@ pub enum WatchdogEvent {
     /// Reply to `Login`/`RenewCert`: the DER client certificate, and how long
     /// it is valid for so the caller knows when to renew.
     Issued {
+        /// DER-encoded certificate issued.
         cert_der: Vec<u8>,
+        /// Validity of the issued certificate, in seconds.
         lifetime_secs: u64,
     },
     /// Reply to `Login`/`RenewCert`: refused. Deliberately one opaque
@@ -272,8 +310,11 @@ pub enum WatchdogEvent {
     /// that signed it (the trust anchor for client certificates), and how long
     /// the certificate is valid.
     RestServerCert {
+        /// DER-encoded certificate issued.
         cert_der: Vec<u8>,
+        /// DER-encoded CA certificate to trust.
         ca_der: Vec<u8>,
+        /// Validity of the issued certificate, in seconds.
         lifetime_secs: u64,
     },
 }

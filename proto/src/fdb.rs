@@ -15,21 +15,37 @@ pub use crate::evpn_id::Esi;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EvpnKey {
     /// Type-2 MAC advertisement (no IP, Ethernet tag 0).
-    Mac { rd: [u8; 8], mac: [u8; 6] },
+    Mac {
+        /// Route Distinguisher (RFC 4364 section 4.2), 8 octets.
+        rd: [u8; 8],
+        /// MAC address.
+        mac: [u8; 6],
+    },
     /// Type-3 inclusive multicast: `origin` is the advertising VTEP.
-    Imet { rd: [u8; 8], origin: IpAddr },
+    Imet {
+        /// Route Distinguisher (RFC 4364 section 4.2), 8 octets.
+        rd: [u8; 8],
+        /// The advertising VTEP or PE.
+        origin: IpAddr,
+    },
     /// Type-2 MAC/IP advertisement (Ethernet tag 0). Appended:
     /// postcard indexes variants by position.
     MacIp {
+        /// Route Distinguisher (RFC 4364 section 4.2), 8 octets.
         rd: [u8; 8],
+        /// MAC address.
         mac: [u8; 6],
+        /// IP address.
         ip: IpAddr,
     },
     /// Type-4 Ethernet Segment route: `origin` is the advertising PE. Appended
     /// (postcard indexes variants by position).
     EthernetSegment {
+        /// Route Distinguisher (RFC 4364 section 4.2), 8 octets.
         rd: [u8; 8],
+        /// Ethernet Segment Identifier.
         esi: Esi,
+        /// The advertising VTEP or PE.
         origin: IpAddr,
     },
     /// Type-1 Ethernet Auto-Discovery: per-ES when `tag == AD_TAG_ES`, per-EVI
@@ -38,24 +54,35 @@ pub enum EvpnKey {
     /// *not* on the wire (the NLRI has no originator), so it is only here to
     /// keep two PEs' routes apart. Appended (postcard indexes by position).
     EthernetAd {
+        /// Route Distinguisher (RFC 4364 section 4.2), 8 octets.
         rd: [u8; 8],
+        /// Ethernet Segment Identifier.
         esi: Esi,
+        /// Ethernet Tag ID (RFC 7432 section 7).
         tag: u32,
+        /// The advertising VTEP or PE.
         origin: IpAddr,
     },
     /// Type-5 IP Prefix (RFC 9136) of an IP-VRF: its L3 VNI is
     /// `EvpnRoute::vni`, its Router's MAC an extended community; ESI, Ethernet
     /// tag and gateway IP are zero on every route nos originates or accepts.
     /// Appended (postcard indexes by position).
-    IpPrefix { rd: [u8; 8], prefix: ipnet::IpNet },
+    IpPrefix {
+        /// Route Distinguisher (RFC 4364 section 4.2), 8 octets.
+        rd: [u8; 8],
+        /// The IP prefix.
+        prefix: ipnet::IpNet,
+    },
 }
 
 /// The Ethernet Tag ID of a per-ES Ethernet A-D route (RFC 7432 §8.2.1,
 /// "MAX-ET").
 pub const AD_TAG_ES: u32 = 0xFFFF_FFFF;
 
+/// One EVPN route exchanged between `nos-bgpd` and `nos-fdbd`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvpnRoute {
+    /// Route identity.
     pub key: EvpnKey,
     /// The VXLAN VNI. Always set on a Type-2; on a received Type-3 it is the
     /// PMSI Tunnel attribute's label (RFC 6514 §5, ingress replication), or 0
@@ -82,33 +109,44 @@ pub struct EvpnRoute {
 /// on connect, then incremental `Add`/`Remove`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvpnUpdate {
+    /// The complete route set, replacing any previous one.
     Full(Vec<EvpnRoute>),
+    /// One route added or changed.
     Add(EvpnRoute),
+    /// One route withdrawn.
     Remove(EvpnKey),
 }
 
 /// Messages to one `nos-fdbd` instance's socket. Append-only (postcard).
 #[derive(Debug, Serialize, Deserialize)]
 pub enum FdbRequest {
+    /// Query the domain's MAC table.
     GetMacs,
     /// Fire-and-forget, `nos-bgpd` only: every EVPN route the BGP instance
     /// named by the domain's `redistribute from mac to bgp` received.
     PushEvpnRoutes(EvpnUpdate),
 }
 
+/// Replies from `nos-fdbd`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum FdbEvent {
+    /// Reply to `GetMacs`.
     Table(FdbTable),
 }
 
+/// A broadcast domain's forwarding table, for `show fdb`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FdbTable {
+    /// Broadcast domain name.
     pub domain: String,
+    /// VXLAN Network Identifier of the domain.
     pub vni: u32,
     /// Bridge and VXLAN device names, once nos-fdbd has resolved/created them.
     pub bridge: Option<String>,
+    /// Name of the VXLAN device, once created.
     pub vxlan: Option<String>,
+    /// The MAC entries.
     pub macs: Vec<MacEntry>,
     /// IP-to-MAC bindings: local ARP/ND and SVI addresses, and remote Type-2
     /// routes carrying an IP.
@@ -165,11 +203,13 @@ pub struct EsEntry {
     pub local_bias: bool,
 }
 
+/// One MAC in a domain's forwarding table.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacEntry {
     /// `aa:bb:cc:dd:ee:ff`.
     pub mac: String,
+    /// How the entry was learned.
     pub source: MacSource,
     /// The remote VTEP for a `Remote` entry (the first of `vteps`).
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
@@ -183,19 +223,23 @@ pub struct MacEntry {
     pub esi: Option<String>,
 }
 
+/// One IP-to-MAC neighbor entry of an IP-VRF.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeighEntry {
+    /// IP address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub ip: IpAddr,
     /// `aa:bb:cc:dd:ee:ff`.
     pub mac: String,
+    /// How the entry was learned.
     pub source: MacSource,
     /// The remote VTEP for a `Remote` entry.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub vtep: Option<IpAddr>,
 }
 
+/// How a MAC or neighbor entry was learned.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MacSource {

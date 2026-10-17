@@ -25,7 +25,9 @@ pub enum Request {
     /// already exist, or resuming its current in-progress config unchanged
     /// (ignoring `base`) if it does.
     OpenTransaction {
+        /// Transaction name.
         name: String,
+        /// What the transaction starts from.
         base: TransactionBase,
         /// The person on whose behalf `nos-restd` calls (its authenticated
         /// REST user), for the audit log. `None` from every other client;
@@ -35,13 +37,18 @@ pub enum Request {
     },
     /// Applies one edit to a named transaction's in-progress config.
     ApplyOp {
+        /// Transaction to edit.
         name: String,
+        /// The edit to apply.
         op: ConfigOp,
         /// As on `OpenTransaction`.
         actor: Option<String>,
     },
     /// One-shot fetch of a named transaction's current in-progress config.
-    GetTransaction { name: String },
+    GetTransaction {
+        /// Transaction name.
+        name: String,
+    },
     /// Validates a named transaction and, if valid, atomically promotes it
     /// to the running config, broadcasts the change to subscribers, and
     /// removes the transaction. If invalid, the transaction is left intact.
@@ -49,36 +56,55 @@ pub enum Request {
     /// commit unless the transaction's `generation` is still `g`; `None` is
     /// unconditional.
     CommitTransaction {
+        /// Transaction name.
         name: String,
+        /// Only act if the transaction is at this revision.
         if_match: Option<u64>,
         /// As on `OpenTransaction`.
         actor: Option<String>,
     },
     /// Deletes a named transaction without touching the running config.
     /// `if_match` as on `CommitTransaction`.
-    DiscardTransaction { name: String, if_match: Option<u64> },
+    DiscardTransaction {
+        /// Transaction name.
+        name: String,
+        /// Only act if the transaction is at this revision.
+        if_match: Option<u64>,
+    },
     /// One-shot: fetch the daemon-authored documentation for one operation
     /// (see `nos_proto::docs::CommandDoc`), so any client can show
     /// consistent help text without hardcoding its own copy. Scoped to a
     /// single `Topic` rather than the whole catalog, so a client only ever
     /// pays for the docs it actually displays.
-    Describe { topic: Topic },
+    Describe {
+        /// The topic to describe.
+        topic: Topic,
+    },
     /// One-shot: compute and return the structural difference between the
     /// running config and a named transaction's in-progress config.
-    DiffTransaction { name: String },
+    DiffTransaction {
+        /// Transaction name.
+        name: String,
+    },
     /// Start streaming diffs: an initial diff synthesized against an empty
     /// config (so a fresh subscriber sees every currently-configured item in
     /// `scopes` as `Added`), then one more `Event::Diff` per future commit
     /// that touches at least one requested scope — other commits are not
     /// sent at all.
-    SubscribeDiff { scopes: Vec<DiffScope> },
+    SubscribeDiff {
+        /// Scopes whose diffs the subscriber wants.
+        scopes: Vec<DiffScope>,
+    },
     /// Watchdog-only compare-and-swap: replace `user`'s stored password hash
     /// `old` with the stronger re-hash `new` of the same password, straight
     /// in the running config (no transaction). Refused if `old` is no longer
     /// the stored hash or `new` is not a hash.
     UpgradePasswordHash {
+        /// User who made the change.
         user: String,
+        /// Previous value.
         old: String,
+        /// New value.
         new: String,
     },
     /// Sets (`value` = `Some(json)`) or removes (`value` = `None`) the
@@ -88,9 +114,13 @@ pub enum Request {
     /// replies with `Event::Transaction`. `if_match` as on
     /// `CommitTransaction`.
     SetTransactionPath {
+        /// Transaction name.
         name: String,
+        /// Config path of the node to edit.
         path: Vec<String>,
+        /// Value to set; `None` clears the node.
         value: Option<String>,
+        /// Only act if the transaction is at this revision.
         if_match: Option<u64>,
     },
 }
@@ -138,7 +168,9 @@ pub enum TransactionBase {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionSnapshot {
+    /// Name of the config.
     pub name: String,
+    /// The config itself.
     pub config: Config,
     /// True once any `ApplyOp` has succeeded since the transaction was
     /// (re)created.

@@ -186,6 +186,7 @@
             "type": "integer"
           },
           "auth_key_id": {
+            "description": "Key ID of the authentication key in use, if the session is authenticated (RFC 5880 section 6.7).",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -211,7 +212,8 @@
             "type": "integer"
           },
           "diag": {
-            "$ref": "#/components/schemas/BfdDiag"
+            "$ref": "#/components/schemas/BfdDiag",
+            "description": "Diagnostic for the last state change."
           },
           "echo_active": {
             "description": "The Echo function is running (RFC 5880 §6.4).",
@@ -228,24 +230,28 @@
             "type": "boolean"
           },
           "key": {
-            "$ref": "#/components/schemas/SessionKey"
+            "$ref": "#/components/schemas/SessionKey",
+            "description": "Session identity."
           },
           "kind": {
             "$ref": "#/components/schemas/BfdSessionKind",
             "description": "RFC 7880 S-BFD: which end of which protocol this session is."
           },
           "local_discriminator": {
+            "description": "My Discriminator (RFC 5880 section 6.8.1).",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "remote_discriminator": {
+            "description": "Your Discriminator learned from the peer; zero until heard.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "state": {
-            "$ref": "#/components/schemas/BfdState"
+            "$ref": "#/components/schemas/BfdState",
+            "description": "Current session state."
           },
           "tx_interval_us": {
             "description": "Negotiated transmit interval, microseconds.",
@@ -1328,36 +1334,42 @@
         "description": "The structural difference between two `Config` values. Only what changed\nis included — no unchanged section or field is ever present, so a client\ncan render this directly as a minimal, context-aware diff.",
         "properties": {
           "as_path_lists": {
+            "description": "AS-path list changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "bfd_profiles": {
+            "description": "BFD profile changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "bgp_instances": {
+            "description": "BGP instance changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "broadcast_domains": {
+            "description": "Broadcast domain changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "community_aliases": {
+            "description": "Community alias changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "community_groups": {
+            "description": "Community group changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
@@ -1366,7 +1378,8 @@
           "hostname": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/FieldDiff"
+                "$ref": "#/components/schemas/FieldDiff",
+                "description": "Hostname change, if any."
               },
               {
                 "type": "null"
@@ -1374,6 +1387,7 @@
             ]
           },
           "interfaces": {
+            "description": "Interface changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
@@ -1394,36 +1408,42 @@
             "type": "array"
           },
           "ospf_instances": {
+            "description": "OSPF instance changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "ospfv3_instances": {
+            "description": "`OSPFv3` instance changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "policy_definitions": {
+            "description": "Policy definition changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "port_aggregates": {
+            "description": "Port aggregate changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "prefix_lists": {
+            "description": "Prefix list changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "routing_tables": {
+            "description": "Routing table changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
@@ -1444,24 +1464,28 @@
             "type": "array"
           },
           "static_routing_instances": {
+            "description": "Static routing instance changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "stp_port_profiles": {
+            "description": "STP port profile changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "switching_profiles": {
+            "description": "Switching profile changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
             "type": "array"
           },
           "users": {
+            "description": "Local user changes.",
             "items": {
               "$ref": "#/components/schemas/SectionDiff"
             },
@@ -1644,11 +1668,13 @@
             "type": "string"
           },
           "vni": {
+            "description": "VXLAN VNI of the tunnel.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "vtep": {
+            "description": "Remote VTEP the route is tunnelled to.",
             "type": "string"
           }
         },
@@ -1660,6 +1686,7 @@
         "type": "object"
       },
       "FdbTable": {
+        "description": "A broadcast domain's forwarding table, for `show fdb`.",
         "properties": {
           "bridge": {
             "description": "Bridge and VXLAN device names, once nos-fdbd has resolved/created them.",
@@ -1669,6 +1696,7 @@
             ]
           },
           "domain": {
+            "description": "Broadcast domain name.",
             "type": "string"
           },
           "flood": {
@@ -1679,6 +1707,7 @@
             "type": "array"
           },
           "macs": {
+            "description": "The MAC entries.",
             "items": {
               "$ref": "#/components/schemas/MacEntry"
             },
@@ -1703,11 +1732,13 @@
             "type": "array"
           },
           "vni": {
+            "description": "VXLAN Network Identifier of the domain.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "vxlan": {
+            "description": "Name of the VXLAN device, once created.",
             "type": [
               "string",
               "null"
@@ -1729,6 +1760,7 @@
         "description": "One changed (or added/removed) field — either a top-level scalar or one\nfield within a `SectionDiff`. Values are pre-formatted strings; the\nclient only needs to display them, never interpret them.",
         "properties": {
           "label": {
+            "description": "Human-readable name of the object.",
             "type": "string"
           },
           "new": {
@@ -1921,6 +1953,7 @@
         "description": "One interface's current desired state, as reconciled by `nos-interfaced`\nfrom the running config. This reflects *desired* state — `nos-interfaced`\ndoes not yet apply it to the OS (see `interface/CLAUDE.md`), so it is not\nnecessarily what the kernel actually has configured.\n\n`addresses`/`routing_table` are populated only for a loopback interface\n(flat L3 config, unchanged); every other interface's L3 config lives in\n`subinterfaces` instead — see `schema::Subinterface`.",
         "properties": {
           "addresses": {
+            "description": "Configured addresses.",
             "items": {
               "$ref": "#/components/schemas/InterfaceAddress"
             },
@@ -1940,6 +1973,7 @@
             "type": "integer"
           },
           "name": {
+            "description": "Interface name.",
             "type": "string"
           },
           "port_aggregate": {
@@ -1950,18 +1984,21 @@
             ]
           },
           "routing_table": {
+            "description": "Routing table (VRF) the object is enslaved to, if any.",
             "type": [
               "string",
               "null"
             ]
           },
           "subinterfaces": {
+            "description": "Subinterfaces (VLAN-tagged).",
             "items": {
               "$ref": "#/components/schemas/SubinterfaceStatus"
             },
             "type": "array"
           },
           "switching_profile": {
+            "description": "Switching profile applied, if any.",
             "type": [
               "string",
               "null"
@@ -2003,6 +2040,7 @@
             "type": "boolean"
           },
           "actor_port_number": {
+            "description": "Actor Port number (IEEE 802.1AX section 6.4.2).",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -2018,6 +2056,7 @@
             "type": "boolean"
           },
           "interface": {
+            "description": "Member port name.",
             "type": "string"
           },
           "mode": {
@@ -2025,13 +2064,15 @@
             "description": "This port's configured `lacp-mode` (`Actor_State.LACP_Activity`)."
           },
           "mux_state": {
-            "$ref": "#/components/schemas/LacpMuxState"
+            "$ref": "#/components/schemas/LacpMuxState",
+            "description": "Mux machine state."
           },
           "partner_churn": {
             "description": "Same, for the partner's advertised state.",
             "type": "boolean"
           },
           "partner_key": {
+            "description": "Partner Operational Key, once heard.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2040,6 +2081,7 @@
             ]
           },
           "partner_port_number": {
+            "description": "Partner Port number, once heard.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2048,6 +2090,7 @@
             ]
           },
           "partner_port_priority": {
+            "description": "Partner Port Priority, once heard.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2068,6 +2111,7 @@
             ]
           },
           "partner_system_priority": {
+            "description": "Partner System Priority, once heard.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2076,7 +2120,8 @@
             ]
           },
           "receive_state": {
-            "$ref": "#/components/schemas/LacpReceiveState"
+            "$ref": "#/components/schemas/LacpReceiveState",
+            "description": "Receive machine state."
           },
           "selected": {
             "description": "This port's Selection Logic outcome (`selection.rs`) — `true` iff it\nagrees with the aggregate's other `Current` ports on partner\nidentity.",
@@ -2210,6 +2255,7 @@
             "type": "integer"
           },
           "interface": {
+            "description": "Local interface name.",
             "type": "string"
           },
           "tlvs_discarded": {
@@ -2254,9 +2300,11 @@
             "type": "integer"
           },
           "autoneg_enabled": {
+            "description": "Auto-negotiation is enabled.",
             "type": "boolean"
           },
           "autoneg_supported": {
+            "description": "Auto-negotiation is supported (IEEE 802.3 MAC/PHY TLV).",
             "type": "boolean"
           },
           "mau_type": {
@@ -2285,6 +2333,7 @@
             "type": "array"
           },
           "chassis_id": {
+            "description": "Chassis ID TLV (IEEE 802.1AB section 8.5.2).",
             "type": "string"
           },
           "link_aggregation": {
@@ -2299,6 +2348,7 @@
             ]
           },
           "local_interface": {
+            "description": "Local port the neighbor was heard on.",
             "type": "string"
           },
           "mac_phy": {
@@ -2329,12 +2379,14 @@
             ]
           },
           "port_description": {
+            "description": "Port Description TLV, if sent.",
             "type": [
               "string",
               "null"
             ]
           },
           "port_id": {
+            "description": "Port ID TLV (IEEE 802.1AB section 8.5.3).",
             "type": "string"
           },
           "port_vlan_id": {
@@ -2347,12 +2399,14 @@
             ]
           },
           "system_description": {
+            "description": "System Description TLV, if sent.",
             "type": [
               "string",
               "null"
             ]
           },
           "system_name": {
+            "description": "System Name TLV, if sent.",
             "type": [
               "string",
               "null"
@@ -2418,11 +2472,13 @@
         "description": "One VLAN a neighbor's port carries, with its name.",
         "properties": {
           "id": {
+            "description": "VLAN ID.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "name": {
+            "description": "VLAN name.",
             "type": "string"
           }
         },
@@ -2452,9 +2508,11 @@
             "type": "array"
           },
           "level": {
-            "$ref": "#/components/schemas/LogLevel"
+            "$ref": "#/components/schemas/LogLevel",
+            "description": "Severity."
           },
           "message": {
+            "description": "The message text, including structured fields.",
             "type": "string"
           },
           "source": {
@@ -2527,6 +2585,7 @@
         "type": "object"
       },
       "MacEntry": {
+        "description": "One MAC in a domain's forwarding table.",
         "properties": {
           "esi": {
             "description": "The Ethernet Segment a `Local` MAC was learned on, when its port is one.",
@@ -2540,7 +2599,8 @@
             "type": "string"
           },
           "source": {
-            "$ref": "#/components/schemas/MacSource"
+            "$ref": "#/components/schemas/MacSource",
+            "description": "How the entry was learned."
           },
           "vtep": {
             "description": "The remote VTEP for a `Remote` entry (the first of `vteps`).",
@@ -2565,6 +2625,7 @@
         "type": "object"
       },
       "MacSource": {
+        "description": "How a MAC or neighbor entry was learned.",
         "enum": [
           "Local",
           "Remote"
@@ -2605,8 +2666,10 @@
         "type": "object"
       },
       "NeighEntry": {
+        "description": "One IP-to-MAC neighbor entry of an IP-VRF.",
         "properties": {
           "ip": {
+            "description": "IP address.",
             "type": "string"
           },
           "mac": {
@@ -2614,7 +2677,8 @@
             "type": "string"
           },
           "source": {
-            "$ref": "#/components/schemas/MacSource"
+            "$ref": "#/components/schemas/MacSource",
+            "description": "How the entry was learned."
           },
           "vtep": {
             "description": "The remote VTEP for a `Remote` entry.",
@@ -3352,11 +3416,13 @@
         "description": "One `PortAggregate`'s LACP engine state, for `show lacp [<name>]`.",
         "properties": {
           "actor_key": {
+            "description": "Actor Operational Key.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "actor_system_id": {
+            "description": "Actor System ID (MAC address).",
             "items": {
               "format": "int32",
               "minimum": 0,
@@ -3371,6 +3437,7 @@
             "type": "integer"
           },
           "aggregate": {
+            "description": "Port aggregate name.",
             "type": "string"
           },
           "min_links": {
@@ -3384,6 +3451,7 @@
             "type": "boolean"
           },
           "ports": {
+            "description": "Member ports.",
             "items": {
               "$ref": "#/components/schemas/LacpPortStatus"
             },
@@ -3432,23 +3500,28 @@
             ]
           },
           "mode": {
-            "$ref": "#/components/schemas/PortAggregateMode"
+            "$ref": "#/components/schemas/PortAggregateMode",
+            "description": "Aggregation mode."
           },
           "mtu": {
+            "description": "Configured MTU in bytes.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "name": {
+            "description": "Name of the aggregate.",
             "type": "string"
           },
           "subinterfaces": {
+            "description": "Subinterfaces (VLAN-tagged).",
             "items": {
               "$ref": "#/components/schemas/SubinterfaceStatus"
             },
             "type": "array"
           },
           "switching_profile": {
+            "description": "Switching profile applied, if any.",
             "type": [
               "string",
               "null"
@@ -3517,12 +3590,14 @@
         "description": "One prefix's full candidate list, ordered best (winner) to worst by\nsource preference.",
         "properties": {
           "candidates": {
+            "description": "All candidate routes for the prefix.",
             "items": {
               "$ref": "#/components/schemas/RouteEntry"
             },
             "type": "array"
           },
           "prefix": {
+            "description": "The destination prefix.",
             "type": "string"
           }
         },
@@ -3657,7 +3732,8 @@
         "description": "The S-BFD reflector, for `show bfd reflector`.",
         "properties": {
           "discarded": {
-            "$ref": "#/components/schemas/ReflectorDiscards"
+            "$ref": "#/components/schemas/ReflectorDiscards",
+            "description": "Packets the S-BFD reflector discarded, by cause."
           },
           "discriminators": {
             "description": "The discriminators answered for, as 32-bit values.",
@@ -3756,7 +3832,8 @@
             "type": "array"
           },
           "source": {
-            "$ref": "#/components/schemas/RouteSourceKind"
+            "$ref": "#/components/schemas/RouteSourceKind",
+            "description": "Protocol that produced the route."
           }
         },
         "required": [
@@ -3945,6 +4022,7 @@
         "description": "A single named/keyed section (e.g. one BGP instance) that changed between\ntwo configs, and the specific fields within it that did.",
         "properties": {
           "fields": {
+            "description": "Changed fields.",
             "items": {
               "$ref": "#/components/schemas/FieldDiff"
             },
@@ -3959,7 +4037,8 @@
             "type": "string"
           },
           "status": {
-            "$ref": "#/components/schemas/DiffStatus"
+            "$ref": "#/components/schemas/DiffStatus",
+            "description": "Whether the object was added, removed or modified."
           },
           "subsections": {
             "description": "Nested sections one level deeper (e.g. a BGP instance's peer-groups\nand peers). Empty for a section with no nested collections.",
@@ -3989,24 +4068,29 @@
             ]
           },
           "interface": {
+            "description": "Egress interface, required for single-hop sessions on link-local addresses.",
             "type": [
               "string",
               "null"
             ]
           },
           "local": {
+            "description": "Local source address, if pinned.",
             "type": [
               "string",
               "null"
             ]
           },
           "multihop": {
+            "description": "Whether this is a multihop session (RFC 5883) rather than single-hop (RFC 5881).",
             "type": "boolean"
           },
           "peer": {
+            "description": "Remote system's address.",
             "type": "string"
           },
           "table": {
+            "description": "Routing table (VRF) the session runs in.",
             "type": "string"
           }
         },
@@ -4228,6 +4312,7 @@
         "description": "One tree of an MST region: instance 0 is the CIST.",
         "properties": {
           "bridge_id": {
+            "description": "This bridge's Bridge ID.",
             "type": "string"
           },
           "domains": {
@@ -4238,20 +4323,24 @@
             "type": "array"
           },
           "id": {
+            "description": "Instance ID.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "ports": {
+            "description": "Ports in the instance.",
             "items": {
               "$ref": "#/components/schemas/StpInstancePort"
             },
             "type": "array"
           },
           "root_id": {
+            "description": "Root Bridge ID.",
             "type": "string"
           },
           "root_path_cost": {
+            "description": "Cost of the path to the root.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -4264,7 +4353,8 @@
             ]
           },
           "topology": {
-            "$ref": "#/components/schemas/StpTopology"
+            "$ref": "#/components/schemas/StpTopology",
+            "description": "Topology-change state."
           },
           "vlans": {
             "description": "The VIDs mapped to this instance (`10,20-30`), derived from the\nbroadcast domains' tags.",
@@ -4294,17 +4384,21 @@
             "type": "boolean"
           },
           "cost": {
+            "description": "Port path cost.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "counters": {
-            "$ref": "#/components/schemas/StpPortCounters"
+            "$ref": "#/components/schemas/StpPortCounters",
+            "description": "BPDU counters."
           },
           "designated_bridge": {
+            "description": "Designated Bridge ID on the segment.",
             "type": "string"
           },
           "designated_port": {
+            "description": "Designated Port ID on the segment.",
             "type": "string"
           },
           "edge": {
@@ -4316,6 +4410,7 @@
             "type": "boolean"
           },
           "name": {
+            "description": "Port name.",
             "type": "string"
           },
           "point_to_point": {
@@ -4323,12 +4418,14 @@
             "type": "boolean"
           },
           "priority": {
+            "description": "Port priority.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "role": {
-            "$ref": "#/components/schemas/StpRole"
+            "$ref": "#/components/schemas/StpRole",
+            "description": "Port role."
           },
           "state": {
             "$ref": "#/components/schemas/StpState",
@@ -4372,14 +4469,17 @@
             "type": "array"
           },
           "max_hops": {
+            "description": "MST `MaxHops`.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "region_name": {
+            "description": "MST configuration name (IEEE 802.1Q section 13.8).",
             "type": "string"
           },
           "revision": {
+            "description": "MST revision level.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -4404,21 +4504,25 @@
             "type": "integer"
           },
           "in_config_bpdu": {
+            "description": "Configuration BPDUs received.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "in_mst_bpdu": {
+            "description": "MST BPDUs received.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "in_rstp_bpdu": {
+            "description": "RST BPDUs received.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "in_tcn_bpdu": {
+            "description": "TCN BPDUs received.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4430,21 +4534,25 @@
             "type": "integer"
           },
           "out_config_bpdu": {
+            "description": "Configuration BPDUs sent.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "out_mst_bpdu": {
+            "description": "MST BPDUs sent.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "out_rstp_bpdu": {
+            "description": "RST BPDUs sent.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "out_tcn_bpdu": {
+            "description": "TCN BPDUs sent.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4489,6 +4597,7 @@
         "description": "One spanning-tree port. Bridge and port ids are display strings\n(`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.",
         "properties": {
           "bpdu_filter": {
+            "description": "BPDU filter is enabled.",
             "type": "boolean"
           },
           "bpdu_guard": {
@@ -4502,13 +4611,15 @@
             "type": "integer"
           },
           "counters": {
-            "$ref": "#/components/schemas/StpPortCounters"
+            "$ref": "#/components/schemas/StpPortCounters",
+            "description": "BPDU counters."
           },
           "designated_bridge": {
             "description": "The designated bridge/port on this port's segment.",
             "type": "string"
           },
           "designated_port": {
+            "description": "Designated Port ID on the segment.",
             "type": "string"
           },
           "edge": {
@@ -4529,6 +4640,7 @@
             ]
           },
           "loop_guard": {
+            "description": "Loop guard is enabled.",
             "type": "boolean"
           },
           "loop_inconsistent": {
@@ -4536,6 +4648,7 @@
             "type": "boolean"
           },
           "name": {
+            "description": "Port name.",
             "type": "string"
           },
           "point_to_point": {
@@ -4543,17 +4656,21 @@
             "type": "boolean"
           },
           "priority": {
+            "description": "Port priority (IEEE 802.1D section 17.3.2).",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "restricted_tcn": {
+            "description": "Restricted TCN is enabled (IEEE 802.1Q section 13.25).",
             "type": "boolean"
           },
           "role": {
-            "$ref": "#/components/schemas/StpRole"
+            "$ref": "#/components/schemas/StpRole",
+            "description": "Port role."
           },
           "root_guard": {
+            "description": "Root guard is enabled.",
             "type": "boolean"
           },
           "root_inconsistent": {
@@ -4561,7 +4678,8 @@
             "type": "boolean"
           },
           "state": {
-            "$ref": "#/components/schemas/StpState"
+            "$ref": "#/components/schemas/StpState",
+            "description": "Port state."
           }
         },
         "required": [
@@ -4707,28 +4825,34 @@
         "description": "`show spanning-tree`. `enabled: false` (mode neither `rstp` nor `mstp`)\nleaves the rest at its default.\n\nFields are only ever appended.",
         "properties": {
           "bridge_id": {
+            "description": "This bridge's Bridge ID.",
             "type": "string"
           },
           "enabled": {
+            "description": "Spanning tree is enabled.",
             "type": "boolean"
           },
           "forward_delay_secs": {
+            "description": "Forward Delay in seconds.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "hello_time_secs": {
+            "description": "Hello Time in seconds.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "max_age_secs": {
+            "description": "Max Age in seconds.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "mode": {
-            "$ref": "#/components/schemas/StpMode"
+            "$ref": "#/components/schemas/StpMode",
+            "description": "Spanning-tree mode."
           },
           "mst": {
             "oneOf": [
@@ -4742,6 +4866,7 @@
             ]
           },
           "ports": {
+            "description": "Ports in the instance.",
             "items": {
               "$ref": "#/components/schemas/StpPortInfo"
             },
@@ -4755,9 +4880,11 @@
             "type": "array"
           },
           "root_id": {
+            "description": "Root Bridge ID.",
             "type": "string"
           },
           "root_path_cost": {
+            "description": "Cost of the path to the root.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -4799,6 +4926,7 @@
         "description": "Topology changes of one tree (RFC 4318 `TopChanges`, `TimeSinceTopologyChange`).",
         "properties": {
           "count": {
+            "description": "Topology changes seen.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4806,7 +4934,8 @@
           "last_cause": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/StpTcCause"
+                "$ref": "#/components/schemas/StpTcCause",
+                "description": "Cause of the most recent topology change."
               },
               {
                 "type": "null"
@@ -4887,6 +5016,7 @@
         "description": "The wire twin of `schema::Subinterface` — one VLAN-scoped L3 attachment\npoint on a physical interface, `tag == 0` for the untagged/native case.",
         "properties": {
           "addresses": {
+            "description": "Configured addresses.",
             "items": {
               "$ref": "#/components/schemas/InterfaceAddress"
             },
@@ -4900,12 +5030,14 @@
             ]
           },
           "routing_table": {
+            "description": "Routing table (VRF) the object is enslaved to, if any.",
             "type": [
               "string",
               "null"
             ]
           },
           "tag": {
+            "description": "802.1Q VLAN ID.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -5097,7 +5229,8 @@
         "description": "A named transaction's current state, returned after `OpenTransaction`,\n`ApplyOp`, and `GetTransaction`.",
         "properties": {
           "config": {
-            "$ref": "#/components/schemas/Config"
+            "$ref": "#/components/schemas/Config",
+            "description": "The config itself."
           },
           "dirty": {
             "description": "True once any `ApplyOp` has succeeded since the transaction was\n(re)created.",
@@ -5110,6 +5243,7 @@
             "type": "integer"
           },
           "name": {
+            "description": "Name of the config.",
             "type": "string"
           },
           "resumed": {

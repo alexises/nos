@@ -43,10 +43,13 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "id",
 ];
 
+/// Why a config path could not be resolved.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PathError {
+    /// No node matches the path; carries the offending word.
     #[error("no such config path: /{0}")]
     NotFound(String),
+    /// The path or value is malformed; carries the reason.
     #[error("{0}")]
     Invalid(String),
 }

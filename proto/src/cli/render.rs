@@ -195,6 +195,7 @@ fn join(head: String, words: Vec<String>) -> String {
         .join(" ")
 }
 
+/// Strips any number of `Option` layers from `kind`.
 pub fn unwrap_option(kind: Kind) -> Kind {
     match kind {
         Kind::Option(inner) => unwrap_option(inner()),

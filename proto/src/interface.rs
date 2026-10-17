@@ -15,9 +15,13 @@ use crate::schema::InterfaceAddress;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterfaceStatus {
+    /// Interface name.
     pub name: String,
+    /// Configured addresses.
     pub addresses: Vec<InterfaceAddress>,
+    /// Routing table (VRF) the object is enslaved to, if any.
     pub routing_table: Option<String>,
+    /// Switching profile applied, if any.
     pub switching_profile: Option<String>,
     /// If set, names the `PortAggregate` this interface is a static bonded
     /// member of — same shape/role as `switching_profile`.
@@ -27,6 +31,7 @@ pub struct InterfaceStatus {
     /// uniformly to every one of `subinterfaces` (MTU is a physical-link
     /// property, inherited by VLAN sub-links, not set per tag).
     pub mtu: u32,
+    /// Subinterfaces (VLAN-tagged).
     pub subinterfaces: Vec<SubinterfaceStatus>,
     /// This interface's kernel-assigned IPv6 link-local address (`fe80::/10`
     /// scope), if the Linux driver has observed one — `None` until the
@@ -46,8 +51,11 @@ pub struct InterfaceStatus {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubinterfaceStatus {
+    /// 802.1Q VLAN ID.
     pub tag: u16,
+    /// Configured addresses.
     pub addresses: Vec<InterfaceAddress>,
+    /// Routing table (VRF) the object is enslaved to, if any.
     pub routing_table: Option<String>,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this subinterface's own kernel device.
@@ -61,8 +69,11 @@ pub struct SubinterfaceStatus {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastDomainStatus {
+    /// Name of the interface.
     pub name: String,
+    /// Configured addresses.
     pub addresses: Vec<InterfaceAddress>,
+    /// Routing table (VRF) the object is enslaved to, if any.
     pub routing_table: Option<String>,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this domain's own bridge device.
@@ -85,10 +96,15 @@ pub struct BroadcastDomainStatus {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortAggregateStatus {
+    /// Name of the aggregate.
     pub name: String,
+    /// Aggregation mode.
     pub mode: crate::schema::PortAggregateMode,
+    /// Switching profile applied, if any.
     pub switching_profile: Option<String>,
+    /// Configured MTU in bytes.
     pub mtu: u32,
+    /// Subinterfaces (VLAN-tagged).
     pub subinterfaces: Vec<SubinterfaceStatus>,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this bond's own kernel device.
@@ -114,7 +130,9 @@ pub struct PortAggregateStatus {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LacpAggregateMembers {
+    /// Name of the port aggregate.
     pub aggregate: String,
+    /// Member ports negotiated active by LACP.
     pub active_members: Vec<String>,
 }
 
@@ -126,7 +144,9 @@ pub struct LacpAggregateMembers {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BfdAggregateMembers {
+    /// Name of the port aggregate.
     pub aggregate: String,
+    /// Member ports whose BFD session is up.
     pub up_members: Vec<String>,
 }
 
@@ -134,7 +154,9 @@ pub struct BfdAggregateMembers {
 /// watcher (`InterfaceRequest::SubscribeLinks`). Keyed by kernel device name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkState {
+    /// Interface name.
     pub name: String,
+    /// Kernel interface index.
     pub ifindex: u32,
     /// `IFF_UP`: the link is administratively up.
     pub admin_up: bool,
@@ -172,13 +194,22 @@ pub enum InterfaceRequest {
     /// One-shot: every interface currently configured.
     GetInterfaces,
     /// One-shot: a single named interface.
-    GetInterface { name: String },
+    GetInterface {
+        /// Name of the object.
+        name: String,
+    },
     /// One-shot: a single named broadcast domain.
-    GetBroadcastDomain { name: String },
+    GetBroadcastDomain {
+        /// Name of the object.
+        name: String,
+    },
     /// One-shot: every port aggregate currently configured.
     GetPortAggregates,
     /// One-shot: a single named port aggregate.
-    GetPortAggregate { name: String },
+    GetPortAggregate {
+        /// Name of the object.
+        name: String,
+    },
     /// Fire-and-forget, sent by `nos-lacpd`: replaces the given aggregate's
     /// active-member set and applies it to the kernel bond immediately
     /// (not deferred to the periodic re-apply tick), gating which of its
@@ -198,11 +229,21 @@ pub enum InterfaceRequest {
     SetStpPortStates(Vec<StpPortAssignment>),
     /// Fire-and-forget, sent by `nos-stpd`: flushes the dynamic FDB entries
     /// learned on one bridge port (topology change). No reply.
-    FlushFdb { port: String, domain: String },
+    FlushFdb {
+        /// Port name.
+        port: String,
+        /// Broadcast domain name.
+        domain: String,
+    },
     /// Fire-and-forget, sent by `nos-stpd` (#320): `port` (an `Interface` or
     /// `PortAggregate` name) is err-disabled by BPDU guard. While set, the
     /// link is administratively down and no resync brings it back up.
-    SetErrDisabled { port: String, disabled: bool },
+    SetErrDisabled {
+        /// Port name.
+        port: String,
+        /// `true` puts the port into err-disabled, `false` releases it.
+        disabled: bool,
+    },
 }
 
 /// The kernel state `nos-stpd` wants a bridge port in.
@@ -212,6 +253,7 @@ pub enum StpPortState {
     Blocking,
     /// Learns, does not forward.
     Learning,
+    /// The port forwards traffic.
     Forwarding,
 }
 
@@ -219,8 +261,11 @@ pub enum StpPortState {
 /// `PortAggregate` name) in the broadcast `domain` it is a member of.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpPortAssignment {
+    /// Port name.
     pub port: String,
+    /// Broadcast domain name.
     pub domain: String,
+    /// STP port state.
     pub state: StpPortState,
 }
 
@@ -244,13 +289,18 @@ pub enum InterfaceEvent {
     /// consumer's whole link table. `observed == false` means this driver
     /// does not watch the kernel (noop): consumers must not gate on it.
     LinkSnapshot {
+        /// Whether the driver watches the kernel at all.
         observed: bool,
+        /// Current link table.
         links: Vec<LinkState>,
     },
     /// One link appeared or changed state.
     LinkChanged(LinkState),
     /// One link disappeared.
-    LinkRemoved { name: String },
+    LinkRemoved {
+        /// Name of the object.
+        name: String,
+    },
 }
 
 #[cfg(test)]

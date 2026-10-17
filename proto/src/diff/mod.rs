@@ -11,8 +11,11 @@ use crate::schema::Config;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffStatus {
+    /// Present only in the new config.
     Added,
+    /// Present only in the old config.
     Removed,
+    /// Present in both with different content.
     Modified,
 }
 
@@ -22,6 +25,7 @@ pub enum DiffStatus {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldDiff {
+    /// Human-readable name of the object.
     pub label: String,
     /// `None` only when the field's owning section is newly `Added`.
     pub old: Option<String>,
@@ -44,7 +48,9 @@ pub struct SectionDiff {
     /// structured, unlike `header`, so a machine consumer never has to parse
     /// display text to find out which item changed.
     pub name: String,
+    /// Whether the object was added, removed or modified.
     pub status: DiffStatus,
+    /// Changed fields.
     pub fields: Vec<FieldDiff>,
     /// Nested sections one level deeper (e.g. a BGP instance's peer-groups
     /// and peers). Empty for a section with no nested collections.
@@ -58,35 +64,54 @@ pub struct SectionDiff {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigDiff {
+    /// Hostname change, if any.
     pub hostname: Option<FieldDiff>,
+    /// BGP instance changes.
     pub bgp_instances: Vec<SectionDiff>,
+    /// Routing table changes.
     pub routing_tables: Vec<SectionDiff>,
+    /// OSPF instance changes.
     pub ospf_instances: Vec<SectionDiff>,
+    /// `OSPFv3` instance changes.
     pub ospfv3_instances: Vec<SectionDiff>,
+    /// Static routing instance changes.
     pub static_routing_instances: Vec<SectionDiff>,
+    /// Interface changes.
     pub interfaces: Vec<SectionDiff>,
+    /// Policy definition changes.
     pub policy_definitions: Vec<SectionDiff>,
+    /// Community alias changes.
     pub community_aliases: Vec<SectionDiff>,
+    /// Community group changes.
     pub community_groups: Vec<SectionDiff>,
+    /// AS-path list changes.
     pub as_path_lists: Vec<SectionDiff>,
+    /// Prefix list changes.
     pub prefix_lists: Vec<SectionDiff>,
+    /// Broadcast domain changes.
     pub broadcast_domains: Vec<SectionDiff>,
+    /// Switching profile changes.
     pub switching_profiles: Vec<SectionDiff>,
+    /// Port aggregate changes.
     pub port_aggregates: Vec<SectionDiff>,
     /// Field-level: `Config.lldp` is one singleton section, not a keyed list.
     pub lldp: Vec<FieldDiff>,
+    /// Local user changes.
     pub users: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.logging` is one singleton section.
     pub logging: Vec<FieldDiff>,
+    /// BFD profile changes.
     pub bfd_profiles: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.sbfd_reflector` is one singleton section.
     pub sbfd_reflector: Vec<FieldDiff>,
     /// Field-level, like `lldp`: `Config.spanning_tree` is one singleton section.
     pub spanning_tree: Vec<FieldDiff>,
+    /// STP port profile changes.
     pub stp_port_profiles: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
+    /// True when nothing changed.
     pub fn is_empty(&self) -> bool {
         self.hostname.is_none()
             && self.bgp_instances.is_empty()
@@ -237,27 +262,49 @@ impl ConfigDiff {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffScope {
+    /// The hostname.
     Hostname,
+    /// BGP instances.
     BgpInstances,
+    /// Routing tables.
     RoutingTables,
+    /// Static routing instances.
     StaticRoutingInstances,
+    /// Interfaces.
     Interfaces,
+    /// Policy definitions.
     PolicyDefinitions,
+    /// Community aliases.
     CommunityAliases,
+    /// Community groups.
     CommunityGroups,
+    /// AS-path lists.
     AsPathLists,
+    /// Prefix lists.
     PrefixLists,
+    /// Broadcast domains.
     BroadcastDomains,
+    /// Switching profiles.
     SwitchingProfiles,
+    /// OSPF instances.
     OspfInstances,
+    /// `OSPFv3` instances.
     Ospfv3Instances,
+    /// Port aggregates.
     PortAggregates,
+    /// The LLDP section.
     Lldp,
+    /// Local users.
     Users,
+    /// The logging section.
     Logging,
+    /// BFD profiles.
     BfdProfiles,
+    /// The S-BFD reflector section.
     SbfdReflector,
+    /// The spanning-tree section.
     SpanningTree,
+    /// STP port profiles.
     StpPortProfiles,
 }
 

@@ -11,11 +11,17 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LacpReceiveState {
+    /// `INITIALIZE` (IEEE 802.1AX section 6.4.12).
     Initialize,
+    /// `PORT_DISABLED`.
     PortDisabled,
+    /// `LACP_DISABLED`.
     LacpDisabled,
+    /// `EXPIRED`.
     Expired,
+    /// `DEFAULTED`.
     Defaulted,
+    /// `CURRENT`.
     Current,
 }
 
@@ -25,10 +31,15 @@ pub enum LacpReceiveState {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LacpMuxState {
+    /// `DETACHED` (IEEE 802.1AX section 6.4.15).
     Detached,
+    /// `WAITING`.
     Waiting,
+    /// `ATTACHED`.
     Attached,
+    /// `COLLECTING`.
     Collecting,
+    /// `DISTRIBUTING`.
     Distributing,
 }
 
@@ -37,20 +48,28 @@ pub enum LacpMuxState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // wire status flags, one per fact
 pub struct LacpPortStatus {
+    /// Member port name.
     pub interface: String,
+    /// Actor Port number (IEEE 802.1AX section 6.4.2).
     pub actor_port_number: u16,
+    /// Receive machine state.
     pub receive_state: LacpReceiveState,
+    /// Mux machine state.
     pub mux_state: LacpMuxState,
     /// Known only once a valid LACPDU has been received at least once
     /// (i.e. `receive_state` has reached `Current` at some point).
     pub partner_system_id: Option<[u8; 6]>,
+    /// Partner Operational Key, once heard.
     pub partner_key: Option<u16>,
+    /// Partner Port number, once heard.
     pub partner_port_number: Option<u16>,
     /// This port's advertised Actor Port Priority.
     pub actor_port_priority: u16,
     /// This port's configured `lacp-mode` (`Actor_State.LACP_Activity`).
     pub mode: crate::schema::LacpMode,
+    /// Partner System Priority, once heard.
     pub partner_system_priority: Option<u16>,
+    /// Partner Port Priority, once heard.
     pub partner_port_priority: Option<u16>,
     /// This port's Selection Logic outcome (`selection.rs`) — `true` iff it
     /// agrees with the aggregate's other `Current` ports on partner
@@ -74,8 +93,11 @@ pub struct LacpPortStatus {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortAggregateLacpSummary {
+    /// Port aggregate name.
     pub aggregate: String,
+    /// Actor System ID (MAC address).
     pub actor_system_id: [u8; 6],
+    /// Actor Operational Key.
     pub actor_key: u16,
     /// The aggregate's advertised Actor System Priority.
     pub actor_system_priority: u16,
@@ -86,6 +108,7 @@ pub struct PortAggregateLacpSummary {
     /// Whether enough ports are Distributing to meet `min_links`; `false`
     /// means the bond was emptied even though ports may be negotiating.
     pub min_links_met: bool,
+    /// Member ports.
     pub ports: Vec<LacpPortStatus>,
 }
 
@@ -103,5 +126,6 @@ pub enum LacpRequest {
 /// Messages sent from `nos-lacpd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LacpEvent {
+    /// Reply with one entry per LACP aggregate.
     Summary(Vec<PortAggregateLacpSummary>),
 }
