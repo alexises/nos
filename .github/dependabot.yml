@@ -4,3 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # Keeps the SHA-pinned actions (and their `# vX.Y.Z` comments) fresh (#412).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
