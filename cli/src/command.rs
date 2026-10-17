@@ -39,6 +39,8 @@ pub enum Command {
     },
     /// `show lldp statistics` — every LLDP-enabled interface's counters.
     ShowLldpStatistics,
+    /// `show version` — local, valid in any mode.
+    ShowVersion,
     /// `show spanning-tree` — the bridge and every port's role/state.
     ShowSpanningTree,
     /// `show spanning-tree instance <id>` — one MST instance (0: the CIST).
@@ -316,6 +318,11 @@ mod tests {
             Command::parse("show lldp"),
             Command::Unknown("show lldp".to_string())
         );
+    }
+
+    #[test]
+    fn show_version() {
+        assert_eq!(Command::parse("show version"), Command::ShowVersion);
     }
 
     #[test]

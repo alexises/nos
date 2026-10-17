@@ -17,6 +17,9 @@ COPY . .
 # "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
 # docs/architecture/development.md's "Memory profiling" note.
 ARG CARGO_FEATURES=
+# Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
+ARG NOS_BUILD_REV=unknown
+ENV NOS_BUILD_REV=$NOS_BUILD_REV
 RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime

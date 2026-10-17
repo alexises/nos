@@ -222,6 +222,17 @@ fn bgp_instance(name: &str, asn: u32) -> Value {
 }
 
 #[tokio::test]
+async fn version_reports_build_info() {
+    let f = fixture(vec![]).await;
+    let (s, v) = send(&f.app, Method::GET, "/v1/version", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        v,
+        json!({"version": nos_proto::version::VERSION, "revision": nos_proto::version::REVISION})
+    );
+}
+
+#[tokio::test]
 async fn transaction_lifecycle_over_the_config_tree() {
     let f = fixture(vec![]).await;
     let app = &f.app;

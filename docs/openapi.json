@@ -5459,6 +5459,24 @@
         },
         "type": "array"
       },
+      "VersionInfo": {
+        "description": "What `show version` / `GET /v1/version` report.",
+        "properties": {
+          "revision": {
+            "description": "Short git revision, or `unknown`.",
+            "type": "string"
+          },
+          "version": {
+            "description": "`CARGO_PKG_VERSION`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "revision"
+        ],
+        "type": "object"
+      },
       "VlanTag": {
         "description": "A dot1q tag, or the absence of one. `Dot1q`'s value is restricted to\n`1..=4094` — 802.1Q reserves 0 and 4095.",
         "oneOf": [
@@ -51191,6 +51209,27 @@
         "summary": "Set: The `password` setting.",
         "tags": [
           "transactions"
+        ]
+      }
+    },
+    "/v1/version": {
+      "get": {
+        "operationId": "version",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionInfo"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Build version and revision of nos-restd",
+        "tags": [
+          "show"
         ]
       }
     }

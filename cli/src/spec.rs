@@ -433,6 +433,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowLldpNeighbors { detail: true }),
+    cmd!(["show" "version"],
+        Doc::Local {
+            summary: "Show the nos version and build revision.",
+            detail: "Prints the compile-time version and the short git revision this nos \
+                     binary was built from (unknown outside the Docker build). Local to the \
+                     shell: it does not contact any daemon.",
+        },
+        Always,
+        Command::ShowVersion),
     cmd!(["show" "lldp" "statistics"],
         Doc::Local {
             summary: "Show every LLDP-enabled interface's counters.",

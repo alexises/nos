@@ -16,6 +16,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show lacp` / `show lacp <name>` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
 | `show lldp neighbors` / `show lldp neighbors detail` | `GET /v1/lldp/neighbors` |
 | `show lldp statistics` | `GET /v1/lldp/statistics` |
+| `show version` | `GET /v1/version` |
 | `show spanning-tree` / `... detail` | `GET /v1/spanning-tree` (always carries topology and counters) |
 | `show spanning-tree instance <id> [detail]` / `domain <bd> [detail]` | `GET /v1/spanning-tree/instance/{id}` / `.../domain/{name}` |
 | (counters as a flat table) | `GET /v1/spanning-tree/counters` |
