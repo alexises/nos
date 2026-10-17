@@ -14,11 +14,17 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpNeighbor {
+    /// Local port the neighbor was heard on.
     pub local_interface: String,
+    /// Chassis ID TLV (IEEE 802.1AB section 8.5.2).
     pub chassis_id: String,
+    /// Port ID TLV (IEEE 802.1AB section 8.5.3).
     pub port_id: String,
+    /// Port Description TLV, if sent.
     pub port_description: Option<String>,
+    /// System Name TLV, if sent.
     pub system_name: Option<String>,
+    /// System Description TLV, if sent.
     pub system_description: Option<String>,
     /// The capabilities the neighbor has *enabled*, by name (e.g. `router`).
     pub capabilities: Vec<String>,
@@ -42,7 +48,9 @@ pub struct LldpNeighbor {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpVlanName {
+    /// VLAN ID.
     pub id: u16,
+    /// VLAN name.
     pub name: String,
 }
 
@@ -63,7 +71,9 @@ pub struct LldpLinkAggregation {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpMacPhy {
+    /// Auto-negotiation is supported (IEEE 802.3 MAC/PHY TLV).
     pub autoneg_supported: bool,
+    /// Auto-negotiation is enabled.
     pub autoneg_enabled: bool,
     /// PMD auto-negotiation advertised capability bits (IANA-MAU-MIB
     /// `IANAifMauAutoNegCapBits`).
@@ -79,6 +89,7 @@ pub struct LldpMacPhy {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpLinkStats {
+    /// Local interface name.
     pub interface: String,
     /// `statsFramesOutTotal`: LLDPDUs sent (periodic, fast-start, shutdown).
     pub frames_out: u64,
@@ -120,6 +131,8 @@ pub enum LldpRequest {
 /// Messages sent from `nos-lldpd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LldpEvent {
+    /// Reply with the known neighbors.
     Neighbors(Vec<LldpNeighbor>),
+    /// Reply with per-link counters.
     Statistics(Vec<LldpLinkStats>),
 }

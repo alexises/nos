@@ -17,7 +17,9 @@ pub mod render;
 /// A generic config verb. `edit` never reaches a sugar function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
+    /// Sets a value.
     Set,
+    /// Deletes a value.
     Delete,
 }
 
@@ -42,8 +44,11 @@ pub enum SugarOut {
 /// through `with` instead of the generic value rules.
 #[derive(Debug)]
 pub struct Sugar {
+    /// The word the operator types.
     pub word: &'static str,
+    /// Help topic of this word.
     pub topic: Topic,
+    /// Builds the edit this sugar word stands for.
     pub with: SugarFn,
 }
 
@@ -69,10 +74,12 @@ pub struct Field {
     pub words: Option<&'static str>,
     /// Further accepted spellings, never shown.
     pub aliases: &'static [&'static str],
+    /// Shorthand words attached to this node.
     pub sugar: &'static [Sugar],
     /// Key-token rewrites for a list field, `"{a}.{b} => {a} x {b}"`: a key
     /// shaped like the left side is read as the words on the right.
     pub templates: &'static [&'static str],
+    /// Value kind of the field (lazily built to allow recursion).
     pub kind: fn() -> Kind,
 }
 
@@ -80,14 +87,20 @@ pub struct Field {
 /// a struct value's starting point) — `None` for `#[cli(no_default)]`.
 #[derive(Debug)]
 pub struct Node {
+    /// The struct's fields.
     pub fields: &'static [Field],
+    /// Default value used when the field is omitted, if any.
     pub default: Option<fn() -> Value>,
 }
 
+/// What follows a variant's words in the config tree.
 #[derive(Debug)]
 pub enum Payload {
+    /// No payload.
     Unit,
+    /// A single wrapped value.
     Newtype(fn() -> Kind),
+    /// A struct payload.
     Struct(&'static [Field]),
 }
 
@@ -96,32 +109,47 @@ pub enum Payload {
 pub struct Variant {
     /// The serde variant name.
     pub name: &'static str,
+    /// CLI words naming the node; `None` means the Rust name.
     pub words: Option<&'static str>,
+    /// Alternative words accepted for the node.
     pub aliases: &'static [&'static str],
     /// `#[default]` — what `delete` resets a non-optional field to.
     pub default: bool,
+    /// What the variant carries.
     pub payload: Payload,
 }
 
+/// The shape of a config value, as the CLI sees it.
 #[derive(Debug)]
 pub enum Kind {
+    /// A string.
     Str,
+    /// A boolean.
     Bool,
     /// An unsigned integer with this maximum.
     Uint(u64),
+    /// An IPv4 address.
     Ipv4,
+    /// An IPv4 or IPv6 address.
     IpAddr,
+    /// An IPv4 or IPv6 prefix.
     IpNet,
+    /// A fixed-size tuple of values.
     Tuple(&'static [fn() -> Kind]),
+    /// An optional value.
     Option(fn() -> Kind),
+    /// A list of values.
     List(fn() -> Kind),
+    /// A struct payload.
     Struct(&'static Node),
+    /// One of several variants.
     Enum(&'static [Variant]),
 }
 
 /// A schema type's place in the CLI tree. Implemented by `#[derive(Cli)]`
 /// for schema structs and enums, and below for the leaf types they use.
 pub trait CliValue {
+    /// Value kind of the field (lazily built to allow recursion).
     fn kind() -> Kind;
 }
 

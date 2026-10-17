@@ -12,15 +12,21 @@ use crate::schema::StpMode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StpRole {
+    /// Root port: best path toward the root bridge (IEEE 802.1D section 17.7).
     Root,
+    /// Designated port: forwards toward the leaves.
     Designated,
+    /// Alternate port: backup path to the root.
     Alternate,
+    /// Backup port: redundant path to a segment we are designated on.
     Backup,
+    /// Not participating in spanning tree.
     #[default]
     Disabled,
 }
 
 impl StpRole {
+    /// The name shown by `show spanning-tree`.
     pub fn as_str(self) -> &'static str {
         match self {
             StpRole::Root => "root",
@@ -37,13 +43,17 @@ impl StpRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StpState {
+    /// Discarding (IEEE 802.1D section 17.4).
     #[default]
     Discarding,
+    /// Learning MACs but not forwarding.
     Learning,
+    /// Forwarding.
     Forwarding,
 }
 
 impl StpState {
+    /// The name shown by `show spanning-tree`.
     pub fn as_str(self) -> &'static str {
         match self {
             StpState::Discarding => "discarding",
@@ -59,13 +69,21 @@ impl StpState {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpPortCounters {
+    /// Configuration BPDUs received.
     pub in_config_bpdu: u64,
+    /// TCN BPDUs received.
     pub in_tcn_bpdu: u64,
+    /// RST BPDUs received.
     pub in_rstp_bpdu: u64,
+    /// MST BPDUs received.
     pub in_mst_bpdu: u64,
+    /// Configuration BPDUs sent.
     pub out_config_bpdu: u64,
+    /// TCN BPDUs sent.
     pub out_tcn_bpdu: u64,
+    /// RST BPDUs sent.
     pub out_rstp_bpdu: u64,
+    /// MST BPDUs sent.
     pub out_mst_bpdu: u64,
     /// Times the port switched between 802.1D and RSTP.
     pub protocol_migration: u64,
@@ -94,11 +112,13 @@ pub enum StpTcCause {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpTopology {
+    /// Topology changes seen.
     pub count: u64,
     /// Seconds since the last change; `None` before the first.
     pub last_secs_ago: Option<u64>,
     /// The port the last change came in on, or started at.
     pub last_port: Option<String>,
+    /// Cause of the most recent topology change.
     pub last_cause: Option<StpTcCause>,
 }
 
@@ -111,14 +131,19 @@ pub struct StpTopology {
 )]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpPortInfo {
+    /// Port name.
     pub name: String,
+    /// Port role.
     pub role: StpRole,
+    /// Port state.
     pub state: StpState,
     /// Path cost this port adds to the root path.
     pub cost: u32,
+    /// Port priority (IEEE 802.1D section 17.3.2).
     pub priority: u8,
     /// The designated bridge/port on this port's segment.
     pub designated_bridge: String,
+    /// Designated Port ID on the segment.
     pub designated_port: String,
     /// `operEdge`: the port is an edge port right now.
     #[serde(default)]
@@ -126,12 +151,16 @@ pub struct StpPortInfo {
     /// The protections configured on the port (`stp-port-profile`, #320).
     #[serde(default)]
     pub bpdu_guard: bool,
+    /// BPDU filter is enabled.
     #[serde(default)]
     pub bpdu_filter: bool,
+    /// Root guard is enabled.
     #[serde(default)]
     pub root_guard: bool,
+    /// Loop guard is enabled.
     #[serde(default)]
     pub loop_guard: bool,
+    /// Restricted TCN is enabled (IEEE 802.1Q section 13.25).
     #[serde(default)]
     pub restricted_tcn: bool,
     /// Root guard holds the port in Discarding: a superior BPDU keeps arriving.
@@ -149,6 +178,7 @@ pub struct StpPortInfo {
     /// `operPointToPointMAC`.
     #[serde(default)]
     pub point_to_point: bool,
+    /// BPDU counters.
     #[serde(default)]
     pub counters: StpPortCounters,
 }
@@ -161,7 +191,9 @@ pub struct StpPortInfo {
 )]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpInstancePort {
+    /// Port name.
     pub name: String,
+    /// Port role.
     pub role: StpRole,
     /// The state the kernel is given for this tree's domains (a boundary
     /// port's is the CIST's).
@@ -175,9 +207,13 @@ pub struct StpInstancePort {
     /// Rapid-PVST+: the port talks 802.1D (PVST+) to its peer in this tree (#322).
     #[serde(default)]
     pub compat: bool,
+    /// Port path cost.
     pub cost: u32,
+    /// Port priority.
     pub priority: u8,
+    /// Designated Bridge ID on the segment.
     pub designated_bridge: String,
+    /// Designated Port ID on the segment.
     pub designated_port: String,
     /// `operEdge`.
     #[serde(default)]
@@ -185,6 +221,7 @@ pub struct StpInstancePort {
     /// `operPointToPointMAC`.
     #[serde(default)]
     pub point_to_point: bool,
+    /// BPDU counters.
     #[serde(default)]
     pub counters: StpPortCounters,
 }
@@ -193,18 +230,24 @@ pub struct StpInstancePort {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpInstance {
+    /// Instance ID.
     pub id: u16,
     /// The VIDs mapped to this instance (`10,20-30`), derived from the
     /// broadcast domains' tags.
     pub vlans: String,
     /// The broadcast domains running in this instance.
     pub domains: Vec<String>,
+    /// This bridge's Bridge ID.
     pub bridge_id: String,
+    /// Root Bridge ID.
     pub root_id: String,
+    /// Cost of the path to the root.
     pub root_path_cost: u32,
     /// `None` when this bridge is the root of the instance.
     pub root_port: Option<String>,
+    /// Ports in the instance.
     pub ports: Vec<StpInstancePort>,
+    /// Topology-change state.
     #[serde(default)]
     pub topology: StpTopology,
 }
@@ -213,10 +256,13 @@ pub struct StpInstance {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpMst {
+    /// MST configuration name (IEEE 802.1Q section 13.8).
     pub region_name: String,
+    /// MST revision level.
     pub revision: u16,
     /// The MST configuration digest, 32 hex digits.
     pub digest: String,
+    /// MST `MaxHops`.
     pub max_hops: u8,
     /// Instance 0 (the CIST) first, then every configured MSTI.
     pub instances: Vec<StpInstance>,
@@ -229,16 +275,25 @@ pub struct StpMst {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpSummary {
+    /// Spanning tree is enabled.
     pub enabled: bool,
+    /// Spanning-tree mode.
     pub mode: StpMode,
+    /// This bridge's Bridge ID.
     pub bridge_id: String,
+    /// Root Bridge ID.
     pub root_id: String,
+    /// Cost of the path to the root.
     pub root_path_cost: u32,
     /// `None` when this bridge is the root.
     pub root_port: Option<String>,
+    /// Hello Time in seconds.
     pub hello_time_secs: u8,
+    /// Max Age in seconds.
     pub max_age_secs: u8,
+    /// Forward Delay in seconds.
     pub forward_delay_secs: u8,
+    /// Ports in the instance.
     pub ports: Vec<StpPortInfo>,
     /// The MST region and its trees; `None` outside `mode mstp` (#321).
     #[serde(default)]
@@ -276,14 +331,17 @@ impl Default for StpSummary {
 /// the variant index).
 #[derive(Debug, Serialize, Deserialize)]
 pub enum StpRequest {
+    /// Query the bridge summary.
     GetSummary,
     /// 802.1Q `mcheck`: re-probe for RSTP on one port, or on all (`None`).
     Mcheck {
+        /// Restrict to this interface; `None` means all.
         interface: Option<String>,
     },
     /// `clear spanning-tree err-disabled <port>` (#320): bring a port that
     /// BPDU guard shut down back up.
     ClearErrDisabled {
+        /// Interface to act on.
         interface: String,
     },
 }
@@ -295,13 +353,16 @@ pub enum StpRequest {
 )]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum StpEvent {
+    /// Reply to `GetSummary`.
     Summary(StpSummary),
     /// How many ports the `Mcheck` matched (0: no such interface).
     Mcheck {
+        /// Number of ports whose counters were cleared.
         ports: u32,
     },
     /// Whether the `ClearErrDisabled` port was err-disabled.
     ErrDisabledCleared {
+        /// Whether any counters were cleared.
         cleared: bool,
     },
 }

@@ -17,9 +17,13 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BgpSessionState {
+    /// `Idle` (RFC 4271 section 8.2.2).
     Idle,
+    /// `OpenSent`: our OPEN is sent, waiting for the peer's.
     OpenSent,
+    /// `OpenConfirm`: OPENs exchanged, waiting for a KEEPALIVE.
     OpenConfirm,
+    /// `Established`: UPDATEs may flow.
     Established,
 }
 
@@ -27,21 +31,27 @@ pub enum BgpSessionState {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerSummary {
+    /// The peer's address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub remote_address: IpAddr,
+    /// Name of the peer group the peer belongs to.
     pub peer_group: String,
     /// The peer (or its peer-group) is administratively shut.
     pub shutdown: bool,
     /// Known only once negotiated (i.e. at least `OpenConfirm`).
     pub remote_as: Option<u32>,
+    /// BGP Identifier from the peer's OPEN (RFC 4271 section 4.2), once received.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub remote_bgp_id: Option<Ipv4Addr>,
+    /// Session state.
     pub state: BgpSessionState,
     /// Seconds since the session reached `Established`. `None` unless
     /// `state == Established` — computed server-side from an `Instant`,
     /// which isn't itself meaningful to serialize across processes.
     pub uptime_secs: Option<u64>,
+    /// Hold time agreed with the peer, in seconds (RFC 4271 section 4.2).
     pub negotiated_hold_time: Option<u16>,
+    /// Keepalive interval in effect, in seconds.
     pub negotiated_keepalive: Option<u16>,
     /// RFC 5925 TCP-AO live per-connection state, from
     /// `getsockopt(TCP_AO_INFO)` — `Some` only for an `Established` session
@@ -54,9 +64,13 @@ pub struct PeerSummary {
     /// `RNextKeyID`, RFC 5925 §7.5.2); `ao_rnext_key` is the `RecvID` of the key
     /// *this router* asks the peer to send with, not what the peer asked for.
     pub ao_current_key: Option<u8>,
+    /// TCP-AO `RNextKeyID` the peer asks us to send (RFC 5925 section 3.1).
     pub ao_rnext_key: Option<u8>,
+    /// Segments that passed TCP-AO verification.
     pub ao_packets_good: Option<u64>,
+    /// Segments that failed TCP-AO verification.
     pub ao_packets_bad: Option<u64>,
+    /// Segments dropped because no matching TCP-AO key was found.
     pub ao_packets_key_not_found: Option<u64>,
     /// Held down by an RFC 4486 maximum-prefix trip: no session is opened or
     /// accepted until `ClearPeer`, a shut/no-shut, or the restart interval.
@@ -93,10 +107,14 @@ pub struct GrSummary {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvpnRouteSummary {
+    /// The advertising peer.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub peer: IpAddr,
+    /// EVPN route type (RFC 7432 section 7).
     pub route_type: u8,
+    /// The NLRI rendered as text.
     pub route: String,
+    /// The route's BGP next hop.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub next_hop: IpAddr,
     /// Extended communities rendered as `RT:65000:10000`, `encap:8`, ...
@@ -120,17 +138,24 @@ pub enum RpkiSessionState {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RpkiCacheStatus {
+    /// The cache's address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub address: IpAddr,
+    /// The cache's RTR TCP port (RFC 8210).
     pub port: u16,
+    /// Cache preference; the lowest is used first.
     pub preference: u8,
+    /// Session state.
     pub state: RpkiSessionState,
     /// This cache's VRPs are the ones validating routes right now.
     pub active: bool,
     /// RTR protocol version negotiated (0 or 1).
     pub version: Option<u8>,
+    /// RTR Session ID (RFC 8210 section 5.1), once received.
     pub session_id: Option<u16>,
+    /// Latest RTR serial number applied.
     pub serial: Option<u32>,
+    /// Validated ROA Payloads currently held from this cache.
     pub vrp_count: usize,
     /// Seconds since the last End of Data from this cache.
     pub last_update_secs: Option<u64>,
@@ -145,8 +170,10 @@ pub struct RpkiCacheStatus {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedistributedRoute {
+    /// The redistributed prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
+    /// Next-hop address of the redistributed route.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub gateway: IpAddr,
 }
@@ -156,8 +183,11 @@ pub struct RedistributedRoute {
 /// connect, then incremental `Add`/`Remove` for each subsequent change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RedistributeUpdate {
+    /// The complete set of redistributed routes, replacing any previous one.
     Full(Vec<RedistributedRoute>),
+    /// One route added or changed.
     Add(RedistributedRoute),
+    /// One route withdrawn.
     Remove(IpNet),
 }
 
@@ -175,7 +205,10 @@ pub enum BgpRequest {
     RedistributeRoutes(RedistributeUpdate),
     /// Operator-triggered `clear bgp <instance> <peer> soft-in` — ask
     /// `peer`'s live session to send it an RFC 2918 `ROUTE_REFRESH`.
-    SendRouteRefresh { peer: IpAddr },
+    SendRouteRefresh {
+        /// The advertising peer.
+        peer: IpAddr,
+    },
     /// One-shot: every EVPN route received from any peer.
     GetEvpnRoutes,
     /// Fire-and-forget, no reply: one `nos-fdbd`'s local MACs, originated as
@@ -183,13 +216,18 @@ pub enum BgpRequest {
     /// `Full`, since several domains feed one BGP instance (unlike
     /// `nos-ribd`, where table and instance are 1:1).
     RedistributeMacs {
+        /// Broadcast domain the update belongs to.
         domain: String,
+        /// The EVPN route change.
         update: crate::fdb::EvpnUpdate,
     },
     /// Operator-triggered `clear bgp <instance> <peer>`: release a peer held
     /// by its maximum-prefix limit, and reset its session if one is up
     /// (Cease/Administrative Reset). Replies `PeerCleared` or `PeerNotFound`.
-    ClearPeer { peer: IpAddr },
+    ClearPeer {
+        /// The advertising peer.
+        peer: IpAddr,
+    },
     /// One-shot: every configured RPKI cache's RTR session (`show bgp rpki`).
     GetRpkiSummary,
     /// Fire-and-forget, no reply, `nos-ribd` only: one IP-VRF's best routes
@@ -198,7 +236,9 @@ pub enum BgpRequest {
     /// `domain`. A variant of its own, not `RedistributeMacs`, since only
     /// `ribd` may send it.
     RedistributeEvpnPrefixes {
+        /// Routing table (IP-VRF) the update belongs to.
         table: String,
+        /// The EVPN route change.
         update: crate::fdb::EvpnUpdate,
     },
 }
@@ -206,6 +246,7 @@ pub enum BgpRequest {
 /// Messages sent from `nos-bgpd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BgpEvent {
+    /// Reply to the summary query: one entry per peer.
     Summary(Vec<PeerSummary>),
     /// Reply to `SendRouteRefresh`: the command was delivered to a live,
     /// `Established` session for that peer.

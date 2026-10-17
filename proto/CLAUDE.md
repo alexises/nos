@@ -66,3 +66,5 @@ For a single always-present scalar with exactly one possible edit (e.g. `hostnam
 `Request`/`Event` variants must always be **appended**, never inserted or reordered — `postcard` encodes enum variants by index, so reordering breaks compatibility with already-built binaries.
 
 Details: [schema reference](../docs/schema-reference.md), [IPC protocols](../docs/ipc-protocols.md).
+
+- `missing_docs` is on for `nos-proto` (except `schema/`, `ops/` for now, #428): document every new pub item.

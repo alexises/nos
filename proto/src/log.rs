@@ -5,10 +5,15 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nos_proto_derive::Cli)]
 pub enum LogLevel {
+    /// Very fine-grained diagnostics.
     Trace,
+    /// Debugging detail.
     Debug,
+    /// Normal operation.
     Info,
+    /// Something unexpected but recoverable.
     Warn,
+    /// Something failed.
     Error,
 }
 
@@ -22,6 +27,7 @@ pub struct LogEntry {
     /// clock — `nos-logd` never rewrites this on receipt, so ordering
     /// reflects when the event was emitted, not when it arrived.
     pub timestamp_ms: u64,
+    /// Severity.
     pub level: LogLevel,
     /// Identifies which process emitted this entry, e.g. `"nos-ribd[rt1]"`,
     /// `"nos-bgpd[r1]"`, `"nos-interfaced"`, `"nos-configd"`,
@@ -30,6 +36,7 @@ pub struct LogEntry {
     pub source: String,
     /// The `tracing` event's target (typically a module path).
     pub target: String,
+    /// The message text, including structured fields.
     pub message: String,
     /// The event's structured fields (other than `message`), flattened to
     /// their `Display`/`Debug` text — e.g. `("table", "rt1")`.
@@ -51,13 +58,18 @@ pub enum LogRequest {
     /// One-shot: the current buffer, optionally filtered by `source` (exact
     /// match) and capped to the most recent `limit` entries.
     GetLogs {
+        /// Only entries from this daemon.
         source: Option<String>,
+        /// Maximum number of entries to return.
         limit: Option<usize>,
     },
     /// Like `GetLogs`, but the connection stays open afterwards: the reply
     /// is followed by one `LogEvent::Line` per new matching entry, streamed
     /// until the client disconnects.
-    Tail { source: Option<String> },
+    Tail {
+        /// Only entries from this daemon.
+        source: Option<String>,
+    },
 }
 
 /// Messages sent from `nos-logd` to a client.
@@ -68,5 +80,6 @@ pub enum LogEvent {
     Logs(Vec<LogEntry>),
     /// One new matching entry, streamed after `Tail`'s initial `Logs` reply.
     Line(LogEntry),
+    /// Something failed.
     Error(String),
 }

@@ -21,19 +21,30 @@ pub struct Ospfv3NeighborSummary {
     /// The attach point's display name, matching `nos-ospfv3d`'s own
     /// `"<interface>.<tag>"`/`"broadcast-domain:<name>"` convention.
     pub link: String,
+    /// Area the interface or LSA belongs to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
+    /// State of the local interface.
     pub interface_state: LinkInterfaceState,
+    /// Neighbor's Router ID, once heard.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub neighbor_router_id: Option<Ipv4Addr>,
+    /// Neighbor state (RFC 5340 section 4.2.1, as RFC 2328 section 10.1).
     pub state: OspfNeighborState,
+    /// Seconds since the last Hello from this neighbor.
     pub last_hello_secs: Option<u64>,
+    /// `HelloInterval` in seconds.
     pub hello_interval: u16,
+    /// `RouterDeadInterval` in seconds.
     pub dead_interval: u16,
+    /// Our Router Priority on the link.
     pub priority: u8,
+    /// Neighbor's Router Priority, once heard.
     pub neighbor_priority: Option<u8>,
+    /// Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub dr: Option<Ipv4Addr>,
+    /// Backup Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub bdr: Option<Ipv4Addr>,
 }
@@ -44,15 +55,22 @@ pub struct Ospfv3NeighborSummary {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ospfv3LsaSummary {
+    /// Area the interface or LSA belongs to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
+    /// LS type including the U/S2/S1 scope bits (RFC 5340 section A.4.2.1).
     pub lsa_type: u16,
+    /// Link State ID.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub link_state_id: Ipv4Addr,
+    /// Advertising Router ID.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub advertising_router: Ipv4Addr,
+    /// LS sequence number.
     pub sequence_number: i32,
+    /// LS age in seconds.
     pub age: u16,
+    /// LS checksum.
     pub checksum: u16,
     /// The owning link's attach point (same naming as
     /// `Ospfv3NeighborSummary.link`) for a link-local-scoped LSA (RFC 5340
@@ -81,6 +99,8 @@ pub enum Ospfv3Request {
 /// Messages sent from `nos-ospfv3d` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Ospfv3Event {
+    /// Reply with the neighbors.
     Neighbors(Vec<Ospfv3NeighborSummary>),
+    /// Reply with the LSDB summary.
     Database(Vec<Ospfv3LsaSummary>),
 }
