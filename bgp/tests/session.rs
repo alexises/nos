@@ -299,14 +299,20 @@ async fn graceful_restart_keeps_routes_across_a_graceful_reset() {
 async fn shutdown_sends_a_hard_reset_so_the_peer_keeps_nothing() {
     let prefix: ipnet::IpNet = "198.51.100.0/24".parse().unwrap();
     let (a, b, _) = routers();
+    // A tight retry makes A's redial during the Cease grace near-certain on
+    // unfixed code (#455): nothing may reconnect once shutdown began.
+    let fast = |p: ResolvedPeer| ResolvedPeer {
+        connect_retry_time: Duration::from_millis(20),
+        ..p
+    };
     a.manager
         .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
         }]))
         .await;
-    a.apply(vec![peer(B, A, 65002)]).await;
-    b.apply(vec![peer(A, B, 65001)]).await;
+    a.apply(vec![fast(peer(B, A, 65002))]).await;
+    b.apply(vec![fast(peer(A, B, 65001))]).await;
     b.wait_for(BgpSessionState::Established).await;
     let has = || async { b.manager.bgp_push_snapshot().await.1.contains_key(&prefix) };
     eventually("b learns a's route", || async { has().await }).await;
@@ -318,6 +324,10 @@ async fn shutdown_sends_a_hard_reset_so_the_peer_keeps_nothing() {
         !has().await
     })
     .await;
+    // Stays gone: A did not redial (three retry intervals).
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(!has().await);
+    assert_ne!(b.state().await, Some(BgpSessionState::Established));
     assert_eq!(b.manager.peer_summaries().await[0].stale_prefixes, 0);
     b.manager.shutdown().await;
 }
