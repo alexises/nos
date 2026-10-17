@@ -3562,7 +3562,12 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     let up = format!("bfd session up peer={}", s.peer);
     let killing = format!("bfd session down, killing {daemon} neighbor link=eth0.0");
     let add = format!("added route prefix={} .*source=Some(Ospf)", s.prefix);
-    let removed = format!("removed route prefix={}", s.prefix);
+    // #443: the route may survive on another hop (router-c on the bridge), so a
+    // changed hop set (re-add with one next hop) counts as much as a removal.
+    let removed = format!(
+        "removed route prefix={0}\\|added route prefix={0} .*next_hops=1",
+        s.prefix
+    );
 
     log("bfd on the shared profile must not reset the adjacency");
     let torn =
