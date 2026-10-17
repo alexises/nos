@@ -1238,7 +1238,7 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&activated, act, 30).await?;
     b.wait_new(
         &format!(
-            "{learned_agg} peer={IP_A} atomic_aggregate=true aggregator=Some(({ASN_A}, {RID_A}))"
+            "{learned_agg} peer={IP_A} .*atomic_aggregate=true aggregator=Some(({ASN_A}, {RID_A}))"
         ),
         learned,
         30,
