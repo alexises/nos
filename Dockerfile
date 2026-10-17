@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1-slim-bookworm AS builder
+# Base images are digest-pinned (manifest-list, multi-arch); Dependabot bumps
+# the digests weekly. apt packages stay unpinned (DL3008 ignored): pinning
+# versions in bookworm-slim breaks on every security update.
+FROM rust:1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS builder
 WORKDIR /app
 
 # hadolint ignore=DL3008
@@ -16,7 +19,7 @@ COPY . .
 ARG CARGO_FEATURES=
 RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
 RUN groupadd --system nos \
     && useradd --system --gid nos --no-create-home --home-dir /nonexistent nos \
@@ -69,17 +72,17 @@ COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provis
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libcap2-bin \
-    && setcap 'cap_net_admin,cap_net_raw=eip' /usr/local/bin/nos-ribd \
-    && setcap 'cap_net_admin,cap_net_raw=eip' /usr/local/bin/nos-interfaced \
-    && setcap 'cap_net_raw,cap_net_bind_service=eip' /usr/local/bin/nos-bgpd \
-    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-ospfd \
-    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-ospfv3d \
-    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-lacpd \
-    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-lldpd \
-    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-stpd \
-    && setcap 'cap_net_raw,cap_net_bind_service=eip' /usr/local/bin/nos-bfdd \
-    && setcap 'cap_net_admin=eip' /usr/local/bin/nos-fdbd \
-    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-restd \
+    && setcap 'cap_net_admin,cap_net_raw=ep' /usr/local/bin/nos-ribd \
+    && setcap 'cap_net_admin,cap_net_raw=ep' /usr/local/bin/nos-interfaced \
+    && setcap 'cap_net_raw,cap_net_bind_service=ep' /usr/local/bin/nos-bgpd \
+    && setcap 'cap_net_raw=ep' /usr/local/bin/nos-ospfd \
+    && setcap 'cap_net_raw=ep' /usr/local/bin/nos-ospfv3d \
+    && setcap 'cap_net_raw=ep' /usr/local/bin/nos-lacpd \
+    && setcap 'cap_net_raw=ep' /usr/local/bin/nos-lldpd \
+    && setcap 'cap_net_raw=ep' /usr/local/bin/nos-stpd \
+    && setcap 'cap_net_raw,cap_net_bind_service=ep' /usr/local/bin/nos-bfdd \
+    && setcap 'cap_net_admin=ep' /usr/local/bin/nos-fdbd \
+    && setcap 'cap_net_raw=ep' /usr/local/bin/nos-restd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 

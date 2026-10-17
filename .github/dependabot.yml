@@ -1,6 +1,10 @@
-# Keeps the SHA-pinned actions (and their `# vX.Y.Z` comments) fresh (#412).
 version: 2
 updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  # Keeps the SHA-pinned actions (and their `# vX.Y.Z` comments) fresh (#412).
   - package-ecosystem: github-actions
     directory: /
     schedule:
