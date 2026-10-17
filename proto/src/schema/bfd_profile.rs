@@ -8,7 +8,9 @@ use crate::validators::unique_in;
 use super::Config;
 use nos_proto_derive::Cli;
 
+/// Default `min-tx-interval` and `min-rx-interval`, milliseconds.
 pub const MIN_INTERVAL_DEFAULT: u32 = 300;
+/// Default `detect-multiplier`: three missed packets declare the session Down.
 pub const DETECT_MULTIPLIER_DEFAULT: u8 = 3;
 /// Default `minimum-ttl`: single-hop BFD (RFC 5881 §5) is sent with TTL 255,
 /// so 254 accepts one routed hop of slack.
@@ -17,6 +19,7 @@ pub const MINIMUM_TTL_DEFAULT: u8 = 254;
 /// number of milliseconds that fits, so the daemon's ms-to-us conversion
 /// cannot overflow.
 pub const INTERVAL_MAX_MS: u32 = 4_294_967;
+/// Smallest accepted transmit or receive interval, milliseconds.
 pub const INTERVAL_MIN_MS: u32 = 10;
 /// Default `echo-interval`, milliseconds.
 pub const ECHO_INTERVAL_DEFAULT: u32 = 50;
@@ -24,6 +27,7 @@ pub const ECHO_INTERVAL_DEFAULT: u32 = 50;
 /// the largest RFC 5880 §6.7 auth section; the largest a jumbo frame's UDP
 /// payload, which also bounds the receive buffer.
 pub const PADDED_PDU_MIN: u16 = 24;
+/// Largest accepted `padded-pdu-size`, bytes.
 pub const PADDED_PDU_MAX: u16 = 9000;
 
 /// A named set of BFD (RFC 5880) session parameters, referenced by bare name
@@ -39,6 +43,7 @@ pub struct BfdProfile {
         custom(|n, ctx: &Config| unique_in(n, &ctx.bfd_profiles, |p| &p.name))
     )]
     #[cli(key)]
+    /// Profile name, 1 to 64 characters, unique among BFD profiles; the key sessions reference.
     pub name: String,
 
     /// Desired minimum transmit interval, milliseconds.
@@ -56,6 +61,7 @@ pub struct BfdProfile {
     #[serde(default = "detect_multiplier_default")]
     #[garde(range(min = 1))]
     #[cli(topic = BfdProfileDetectMultiplier)]
+    /// Detection multiplier (RFC 5880 §6.8.4): detection time is this times the negotiated interval. At least 1.
     pub detect_multiplier: u8,
 
     /// Passive role: wait for the peer's first packet instead of starting
@@ -68,6 +74,7 @@ pub struct BfdProfile {
     #[serde(default = "minimum_ttl_default")]
     #[garde(skip)]
     #[cli(topic = BfdProfileMinimumTtl)]
+    /// Lowest received IP TTL / Hop Limit a session accepts (RFC 5881 §5 GTSM); lower packets are dropped.
     pub minimum_ttl: u8,
 
     /// Administratively down: sessions using this profile stay `AdminDown`.
@@ -127,7 +134,9 @@ pub struct BfdProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum BfdMode {
     #[default]
+    /// Classical RFC 5880 asynchronous session with the three-way handshake.
     Async,
+    /// S-BFD initiator (RFC 7880) probing a stateless reflector.
     Sbfd,
 }
 
@@ -165,8 +174,11 @@ fn sbfd_compatible(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EchoMode {
     #[default]
+    /// No Echo function.
     Disabled,
+    /// Echo alongside a BFD session (RFC 5880 §6.4), which then slows its Control packets.
     Affiliated,
+    /// Echo is the whole session, for a peer that runs no BFD (RFC 9747).
     Unaffiliated,
 }
 
@@ -211,26 +223,35 @@ impl Default for BfdProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BfdAuth {
     #[cli(topic = BfdProfileAuth)]
+    /// Auth Key ID carried in each packet (RFC 5880 §4.2/§4.3); both ends must agree.
     pub key_id: u8,
     #[cli(topic = BfdProfileAuth)]
+    /// Mechanism, which fixes the `AuthType` on the wire.
     pub method: BfdAuthMethod,
     #[cli(topic = BfdProfileAuth)]
+    /// Shared secret, stored clear-text like every config value.
     pub key: String,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+/// BFD authentication mechanism (RFC 5880 §4.2 and §4.3).
 pub enum BfdAuthMethod {
     #[default]
     #[cli(words = "simple-password")]
+    /// Clear-text password (`AuthType` 1).
     SimplePassword,
     #[cli(words = "keyed-md5")]
+    /// Keyed MD5; the sequence number advances only occasionally.
     KeyedMd5,
     #[cli(words = "meticulous-md5")]
+    /// Meticulous keyed MD5; the sequence number advances every packet.
     MeticulousMd5,
     #[cli(words = "keyed-sha1")]
+    /// Keyed SHA1; the sequence number advances only occasionally.
     KeyedSha1,
     #[cli(words = "meticulous-sha1")]
+    /// Meticulous keyed SHA1; the sequence number advances every packet.
     MeticulousSha1,
 }
 

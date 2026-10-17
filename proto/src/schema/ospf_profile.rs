@@ -28,7 +28,9 @@ pub const PRIORITY_DEFAULT: u8 = 1;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum NetworkType {
+    /// Point-to-point link: no DR election.
     PointToPoint,
+    /// Broadcast network: DR/BDR election.
     Broadcast,
     /// RFC 2328 §9.5: multicast Hello, no DR/BDR, one adjacency per
     /// discovered neighbor. `OSPFv2` only (rejected on an `Ospfv3Profile`).
@@ -44,10 +46,16 @@ pub enum NetworkType {
 pub enum OspfAuth {
     /// RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,
     /// carried directly in the OSPF header's 8-byte Authentication field.
-    Simple { password: String },
+    Simple {
+        /// The password, at most 8 bytes.
+        password: String,
+    },
     /// RFC 2328 Appendix D.3 / RFC 5709 — one or more keys, supporting
     /// rotation via `key_id`/`is_current`, mirroring `BgpAoKey`.
-    Crypto { keys: Vec<OspfCryptoKey> },
+    Crypto {
+        /// The keychain; `is_current` selects the signing key, the rest allow rotation.
+        keys: Vec<OspfCryptoKey>,
+    },
 }
 
 /// One cryptographic auth key, shared by `OspfProfile.auth` (RFC 2328 D.3)
@@ -65,12 +73,16 @@ pub enum OspfAuth {
 #[cli(no_default)]
 pub struct OspfCryptoKey {
     #[cli(key)]
+    /// Key id carried in the authentication trailer; the list key.
     pub key_id: u16,
     #[cli(topic = OspfProfileCryptoKey)]
+    /// HMAC algorithm of this key.
     pub algorithm: OspfCryptoAlgorithm,
     #[cli(topic = OspfProfileCryptoKey)]
+    /// Shared secret, stored clear-text like every config value.
     pub key: String,
     #[cli(topic = OspfProfileCryptoKey)]
+    /// Whether this key signs outgoing packets.
     pub is_current: bool,
 }
 
@@ -81,10 +93,15 @@ pub struct OspfCryptoKey {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum OspfCryptoAlgorithm {
+    /// Keyed MD5 (RFC 2328 Appendix D.3).
     Md5,
+    /// HMAC-SHA-1 (RFC 5709).
     HmacSha1,
+    /// HMAC-SHA-256 (RFC 5709).
     HmacSha256,
+    /// HMAC-SHA-384 (RFC 5709).
     HmacSha384,
+    /// HMAC-SHA-512 (RFC 5709).
     HmacSha512,
 }
 
@@ -164,6 +181,7 @@ pub struct OspfProfile {
         custom(|n, ctx: &Config| unique_name(n, ctx))
     )]
     #[cli(key)]
+    /// Profile name, unique within its area.
     pub name: String,
 
     /// `None` defaults to `HELLO_INTERVAL_DEFAULT` (10s).

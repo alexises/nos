@@ -26,6 +26,7 @@ pub struct Ospfv3Profile {
         custom(|n, ctx: &Config| unique_name(n, ctx))
     )]
     #[cli(key)]
+    /// Profile name, unique within its area.
     pub name: String,
 
     /// `None` defaults to `OspfProfile::HELLO_INTERVAL_DEFAULT` (10s).

@@ -28,14 +28,17 @@ pub struct BroadcastDomain {
         custom(|n, ctx: &Config| unique_in(n, &ctx.broadcast_domains, |d| &d.name))
     )]
     #[cli(key)]
+    /// Domain name, 1 to 64 characters, unique among broadcast domains.
     pub name: String,
 
     #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]
     #[cli(topic = BroadcastDomainAddress)]
+    /// Addresses of the domain's bridge device (SVI); empty for a pure L2 domain.
     pub addresses: Vec<InterfaceAddress>,
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
     #[cli(topic = BroadcastDomainRoutingTable)]
+    /// Routing table (VRF) the bridge device joins, if any.
     pub routing_table: Option<String>,
 
     /// If set, names an `OspfProfile` this domain's own SVI joins OSPF
@@ -140,10 +143,12 @@ pub struct BroadcastDomain {
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = BroadcastDomainStpMaxAge, words = "stp-max-age")]
+    /// Max Age in seconds for this domain's bridge; `None` uses the spanning-tree default.
     pub stp_max_age: Option<u8>,
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = BroadcastDomainStpForwardDelay, words = "stp-forward-delay")]
+    /// Forward Delay in seconds for this domain's bridge; `None` uses the spanning-tree default.
     pub stp_forward_delay: Option<u8>,
 }
 

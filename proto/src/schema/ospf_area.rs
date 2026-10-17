@@ -23,6 +23,7 @@ pub struct OspfArea {
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Area id in dotted-quad form; 0.0.0.0 is the backbone.
     pub area_id: Ipv4Addr,
 
     #[garde(
@@ -30,6 +31,7 @@ pub struct OspfArea {
         custom(|profiles, _ctx: &Config| ospf_profile::valid_profile_timers(profiles))
     )]
     #[cli(topic = OspfProfile)]
+    /// Interface profiles declared in this area, referenced by an interface's `ospf` attachment.
     pub profiles: Vec<OspfProfile>,
 
     /// RFC 2328 §3.6 stub area (no AS-external LSAs, E-bit clear) or
@@ -95,6 +97,7 @@ pub struct OspfArea {
 pub struct OspfVirtualLink {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Router id of the far end of the virtual link; the key.
     pub router_id: Ipv4Addr,
     /// `None` defaults to 10s, as for a profile.
     #[serde(default)]
@@ -116,6 +119,7 @@ pub struct OspfVirtualLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum OspfAreaType {
     #[default]
+    /// An ordinary area (backbone or transit) that carries external LSAs.
     Normal,
     /// No AS-external LSAs; the ABR originates a default Type-3.
     Stub,
@@ -135,6 +139,7 @@ impl OspfAreaType {
         self != OspfAreaType::Normal
     }
 
+    /// Whether the area is an NSSA (`Nssa` or `NssaNoSummary`).
     pub fn is_nssa(self) -> bool {
         matches!(self, OspfAreaType::Nssa | OspfAreaType::NssaNoSummary)
     }
@@ -155,6 +160,7 @@ impl OspfAreaType {
 pub struct OspfAreaRange {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// The summarised address range; the key.
     pub cidr: Ipv4Net,
     /// RFC 2328's `DoNotAdvertise`: the covered prefixes are hidden from the
     /// other areas entirely. `false` (the default) advertises the range.

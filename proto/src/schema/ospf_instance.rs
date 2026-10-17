@@ -23,12 +23,14 @@ pub struct OspfInstance {
         custom(|n, ctx: &Config| unique_in(n, &ctx.ospf_instances, |i| &i.name))
     )]
     #[cli(key)]
+    /// Instance name, 1 to 64 characters, unique among `OSPFv2` instances.
     pub name: String,
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(topic = OspfInstanceRouterId)]
+    /// OSPF router id (RFC 2328 §C.1), written as a dotted-quad.
     pub router_id: Ipv4Addr,
 
     /// This instance's OSPF areas, keyed by `area_id` — see `OspfArea`.

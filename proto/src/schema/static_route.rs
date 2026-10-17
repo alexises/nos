@@ -25,11 +25,13 @@ pub struct StaticRoute {
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
+    /// Destination prefix; the key within the instance.
     pub subnet: IpNet,
 
     #[garde(custom(gateway_matches_subnet_family(self.subnet)))]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(topic = StaticRoute)]
+    /// Next-hop address, in the same family as `subnet`.
     pub gateway: IpAddr,
 
     /// Name of a `BfdProfile` to run BFD with; `None` runs no BFD.

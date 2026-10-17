@@ -11,7 +11,9 @@ use crate::validators::unique_in;
 use super::spanning_tree::valid_port_priority;
 use super::Config;
 
+/// Default port priority (802.1Q 13.25), a multiple of 16.
 pub const PORT_PRIORITY_DEFAULT: u8 = 128;
+/// Largest administrative port path cost.
 pub const PORT_COST_MAX: u32 = 200_000_000;
 
 /// Edge-port (`PortFast`) behaviour (802.1Q 13.4 `AdminEdgePort`/`AutoEdge`).
@@ -23,6 +25,7 @@ pub enum EdgePort {
     /// Becomes an edge port after `3 * hello-time` without a BPDU.
     #[default]
     Auto,
+    /// Never an edge port: the port always runs the full protocol.
     Disabled,
 }
 
@@ -31,8 +34,11 @@ pub enum EdgePort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LinkType {
     #[default]
+    /// Derive the link type from the port's duplex.
     Auto,
+    /// Treat the link as point-to-point, allowing rapid transitions.
     PointToPoint,
+    /// Treat the link as shared media, with no rapid transitions.
     Shared,
 }
 
@@ -42,12 +48,15 @@ pub enum LinkType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct StpPortMstInstance {
     #[cli(key)]
+    /// MST instance id; the key.
     pub id: u16,
     #[serde(default)]
     #[cli(topic = StpPortProfileMstInstanceCost)]
+    /// Administrative path cost in this instance; `None` derives it from link speed.
     pub cost: Option<u32>,
     #[serde(default = "priority_default")]
     #[cli(topic = StpPortProfileMstInstancePriority)]
+    /// Port priority in this instance, a multiple of 16.
     pub priority: u8,
 }
 
@@ -68,6 +77,7 @@ impl Default for StpPortMstInstance {
     clippy::struct_excessive_bools,
     reason = "one independent on/off switch per STP guard feature, edited one by one"
 )]
+/// Per-port spanning-tree settings that a switching profile attaches to ports.
 pub struct StpPortProfile {
     #[garde(
         length(min = 1, max = 64),
@@ -75,16 +85,19 @@ pub struct StpPortProfile {
         custom(|n, ctx: &Config| valid_protections(n, ctx))
     )]
     #[cli(key)]
+    /// Profile name, 1 to 64 characters, unique among port profiles.
     pub name: String,
 
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = StpPortProfileEdgePort)]
+    /// Edge-port (`PortFast`) behaviour.
     pub edge_port: EdgePort,
 
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = StpPortProfileLinkType)]
+    /// Link type that governs the rapid transitions.
     pub link_type: LinkType,
 
     /// `None`: automatic from the link speed (802.1Q Table 13-4).
@@ -139,6 +152,7 @@ pub struct StpPortProfile {
     #[serde(default)]
     #[garde(custom(|m: &Vec<StpPortMstInstance>, ctx: &Config| valid_mst_instances(m, ctx)))]
     #[cli(topic = StpPortProfileMstInstance, words = "mst-instance")]
+    /// Per-instance cost and priority overrides.
     pub mst_instances: Vec<StpPortMstInstance>,
 }
 

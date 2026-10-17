@@ -17,8 +17,10 @@ use super::sugar;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Cli)]
 pub enum AddressFamily {
     #[cli(words = "ipv4")]
+    /// Unicast IPv4 (AFI 1, SAFI 1).
     Ipv4Unicast,
     #[cli(words = "ipv6")]
+    /// Unicast IPv6 (AFI 2, SAFI 1).
     Ipv6Unicast,
     /// RFC 7432 EVPN (AFI 25 / SAFI 70). Appended last: postcard indexes
     /// enum variants by position.
@@ -33,6 +35,7 @@ impl AddressFamily {
         AddressFamily::L2vpnEvpn,
     ];
 
+    /// The CLI spelling of the family.
     pub fn as_str(&self) -> &'static str {
         match self {
             AddressFamily::Ipv4Unicast => "ipv4",
@@ -60,7 +63,9 @@ impl std::fmt::Display for AddressFamily {
 pub enum SourceAddress {
     /// An explicitly named interface.
     Interface {
+        /// Interface whose address becomes the session's local address.
         interface: String,
+        /// Selects one of the interface's addresses; `None` requires exactly one.
         label: Option<String>,
     },
     /// This peer-group's owning `BgpInstance`'s own loopback interface
@@ -68,7 +73,10 @@ pub enum SourceAddress {
     /// `routing_table`) — so no interface name needs to be spelled out.
     /// Invalid (an error, not a fallback) for an instance with no owning
     /// routing table, exactly like `BgpInstance.routing_table` itself.
-    Loopback { label: Option<String> },
+    Loopback {
+        /// Selects one of the loopback's addresses; `None` requires exactly one.
+        label: Option<String>,
+    },
 }
 
 impl std::fmt::Display for SourceAddress {
@@ -124,7 +132,9 @@ pub const ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS: u16 = 360;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum NextHopMode {
     #[cli(words = "self")]
+    /// Rewrite `NEXT_HOP` to the session's local address.
     SelfAddress,
+    /// Keep the `NEXT_HOP` the route already carries.
     Unchanged,
 }
 
@@ -134,10 +144,15 @@ pub enum NextHopMode {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpRole {
+    /// The local AS is the provider of the peer (RFC 9234).
     Provider,
+    /// The local AS runs a route server.
     RouteServer,
+    /// The local AS is a client of the peer's route server.
     RouteServerClient,
+    /// The local AS is a customer of the peer.
     Customer,
+    /// Lateral peering between equals.
     Peer,
 }
 
@@ -153,6 +168,7 @@ impl BgpRole {
         }
     }
 
+    /// Parses the RFC 9234 §4.1 capability value; `None` when unassigned.
     pub fn from_wire(v: u8) -> Option<Self> {
         Some(match v {
             0 => BgpRole::Provider,
@@ -177,6 +193,7 @@ impl BgpRole {
         }
     }
 
+    /// The CLI spelling of the role.
     pub fn as_str(self) -> &'static str {
         match self {
             BgpRole::Provider => "provider",
@@ -195,8 +212,11 @@ impl BgpRole {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAddPath {
+    /// Offer to receive several paths per prefix.
     Receive,
+    /// Send several paths per prefix.
     Send,
+    /// Both receive and send.
     Both,
 }
 
@@ -211,6 +231,7 @@ impl BgpAddPath {
         }
     }
 
+    /// The CLI spelling of the direction.
     pub fn as_str(self) -> &'static str {
         match self {
             BgpAddPath::Receive => "receive",
@@ -228,6 +249,7 @@ impl BgpAddPath {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpShutdown {
     #[cli(topic = BgpPeerGroupShutdown)]
+    /// Optional RFC 9003 shutdown communication text carried in the NOTIFICATION.
     pub message: Option<String>,
 }
 
@@ -240,12 +262,16 @@ pub struct BgpShutdown {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct BgpDamping {
     #[cli(topic = BgpPeerGroupDamping)]
+    /// Seconds for the penalty to halve.
     pub half_life: u32,
     #[cli(topic = BgpPeerGroupDamping)]
+    /// Penalty below which a suppressed route is released again.
     pub reuse: u32,
     #[cli(topic = BgpPeerGroupDamping)]
+    /// Penalty at or above which a route is suppressed.
     pub suppress: u32,
     #[cli(topic = BgpPeerGroupDamping)]
+    /// Longest time in seconds a route can stay suppressed.
     pub max_suppress: u32,
 }
 
@@ -281,12 +307,15 @@ pub(super) fn valid_damping(d: Option<&BgpDamping>) -> garde::Result {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpLocalAs {
     #[cli(topic = BgpPeerGroupLocalAs)]
+    /// AS number this group's peers see instead of the instance's own; carried in OPEN.
     pub asn: u32,
     #[serde(default)]
     #[cli(topic = BgpPeerGroupLocalAs)]
+    /// Do not prepend `asn` to the `AS_PATH` of received routes.
     pub no_prepend: bool,
     #[serde(default)]
     #[cli(topic = BgpPeerGroupLocalAs)]
+    /// Advertise `[asn]` only instead of `[asn, own]`.
     pub replace_as: bool,
 }
 
@@ -299,12 +328,15 @@ pub struct BgpLocalAs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpPrefixLimit {
     #[cli(topic = BgpPeerGroupMaximumPrefixLimit)]
+    /// Maximum number of prefixes accepted from the peer for the family.
     pub limit: u32,
     #[serde(default)]
     #[cli(topic = BgpPeerGroupMaximumPrefixWarningOnly)]
+    /// Log when the limit is exceeded instead of closing the session.
     pub warning_only: bool,
     #[serde(default)]
     #[cli(topic = BgpPeerGroupMaximumPrefixRestartInterval)]
+    /// Seconds before a session closed for exceeding `limit` restarts; 0 leaves it down.
     pub restart_interval: u16,
 }
 
@@ -316,14 +348,18 @@ pub struct BgpPrefixLimit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpMaximumPrefix {
     #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    /// Limit for IPv4 unicast; `None` is unlimited.
     pub ipv4: Option<BgpPrefixLimit>,
     #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    /// Limit for IPv6 unicast; `None` is unlimited.
     pub ipv6: Option<BgpPrefixLimit>,
     #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    /// Limit for L2VPN EVPN; `None` is unlimited.
     pub l2vpn_evpn: Option<BgpPrefixLimit>,
 }
 
 impl BgpMaximumPrefix {
+    /// The limit configured for `family`.
     pub fn get(&self, family: AddressFamily) -> Option<BgpPrefixLimit> {
         match family {
             AddressFamily::Ipv4Unicast => self.ipv4,
@@ -332,6 +368,7 @@ impl BgpMaximumPrefix {
         }
     }
 
+    /// Mutable access to the limit configured for `family`.
     pub fn slot_mut(&mut self, family: AddressFamily) -> &mut Option<BgpPrefixLimit> {
         match family {
             AddressFamily::Ipv4Unicast => &mut self.ipv4,
@@ -367,14 +404,17 @@ pub(super) fn valid_shutdown(s: Option<&BgpShutdown>) -> garde::Result {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 #[allow(clippy::struct_excessive_bools)] // each bool is an independent schema field
+/// Session settings shared by every `BgpPeer` that names this group.
 pub struct BgpPeerGroup {
     #[garde(length(min = 1, max = 64), custom(|n, ctx: &Config| unique_name(n, ctx)))]
     #[cli(key)]
+    /// Group name, 1 to 64 characters, unique within the instance.
     pub name: String,
 
     // RFC 6793: ASN 0 and 4_294_967_295 are reserved.
     #[garde(range(min = 1, max = 4_294_967_294u32))]
     #[cli(topic = BgpPeerGroupRemoteAs)]
+    /// Expected remote AS, 1 to 4294967294; equal to the local ASN means iBGP.
     pub remote_as: u32,
 
     // Transport source address. Deliberately `#[garde(skip)]` and never
@@ -386,10 +426,12 @@ pub struct BgpPeerGroup {
     // transaction.
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupSourceAddress)]
+    /// Transport source address, resolved by `nos-bgpd` at runtime; `None` lets the kernel choose.
     pub source_address: Option<SourceAddress>,
 
     #[garde(custom(|afs, _ctx: &Config| non_empty_no_duplicate_afs(afs)))]
     #[cli(topic = BgpPeerGroupAddressFamily)]
+    /// Families to negotiate; non-empty, no duplicates.
     pub address_families: Vec<AddressFamily>,
 
     /// `None` defaults to `HOLD_TIME_DEFAULT` (90s). `Some(0)` disables both
@@ -607,11 +649,17 @@ fn policy_reference_valid(name: Option<&String>, ctx: &Config) -> garde::Result 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAuth {
     /// RFC 2385 TCP MD5 signature — a single shared password.
-    Md5 { password: String },
+    Md5 {
+        /// Password the TCP MD5 signature option is keyed with.
+        password: String,
+    },
     /// RFC 5925 TCP Authentication Option — one or more keys, supporting
     /// rotation via `send_id`/`recv_id` and the `is_current`/`is_rnext`
     /// flags.
-    Ao { keys: Vec<BgpAoKey> },
+    Ao {
+        /// The keychain; `is_current` and `is_rnext` drive rotation.
+        keys: Vec<BgpAoKey>,
+    },
 }
 
 /// One TCP-AO key. `send_id`/`recv_id` identify it on the wire (RFC 5925's
@@ -628,19 +676,26 @@ pub enum BgpAuth {
 #[cli(no_default)]
 pub struct BgpAoKey {
     #[cli(key)]
+    /// `SendID`: the `KeyID` this side puts in the TCP-AO option (0 to 255); the list key.
     pub send_id: u8,
     #[cli(topic = BgpPeerGroupAoKey)]
+    /// `RecvID`: the `KeyID` expected in the peer's TCP-AO option.
     pub recv_id: u8,
     #[cli(topic = BgpPeerGroupAoKey)]
+    /// MAC algorithm of this key.
     pub algorithm: BgpAoAlgorithm,
     #[cli(topic = BgpPeerGroupAoKey)]
+    /// Master key, stored clear-text like every config value.
     pub key: String,
     #[cli(topic = BgpPeerGroupAoKey)]
+    /// Whether this key signs outgoing segments.
     pub is_current: bool,
     #[cli(topic = BgpPeerGroupAoKey)]
+    /// Whether this key is advertised as the next one to switch to (`RNextKeyID`).
     pub is_rnext: bool,
     #[serde(default)]
     #[cli(topic = BgpPeerGroupAoKey)]
+    /// Leave TCP options out of the MAC computation.
     pub exclude_options: bool,
 }
 
@@ -649,8 +704,10 @@ pub struct BgpAoKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAoAlgorithm {
     #[cli(words = "hmac-sha1")]
+    /// HMAC-SHA-1 truncated to 96 bits (RFC 5926).
     HmacSha1_96,
     #[cli(words = "aes-cmac")]
+    /// AES-128-CMAC truncated to 96 bits (RFC 5926).
     AesCmac96,
 }
 

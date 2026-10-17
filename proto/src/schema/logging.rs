@@ -37,6 +37,7 @@ pub struct SyslogServer {
         custom(|n: &String, ctx: &Config| unique_in(n, &ctx.logging.syslog, |s| &s.name))
     )]
     #[cli(key)]
+    /// Collector name, unique among syslog servers.
     pub name: String,
 
     /// The collector's address. An IP, not a name: there is no resolver
@@ -184,6 +185,7 @@ impl Default for SyslogServer {
 }
 
 impl SyslogServer {
+    /// The configured port, else 514 (UDP), 601 (TCP) or 6514 (TLS).
     pub fn effective_port(&self) -> u16 {
         self.port.unwrap_or(match self.transport {
             SyslogTransport::Udp => 514,
@@ -192,10 +194,12 @@ impl SyslogServer {
         })
     }
 
+    /// The configured minimum level, else `Info`.
     pub fn effective_level(&self) -> LogLevel {
         self.level.unwrap_or(LogLevel::Info)
     }
 
+    /// The configured facility, else `Local7`.
     pub fn effective_facility(&self) -> SyslogFacility {
         self.facility.unwrap_or(SyslogFacility::Local7)
     }
@@ -219,6 +223,7 @@ fn valid_port(p: Option<u16>) -> garde::Result {
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+/// How a syslog server is reached.
 pub enum SyslogTransport {
     /// RFC 5426: one message per datagram.
     #[default]
@@ -234,14 +239,22 @@ pub enum SyslogTransport {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum SyslogFacility {
+    /// Facility `local0` (code 16).
     Local0,
+    /// Facility `local1` (code 17).
     Local1,
+    /// Facility `local2` (code 18).
     Local2,
+    /// Facility `local3` (code 19).
     Local3,
+    /// Facility `local4` (code 20).
     Local4,
+    /// Facility `local5` (code 21).
     Local5,
+    /// Facility `local6` (code 22).
     Local6,
     #[default]
+    /// Facility `local7` (code 23).
     Local7,
 }
 

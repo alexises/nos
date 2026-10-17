@@ -23,10 +23,12 @@ pub struct CommunityGroup {
         custom(|n, ctx: &Config| unique_in(n, &ctx.community_groups, |g| &g.name))
     )]
     #[cli(key)]
+    /// Group name, 1 to 64 characters, unique among groups.
     pub name: String,
 
     #[garde(custom(|m: &Vec<String>, ctx: &Config| valid_members(m, ctx)))]
     #[cli(topic = CommunityGroupMember)]
+    /// Names of the `CommunityAlias` entries in the group; each must exist.
     pub members: Vec<String>,
 }
 

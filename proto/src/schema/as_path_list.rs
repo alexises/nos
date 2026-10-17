@@ -20,10 +20,12 @@ pub struct AsPathList {
         custom(|n, ctx: &Config| unique_in(n, &ctx.as_path_lists, |l| &l.name))
     )]
     #[cli(key)]
+    /// List name, 1 to 64 characters, unique among AS-path lists.
     pub name: String,
 
     #[garde(custom(|p: &Vec<String>, _ctx: &Config| valid_patterns(p)))]
     #[cli(topic = AsPathListPattern)]
+    /// Regexes over the space-separated ASN path with `_` as boundary; a path matches when any one matches. Never empty.
     pub patterns: Vec<String>,
 }
 

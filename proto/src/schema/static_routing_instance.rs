@@ -18,10 +18,12 @@ pub struct StaticRoutingInstance {
         custom(|n, ctx: &Config| unique_in(n, &ctx.static_routing_instances, |i| &i.name))
     )]
     #[cli(key)]
+    /// Instance name, 1 to 64 characters, unique among static routing instances.
     pub name: String,
 
     #[garde(dive, custom(|routes, _ctx: &Config| unique_subnets(routes)))]
     #[cli(topic = StaticRoute)]
+    /// Routes of this instance, keyed by destination prefix.
     pub routes: Vec<StaticRoute>,
 }
 

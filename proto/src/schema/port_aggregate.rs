@@ -41,7 +41,9 @@ pub enum PortAggregateMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LacpRate {
     #[default]
+    /// Ask the partner to send LACPDUs every 30 seconds.
     Slow,
+    /// Ask the partner to send LACPDUs every second.
     Fast,
 }
 
@@ -52,7 +54,9 @@ pub enum LacpRate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LacpMode {
     #[default]
+    /// Send LACPDUs whenever the link is up.
     Active,
+    /// Stay silent until a partner's LACPDU is heard.
     Passive,
 }
 
@@ -66,7 +70,9 @@ pub enum LacpMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EsRedundancy {
     #[default]
+    /// Every PE of the segment forwards unicast; only the DF floods BUM.
     AllActive,
+    /// Only the Designated Forwarder forwards at all.
     SingleActive,
 }
 
@@ -107,10 +113,12 @@ pub struct PortAggregate {
         custom(|n, ctx: &Config| port_aggregate_name_valid(n, ctx))
     )]
     #[cli(key)]
+    /// Bond name, 1 to 64 characters, unique among interfaces and aggregates.
     pub name: String,
 
     #[garde(skip)]
     #[cli(topic = PortAggregateMode)]
+    /// Static bond or LACP (802.1AX) with its negotiation parameters.
     pub mode: PortAggregateMode,
 
     /// See [`LacpRate`]. `#[serde(default)]` so a config persisted before
@@ -207,6 +215,7 @@ pub struct PortAggregate {
 
     #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
     #[cli(topic = InterfaceMtu)]
+    /// Bond MTU in bytes; `None` keeps the kernel default.
     pub mtu: Option<u32>,
 
     /// This bond's own per-tag L3 attachment points — same type and same

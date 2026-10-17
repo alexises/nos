@@ -20,10 +20,12 @@ pub struct PolicyDefinition {
         custom(|n, ctx: &Config| valid_name(n, ctx))
     )]
     #[cli(key)]
+    /// Policy name, unique, and never the reserved `accept-all` or `deny-all`.
     pub name: String,
 
     #[garde(custom(|src: &String, ctx: &Config| valid_source(src, ctx)))]
     #[cli(topic = PolicyDefinitionSource)]
+    /// RPL source text, compiled at commit time and again by each consumer.
     pub source: String,
 }
 
