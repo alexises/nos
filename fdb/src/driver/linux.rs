@@ -18,6 +18,7 @@ use rtnetlink::packet_route::link::{
 use rtnetlink::packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
+use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{Handle, LinkUnspec, LinkVxlan, MulticastGroup};
 use tokio::sync::mpsc;
@@ -64,6 +65,32 @@ const FDB_NOTIFY_INACTIVE_BIT: u8 = 2;
 const IFLA_BRPORT_STATE: u16 = 1;
 const BR_STATE_DISABLED: u8 = 0;
 const BR_STATE_FORWARDING: u8 = 3;
+
+/// `FRA_TUN_ID`, sent raw: `netlink-packet-route` types it as a `u32`, the
+/// kernel reads a big-endian `u64`.
+const FRA_TUN_ID: u16 = 12;
+/// The metadata rule's `tun_id` is `METADATA_TUN_ID | vni`: above 32 bits, so no
+/// VXLAN/Geneve VNI or GRE key ever equals it, and one rule per domain.
+const METADATA_TUN_ID: u64 = 0xE5 << 32;
+/// Where the metadata rule sits; it is `nop`, so the position changes nothing.
+const METADATA_RULE_PREF: u32 = 32741;
+
+/// The never-matching `tun_id` fib rule that keeps the kernel's
+/// `ip_tunnel_collect_metadata()` on (#460): without it a classic `vx<vni>`
+/// attaches no tunnel info, so the local-bias `flower enc_src_ip` filters
+/// never match. A flower `enc_*` filter alone does not turn it on (7.2.11).
+fn metadata_rule(vni: u32) -> RuleMessage {
+    let mut m = RuleMessage::default();
+    m.header.family = AddressFamily::Inet;
+    m.header.action = RuleAction::Nop;
+    m.attributes
+        .push(RuleAttribute::Priority(METADATA_RULE_PREF));
+    m.attributes.push(RuleAttribute::Other(DefaultNla::new(
+        FRA_TUN_ID,
+        (METADATA_TUN_ID | u64::from(vni)).to_be_bytes().to_vec(),
+    )));
+    m
+}
 
 pub struct LinuxFdbDriver {
     handle: Handle,
@@ -212,6 +239,24 @@ impl LinuxFdbDriver {
             NO_FILTER,
         )
         .await
+    }
+
+    /// Adds (`present`) or removes `vni`'s metadata rule; already so is fine.
+    async fn metadata_rule(&self, vni: u32, present: bool) -> Result<(), DriverError> {
+        let (res, tolerate) = if present {
+            let mut req = self.handle.rule().add();
+            *req.message_mut() = metadata_rule(vni);
+            (req.execute().await, EEXIST)
+        } else {
+            (
+                self.handle.rule().del(metadata_rule(vni)).execute().await,
+                ENOENT,
+            )
+        };
+        match res {
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -tolerate => Ok(()),
+            r => r.map_err(Into::into),
+        }
     }
 
     /// Runs one nexthop request on a blocking thread (see `nexthop`).
@@ -612,6 +657,9 @@ impl FdbDriver for LinuxFdbDriver {
         self.bias.lock().unwrap().remove(&vni);
         self.ifindex.lock().unwrap().remove(&vni);
         self.underlay.lock().unwrap().remove(&vni);
+        // Best effort, like the nexthops below: a nop rule left behind only
+        // keeps tunnel metadata collection on.
+        let _ = self.metadata_rule(vni, false).await;
         if let Some(l) = self.find_link(&vxlan_name(vni)).await? {
             self.handle.link().del(l.header.index).execute().await?;
             info!(vxlan = %vxlan_name(vni), "deleted vxlan device");
@@ -777,8 +825,10 @@ impl FdbDriver for LinuxFdbDriver {
             self.tc_flush(ifindex, tc::Hook::Ingress, tc::PRIO_SECOND)
                 .await?;
             self.bias.lock().unwrap().remove(&vni);
-            return Ok(());
+            return self.metadata_rule(vni, false).await;
         }
+        // Before the marking: an `enc_src_ip` match needs tunnel metadata.
+        self.metadata_rule(vni, true).await?;
         self.tc(Tc::Clsact { ifindex }, &[EEXIST]).await?;
         let before = self.bias.lock().unwrap().get(&vni).copied();
         if before.is_none() {
@@ -1033,6 +1083,21 @@ impl FdbDriver for LinuxFdbDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_metadata_rule_is_a_nop_on_a_64_bit_big_endian_tun_id() {
+        let m = metadata_rule(10100);
+        assert_eq!(m.header.family, AddressFamily::Inet);
+        assert_eq!(m.header.action, RuleAction::Nop);
+        assert_eq!(m.attributes[0], RuleAttribute::Priority(METADATA_RULE_PREF));
+        let RuleAttribute::Other(n) = &m.attributes[1] else {
+            panic!("no tun_id");
+        };
+        let mut buf = vec![0; n.buffer_len()];
+        n.emit(&mut buf);
+        // len 12, FRA_TUN_ID, then 0x000000E5_00002774 in network order.
+        assert_eq!(buf, [12, 0, 12, 0, 0, 0, 0, 0xE5, 0, 0, 0x27, 0x74]);
+    }
 
     #[test]
     fn a_segment_pin_carries_and_reads_back_its_activity() {
