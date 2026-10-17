@@ -12,7 +12,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | Phase | Family | Groups | Requires | Proves |
 |---|---|---|---|---|
 | `up` | BGP | base, drivers, rpl, ospf-suite, pki-suite | - | Starts both routers (config seeded, REST pinned) configured as BGP peers. |
-| `established` | BGP | base, drivers, rpl, ospf-suite, pki-suite | - | Both sides log `bgp session established` (graceful-restart capability checked too). |
+| `established` | BGP | base, drivers, rpl, ospf-suite, pki-suite | - | Both sides log `bgp session established` (graceful-restart capability checked too); `GET /v1/version` on both routers reports the same revision, not `unknown`. |
 | `reconnect` | BGP | base | - | Killing one side's `nos-bgpd` is detected by the other and both re-establish. |
 | `collision` | BGP | base | - | Restarting both `nos-bgpd` at once yields an RFC 4271 §6.8 collision event (best-effort, timing-dependent). |
 | `shutdown` | BGP | base | - | RFC 9003 shutdown message reaches router-b as Cease/Administrative Shutdown (inside an RFC 8538 Hard Reset); the session stays down until cleared; removing the peer sends Cease/Peer De-configured. |

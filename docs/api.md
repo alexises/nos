@@ -141,6 +141,7 @@ $ $C $B/v1/bgp/summary | jq .
 
 All are `GET`, and each returns the same data as the matching shell command, as JSON:
 
+- `/v1/version`: `{version, revision}` of the running build; `revision` is `unknown` unless built by `make docker-build`. No daemon is queried.
 - `/v1/config`: the running config. Users show only their name and password hash.
 - `/v1/routes/{table}`: every prefix with every candidate route, best first. `/v1/routes/{table}/{addr}` is the longest-prefix match for one address, or `404` if nothing covers it.
 - `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.

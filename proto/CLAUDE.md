@@ -21,6 +21,7 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 | `ipc`, `broker`, `rib`, `interface`, `bgp`, `log`, `ospf`, `lacp`, `lldp`, `stp`, `fdb` | Wire types per daemon family: `docs/ipc-protocols.md`. |
 | `evpn_id` | RD/RT text ⇄ bytes, ESI, EVPN extended communities, `vxlan_name`; RFC detail in the function docs and the schema reference. |
 | `config_path` | URL-style addressing of a config subsection, shared by `nos-config` and `nos-restd`. `ELEMENT_KEYS` must be extended for a new list keyed by another field; `field_segment`/`key_field`/`field_matches` are shared with the OpenAPI generator, so spec and behaviour can't drift. The `openapi` feature adds `utoipa::ToSchema` (`IpAddr`/`IpNet` need `schema(value_type = String)`, recursive `SectionDiff.subsections` `schema(no_recursion)`). |
+| `version` | `VERSION`/`REVISION` constants (`build.rs` bakes env `NOS_BUILD_REV`, default `unknown`; the Docker build sets it, so a changed rev recompiles every crate) and the `VersionInfo` shared by `show version` and `GET /v1/version`. |
 | `paths` | The two bootstrap socket defaults that stay fixed (config, watchdog) plus the PKI ones. |
 | `codec` | `IpcCodec<T>`: 4-byte LE length prefix + postcard payload, generic over any `Serialize + DeserializeOwned`. |
 

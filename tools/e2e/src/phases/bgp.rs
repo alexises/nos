@@ -47,6 +47,13 @@ async fn reestablished(r: &Router, baseline: usize) -> anyhow::Result<()> {
     r.wait_new("bgp session established", baseline, 60).await
 }
 
+/// `nos-restd`'s baked-in build revision, over `GET /v1/version`.
+async fn revision(r: &Router) -> anyhow::Result<String> {
+    let body = r.rest_expect(Method::GET, "/v1/version", None, 200).await?;
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    Ok(v["revision"].as_str().unwrap_or_default().to_string())
+}
+
 pub async fn established(w: &mut World) -> anyhow::Result<()> {
     let waited = async {
         w.a()?.established().await?;
@@ -74,7 +81,14 @@ pub async fn established(w: &mut World) -> anyhow::Result<()> {
         .wait(&format!(
             "graceful restart negotiated peer={IP_A} .*notification=true"
         ))
-        .await
+        .await?;
+    // #473: both images were built from one tree, so `nos-restd` reports the
+    // same baked-in revision; `unknown` means `NOS_BUILD_REV` never arrived.
+    let (ra, rb) = (revision(w.a()?).await?, revision(w.b()?).await?);
+    if ra == "unknown" || ra.is_empty() || ra != rb {
+        bail!("/v1/version revision: a={ra:?} b={rb:?} (want equal and not unknown)");
+    }
+    Ok(())
 }
 
 /// On an `established` timeout (#158): each router's port-179 sockets

@@ -40,6 +40,8 @@ pub mod schema;
 pub mod stp;
 /// Field validators shared by the config ops.
 pub mod validators;
+pub mod version;
+pub use version::VersionInfo;
 
 pub use bfd::{
     BfdDiag, BfdEvent, BfdRequest, BfdSessionKind, BfdSessionView, BfdState, ReflectorDiscards,

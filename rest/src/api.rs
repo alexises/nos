@@ -46,6 +46,7 @@ struct ApiDoc;
 
 fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(show::version))
         .routes(routes!(show::config))
         .routes(routes!(show::routes))
         .routes(routes!(show::route_lookup))

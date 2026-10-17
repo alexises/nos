@@ -236,6 +236,10 @@ pub async fn handle_action(
             diff(&mode, socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowVersion => {
+            println!("{}", version_line());
+            Outcome::Continue(mode)
+        }
         Resolved::Error(msg) => {
             eprintln!("error: {msg}");
             Outcome::Continue(mode)
@@ -271,6 +275,15 @@ pub async fn handle_action(
             run_query(action, mode, socket, watchdog_socket).await
         }
     }
+}
+
+/// `show version`'s one line.
+fn version_line() -> String {
+    format!(
+        "nos {} ({})",
+        nos_proto::version::VERSION,
+        nos_proto::version::REVISION
+    )
 }
 
 /// The `show`/`clear` actions of `handle_action`, split out for length
@@ -1574,6 +1587,16 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
 #[cfg(test)]
 mod tempfile_tests {
     use super::new_policy_tempfile;
+
+    #[test]
+    fn version_line_names_version_and_revision() {
+        let l = super::version_line();
+        assert!(l.starts_with("nos "), "{l}");
+        assert!(
+            l.contains(nos_proto::version::VERSION) && l.ends_with(')'),
+            "{l}"
+        );
+    }
 
     /// The security property #100 fixed: an unpredictable name (not a
     /// pid-based `/tmp/nos-policy-<pid>.rpl`) created with mode 0600, so a

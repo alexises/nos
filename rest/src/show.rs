@@ -16,7 +16,7 @@ use nos_proto::{
     LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
     PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
-    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary,
+    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,11 @@ use utoipa::ToSchema;
 
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::ipc::{unexpected, Daemons};
+
+#[utoipa::path(get, path = "/v1/version", tag = "show", summary = "Build version and revision of nos-restd", responses((status = 200, body = VersionInfo)))]
+pub async fn version() -> Json<VersionInfo> {
+    Json(VersionInfo::current())
+}
 
 #[utoipa::path(get, path = "/v1/config", tag = "show", summary = "Running config", responses((status = 200, body = Config)))]
 pub async fn config(State(d): State<Daemons>) -> ApiResult<Json<Config>> {
