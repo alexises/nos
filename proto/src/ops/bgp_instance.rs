@@ -17,80 +17,120 @@ pub enum BgpInstanceOp {
     /// already exist by name; no-op if it does. Backs `edit bgp instance
     /// <name>`'s "create if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the BGP instance this op targets.
         name: String,
     },
+    /// Sets the AS number of the BGP instance to `asn`.
     SetAsn {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Autonomous system number (4 bytes, RFC 6793).
         asn: u32,
     },
+    /// Sets the router ID of the BGP instance to `router_id`.
     SetRouterId {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// BGP identifier (RFC 4271 §4.2).
         router_id: Ipv4Addr,
     },
+    /// Sets the cluster ID of the BGP instance to `cluster_id`.
     SetClusterId {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Route-reflector cluster ID (RFC 4456).
         cluster_id: Ipv4Addr,
     },
+    /// Clears the cluster ID of the BGP instance so it reverts to the default.
     ClearClusterId {
+        /// Name of the BGP instance this op targets.
         name: String,
     },
+    /// Deletes the BGP instance and everything nested under it.
     Delete {
+        /// Name of the BGP instance this op targets.
         name: String,
     },
     /// RFC 5065: makes the instance a confederation member.
     SetConfederationIdentifier {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Confederation identifier (RFC 5065) shown to external peers.
         identifier: u32,
     },
+    /// Clears the confederation of the BGP instance so it reverts to the default.
     ClearConfederation {
+        /// Name of the BGP instance this op targets.
         name: String,
     },
     /// Adds another member AS; no-op if already listed. Refused at commit
     /// until an identifier is set too.
     AddConfederationPeer {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Autonomous system number (4 bytes, RFC 6793).
         asn: u32,
     },
+    /// Removes confederation peer `asn` from the BGP instance.
     RemoveConfederationPeer {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Autonomous system number (4 bytes, RFC 6793).
         asn: u32,
     },
     /// RFC 8210: adds an RPKI cache, or replaces the one with that address.
     SetRpkiCache {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// RPKI cache (RTR, RFC 8210) definition.
         cache: RpkiCache,
     },
+    /// Removes RPKI cache `address` from the BGP instance.
     RemoveRpkiCache {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Address of the RPKI cache.
         address: IpAddr,
     },
     /// BGP multipath: how many equal paths' next hops to install.
     SetMaximumPaths {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Maximum number of equal-cost paths installed.
         maximum_paths: u8,
     },
+    /// Clears the maximum paths of the BGP instance so it reverts to the default.
     ClearMaximumPaths {
+        /// Name of the BGP instance this op targets.
         name: String,
     },
     /// RFC 4271 §9.2.2.2: adds an aggregate, or replaces the one with that
     /// prefix.
     SetAggregate {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Aggregate route definition.
         aggregate: BgpAggregate,
     },
+    /// Removes aggregate `prefix` from the BGP instance.
     RemoveAggregate {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Aggregate prefix.
         prefix: IpNet,
     },
     /// RFC 4724 / RFC 8538: replaces the whole graceful-restart setting
     /// (`BgpGracefulRestart::default()` puts it back on with default timers).
     SetGracefulRestart {
+        /// Name of the BGP instance this op targets.
         name: String,
+        /// Graceful-restart parameters.
         graceful_restart: BgpGracefulRestart,
     },
 }
 
 impl BgpInstanceOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             BgpInstanceOp::Ensure { name } => {

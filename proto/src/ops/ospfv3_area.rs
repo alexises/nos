@@ -12,11 +12,24 @@ use super::OpError;
 /// mirrors `OspfAreaOp` exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ospfv3AreaOp {
-    Ensure { instance: String, area_id: Ipv4Addr },
-    Delete { instance: String, area_id: Ipv4Addr },
+    /// Creates the `OSPFv3` area if it does not exist (idempotent).
+    Ensure {
+        /// Name of the `OSPFv3` instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+    },
+    /// Deletes the `OSPFv3` area and everything nested under it.
+    Delete {
+        /// Name of the `OSPFv3` instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+    },
 }
 
 impl Ospfv3AreaOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             Ospfv3AreaOp::Ensure { instance, area_id } => {

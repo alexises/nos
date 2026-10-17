@@ -16,111 +16,170 @@ pub enum BroadcastDomainOp {
     /// Backs `edit broadcast-domain <name>`'s "create if missing, else
     /// navigate to it" semantics.
     Ensure {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// Upserts by address: if `address` is already present on the domain,
     /// this replaces its label rather than adding a duplicate.
     AddAddress {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Gateway address in CIDR notation of the domain's routed interface.
         address: IpNet,
+        /// Optional label tagging the address.
         label: Option<String>,
     },
+    /// Removes address `address` from the broadcast domain.
     RemoveAddress {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Gateway address in CIDR notation of the domain's routed interface.
         address: IpNet,
     },
+    /// Sets the routing table of the broadcast domain to `routing_table`.
     SetRoutingTable {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Name of the routing table (VRF) to attach to.
         routing_table: String,
     },
+    /// Clears the routing table of the broadcast domain so it reverts to the default.
     ClearRoutingTable {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
+    /// Sets the OSPF profile of the broadcast domain to `ospf_profile`.
     SetOspfProfile {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Name of the OSPF profile to attach.
         ospf_profile: String,
     },
+    /// Clears the OSPF profile of the broadcast domain so it reverts to the default.
     ClearOspfProfile {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// Same shape as `SetOspfProfile`/`ClearOspfProfile`, joining `OSPFv3`
     /// (RFC 5340) instead.
     SetOspfv3Profile {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
+    /// Clears the `OSPFv3` profile of the broadcast domain so it reverts to the default.
     ClearOspfv3Profile {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
+    /// Deletes the broadcast domain and everything nested under it.
     Delete {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// EVPN/VXLAN (all appended after `Delete`: postcard indexes by position).
     SetVni {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// VXLAN network identifier (24 bits).
         vni: u32,
     },
+    /// Clears the VNI of the broadcast domain so it reverts to the default.
     ClearVni {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
+    /// Sets the route distinguisher of the broadcast domain to `rd`.
     SetRd {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Route distinguisher in `ASN:NN` or `IP:NN` form.
         rd: String,
     },
+    /// Clears the route distinguisher of the broadcast domain so it reverts to the default.
     ClearRd {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// Idempotent add of one Route Target to the import or export list.
     AddRouteTarget {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// `true` selects the import set, `false` the export set.
         import: bool,
+        /// Route target in `ASN:NN` or `IP:NN` form.
         route_target: String,
     },
+    /// Removes route target `import` from the broadcast domain.
     RemoveRouteTarget {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// `true` selects the import set, `false` the export set.
         import: bool,
+        /// Route target in `ASN:NN` or `IP:NN` form.
         route_target: String,
     },
+    /// Sets the VTEP source of the broadcast domain to `vtep_source`.
     SetVtepSource {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Local address or interface used as the VXLAN underlay source.
         vtep_source: SourceAddress,
     },
+    /// Clears the VTEP source of the broadcast domain so it reverts to the default.
     ClearVtepSource {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// `redistribute from mac to bgp <bgp_instance>`.
     SetMacRedistribute {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Name of the BGP instance to bind.
         bgp_instance: String,
     },
+    /// Clears the MAC redistribute of the broadcast domain so it reverts to the default.
     ClearMacRedistribute {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// `redistribute from arp to bgp <bgp_instance>` — appended: postcard
     /// indexes variants by position.
     SetArpRedistribute {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Name of the BGP instance to bind.
         bgp_instance: String,
     },
+    /// Clears the ARP redistribute of the broadcast domain so it reverts to the default.
     ClearArpRedistribute {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// `redistribute from connected to bgp <bgp_instance>`.
     SetConnectedRedistribute {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// Name of the BGP instance to bind.
         bgp_instance: String,
     },
+    /// Clears the connected redistribute of the broadcast domain so it reverts to the default.
     ClearConnectedRedistribute {
+        /// Name of the broadcast domain this op targets.
         name: String,
     },
     /// `neigh-suppress` (ARP/ND suppression on the VXLAN bridge port).
     SetNeighSuppress {
+        /// Name of the broadcast domain this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
 }
 
 impl BroadcastDomainOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             BroadcastDomainOp::Ensure { .. }

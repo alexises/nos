@@ -29,7 +29,6 @@ pub mod lldp;
 /// Wire types of `nos-logd`: levels, entries, requests.
 pub mod log;
 /// Config edit operations (`ConfigOp`) and their application to a `Config`.
-#[allow(missing_docs)] // removed by the ops sub-issue of #428
 pub mod ops;
 pub mod ospf;
 pub mod ospfv3;

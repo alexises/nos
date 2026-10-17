@@ -13,127 +13,214 @@ use super::OpError;
 /// simple-password mechanism — see `Ospfv3Profile`'s doc comment).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ospfv3ProfileOp {
+    /// Creates the `OSPFv3` profile if it does not exist (idempotent).
     Ensure {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
+    /// Deletes the `OSPFv3` profile and everything nested under it.
     Delete {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
+    /// Sets the hello interval of the `OSPFv3` profile to `hello_interval`.
     SetHelloInterval {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// Hello interval in seconds (RFC 2328 §9.5).
         hello_interval: u16,
     },
+    /// Clears the hello interval of the `OSPFv3` profile so it reverts to the default.
     ClearHelloInterval {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
+    /// Sets the dead interval of the `OSPFv3` profile to `dead_interval`.
     SetDeadInterval {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// Router dead interval in seconds (RFC 2328 §9.5).
         dead_interval: u16,
     },
+    /// Clears the dead interval of the `OSPFv3` profile so it reverts to the default.
     ClearDeadInterval {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
+    /// Sets the cost of the `OSPFv3` profile to `cost`.
     SetCost {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// Interface output cost (RFC 5340).
         cost: u16,
     },
+    /// Clears the cost of the `OSPFv3` profile so it reverts to the default.
     ClearCost {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
+    /// Sets the priority of the `OSPFv3` profile to `priority`.
     SetPriority {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// Router priority for DR/BDR election (0 makes the router ineligible).
         priority: u8,
     },
+    /// Clears the priority of the `OSPFv3` profile so it reverts to the default.
     ClearPriority {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
+    /// Sets the MTU of the `OSPFv3` profile to `mtu`.
     SetMtu {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// MTU advertised in database descriptions (RFC 5340).
         mtu: u16,
     },
     /// Toggles the RFC 2328 §10.6 DBD Interface MTU check.
     SetMtuIgnore {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Clears the MTU of the `OSPFv3` profile so it reverts to the default.
     ClearMtu {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
+    /// Sets the network type of the `OSPFv3` profile to `network_type`.
     SetNetworkType {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// OSPF network type (point-to-point, broadcast, ...).
         network_type: NetworkType,
     },
+    /// Clears the network type of the `OSPFv3` profile so it reverts to the default.
     ClearNetworkType {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
     /// Upserts one RFC 7166 key by `key_id`, starting the list if `auth`
     /// was unset — mirrors `OspfProfileOp::SetCryptoKey`.
     SetCryptoKey {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// The authentication key entry.
         key: OspfCryptoKey,
     },
     /// Removes one key by `key_id`; no-op if absent, never clears `auth`
     /// back to `None` (an empty list is rejected at commit — use `ClearAuth`).
     RemoveCryptoKey {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// Key ID selecting the SA key (RFC 7166).
         key_id: u16,
     },
     /// Marks one existing key current, clearing the flag on every other.
     SetCryptoCurrentKey {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// Key ID selecting the SA key (RFC 7166).
         key_id: u16,
     },
+    /// Clears the auth of the `OSPFv3` profile so it reverts to the default.
     ClearAuth {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
     },
     /// Sets (`Some`) or clears (`None`, meaning 0) the RFC 5340 Instance ID.
     SetInstanceId {
+        /// Name of the `OSPFv3` instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
         name: String,
+        /// Instance ID (RFC 5838 multi-instance).
         instance_id: Option<u8>,
     },
 }
 
 impl Ospfv3ProfileOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             Ospfv3ProfileOp::Ensure { .. }

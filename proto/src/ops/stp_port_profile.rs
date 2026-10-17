@@ -11,14 +11,18 @@ use super::OpError;
 pub enum StpPortProfileOp {
     /// Creates the profile with defaults if missing; no-op otherwise.
     Ensure {
+        /// Name of the STP port profile this op targets.
         name: String,
     },
+    /// Deletes the STP port profile and everything nested under it.
     Delete {
+        /// Name of the STP port profile this op targets.
         name: String,
     },
 }
 
 impl StpPortProfileOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             StpPortProfileOp::Ensure { name } => {

@@ -18,115 +18,192 @@ pub enum BgpPeerGroupOp {
     /// `edit peer-group <name>`'s "create if missing, else navigate to it"
     /// semantics.
     Ensure {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the remote AS of the BGP peer group to `remote_as`.
     SetRemoteAs {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Remote AS number the session expects.
         remote_as: u32,
     },
+    /// Sets the source address of the BGP peer group to `source`.
     SetSourceAddress {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Local address or interface the session binds to.
         source: SourceAddress,
     },
+    /// Clears the source address of the BGP peer group so it reverts to the default.
     ClearSourceAddress {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// Idempotent — no-op if `af` is already present.
     AddAddressFamily {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Address family (IPv4/IPv6 unicast, EVPN) the setting applies to.
         af: AddressFamily,
     },
     /// Idempotent — no-op if `af` is already absent.
     RemoveAddressFamily {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Address family (IPv4/IPv6 unicast, EVPN) the setting applies to.
         af: AddressFamily,
     },
+    /// Deletes the BGP peer group and everything nested under it.
     Delete {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the hold time of the BGP peer group to `hold_time`.
     SetHoldTime {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// BGP hold time in seconds (RFC 4271 §4.2).
         hold_time: u16,
     },
+    /// Clears the hold time of the BGP peer group so it reverts to the default.
     ClearHoldTime {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the keepalive interval of the BGP peer group to `keepalive_interval`.
     SetKeepaliveInterval {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Keepalive interval in seconds (RFC 4271 §4.4).
         keepalive_interval: u16,
     },
+    /// Clears the keepalive interval of the BGP peer group so it reverts to the default.
     ClearKeepaliveInterval {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the connect retry time of the BGP peer group to `connect_retry_time`.
     SetConnectRetryTime {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// `ConnectRetry` timer in seconds (RFC 4271 §8.2.2).
         connect_retry_time: u16,
     },
+    /// Clears the connect retry time of the BGP peer group so it reverts to the default.
     ClearConnectRetryTime {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the MRAI of the BGP peer group to `mrai`.
     SetMrai {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Minimum route advertisement interval in seconds (RFC 4271 §9.2.1.1).
         mrai: u16,
     },
+    /// Clears the MRAI of the BGP peer group so it reverts to the default.
     ClearMrai {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the route refresh stale time of the BGP peer group to `seconds`.
     SetRouteRefreshStaleTime {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Route-refresh stale-route timeout in seconds (RFC 7313).
         seconds: u16,
     },
+    /// Clears the route refresh stale time of the BGP peer group so it reverts to the default.
     ClearRouteRefreshStaleTime {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the damping of the BGP peer group to `damping`.
     SetDamping {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Route-flap damping parameters (RFC 2439).
         damping: BgpDamping,
     },
+    /// Clears the damping of the BGP peer group so it reverts to the default.
     ClearDamping {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the max hops of the BGP peer group to `max_hops`.
     SetMaxHops {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Maximum TTL hops to the peer (eBGP multihop; 1 means directly connected).
         max_hops: u8,
     },
+    /// Clears the max hops of the BGP peer group so it reverts to the default.
     ClearMaxHops {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// Sets `auth` to a single MD5 password, replacing any TCP-AO keys
     /// (the two mechanisms are mutually exclusive — the kernel accepts only
     /// one per socket).
     SetMd5Auth {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// TCP MD5 password (RFC 2385), handed to the kernel.
         password: String,
     },
     /// Upserts one TCP-AO key by `send_id`. If `auth` isn't already `Ao`
     /// (unset, or `Md5`), starts a fresh key list with just this key.
     SetAoKey {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// TCP-AO key (RFC 5925) to store.
         key: BgpAoKey,
     },
     /// Removes one TCP-AO key by `send_id`. No-op if `auth` isn't `Ao` or
@@ -134,149 +211,238 @@ pub enum BgpPeerGroupOp {
     /// the list becomes empty; commit-time validation rejects an empty
     /// `Ao` list, so an explicit `ClearAuth` is required for that case.
     RemoveAoKey {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// TCP-AO `SendID` (RFC 5925 §3.1), unique per peer group.
         send_id: u8,
     },
     /// Marks one existing TCP-AO key as the current key, clearing the flag
     /// on every other key in the list.
     SetAoCurrentKey {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// TCP-AO `SendID` (RFC 5925 §3.1), unique per peer group.
         send_id: u8,
     },
     /// Marks one existing TCP-AO key as the rnext key, clearing the flag on
     /// every other key in the list.
     SetAoRnextKey {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// TCP-AO `SendID` (RFC 5925 §3.1), unique per peer group.
         send_id: u8,
     },
     /// Unsets `auth` entirely, regardless of which mechanism was set.
     ClearAuth {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the next hop of the BGP peer group to `mode`.
     SetNextHop {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Next-hop handling: self, unchanged or default.
         mode: NextHopMode,
     },
+    /// Clears the next hop of the BGP peer group so it reverts to the default.
     ClearNextHop {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Enables route reflector client on the BGP peer group.
     SetRouteReflectorClient {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// RFC 8097 `announce_rpki_state` on/off.
     SetAnnounceRpkiState {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Clears the route reflector client of the BGP peer group so it reverts to the default.
     ClearRouteReflectorClient {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Enables route server client on the BGP peer group.
     SetRouteServerClient {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Clears the route server client of the BGP peer group so it reverts to the default.
     ClearRouteServerClient {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the import policy of the BGP peer group to `import_policy`.
     SetImportPolicy {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Name of the policy applied to routes received from the peer.
         import_policy: String,
     },
+    /// Clears the import policy of the BGP peer group so it reverts to the default.
     ClearImportPolicy {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the export policy of the BGP peer group to `export_policy`.
     SetExportPolicy {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Name of the policy applied to routes sent to the peer.
         export_policy: String,
     },
+    /// Clears the export policy of the BGP peer group so it reverts to the default.
     ClearExportPolicy {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// Administratively shuts the whole peer-group (see `BgpShutdown`).
     SetShutdown {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Optional shutdown communication (RFC 8203) sent to the peer.
         message: Option<String>,
     },
+    /// Clears the shutdown of the BGP peer group so it reverts to the default.
     ClearShutdown {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// Sets one address family's RFC 4486 maximum-prefix limit.
     SetMaximumPrefix {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Address family the setting applies to.
         family: AddressFamily,
+        /// Maximum number of prefixes accepted before the session is dropped.
         limit: BgpPrefixLimit,
     },
     /// Removes one address family's maximum-prefix limit (no-op if unset).
     ClearMaximumPrefix {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Address family the setting applies to.
         family: AddressFamily,
     },
     /// Sets the vendor `local-as` (see `BgpLocalAs`).
     SetLocalAs {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// AS number presented to the peer instead of the instance ASN.
         local_as: BgpLocalAs,
     },
+    /// Clears the local AS of the BGP peer group so it reverts to the default.
     ClearLocalAs {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// Sets RFC 7911 ADD-PATH (see `BgpAddPath`).
     SetAddPath {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Next-hop handling: self, unchanged or default.
         mode: BgpAddPath,
     },
+    /// Clears the add path of the BGP peer group so it reverts to the default.
     ClearAddPath {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// Sets RFC 7911 `add_path_send_count`.
     SetAddPathSendCount {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// Maximum number of additional paths advertised per prefix (RFC 7911).
         count: u8,
     },
+    /// Clears the add path send count of the BGP peer group so it reverts to the default.
     ClearAddPathSendCount {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
     /// Sets the RFC 9234 role (see `BgpRole`).
     SetRole {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// BGP role (RFC 9234) of the session.
         role: BgpRole,
     },
+    /// Clears the role of the BGP peer group so it reverts to the default.
     ClearRole {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the strict mode of the BGP peer group to `enabled`.
     SetStrictMode {
+        /// Name of the BGP instance owning the target.
         instance: String,
+        /// Name of the BGP peer group this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
 }
 
 impl BgpPeerGroupOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             BgpPeerGroupOp::Ensure { .. }

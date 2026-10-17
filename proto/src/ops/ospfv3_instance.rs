@@ -14,28 +14,39 @@ pub enum Ospfv3InstanceOp {
     /// already exist by name; no-op if it does. Backs `edit ospfv3 instance
     /// <name>`'s "create if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the `OSPFv3` instance this op targets.
         name: String,
     },
+    /// Sets the router ID of the `OSPFv3` instance to `router_id`.
     SetRouterId {
+        /// Name of the `OSPFv3` instance this op targets.
         name: String,
+        /// Router ID of the instance (32 bits, dotted-quad).
         router_id: Ipv4Addr,
     },
     /// Turns RFC 8362 extended-LSA (Full mode) origination on or off.
     SetExtendedLsa {
+        /// Name of the `OSPFv3` instance this op targets.
         name: String,
+        /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
     /// Sets (`Some`) or clears (`None`) the RFC 5187 grace period.
     SetGracefulRestartGracePeriod {
+        /// Name of the `OSPFv3` instance this op targets.
         name: String,
+        /// Grace period in seconds (RFC 3623 / RFC 5187).
         grace_period: Option<u16>,
     },
+    /// Deletes the `OSPFv3` instance and everything nested under it.
     Delete {
+        /// Name of the `OSPFv3` instance this op targets.
         name: String,
     },
 }
 
 impl Ospfv3InstanceOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             Ospfv3InstanceOp::Ensure { name } => {

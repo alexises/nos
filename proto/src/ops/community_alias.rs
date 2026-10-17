@@ -13,18 +13,25 @@ pub enum CommunityAliasOp {
     /// name; no-op if it does. Backs `edit community-alias <name>`'s "create
     /// if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the community alias this op targets.
         name: String,
     },
+    /// Sets the value of the community alias to `value`.
     SetValue {
+        /// Name of the community alias this op targets.
         name: String,
+        /// Value to store.
         value: String,
     },
+    /// Deletes the community alias and everything nested under it.
     Delete {
+        /// Name of the community alias this op targets.
         name: String,
     },
 }
 
 impl CommunityAliasOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             CommunityAliasOp::Ensure { name } => {

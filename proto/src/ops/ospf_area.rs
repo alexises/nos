@@ -20,49 +20,78 @@ pub enum OspfAreaOp {
     /// exist); no-op if it does. Backs `edit ospf instance <name> area
     /// <area-id>`'s "create if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
     },
+    /// Deletes the OSPF area and everything nested under it.
     Delete {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
     },
+    /// Sets the area type of the OSPF area to `area_type`.
     SetAreaType {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Area type (normal, stub, NSSA).
         area_type: OspfAreaType,
     },
+    /// Sets the stub default cost of the OSPF area to `cost`.
     SetStubDefaultCost {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Metric of the default route injected into the stub area.
         cost: Option<u16>,
     },
     /// Upserts by `cidr`.
     SetRange {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// IPv4 prefix summarising the area's addresses.
         cidr: Ipv4Net,
+        /// `true` suppresses advertising the range.
         not_advertise: bool,
     },
+    /// Removes range `cidr` from the OSPF area.
     RemoveRange {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// IPv4 prefix summarising the area's addresses.
         cidr: Ipv4Net,
     },
     /// Upserts by `router_id`, resetting its timers and auth.
     SetVirtualLink {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Router ID of the virtual-link peer (the ABR at its far end).
         router_id: Ipv4Addr,
     },
+    /// Removes virtual link `router_id` from the OSPF area.
     RemoveVirtualLink {
+        /// Name of the OSPF instance owning the target.
         instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
         area_id: Ipv4Addr,
+        /// Router ID of the virtual-link peer (the ABR at its far end).
         router_id: Ipv4Addr,
     },
 }
 
 impl OspfAreaOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             OspfAreaOp::Ensure { instance, area_id } => {

@@ -18,6 +18,7 @@ pub enum InterfaceOp {
     /// by using a `loopback-<table>`-prefixed name (see
     /// `schema::LOOPBACK_PREFIX`) — there is no separate op for it.
     Ensure {
+        /// Name of the interface this op targets.
         name: String,
     },
     /// Upserts by address: if `address` is already present on the
@@ -25,93 +26,147 @@ pub enum InterfaceOp {
     /// re-running `set interface <name> address <addr> label <label>` is
     /// how a label is changed or cleared.
     AddAddress {
+        /// Name of the interface this op targets.
         name: String,
+        /// Address in CIDR notation assigned to the interface.
         address: IpNet,
+        /// Optional label tagging the address.
         label: Option<String>,
     },
+    /// Removes address `address` from the interface.
     RemoveAddress {
+        /// Name of the interface this op targets.
         name: String,
+        /// Address in CIDR notation assigned to the interface.
         address: IpNet,
     },
+    /// Sets the routing table of the interface to `routing_table`.
     SetRoutingTable {
+        /// Name of the interface this op targets.
         name: String,
+        /// Name of the routing table (VRF) to attach to.
         routing_table: String,
     },
+    /// Clears the routing table of the interface so it reverts to the default.
     ClearRoutingTable {
+        /// Name of the interface this op targets.
         name: String,
     },
+    /// Sets the MTU of the interface to `mtu`.
     SetMtu {
+        /// Name of the interface this op targets.
         name: String,
+        /// MTU in bytes applied to the kernel device.
         mtu: u32,
     },
+    /// Clears the MTU of the interface so it reverts to the default.
     ClearMtu {
+        /// Name of the interface this op targets.
         name: String,
     },
     /// `set`/`delete interface <name> lldp transmit` — one op with a flag
     /// rather than a `Set`/`Clear` pair, since a bool has no value to clear.
     SetLldpTransmit {
+        /// Name of the interface this op targets.
         name: String,
+        /// `true` enables the LLDP receive direction, `false` disables it.
         enabled: bool,
     },
+    /// Sets the LLDP receive of the interface to `enabled`.
     SetLldpReceive {
+        /// Name of the interface this op targets.
         name: String,
+        /// `true` enables the LLDP receive direction, `false` disables it.
         enabled: bool,
     },
+    /// Sets the LLDP destination of the interface to `destination`.
     SetLldpDestination {
+        /// Name of the interface this op targets.
         name: String,
+        /// Multicast destination MAC used for this interface's LLDPDUs.
         destination: LldpDestination,
     },
+    /// Clears the LLDP destination of the interface so it reverts to the default.
     ClearLldpDestination {
+        /// Name of the interface this op targets.
         name: String,
     },
+    /// Sets the OSPF profile of the interface to `ospf_profile`.
     SetOspfProfile {
+        /// Name of the interface this op targets.
         name: String,
+        /// Name of the OSPF profile to attach.
         ospf_profile: String,
     },
+    /// Clears the OSPF profile of the interface so it reverts to the default.
     ClearOspfProfile {
+        /// Name of the interface this op targets.
         name: String,
     },
+    /// Sets the `OSPFv3` profile of the interface to `ospfv3_profile`.
     SetOspfv3Profile {
+        /// Name of the interface this op targets.
         name: String,
+        /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
+    /// Clears the `OSPFv3` profile of the interface so it reverts to the default.
     ClearOspfv3Profile {
+        /// Name of the interface this op targets.
         name: String,
     },
+    /// Sets the switching profile of the interface to `switching_profile`.
     SetSwitchingProfile {
+        /// Name of the interface this op targets.
         name: String,
+        /// Name of the switching profile.
         switching_profile: String,
     },
+    /// Clears the switching profile of the interface so it reverts to the default.
     ClearSwitchingProfile {
+        /// Name of the interface this op targets.
         name: String,
     },
+    /// Enables port aggregate on the interface.
     SetPortAggregate {
+        /// Name of the interface this op targets.
         name: String,
+        /// Name of the port aggregate.
         port_aggregate: String,
     },
+    /// Clears the port aggregate of the interface so it reverts to the default.
     ClearPortAggregate {
+        /// Name of the interface this op targets.
         name: String,
     },
+    /// Deletes the interface and everything nested under it.
     Delete {
+        /// Name of the interface this op targets.
         name: String,
     },
     /// Appended (postcard indexes variants by position).
     SetLacpPortPriority {
+        /// Name of the interface this op targets.
         name: String,
+        /// Router priority for DR/BDR election (0 makes the router ineligible).
         priority: u16,
     },
     /// Appended (postcard indexes variants by position).
     ClearLacpPortPriority {
+        /// Name of the interface this op targets.
         name: String,
     },
     /// Appended (postcard indexes variants by position).
     SetLacpMode {
+        /// Name of the interface this op targets.
         name: String,
+        /// Mode to select.
         mode: crate::schema::LacpMode,
     },
 }
 
 impl InterfaceOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             InterfaceOp::Ensure { name } => {

@@ -11,14 +11,18 @@ use super::OpError;
 pub enum BfdProfileOp {
     /// Creates the profile with defaults if missing; no-op otherwise.
     Ensure {
+        /// Name of the BFD profile this op targets.
         name: String,
     },
+    /// Deletes the BFD profile and everything nested under it.
     Delete {
+        /// Name of the BFD profile this op targets.
         name: String,
     },
 }
 
 impl BfdProfileOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             BfdProfileOp::Ensure { name } => {

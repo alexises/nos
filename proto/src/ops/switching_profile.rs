@@ -15,26 +15,36 @@ pub enum SwitchingProfileOp {
     /// Backs `edit switching-profile <name>`'s "create if missing, else
     /// navigate to it" semantics.
     Ensure {
+        /// Name of the switching profile this op targets.
         name: String,
     },
     /// Upserts by `broadcast_domain` — a repeat `AddMember` for the same
     /// domain replaces its tag, mirroring `InterfaceOp::AddAddress`'s
     /// upsert-by-`address` semantics.
     AddMember {
+        /// Name of the switching profile this op targets.
         name: String,
+        /// Name of the member broadcast domain.
         broadcast_domain: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: VlanTag,
     },
+    /// Removes member `broadcast_domain` from the switching profile.
     RemoveMember {
+        /// Name of the switching profile this op targets.
         name: String,
+        /// Name of the member broadcast domain.
         broadcast_domain: String,
     },
+    /// Deletes the switching profile and everything nested under it.
     Delete {
+        /// Name of the switching profile this op targets.
         name: String,
     },
 }
 
 impl SwitchingProfileOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             SwitchingProfileOp::Ensure { name } => {

@@ -20,93 +20,139 @@ pub enum PortAggregateOp {
     /// no-op if it does. Backs `edit port-aggregate <name>`'s "create if
     /// missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Aggregation mode (static XOR or LACP).
         mode: PortAggregateMode,
     },
+    /// Sets the switching profile of the port aggregate to `switching_profile`.
     SetSwitchingProfile {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Name of the switching profile.
         switching_profile: String,
     },
+    /// Clears the switching profile of the port aggregate so it reverts to the default.
     ClearSwitchingProfile {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
+    /// Sets the MTU of the port aggregate to `mtu`.
     SetMtu {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// MTU in bytes applied to the bond device.
         mtu: u32,
     },
+    /// Clears the MTU of the port aggregate so it reverts to the default.
     ClearMtu {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
+    /// Sets the mode of the port aggregate to `mode`.
     SetMode {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Aggregation mode (static XOR or LACP).
         mode: PortAggregateMode,
     },
+    /// Sets the LACP rate of the port aggregate to `rate`.
     SetLacpRate {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// LACPDU rate: fast (1 s) or slow (30 s).
         rate: LacpRate,
     },
+    /// Deletes the port aggregate and everything nested under it.
     Delete {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
+    /// Sets the ESI of the port aggregate to `esi`.
     SetEsi {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Ethernet segment identifier (10 bytes, hex).
         esi: String,
     },
+    /// Clears the ESI of the port aggregate so it reverts to the default.
     ClearEsi {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
+    /// Sets the LACP system ID of the port aggregate to `system_id`.
     SetLacpSystemId {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// LACP system ID (MAC address) used in negotiation.
         system_id: String,
     },
+    /// Clears the LACP system ID of the port aggregate so it reverts to the default.
     ClearLacpSystemId {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
     /// Appended (postcard indexes variants by position).
     SetRedundancyMode {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Aggregation mode (static XOR or LACP).
         mode: EsRedundancy,
     },
     /// Appended (postcard indexes variants by position).
     SetDfAlgorithm {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// HMAC/hash algorithm.
         algorithm: DfAlgorithm,
     },
     /// Appended (postcard indexes variants by position).
     SetLacpSystemPriority {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Router priority for DR/BDR election (0 makes the router ineligible).
         priority: u16,
     },
     /// Appended (postcard indexes variants by position).
     ClearLacpSystemPriority {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
     /// Appended (postcard indexes variants by position).
     SetMinLinks {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Minimum active members before the aggregate is up.
         min_links: u16,
     },
     /// Appended (postcard indexes variants by position).
     SetBfd {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Name of the profile.
         profile: String,
     },
     /// Appended (postcard indexes variants by position).
     ClearBfd {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
     /// Appended (postcard indexes variants by position).
     SetBfdPeer {
+        /// Name of the port aggregate this op targets.
         name: String,
+        /// Address of the peer.
         peer: IpAddr,
     },
     /// Appended (postcard indexes variants by position).
     ClearBfdPeer {
+        /// Name of the port aggregate this op targets.
         name: String,
     },
 }
 
 impl PortAggregateOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             PortAggregateOp::Ensure { name, mode } => {

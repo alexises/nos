@@ -14,18 +14,25 @@ pub enum PolicyDefinitionOp {
     /// by name; no-op if it does. Backs `edit policy-definition <name>`'s
     /// "create if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the policy definition this op targets.
         name: String,
     },
+    /// Sets the source of the policy definition to `source`.
     SetSource {
+        /// Name of the policy definition this op targets.
         name: String,
+        /// Source to use, as the op describes.
         source: String,
     },
+    /// Deletes the policy definition and everything nested under it.
     Delete {
+        /// Name of the policy definition this op targets.
         name: String,
     },
 }
 
 impl PolicyDefinitionOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             PolicyDefinitionOp::Ensure { name } => {

@@ -16,22 +16,32 @@ pub enum CommunityGroupOp {
     /// name; no-op if it does. Backs `edit community-group <name>`'s
     /// "create if missing, else navigate to it" semantics.
     Ensure {
+        /// Name of the community group this op targets.
         name: String,
     },
+    /// Adds member `member` to the community group.
     AddMember {
+        /// Name of the community group this op targets.
         name: String,
+        /// Member of the group.
         member: String,
     },
+    /// Removes member `member` from the community group.
     RemoveMember {
+        /// Name of the community group this op targets.
         name: String,
+        /// Member of the group.
         member: String,
     },
+    /// Deletes the community group and everything nested under it.
     Delete {
+        /// Name of the community group this op targets.
         name: String,
     },
 }
 
 impl CommunityGroupOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             CommunityGroupOp::Ensure { name } => {

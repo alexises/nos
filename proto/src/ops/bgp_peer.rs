@@ -15,28 +15,41 @@ use super::OpError;
 pub enum BgpPeerOp {
     /// Creates the peer if missing, else repoints it to `peer_group`.
     Set {
+        /// Name of the BGP instance the peer belongs to.
         instance: String,
+        /// Address of the remote peer, which identifies it within the instance.
         remote_address: IpAddr,
+        /// Name of the peer group the peer belongs to.
         peer_group: String,
     },
+    /// Deletes the BGP peer and everything nested under it.
     Delete {
+        /// Name of the BGP instance the peer belongs to.
         instance: String,
+        /// Address of the remote peer, which identifies it within the instance.
         remote_address: IpAddr,
     },
     /// Administratively shuts this one peer, overriding its peer-group's own
     /// `shutdown` (see `BgpShutdown`). The peer must already exist.
     SetShutdown {
+        /// Name of the BGP instance the peer belongs to.
         instance: String,
+        /// Address of the remote peer, which identifies it within the instance.
         remote_address: IpAddr,
+        /// Optional shutdown communication (RFC 8203) sent to the peer.
         message: Option<String>,
     },
+    /// Clears the shutdown of the BGP peer so it reverts to the default.
     ClearShutdown {
+        /// Name of the BGP instance the peer belongs to.
         instance: String,
+        /// Address of the remote peer, which identifies it within the instance.
         remote_address: IpAddr,
     },
 }
 
 impl BgpPeerOp {
+    /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             BgpPeerOp::Set {
