@@ -97,6 +97,13 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              ifIndex; any other is still advertised as configured. `delete` stops advertising \
              one.",
         ),
+        Topic::LldpSystemDescription => (
+            "Set the LLDP System Description.",
+            "Free text (1-255 bytes, no control characters) advertised in the System \
+             Description TLV of every LLDPDU. Default `nos`, which reveals no version. \
+             Applies to every LLDP-enabled interface; changing it restarts each link. \
+             `delete` restores the default.",
+        ),
         Topic::Logging => (
             "Log export settings.",
             "Where nos-logd sends every log entry besides keeping it for `show log`.",

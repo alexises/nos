@@ -1029,6 +1029,11 @@ pub struct Args {
     #[arg(long)]
     pub lldp_tx_hold: Option<u8>,
 
+    /// If set, the system-wide LLDP System Description
+    /// (`LldpOp::SetSystemDescription`).
+    #[arg(long)]
+    pub lldp_system_description: Option<String>,
+
     /// One LLDP management address per repetition, each advertised in its
     /// own Management Address TLV (`LldpOp::AddManagementAddress`).
     #[arg(long = "lldp-management-address")]
@@ -3182,6 +3187,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if let Some(hold) = args.lldp_tx_hold {
         ops.push(ConfigOp::Lldp(LldpOp::SetTxHold { hold }));
     }
+    if let Some(text) = &args.lldp_system_description {
+        ops.push(ConfigOp::Lldp(LldpOp::SetSystemDescription {
+            text: text.clone(),
+        }));
+    }
     for &address in &args.lldp_management_addresses {
         ops.push(ConfigOp::Lldp(LldpOp::AddManagementAddress { address }));
     }
@@ -4188,6 +4198,8 @@ mod tests {
             "5",
             "--lldp-tx-hold",
             "3",
+            "--lldp-system-description",
+            "core",
             "--lldp-management-address",
             "10.0.0.1",
             "--lldp-management-address",
@@ -5794,6 +5806,8 @@ mod tests {
             "10",
             "--lldp-tx-hold",
             "3",
+            "--lldp-system-description",
+            "core",
             "--lldp-management-address",
             "10.1.1.1",
             "--no-lldp-management-address",
@@ -5858,6 +5872,7 @@ mod tests {
             "SetLldpReceive { name: \"eth4\", enabled: false }",
             "SetTxInterval",
             "SetTxHold",
+            "SetSystemDescription",
             "AddManagementAddress",
             "RemoveManagementAddress",
             "SetLldpDestination",

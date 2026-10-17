@@ -37,6 +37,12 @@ const MSG_FAST_TX: Duration = Duration::from_secs(1);
 /// comes back per second.
 const TX_CREDIT_MAX: u8 = 5;
 
+/// Neighbor learned/removed events logged at `info` back to back per link;
+/// beyond that they go to `debug` (a hostile or flapping peer must not flood
+/// nos-logd). One `info` credit comes back per `LOG_CREDIT_EVERY`.
+const LOG_CREDIT_MAX: u8 = 5;
+const LOG_CREDIT_EVERY: Duration = Duration::from_secs(10);
+
 const SYS_CLASS_NET: &str = "/sys/class/net";
 
 /// Everything a link task needs; also what `reconcile` compares to decide
@@ -49,6 +55,8 @@ pub struct LinkConfig {
     pub receive: bool,
     /// Advertised as the System Name TLV (the configured hostname).
     pub system_name: String,
+    /// Advertised as the System Description TLV (`lldp system-description`).
+    pub system_description: String,
     /// This machine's chassis identity — see `reconcile::local_system_id`.
     pub chassis_mac: [u8; 6],
     /// `msgTxInterval`: how often to transmit.
@@ -87,6 +95,39 @@ pub struct Port {
 /// counters survive a link restart); `reconcile` removes it when LLDP is
 /// turned off on the interface.
 pub type SharedPorts = Arc<Mutex<HashMap<String, Port>>>;
+
+/// Token bucket for the per-link `info` neighbor logs (`LOG_CREDIT_MAX`
+/// burst, one credit per `LOG_CREDIT_EVERY`).
+pub struct LogBucket {
+    credit: u8,
+    last: Instant,
+}
+
+impl LogBucket {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            credit: LOG_CREDIT_MAX,
+            last: now,
+        }
+    }
+
+    /// Refills for the time elapsed, then spends one credit if there is one.
+    fn take(&mut self, now: Instant) -> bool {
+        let n = now.saturating_duration_since(self.last).as_secs() / LOG_CREDIT_EVERY.as_secs();
+        if n > 0 {
+            self.credit = u8::try_from(n)
+                .unwrap_or(u8::MAX)
+                .saturating_add(self.credit)
+                .min(LOG_CREDIT_MAX);
+            self.last += LOG_CREDIT_EVERY * u32::try_from(n).unwrap_or(u32::MAX);
+        }
+        if self.credit == 0 {
+            return false;
+        }
+        self.credit -= 1;
+        true
+    }
+}
 
 fn chassis_id(cfg: &LinkConfig) -> Id {
     Id {
@@ -129,7 +170,7 @@ pub fn local_pdu(
         ttl: cfg.ttl_secs,
         port_description: Some(cfg.interface.clone()),
         system_name: Some(cfg.system_name.clone()),
-        system_description: Some(format!("nos {}", env!("CARGO_PKG_VERSION"))),
+        system_description: Some(cfg.system_description.clone()),
         capabilities: Some(Capabilities {
             supported: CAP_ROUTER | CAP_BRIDGE,
             enabled: CAP_ROUTER | if cfg.bridge { CAP_BRIDGE } else { 0 },
@@ -200,7 +241,13 @@ fn send(socket: &LldpSocket, interface: &str, ports: &SharedPorts, pdu: &Lldpdu)
 /// that came up after us learns us without waiting out our 30s timer. Only new
 /// neighbors trigger it, so two systems settle after one burst rather than
 /// ping-ponging.
-fn handle_rx(cfg: &LinkConfig, ports: &SharedPorts, payload: &[u8], now: Instant) -> bool {
+fn handle_rx(
+    cfg: &LinkConfig,
+    ports: &SharedPorts,
+    payload: &[u8],
+    now: Instant,
+    bucket: &mut LogBucket,
+) -> bool {
     let decoded = packet::decode_counted(payload);
     let mut ports_guard = ports.lock().unwrap();
     let entry = ports_guard.entry(cfg.interface.clone()).or_default();
@@ -224,6 +271,7 @@ fn handle_rx(cfg: &LinkConfig, ports: &SharedPorts, payload: &[u8], now: Instant
     let chassis = pdu.chassis_display();
     let port = pdu.port_display();
     let system_name = pdu.system_name.clone().unwrap_or_default();
+    let system_description = pdu.system_description.clone().unwrap_or_default();
     let ttl = pdu.ttl;
     let management_addresses = pdu
         .management_addresses
@@ -252,19 +300,37 @@ fn handle_rx(cfg: &LinkConfig, ports: &SharedPorts, payload: &[u8], now: Instant
     drop(ports_guard);
     match update {
         Update::New => {
-            info!(
-                interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
-                system_name = %system_name, ttl, management_addresses = %management_addresses,
-                capabilities = %capabilities, max_frame_size = %max_frame_size,
-                vlans = %vlans, aggregation = %aggregation, "lldp neighbor learned"
-            );
+            // Same fields either way; `debug` once the link's burst is spent.
+            macro_rules! learned {
+                ($lvl:ident) => {
+                    $lvl!(
+                        interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
+                        system_name = %system_name, system_description = %system_description,
+                        ttl, management_addresses = %management_addresses,
+                        capabilities = %capabilities, max_frame_size = %max_frame_size,
+                        vlans = %vlans, aggregation = %aggregation, "lldp neighbor learned"
+                    )
+                };
+            }
+            if bucket.take(now) {
+                learned!(info);
+            } else {
+                learned!(debug);
+            }
             true
         }
         Update::Removed => {
-            info!(
-                interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
-                reason = "shutdown", "lldp neighbor removed"
-            );
+            if bucket.take(now) {
+                info!(
+                    interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
+                    reason = "shutdown", "lldp neighbor removed"
+                );
+            } else {
+                debug!(
+                    interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
+                    reason = "shutdown", "lldp neighbor removed"
+                );
+            }
             false
         }
         // A hostile segment must not flood the log through nos-logd: warn on
@@ -374,6 +440,7 @@ pub async fn run(
     let mut next_tx = Instant::now();
     let mut tx_fast = TX_FAST_INIT;
     let (mut tx_credit, mut last_refill) = (TX_CREDIT_MAX, Instant::now());
+    let mut log_bucket = LogBucket::new(Instant::now());
 
     let result = loop {
         // Never leave an elapsed deadline armed: `expire` moves it forward by
@@ -401,7 +468,7 @@ pub async fn run(
             }
             frame = socket.recv(), if cfg.receive => match frame {
                 Ok(payload) => {
-                    if handle_rx(&cfg, &ports, &payload, Instant::now()) && cfg.transmit {
+                    if handle_rx(&cfg, &ports, &payload, Instant::now(), &mut log_bucket) && cfg.transmit {
                         tx_fast = TX_FAST_INIT;
                         next_tx = Instant::now();
                     }
@@ -436,6 +503,7 @@ mod tests {
             transmit: true,
             receive: true,
             system_name: format!("router-{mac_last}"),
+            system_description: "nos".to_string(),
             chassis_mac: [2, 0, 0, 0, 0, mac_last],
             tx_interval: Duration::from_secs(30),
             ttl_secs: 120,
@@ -446,6 +514,76 @@ mod tests {
             aggregated: false,
             max_frame_size: 1518,
         }
+    }
+
+    /// `handle_rx` with a fresh log bucket.
+    fn rx(me: &LinkConfig, n: &SharedPorts, payload: &[u8], now: Instant) -> bool {
+        handle_rx(me, n, payload, now, &mut LogBucket::new(now))
+    }
+
+    #[test]
+    fn log_bucket_allows_a_burst_then_suppresses_then_refills() {
+        let t0 = Instant::now();
+        let mut b = LogBucket::new(t0);
+        for _ in 0..LOG_CREDIT_MAX {
+            assert!(b.take(t0));
+        }
+        assert!(!b.take(t0));
+        assert!(!b.take(t0 + Duration::from_secs(9)));
+        assert!(b.take(t0 + Duration::from_secs(10)));
+        assert!(!b.take(t0 + Duration::from_secs(10)));
+        // A long idle refills to the cap, never beyond.
+        let later = t0 + Duration::from_secs(10_000);
+        for _ in 0..LOG_CREDIT_MAX {
+            assert!(b.take(later));
+        }
+        assert!(!b.take(later));
+    }
+
+    #[test]
+    fn flapping_neighbor_is_still_recorded_when_logs_are_suppressed() {
+        let (me, peer) = (cfg(1), cfg(2));
+        let n = shared();
+        let now = Instant::now();
+        let mut bucket = LogBucket::new(now);
+        for _ in 0..20 {
+            assert!(handle_rx(
+                &me,
+                &n,
+                &frame_from(&peer, 120),
+                now,
+                &mut bucket
+            ));
+            assert!(!handle_rx(&me, &n, &frame_from(&peer, 0), now, &mut bucket));
+        }
+        assert_eq!(bucket.credit, 0);
+        assert!(handle_rx(
+            &me,
+            &n,
+            &frame_from(&peer, 120),
+            now,
+            &mut bucket
+        ));
+        assert_eq!(
+            n.lock().unwrap()["eth1"]
+                .neighbors
+                .snapshot("eth1", now)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn system_description_defaults_to_nos_and_reaches_the_wire() {
+        let mut c = cfg(1);
+        let wire = |c: &LinkConfig| {
+            packet::decode(&packet::encode(&local_pdu(c, |_| None, None)))
+                .unwrap()
+                .system_description
+        };
+        assert_eq!(wire(&c).as_deref(), Some("nos"));
+        c.system_description = "edge router".to_string();
+        assert_eq!(wire(&c).as_deref(), Some("edge router"));
     }
 
     fn shared() -> SharedPorts {
@@ -572,9 +710,9 @@ mod tests {
         let (me, peer) = (cfg(1), cfg(2));
         let n = shared();
         let now = Instant::now();
-        assert!(handle_rx(&me, &n, &frame_from(&peer, 120), now));
+        assert!(rx(&me, &n, &frame_from(&peer, 120), now));
         // The same neighbor again is a refresh: no reply, so no ping-pong.
-        assert!(!handle_rx(&me, &n, &frame_from(&peer, 120), now));
+        assert!(!rx(&me, &n, &frame_from(&peer, 120), now));
         assert_eq!(
             n.lock().unwrap()["eth1"]
                 .neighbors
@@ -589,8 +727,8 @@ mod tests {
         let (me, peer) = (cfg(1), cfg(2));
         let n = shared();
         let now = Instant::now();
-        handle_rx(&me, &n, &frame_from(&peer, 120), now);
-        assert!(!handle_rx(&me, &n, &frame_from(&peer, 0), now));
+        rx(&me, &n, &frame_from(&peer, 120), now);
+        assert!(!rx(&me, &n, &frame_from(&peer, 0), now));
         assert_eq!(
             n.lock().unwrap()["eth1"].neighbors.snapshot("eth1", now),
             []
@@ -602,8 +740,8 @@ mod tests {
         let me = cfg(1);
         let n = shared();
         let now = Instant::now();
-        assert!(!handle_rx(&me, &n, &frame_from(&me, 120), now));
-        assert!(!handle_rx(&me, &n, &[0xff, 0xff, 0x01], now));
+        assert!(!rx(&me, &n, &frame_from(&me, 120), now));
+        assert!(!rx(&me, &n, &[0xff, 0xff, 0x01], now));
         assert_eq!(
             n.lock().unwrap()["eth1"].neighbors.snapshot("eth1", now),
             []
@@ -652,7 +790,7 @@ mod tests {
         let (me, peer) = (cfg(1), cfg(2));
         let n = shared();
         let now = Instant::now();
-        handle_rx(&me, &n, &frame_from(&peer, 10), now);
+        rx(&me, &n, &frame_from(&peer, 10), now);
         expire(&me, &n, now + Duration::from_secs(5));
         assert_eq!(
             n.lock().unwrap()["eth1"]
@@ -675,12 +813,12 @@ mod tests {
         let me = cfg(1);
         let n = shared();
         let now = Instant::now();
-        handle_rx(&me, &n, &frame_from(&cfg(2), 120), now); // valid
-        handle_rx(&me, &n, &[0xff, 0xff, 0x01], now); // garbage
-        handle_rx(&me, &n, &frame_from(&me, 120), now); // our own, not counted
-                                                        // Fill the table, then one more new neighbor is refused.
+        rx(&me, &n, &frame_from(&cfg(2), 120), now); // valid
+        rx(&me, &n, &[0xff, 0xff, 0x01], now); // garbage
+        rx(&me, &n, &frame_from(&me, 120), now); // our own, not counted
+                                                 // Fill the table, then one more new neighbor is refused.
         for i in 3..=u8::try_from(MAX_NEIGHBORS_PER_LINK + 2).unwrap() {
-            handle_rx(&me, &n, &frame_from(&cfg(i), 120), now);
+            rx(&me, &n, &frame_from(&cfg(i), 120), now);
         }
         let stats = n.lock().unwrap()["eth1"].stats.clone();
         assert_eq!(

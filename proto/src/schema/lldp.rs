@@ -18,6 +18,11 @@ pub const TX_HOLD_MAX: u8 = 100;
 /// Most Management Address TLVs one LLDPDU carries, and the most a receiver
 /// keeps — one number on both sides, so one nos never drops another's.
 pub const MAX_MANAGEMENT_ADDRESSES: usize = 4;
+/// System Description advertised when none is configured. No version: a
+/// neighbor (and anyone on the segment) learns nothing about the build.
+pub const SYSTEM_DESCRIPTION_DEFAULT: &str = "nos";
+/// Longest System Description: the TLV's 255-byte limit.
+pub const SYSTEM_DESCRIPTION_MAX_BYTES: usize = 255;
 
 /// System-wide LLDP settings. `None` for a timer means the 802.1AB default.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -41,6 +46,10 @@ pub struct LldpSettings {
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     #[cli(topic = LldpManagementAddress, words = "management-address")]
     pub management_addresses: Vec<IpAddr>,
+    /// The System Description TLV text; `None` advertises `nos`.
+    #[serde(default)]
+    #[cli(topic = LldpSystemDescription, words = "system-description")]
+    pub system_description: Option<String>,
 }
 
 impl LldpSettings {
@@ -59,6 +68,13 @@ impl LldpSettings {
     pub fn effective_ttl_secs(&self) -> u16 {
         u16::try_from(u32::from(self.effective_interval_secs()) * u32::from(self.effective_hold()))
             .unwrap_or(u16::MAX)
+    }
+
+    /// The System Description advertised: the configured one, else `SYSTEM_DESCRIPTION_DEFAULT`.
+    pub fn effective_system_description(&self) -> &str {
+        self.system_description
+            .as_deref()
+            .unwrap_or(SYSTEM_DESCRIPTION_DEFAULT)
     }
 
     /// Commit-time validation (`Config.lldp`'s `garde` custom check).
@@ -80,6 +96,15 @@ impl LldpSettings {
             return Err(garde::Error::new(
                 "lldp tx-interval × tx-hold must be at most 65535 seconds (the 16-bit TTL)",
             ));
+        }
+        if let Some(d) = &self.system_description
+            && (d.is_empty()
+                || d.len() > SYSTEM_DESCRIPTION_MAX_BYTES
+                || d.chars().any(char::is_control))
+        {
+            return Err(garde::Error::new(format!(
+                    "lldp system-description must be 1-{SYSTEM_DESCRIPTION_MAX_BYTES} bytes without control characters"
+                )));
         }
         for (i, addr) in self.management_addresses.iter().enumerate() {
             if addr.is_unspecified() || addr.is_multicast() {
@@ -173,6 +198,7 @@ mod tests {
             tx_interval_secs: i,
             tx_hold: h,
             management_addresses: a.into_iter().map(|a| a.parse().unwrap()).collect(),
+            system_description: None,
         }
     }
 
@@ -279,6 +305,31 @@ mod tests {
             serde_json::from_str::<LldpSettings>("{}").unwrap(),
             LldpSettings::default()
         );
+    }
+
+    #[test]
+    fn system_description_defaults_and_validates() {
+        let with = |d: &str| LldpSettings {
+            system_description: Some(d.to_string()),
+            ..LldpSettings::default()
+        };
+        assert_eq!(
+            LldpSettings::default().effective_system_description(),
+            "nos"
+        );
+        assert_eq!(
+            with("core router").effective_system_description(),
+            "core router"
+        );
+        assert!(with("core router").check().is_ok());
+        assert!(with(&"x".repeat(255)).check().is_ok());
+        assert!(with(&"x".repeat(256)).check().is_err());
+        assert!(with("").check().is_err());
+        assert!(with("a\nb").check().is_err());
+        assert!(with("a\x1bb").check().is_err());
+        // A config saved before the knob existed still loads.
+        let s: LldpSettings = serde_json::from_str(r#"{"tx_hold":3}"#).unwrap();
+        assert_eq!(s.system_description, None);
     }
 
     #[test]

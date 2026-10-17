@@ -36,6 +36,13 @@ pub enum LldpOp {
         /// Management address advertised in the Management Address TLV.
         address: IpAddr,
     },
+    /// Sets the System Description TLV text.
+    SetSystemDescription {
+        /// The text; checked at commit.
+        text: String,
+    },
+    /// Clears the System Description so it reverts to the default.
+    ClearSystemDescription,
 }
 
 impl LldpOp {
@@ -56,6 +63,8 @@ impl LldpOp {
             LldpOp::RemoveManagementAddress { address } => {
                 lldp.management_addresses.retain(|a| a != address);
             }
+            LldpOp::SetSystemDescription { text } => lldp.system_description = Some(text.clone()),
+            LldpOp::ClearSystemDescription => lldp.system_description = None,
         }
         Ok(())
     }
@@ -84,6 +93,11 @@ mod tests {
             .unwrap();
         assert_eq!(cfg.lldp.management_addresses, [b]);
 
+        LldpOp::SetSystemDescription { text: "x".into() }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.lldp.effective_system_description(), "x");
+        LldpOp::ClearSystemDescription.apply(&mut cfg).unwrap();
         LldpOp::ClearTxInterval.apply(&mut cfg).unwrap();
         LldpOp::ClearTxHold.apply(&mut cfg).unwrap();
         LldpOp::ClearManagementAddress.apply(&mut cfg).unwrap();

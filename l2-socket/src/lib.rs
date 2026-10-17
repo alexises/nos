@@ -212,7 +212,10 @@ impl L2Socket {
             let mut guard = self.inner.readable().await?;
             match guard.try_io(|inner| inner.get_ref().read(&mut buf)) {
                 Ok(Ok(n)) => {
-                    if n >= ETH_HEADER_LEN && buf[6..12] != self.own_hw_addr {
+                    if n >= ETH_HEADER_LEN
+                        && buf[6..12] != self.own_hw_addr
+                        && self.ethertype_ok(&buf[..n])
+                    {
                         return Ok(buf[..n].to_vec());
                     }
                 }
@@ -223,6 +226,13 @@ impl L2Socket {
                 Err(_would_block) => {}
             }
         }
+    }
+
+    /// Whether `frame` carries the bound ethertype. An `AF_PACKET` socket also
+    /// delivers VLAN-tagged frames (kernel fallback) whose payload starts
+    /// after the tag; those are not ours. An `ETH_P_ALL` socket takes anything.
+    fn ethertype_ok(&self, frame: &[u8]) -> bool {
+        self.ethertype == ETH_P_ALL || ethertype_matches(frame, self.ethertype)
     }
 
     /// Also receive frames addressed to this port's own MAC, not just `group`.
@@ -276,7 +286,8 @@ impl L2Socket {
                         self.own_hw_addr,
                         self.group,
                         self.accept_own_unicast,
-                    ) {
+                    ) && self.ethertype_ok(&buf[..n])
+                    {
                         return Ok(payload.to_vec());
                     }
                 }
@@ -471,6 +482,12 @@ impl AsRawFd for L2Socket {
 /// `ENETDOWN` — see `recv`. Also what `send` returns while the link is down.
 pub fn is_link_down(e: &io::Error) -> bool {
     e.raw_os_error() == Some(libc::ENETDOWN)
+}
+
+/// Whether the frame's ethertype field (bytes 12..14) is `bound`. False for a
+/// frame shorter than the header; a VLAN-tagged frame has 0x8100 there.
+fn ethertype_matches(frame: &[u8], bound: u16) -> bool {
+    frame.get(12..14) == Some(&bound.to_be_bytes()[..])
 }
 
 /// The payload of a received frame, or `None` for a runt, a frame not
@@ -673,6 +690,18 @@ mod tests {
             payload_of_foreign_frame(&frame(own, own), own, GROUP, true),
             None
         );
+    }
+
+    #[test]
+    fn ethertype_check_rejects_tagged_and_short_frames() {
+        let mut f = vec![0u8; 12];
+        f.extend_from_slice(&0x88CCu16.to_be_bytes());
+        assert!(ethertype_matches(&f, 0x88CC));
+        assert!(!ethertype_matches(&f, 0x8809));
+        f[12..14].copy_from_slice(&0x8100u16.to_be_bytes());
+        assert!(!ethertype_matches(&f, 0x88CC));
+        assert!(!ethertype_matches(&f[..13], 0x88CC));
+        assert!(!ethertype_matches(&[], 0x88CC));
     }
 
     #[test]

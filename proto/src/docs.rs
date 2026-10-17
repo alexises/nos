@@ -51,6 +51,8 @@ topics! {
     LldpTxHold,
     /// `LldpSettings.management_addresses`
     LldpManagementAddress,
+    /// `LldpSettings.system_description`
+    LldpSystemDescription,
     /// `Config.logging`
     Logging,
     /// `LoggingSettings.syslog`

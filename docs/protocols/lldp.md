@@ -19,7 +19,7 @@ Each frame NOS sends carries:
 - the chassis ID, a MAC address that identifies this router;
 - the port ID and port description, both the interface name (`eth1`);
 - the time to live: how long the neighbour should keep this information, 120 seconds by default;
-- the system name, which is the router's `hostname`, and the system description `nos <version>`;
+- the system name, which is the router's `hostname`, and the system description, `nos` unless you set one (no version number is sent);
 - the capabilities: supported "Router, Bridge"; enabled "Router", plus "Bridge" on an interface that has a switching profile;
 - up to four management addresses, if configured, each with the ifIndex of the interface that carries it;
 - the maximum frame size (IEEE 802.3): the interface's MTU plus 18 bytes of Ethernet header and FCS, 1518 by default. A port-aggregate member uses its aggregate's MTU;
@@ -28,7 +28,7 @@ Each frame NOS sends carries:
 
 NOS does not send a port VLAN ID or the 802.3 MAC/PHY field. It decodes and shows both when a neighbour sends them.
 
-Three settings apply to all interfaces at once: the transmit interval, the hold multiplier, and the management addresses. One more is per interface: the destination group.
+Four settings apply to all interfaces at once: the transmit interval, the hold multiplier, the management addresses and the system description. One more is per interface: the destination group.
 
 ## Common operations
 
@@ -72,7 +72,7 @@ $ $C $B/v1/lldp/neighbors | jq .
     "port_id": "eth1",
     "port_description": "eth1",
     "system_name": "router-b",
-    "system_description": "nos 0.1.0",
+    "system_description": "nos",
     "capabilities": [
       "router"
     ],
@@ -96,7 +96,7 @@ eth1: neighbor router-a
   chassis 02:47:33:45:65:f2
   port eth1
   port-description eth1
-  system-description nos 0.1.0
+  system-description nos
   capabilities bridge,router
   vlans 100 (bd1)
   max-frame-size 9018
@@ -105,7 +105,7 @@ eth2: neighbor router-a
   chassis 02:47:33:45:65:f2
   port eth2
   port-description eth2
-  system-description nos 0.1.0
+  system-description nos
   capabilities router
   aggregation aggregated, port id 9
   max-frame-size 1518
@@ -145,6 +145,20 @@ $ $C -X POST $B/v1/transactions/lldp2/commit
 ```
 
 Each can also be set on its own, for example `PUT …/lldp/tx-interval-secs` with body `5`. `delete lldp tx-interval` (REST: `DELETE …/lldp/tx-interval-secs`) goes back to the default. `delete lldp management-address 192.0.2.1` stops advertising that one address.
+
+### Set the system description
+
+```
+router-a> configure lldp4
+router-a(lldp4)> set lldp system-description "core router, rack 4"
+router-a(lldp4)> commit
+transaction 'lldp4' committed
+```
+
+- Free text, 1-255 bytes, no control characters. `delete lldp system-description` goes back to `nos`.
+- Neighbours see it in `show lldp neighbors detail` (`system-description`) and in `GET /v1/lldp/neighbors`.
+- REST: `PUT …/lldp/system-description` with body `"core router, rack 4"`.
+- Changing it restarts LLDP on every enabled interface, like the timers.
 
 ### Change the destination group
 
@@ -208,6 +222,8 @@ $ $C $B/v1/lldp/statistics | jq .
 
 **Timers.** `tx-interval` is the time between frames (1-3600 seconds, default 30). `tx-hold` is how many intervals a neighbour keeps our information (1-100, default 4); the time to live we advertise is `tx-interval × tx-hold`, which must not exceed 65535 seconds. Changing either, or the management addresses, restarts LLDP on every enabled interface: a shutdown frame, then a fresh one, so neighbours briefly drop and relearn this router.
 
+**Log volume.** NOS logs `lldp neighbor learned` and `lldp neighbor removed` at info level, at most 5 in a row per interface, then one more every 10 seconds. Beyond that they are logged at debug level with the same fields. The neighbour table and the counters are not affected, so a flapping neighbour cannot flood the log.
+
 **Management addresses.** Up to four IPv4 or IPv6 unicast addresses, each sent in its own field on every interface. NOS sends them as configured and does not check them at commit. When it sends a frame, it looks up the interface that carries each address. If it finds one, the field carries that interface's ifIndex. If not, the field says the interface is unknown. So an address added to an interface later gets its ifIndex on the next frame, with no restart. NOS also keeps at most four management addresses from each neighbour frame.
 
 **Destination groups.** LLDP frames go to one of three reserved multicast addresses, which decide how far a frame travels through intermediate bridges:
@@ -235,6 +251,8 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI forms are
 | tx-hold | `set lldp tx-hold <n>`; `delete lldp tx-hold` | `lldp/tx-hold` | 1-100, default 4 | range; as above | advertised time to live = `tx-interval × tx-hold` | the neighbour's `show lldp neighbors` (`ttl`) |
 | management-address | `set lldp management-address <ip>` adds one; `delete lldp management-address <ip>` removes one | `lldp/management-address`, a list | up to 4 IPv4 or IPv6 addresses, default none | unicast (not unspecified, not multicast), no duplicates, at most 4 | each advertised on every interface, with its interface's ifIndex when one carries it | the neighbour's `show lldp neighbors` (`management`) |
 
-`tx-interval`, `tx-hold` and `management-address` are system-wide: they are typed the same way from anywhere in configuration mode.
+| system-description | `set lldp system-description <text>`; `delete lldp system-description` | `lldp/system-description` | text, 1-255 bytes, default `nos` | not empty, at most 255 bytes, no control characters | the System Description field of every frame | the neighbour's `show lldp neighbors detail` (`system-description`) |
+
+`tx-interval`, `tx-hold`, `management-address` and `system-description` are system-wide: they are typed the same way from anywhere in configuration mode.
 
 Implementation notes for developers are in [`docs/internals/lldp.md`](../internals/lldp.md).
