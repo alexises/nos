@@ -76,3 +76,12 @@ cargo fmt --all
 - An advisory that NOS cannot fix is ignored in `deny.toml` with a `reason` (today: `atomic-polyfill`, via `postcard` 1).
 - YAML is `serde_norway` (maintained fork of `serde_yaml` 0.9, same on-disk format); timestamps use `time`, not `chrono`.
 - `tokio` has no `full`: the workspace entry lists the common features, crates add `signal`/`process`.
+
+## Pinned GitHub Actions
+
+- Every `uses:` in `.github/workflows` is a full commit SHA with the release tag as a comment (`uses: o/r@<sha> # v1.2.3`); the `semgrep` job image is pinned by digest. Workflows default to `permissions: contents: read`.
+- `tools/ci/pin-actions.sh` pins any unpinned ref; `--update` moves each pin to the newest tag of the same major; `--check` fails on an unpinned ref or a SHA that is not the commented tag (needs an authenticated `gh`).
+- `.github/dependabot.yml` opens weekly grouped bumps and rewrites the tag comment too.
+- `dtolnay/rust-toolchain` has no per-toolchain tags: it is pinned at `master` and always gets an explicit `toolchain:` (the canaries pass `stable`/`nightly`, so they still float). `taiki-e/install-action` is pinned at a release and selects the tool with `with: tool:`.
+- To add an action: write `uses: o/r@v1`, run `tools/ci/pin-actions.sh`, commit the result.
+- Repo setting (admin, after the pins are merged): Settings, Actions, General, "Require actions to be pinned to a full-length commit SHA".
