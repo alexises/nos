@@ -17,6 +17,7 @@ racing decal.
 | `nos-mark-{black,white,orange}.svg`, `nos-horizontal-{black,white}.svg` | One-colour: print, engraving, stamps, embroidery |
 | `nos-app-icon.svg`, `nos-maskable.svg` | Rounded and full-bleed (Android maskable) icon tiles |
 | `web/` | `favicon.ico`/`.svg`, PNG favicons, touch/PWA icons, `site.webmanifest` |
+| `social-preview.png` | GitHub repository image (1280×640): Settings → General → Social preview |
 
 `-dark` means *for dark backgrounds*: lighter wings and head, light lettering.
 
