@@ -25,6 +25,24 @@ fn router_lsa_links_includes_p2p_link_with_a_neighbor() {
     assert!(links.iter().any(|l| l.link_type == LINK_TYPE_STUB_NETWORK));
 }
 
+/// #463, RFC 2328 §12.4.1.1: a neighbor back in Init (one Hello after a BFD
+/// kill) is not fully adjacent, so only the stub network is advertised.
+#[test]
+fn router_lsa_links_omits_p2p_link_until_full() {
+    let mut status = LinkStatus::new(NetworkType::PointToPoint);
+    status.neighbors.insert(
+        Ipv4Addr::new(9, 9, 9, 10),
+        neighbor_info(NeighborState::Init, Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    let links = router_lsa_links(
+        Ipv4Addr::new(1, 1, 1, 1),
+        &[(link("eth0.0", 10), status)],
+        false,
+        false,
+    );
+    assert!(links.iter().all(|l| l.link_type == LINK_TYPE_STUB_NETWORK));
+}
+
 #[test]
 fn router_lsa_links_max_metric_raises_transit_links_only() {
     // RFC 6987 §2: type-1/type-2 at MaxLinkMetric, type-3 keeps its cost.
