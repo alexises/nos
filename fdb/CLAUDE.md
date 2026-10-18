@@ -56,8 +56,9 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 | `df.rs` | pure DF election (`candidates`/`elect` modulo, `elect_hrw`/`hrw_weight`, `effective`) |
 | `reconcile.rs` | config diff + tick → `Ready` → `Fdb::set_ready` |
 | `driver/` | `FdbDriver`, `linux.rs`, `noop.rs`, `nexthop.rs`, `tc.rs`, `is_local_mac` (pure) |
-| `bgp_client.rs`, `interface_client.rs`, `server.rs` | push to `nos-bgpd`; bridge/VTEP/bond lookups; `GetMacs`/`PushEvpnRoutes` |
-| `config_client.rs`, `watchdog_client.rs` | reimplemented per crate, per the star dependency graph |
+| `bgp_client.rs`, `interface_client.rs`, `server.rs` | push to `nos-bgpd`; bridge/VTEP/bond lookups (over `nos_daemon::ipc::one_shot`); `GetMacs`/`PushEvpnRoutes` |
+
+Config/watchdog clients and the `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`).
 
 `nos-e2e evpn-fdb`, `evpn-esi`, `evpn-single-active`, `evpn-dataplane` and `evpn-v6` are the end-to-end proof (log anchors, kernel read-backs).
 

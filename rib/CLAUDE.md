@@ -26,6 +26,6 @@ Computes the best route per prefix for one routing table (binary `nos-ribd`, one
 | `reconcile.rs` | Diff-triggered resync, 10s tick, `driver.teardown` on exit; `reconcile_tests.rs` runs it against `nos-test-support`'s fakes and a recording `RibDriver` (#344) |
 | `server.rs` | Route queries, `GetVrfName`/`GetTableId`, `BgpRouteCount`, route pushes |
 | `bgp_client.rs`, `ospf_client.rs`, `interface_client.rs` | Redistribution pushes; `get_interfaces`/`get_port_aggregates`/`get_broadcast_domain` |
-| `config_client.rs`, `watchdog_client.rs` | Per-crate clients (star dependency graph) |
+| (no `config_client`/`watchdog_client`) | config, watchdog, one-shot IPC and `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`) |
 
 Details: [internals](../docs/internals/rib.md) (scope, EVPN IP-VRF, backup/tunnel/discard/ECMP routes, per-module notes), [routing tables](../docs/protocols/routing-tables.md), [EVPN/VXLAN](../docs/protocols/evpn-vxlan.md).

@@ -1,13 +1,11 @@
 use std::net::IpAddr;
 use std::path::Path;
 
-use futures::{SinkExt, StreamExt};
+use nos_daemon::ipc::one_shot;
 use nos_proto::{
-    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
-    PortAggregateStatus, RibEvent, RibRequest, Role, ServiceRef, SourceAddress, LOOPBACK_PREFIX,
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, PortAggregateStatus,
+    RibEvent, RibRequest, Role, ServiceRef, SourceAddress, LOOPBACK_PREFIX,
 };
-use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::trace;
 
 /// One-shot queries of `nos-interfaced` for the addresses it applied — the
 /// input to `reconcile::connected_entries`. Best-effort like
@@ -15,15 +13,7 @@ use tracing::trace;
 /// malformed reply) is a normal transient condition, and the caller keeps
 /// its previous `Connected` set until the next resync.
 async fn query(interface_socket: &Path, request: InterfaceRequest) -> Option<InterfaceEvent> {
-    let Ok(stream) = nos_pki::connect(interface_socket, Role::Interfaced, "").await else {
-        trace!(socket = %interface_socket.display(), "failed to connect to nos-interfaced");
-        return None;
-    };
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<InterfaceEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
-    writer.send(request).await.ok()?;
-    reader.next().await?.ok()
+    one_shot(interface_socket, Role::Interfaced, request).await
 }
 
 /// Every interface as `nos-interfaced` currently sees it.
@@ -59,18 +49,13 @@ pub async fn get_broadcast_domain(
 /// The kernel name of routing table `table`'s loopback device: `lo<table
 /// id>`, the id being that table's own `nos-ribd`'s (`RibRequest::GetTableId`).
 async fn loopback_device(watchdog_socket: &Path, table: &str) -> Option<String> {
-    let sock = crate::watchdog_client::resolve_once(
+    let sock = nos_daemon::watchdog::resolve_once(
         watchdog_socket,
         &ServiceRef::RibTable(table.to_string()),
     )
     .await?;
-    let stream = nos_pki::connect(&sock, Role::Ribd, table).await.ok()?;
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(RibRequest::GetTableId).await.ok()?;
-    match reader.next().await? {
-        Ok(RibEvent::TableId(Some(id))) => Some(format!("lo{id}")),
+    match one_shot(&sock, Role::Ribd, RibRequest::GetTableId).await? {
+        RibEvent::TableId(Some(id)) => Some(format!("lo{id}")),
         _ => None,
     }
 }
@@ -79,8 +64,8 @@ async fn loopback_device(watchdog_socket: &Path, table: &str) -> Option<String> 
 /// kernel device carrying it — the VXLAN device's underlay, which it must be
 /// bound through when the address sits in a VRF. `underlay_table` is the
 /// routing table owning the underlay BGP instance (a `Loopback` source is
-/// `loopback-<underlay_table>`). Reimplemented from `nos-fdbd`'s, per the
-/// star dependency graph.
+/// `loopback-<underlay_table>`). Duplicates `nos-fdbd`'s
+/// (sharing needs a common crate, out of #418's scope).
 pub async fn resolve_vtep(
     watchdog_socket: &Path,
     underlay_table: Option<&str>,
@@ -97,8 +82,7 @@ pub async fn resolve_vtep(
     } else {
         interface.clone()
     };
-    let sock =
-        crate::watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let sock = nos_daemon::watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let InterfaceEvent::Interface(status) =
         query(&sock, InterfaceRequest::GetInterface { name: interface }).await?
     else {
@@ -127,6 +111,9 @@ pub async fn resolve_vtep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
+    use nos_proto::IpcCodec;
+    use tokio_util::codec::{FramedRead, FramedWrite};
 
     fn serve_once(
         path: &Path,

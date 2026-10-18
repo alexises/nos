@@ -14,14 +14,14 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::bfd_client;
 use crate::bgp_client;
-use crate::config_client;
 use crate::driver::RibDriver;
 use crate::evpn::{self, L3Vni};
 use crate::evpn_client::EvpnTarget;
 use crate::interface_client;
 use crate::ospf_client;
 use crate::rib::{build_from_config, Rib, RibEntry, RouteSource};
-use crate::watchdog_client;
+use nos_daemon::config;
+use nos_daemon::watchdog;
 
 /// Fixed reconnect delay for the config subscription, matching
 /// `nos-watchdog`'s `bgp_instances::RECONNECT_DELAY` for consistency across
@@ -76,7 +76,7 @@ pub async fn run(
     // routes through them come or go.
     let mut bfd_changed = bfd_up.clone();
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(
+        match config::subscribe_diff(
             &config_socket,
             // `OspfInstances`: an instance's `remote-lfa` adds or removes this
             // table's IP-in-IP device.
@@ -159,7 +159,7 @@ async fn resync(
     bfd_target_tx: &watch::Sender<bfd_client::Target>,
     bfd_up: &watch::Receiver<bfd_client::UpSet>,
 ) {
-    match config_client::fetch_config(config_socket).await {
+    match config::fetch_config(config_socket).await {
         Ok(cfg) => {
             let _ = bfd_target_tx.send_if_modified(|t| {
                 let want = crate::rib::bfd_target(&cfg, table);
@@ -333,7 +333,7 @@ async fn fetch_connected(
     cfg: &Config,
     table: &str,
 ) -> Option<Vec<RibEntry>> {
-    let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let interfaces = interface_client::get_interfaces(&socket).await?;
     let aggregates = if cfg.port_aggregates.iter().any(|a| {
         a.subinterfaces

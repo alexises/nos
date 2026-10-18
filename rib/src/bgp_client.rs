@@ -31,10 +31,10 @@ use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
 
-use crate::watchdog_client::resolve_once;
+use nos_daemon::watchdog::resolve_once;
 
 /// Fixed retry delay, matching every other reconnect/resolve loop in this
-/// crate (`watchdog_client::RETRY_DELAY`, `reconcile::RECONNECT_DELAY`).
+/// crate (`nos_daemon::watchdog`'s retry delay, `reconcile::RECONNECT_DELAY`).
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// The desired redistribution state for this table, published by
