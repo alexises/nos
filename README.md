@@ -15,9 +15,11 @@ Linux kernel (`rtnetlink`, VRFs, bridges, bonds, VXLAN). `nos-watchdogd`
 supervises every other process and is also the internal certificate
 authority.
 
-Full architecture, protocol internals, and the reasoning behind every design
-choice live in [`CLAUDE.md`](CLAUDE.md) — this file only orients a human and
-gets a router running. It deliberately does not repeat what's in there.
+Architecture and protocol internals: [`docs/architecture/`](docs/architecture/README.md).
+Using a router (concepts, shell, REST): [`docs/`](docs/README.md).
+Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md). Coding agents: see
+[`CLAUDE.md`](CLAUDE.md). This file only orients a human and gets a router
+running.
 
 ## Features
 
@@ -39,9 +41,9 @@ gets a router running. It deliberately does not repeat what's in there.
 - **Post-quantum mutual TLS everywhere** (`nos-pki`): hybrid ML-KEM key
   exchange, ML-DSA-65 IPC certificates, no classical fallback.
 
-See `CLAUDE.md`'s component table for the full list, including static
-routing, VLAN switching/SVIs, port aggregation, and structured log
-collection.
+See the [repository layout](#repository-layout) for the full component
+list, including static routing, VLAN switching/SVIs, port aggregation, and
+structured log collection.
 
 ## Quick start
 
@@ -54,8 +56,8 @@ docker compose run --rm cli       # interactive shell, against the running route
 ```
 
 The shell prompts `login:`/`password:`. On first boot with no configured
-users it seeds `admin`/`admin` — change it (see `CLAUDE.md`'s "User
-authentication").
+users it seeds `admin`/`admin` — change it (see
+[`docs/architecture/auth.md`](docs/architecture/auth.md)).
 
 ## A minimal config example
 
@@ -71,6 +73,13 @@ show bgp brief
 
 User documentation (concepts, the `nos` shell, the REST API and how they map to each other) is in [`docs/`](docs/README.md).
 See [`docs/cli.md`](docs/cli.md) for the full command reference.
+
+## Build natively
+
+- Install Rust through `rustup`: it picks the pinned toolchain (1.99.0) from `rust-toolchain.toml`.
+- `cargo build --workspace` builds every daemon and the `nos` shell; `make check` runs build + fmt + clippy + test.
+- A host with a different `rustc` and no rustup runs `make check` inside the `nos-ci` image instead (`make ci-image`); details in [`docs/architecture/development.md`](docs/architecture/development.md).
+- Running the daemons for real needs Linux capabilities and kernel modules (`make e2e-preflight` checks them); the e2e harness needs Docker and the built image.
 
 ## Development
 
@@ -89,8 +98,9 @@ cargo run -p nos-e2e -- all              # every verification phase (see tools/e
 ```
 
 `tools/bench-bgp.sh` benchmarks `nos-bgpd` against GoBGP/BIRD/FRR on the
-same load. See `CLAUDE.md`'s "Development" section for CI details and the
-rest of the tooling.
+same load. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+[`docs/architecture/development.md`](docs/architecture/development.md) for CI
+details and the rest of the tooling.
 
 ## Repository layout
 

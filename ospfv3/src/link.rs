@@ -2932,7 +2932,8 @@ pub(crate) mod tests {
             Ipv4Addr::new(9, 9, 9, 10),
             neighbor_info(NeighborState::Init, "fe80::2".parse().unwrap(), 7),
         );
-        assert!(router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(link("eth0.0", 10), status)]).is_empty());
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(link("eth0.0", 10), status)]);
+        assert!(links.is_empty(), "{links:?}");
     }
 
     #[test]
