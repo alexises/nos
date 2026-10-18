@@ -1,33 +1,27 @@
-//! One-shot queries of `nos-interfaced` (best-effort like `nos-bgpd`'s and
-//! `nos-ospfd`'s copies: `None` is "not answerable yet", retried next tick).
-//! Reimplemented rather than imported, per the star dependency graph.
+//! One-shot queries of `nos-interfaced` and `nos-ribd` (best-effort:
+//! `None` is "not answerable yet", retried next tick), over
+//! `nos_daemon::ipc::one_shot`.
 
 use std::net::IpAddr;
 use std::path::Path;
 
-use futures::{SinkExt, StreamExt};
 use nos_proto::rib::EvpnIrb;
 use nos_proto::{
-    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, IpcCodec, RibEvent, RibRequest, Role,
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, RibEvent, RibRequest, Role,
     ServiceRef, SourceAddress, LOOPBACK_PREFIX,
 };
-use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
 
-use crate::watchdog_client;
+use nos_daemon::ipc::one_shot;
+use nos_daemon::watchdog;
 
 async fn ask(sock: &Path, req: InterfaceRequest) -> Option<InterfaceEvent> {
-    let stream = nos_pki::connect(sock, Role::Interfaced, "").await.ok()?;
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<InterfaceEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
-    writer.send(req).await.ok()?;
-    reader.next().await?.ok()
+    one_shot(sock, Role::Interfaced, req).await
 }
 
 /// The domain's reconciled bridge device name (`None` until created).
 pub async fn bridge_name(watchdog_socket: &Path, domain: &str) -> Option<String> {
-    let sock = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let sock = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let req = InterfaceRequest::GetBroadcastDomain {
         name: domain.to_string(),
     };
@@ -43,7 +37,7 @@ pub async fn bridge_name(watchdog_socket: &Path, domain: &str) -> Option<String>
 /// The kernel bond device `nos-interfaced` created for port aggregate
 /// `aggregate` (`bond<id>`, never its config name; `None` until created).
 pub async fn bond_name(watchdog_socket: &Path, aggregate: &str) -> Option<String> {
-    let sock = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let sock = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let req = InterfaceRequest::GetPortAggregate {
         name: aggregate.to_string(),
     };
@@ -76,14 +70,8 @@ pub async fn evpn_irb(watchdog_socket: &Path, table: &str) -> Option<EvpnIrb> {
 
 async fn ask_rib(watchdog_socket: &Path, table: &str, req: RibRequest) -> Option<RibEvent> {
     let sock =
-        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string()))
-            .await?;
-    let stream = nos_pki::connect(&sock, Role::Ribd, table).await.ok()?;
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(req).await.ok()?;
-    reader.next().await?.ok()
+        watchdog::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string())).await?;
+    one_shot(&sock, Role::Ribd, req).await
 }
 
 /// The VTEP address `source` names, preferring IPv4, and the kernel device
@@ -108,7 +96,7 @@ pub async fn resolve_vtep(
     } else {
         interface.clone()
     };
-    let sock = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let sock = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let InterfaceEvent::Interface(status) =
         ask(&sock, InterfaceRequest::GetInterface { name: interface }).await?
     else {

@@ -2,16 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_log_client::ForwardingLayer;
+use nos_daemon::{bootstrap, watchdog};
 use nos_ospfv3::link::LinkManager;
-use nos_ospfv3::{reconcile, rib_push_client, server, watchdog_client};
-use nos_pki::Identity;
+use nos_ospfv3::{reconcile, rib_push_client, server};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "nos-ospfv3d", about = "NOS OSPFv3 (RFC 5340) daemon")]
@@ -55,27 +52,18 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
-    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
+    let identity = bootstrap::identity()?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace")),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .with(ForwardingLayer::install(
-            format!("nos-ospfv3d[{}]", args.instance),
-            args.log_socket.clone(),
-            identity.clone(),
-            shutdown_rx.clone(),
-        ))
-        .init();
-    nos_log_client::install_panic_hook();
+    bootstrap::init_tracing(
+        format!("nos-ospfv3d[{}]", args.instance),
+        args.log_socket.clone(),
+        identity.clone(),
+        shutdown_rx.clone(),
+    );
     info!(instance = %args.instance, "nos-ospfv3d starting");
 
-    let Some(config_socket) = watchdog_client::resolve_with_retry(
+    let Some(config_socket) = watchdog::resolve_with_retry(
         &args.watchdog_socket,
         ServiceRef::Config,
         &mut shutdown_rx.clone(),

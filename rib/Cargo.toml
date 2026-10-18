@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 nos-pki            = { workspace = true }
+nos-daemon         = { workspace = true }
 tokio              = { workspace = true, features = ["signal"] }
 serde              = { workspace = true }
 tracing            = { workspace = true }

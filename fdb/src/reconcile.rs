@@ -14,10 +14,10 @@ use nos_proto::{BroadcastDomain, Config, DiffScope, Event, VlanTag};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::config_client;
 use crate::driver::is_advertisable_ip;
 use crate::fdb::{EsPort, Fdb, Ready, TICK};
 use crate::interface_client;
+use nos_daemon::config;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
@@ -37,7 +37,7 @@ pub async fn run(
         DiffScope::SwitchingProfiles,
     ];
     'outer: while !*shutdown.borrow() {
-        let mut events = match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
+        let mut events = match config::subscribe_diff(&config_socket, scopes.clone()).await {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "failed to subscribe to config diffs, retrying");
@@ -73,7 +73,7 @@ pub async fn run(
 }
 
 async fn resync(config_socket: &Path, watchdog_socket: &Path, domain: &str, fdb: &Fdb) {
-    let cfg = match config_client::fetch_config(config_socket).await {
+    let cfg = match config::fetch_config(config_socket).await {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "failed to fetch running config, keeping previous state");

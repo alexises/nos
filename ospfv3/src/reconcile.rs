@@ -11,12 +11,12 @@ use nos_rpl::CompiledPolicy;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config_client;
 use crate::interface_client;
 use crate::link::{LinkConfig, LinkManager};
 use crate::link_client::{self, Gate, LinkTable};
 use crate::packet;
-use crate::watchdog_client;
+use nos_daemon::config;
+use nos_daemon::watchdog;
 
 /// Fixed reconnect delay — same cadence as every other config-subscribing
 /// consumer in this codebase, `ospf::reconcile::RECONNECT_DELAY` included.
@@ -86,9 +86,7 @@ pub async fn run(
     let mut state = State::default();
     let mut link_open = true;
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&ctx.config_socket, vec![DiffScope::Ospfv3Instances])
-            .await
-        {
+        match config::subscribe_diff(&ctx.config_socket, vec![DiffScope::Ospfv3Instances]).await {
             Ok(mut reader) => {
                 info!(instance = %ctx.instance, "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
@@ -414,7 +412,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     let watched = HashSet::new();
     let next_down: HashMap<String, &'static str> = HashMap::new();
     let next_degraded = HashSet::new();
-    let cfg = match config_client::fetch_config(config_socket).await {
+    let cfg = match config::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
             warn!(error = %e, "failed to fetch running config, keeping previous state");
@@ -860,8 +858,7 @@ fn loopback_attach_points(cfg: &nos_proto::Config, profile: &str) -> Vec<Loopbac
 
 async fn resolve_vrf(watchdog_socket: &Path, table: &str) -> Option<String> {
     let socket =
-        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string()))
-            .await?;
+        watchdog::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string())).await?;
     crate::rib_client::get_vrf_name(&socket).await
 }
 
@@ -885,7 +882,7 @@ async fn resolve_local_address(
     interface: &str,
     tag: u16,
 ) -> Option<ResolvedLink> {
-    let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
     let mtu = status.mtu;
     let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
@@ -941,7 +938,7 @@ fn resolve_effective_mtu(profile: &nos_proto::Ospfv3Profile, resolved_mtu: Optio
 /// loopback has no live link/socket to carry it through `LinkConfig` (no
 /// Hello is ever sent from it — see `link.rs`'s module doc comment).
 async fn resolve_loopback_prefix(watchdog_socket: &Path, interface: &str) -> Option<Ipv6Net> {
-    let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
     status.addresses.into_iter().find_map(|a| match a.address {
         IpNet::V6(v6) => Some(v6),
@@ -956,7 +953,7 @@ async fn resolve_broadcast_domain(
     watchdog_socket: &Path,
     domain: &str,
 ) -> Option<(ResolvedLink, String)> {
-    let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_broadcast_domain(&socket, domain).await?;
     let bridge_name = status.bridge_name?;
     let link_local_address = status.link_local_address?;

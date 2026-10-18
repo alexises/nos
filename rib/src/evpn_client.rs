@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, info, warn};
 
-use crate::watchdog_client::resolve_once;
+use nos_daemon::watchdog::resolve_once;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 

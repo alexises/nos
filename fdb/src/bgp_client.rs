@@ -18,7 +18,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, warn};
 
 use crate::fdb::EvpnTarget;
-use crate::watchdog_client::resolve_once;
+use nos_daemon::watchdog::resolve_once;
 
 /// Fixed delay, like every other reconnect/resolve loop in this codebase.
 const RETRY_DELAY: Duration = Duration::from_secs(1);

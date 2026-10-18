@@ -3,18 +3,15 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_log_client::ForwardingLayer;
-use nos_pki::Identity;
+use nos_daemon::{bootstrap, watchdog};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_rib::{
-    bfd_client, bgp_client, evpn_client, ospf_client, reconcile, server, watchdog_client,
-    LinuxRibDriver, NoopRibDriver, Rib, RibDriver,
+    bfd_client, bgp_client, evpn_client, ospf_client, reconcile, server, LinuxRibDriver,
+    NoopRibDriver, Rib, RibDriver,
 };
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
 use tracing::{info, warn};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// Default location for `nos-ribd`'s own private table-id↔VRF-name
 /// registry (see `nos_rib::driver::table_registry`) — never read by any
@@ -87,33 +84,21 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
-    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
+    let identity = bootstrap::identity()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tracing_subscriber::registry()
-        // `RUST_LOG` support: defaults to `trace`, i.e. exactly the
-        // unfiltered behavior this process had before, so an unset
-        // `RUST_LOG` changes nothing. Added so `tools/bench-bgp.sh` can run
-        // the stack quietly enough to measure BGP rather than logging.
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace")),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .with(ForwardingLayer::install(
-            format!("nos-ribd[{}]", args.table),
-            args.log_socket.clone(),
-            identity.clone(),
-            shutdown_rx.clone(),
-        ))
-        .init();
-    nos_log_client::install_panic_hook();
+    bootstrap::init_tracing(
+        format!("nos-ribd[{}]", args.table),
+        args.log_socket.clone(),
+        identity.clone(),
+        shutdown_rx.clone(),
+    );
     info!(table = %args.table, peer = ?identity.peer(), "nos-ribd starting");
 
     let listen_socket = args
         .listen_socket
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/rib-{}.sock", args.table)));
 
-    let Some(config_socket) = watchdog_client::resolve_with_retry(
+    let Some(config_socket) = watchdog::resolve_with_retry(
         &args.watchdog_socket,
         ServiceRef::Config,
         &mut shutdown_rx.clone(),
