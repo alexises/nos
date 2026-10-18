@@ -3,7 +3,7 @@
 //! fresh, strictly larger value, so a neighbor's replay check never sees the
 //! sequence go backwards across a link restart *or* a process restart.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,12 +74,23 @@ fn read_count(path: &Path) -> io::Result<u32> {
 }
 
 fn write_count(path: &Path, n: u32) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, n.to_string())?;
-    std::fs::rename(&tmp, path)
+    write_atomic(path, &n.to_string())
+}
+
+/// Temp file in the target's directory (`O_EXCL`, mode 0600: never follows a
+/// planted symlink), then renamed over `path`.
+fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => {
+            std::fs::create_dir_all(d)?;
+            d
+        }
+        _ => Path::new("."),
+    };
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(contents.as_bytes())?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// RFC 3623 graceful-restart marker (`<instance>.gr`): the grace deadline in
@@ -87,12 +98,7 @@ fn write_count(path: &Path, n: u32) -> io::Result<()> {
 /// process skips RFC 6987's on-startup period while its helpers keep the old
 /// topology. Atomic, like the boot count.
 pub fn write_grace_marker(path: &Path, deadline: u64) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, deadline.to_string())?;
-    std::fs::rename(&tmp, path)
+    write_atomic(path, &deadline.to_string())
 }
 
 /// Consumes the marker (deleted whatever its content): `true` only if its
@@ -159,6 +165,24 @@ mod tests {
         std::fs::write(&path, "garbage").unwrap();
         assert!(BootCounter::persistent(path).next() > 1_000_000);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_leaves_only_target_and_ignores_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("i.tmp")).unwrap();
+        let path = dir.path().join("i.boot");
+        assert_eq!(BootCounter::persistent(path).next(), 1);
+        write_grace_marker(&dir.path().join("i.gr"), 5).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["i.boot", "i.gr", "i.tmp", "victim"]);
     }
 
     #[test]
