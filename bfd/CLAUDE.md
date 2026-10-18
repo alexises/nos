@@ -15,13 +15,12 @@ The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fix
 | `echo` | Echo packet build/parse (IP + UDP 3785, TTL 255, source = destination) |
 | `micro` | RFC 7130 IP/UDP 6784 frame build/parse (pure), 802.1p tag-0 untagging |
 | `micro_sessions` | `wanted(&Config)` (one session per aggregate member), `Micro::apply`, `UpSets` (push-on-change), config follow loop |
-| `config_client`, `interface_client` | `nos-configd` diff stream; the `PushBfdMembers` connection to `nos-interfaced` (cached, resent on reconnect) |
+| `interface_client` | The `PushBfdMembers` connection to `nos-interfaced` (cached, resent on reconnect); config/watchdog clients come from `nos-daemon` |
 | `neigh` | The neighbour's MAC from rtnetlink (read-only) |
 | `sbfd` | RFC 7880 Seamless BFD, pure: `reflect` (the stateless reflector's decision) and `Initiator` (Figure 4), `run` its task |
 | `reflector` | The reflector's policy, token bucket and counters (`Manager::reflector()`) |
-| `socket` | UDP 3784/4784/7784 sockets (`UdpNet`, `ReflectorNet`) and the Echo `AF_PACKET` transport; excluded from coverage, `nos-e2e`'s `bfd`, `bfd-echo` and `bfd-sbfd` phases are its test |
+| `socket` | `vrf_name` (the table's VRF device via `nos-ribd` `GetVrfName`), UDP 3784/4784/7784 sockets (`UdpNet`, `ReflectorNet`) and the Echo `AF_PACKET` transport; excluded from coverage, `nos-e2e`'s `bfd`, `bfd-echo` and `bfd-sbfd` phases are its test |
 | `unsolicited` | RFC 9468, pure: `Rule`s from the config, `decide` (create/ignore/cap), `age_step` |
-| `watchdog_client` | Broker lookups, the table's VRF device via `nos-ribd` `GetVrfName` |
 
 Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`.
 

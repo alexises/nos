@@ -46,6 +46,6 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 | `interface_client.rs` | Full-resend push of `PushLacpMembers` to `nos-interfaced` |
 | `server.rs` | `LacpRequest::GetSummary` for `show lacp` |
 | `reconcile.rs` | Config diff resync plus a 10s tick |
-| `config_client.rs`, `watchdog_client.rs` | Per-crate reimplementations (star dependency graph) |
+| (no `config_client`/`watchdog_client`) | config, watchdog and `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`) |
 
 Details: [internals](../docs/internals/lacp.md) (state machines, `lacp-rate`, selection, actor identity and the `nos-e2e lacp` narrative), [user guide](../docs/protocols/port-aggregation-lacp.md), [e2e phases](../docs/e2e-phases.md).

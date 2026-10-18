@@ -6,15 +6,12 @@ use clap::Parser;
 use nos_bfd::manager::{Demux, Manager};
 use nos_bfd::micro_sessions::{self, Micro};
 use nos_bfd::socket::{ReflectorNet, UdpNet};
-use nos_bfd::{interface_client, server, watchdog_client};
-use nos_log_client::ForwardingLayer;
-use nos_pki::Identity;
+use nos_bfd::{interface_client, server};
+use nos_daemon::{bootstrap, watchdog};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
 use tracing::info;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// One system-wide process, like `nos-lldpd`, so one fixed socket.
 const DEFAULT_LISTEN_SOCKET: &str = "/run/nos/bfd.sock";
@@ -40,23 +37,14 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
-    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
+    let identity = bootstrap::identity()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace")),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .with(ForwardingLayer::install(
-            "nos-bfdd",
-            args.log_socket.clone(),
-            identity.clone(),
-            shutdown_rx.clone(),
-        ))
-        .init();
-    nos_log_client::install_panic_hook();
+    bootstrap::init_tracing(
+        "nos-bfdd",
+        args.log_socket.clone(),
+        identity.clone(),
+        shutdown_rx.clone(),
+    );
     info!(listen_socket = %args.listen_socket.display(), "nos-bfdd starting");
 
     let demux = Demux::default();
@@ -78,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let (watchdog, mut sd) = (args.watchdog_socket.clone(), shutdown_rx.clone());
     let micro_task = tokio::spawn(async move {
         if let Some(config) =
-            watchdog_client::resolve_with_retry(&watchdog, ServiceRef::Config, &mut sd).await
+            watchdog::resolve_with_retry(&watchdog, ServiceRef::Config, &mut sd).await
         {
             micro_sessions::run(config, micro, reflector, sd).await;
         }

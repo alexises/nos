@@ -4,7 +4,7 @@ Collects structured log entries pushed by every other component process into a b
 
 ## Scope
 
-Every other daemon forwards its own `tracing` events here over one long-lived `LogRequest::Push` connection, via the shared `nos-log-client` crate (`log-client/`). That crate depends only on `nos-proto`, so it doesn't breach the root `CLAUDE.md`'s star dependency graph the way sharing a component crate would — unlike each crate's own `config_client.rs`/`watchdog_client.rs`, which stay reimplemented per crate. `nos-logd` itself never forwards its own logs anywhere — it's the foundation, and logs to stdout only via a plain `tracing_subscriber::fmt::init()` (so the syslog export's own state lines are in `docker logs`, never in `show log`, and an export error can't loop back into the export).
+Every other daemon forwards its own `tracing` events here over one long-lived `LogRequest::Push` connection, via the shared `nos-log-client` crate (`log-client/`). That crate depends only on `nos-proto`, so it doesn't breach the root `CLAUDE.md`'s star dependency graph the way sharing a component crate would. `nos-logd` itself never forwards its own logs anywhere — it's the foundation, and logs to stdout only via a plain `tracing_subscriber::fmt::init()` (so the syslog export's own state lines are in `docker logs`, never in `show log`, and an export error can't loop back into the export).
 
 It does read the config, for one purpose: **remote syslog export** (#71, `Config.logging.syslog`). `--watchdog-socket` (the watchdog hands it over at spawn) resolves `nos-configd` and each collector's `nos-ribd` — **in a background task** (`syslog::reconcile::run`), so startup and the IPC server never wait on `nos-configd` (every other daemon's forwarder needs `nos-logd` up first).
 

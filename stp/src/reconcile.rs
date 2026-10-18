@@ -10,7 +10,6 @@ use nos_proto::{DiffScope, Event};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config_client;
 use crate::ports::{self, Plan};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -31,7 +30,7 @@ pub async fn run(
         DiffScope::BroadcastDomains,
     ];
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
+        match nos_daemon::config::subscribe_diff(&config_socket, scopes.clone()).await {
             Ok(mut reader) => {
                 info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
                 resync(&config_socket, &plan_tx).await;
@@ -70,7 +69,7 @@ pub async fn run(
 }
 
 async fn resync(config_socket: &std::path::Path, plan_tx: &watch::Sender<Option<Plan>>) {
-    match config_client::fetch_config(config_socket).await {
+    match nos_daemon::config::fetch_config(config_socket).await {
         Ok(cfg) => {
             let plan = ports::plan(&cfg);
             plan_tx.send_if_modified(|cur| {

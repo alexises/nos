@@ -39,7 +39,7 @@ pub async fn run(
 
     loop {
         if writer.is_none() {
-            let Some(socket) = crate::watchdog_client::resolve_with_retry(
+            let Some(socket) = nos_daemon::watchdog::resolve_with_retry(
                 &watchdog_socket,
                 ServiceRef::Interfaces,
                 &mut shutdown,

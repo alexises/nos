@@ -12,8 +12,6 @@ use tokio::sync::watch;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{info, warn};
 
-use crate::watchdog_client;
-
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// The table as last streamed. Kept when the stream drops: a lost stream says
@@ -72,7 +70,7 @@ pub async fn run(
 ) {
     while !*shutdown.borrow() {
         if let Some(socket) =
-            watchdog_client::resolve_once(&watchdog_socket, &ServiceRef::Interfaces).await
+            nos_daemon::watchdog::resolve_once(&watchdog_socket, &ServiceRef::Interfaces).await
         {
             tokio::select! {
                 () = stream(&socket, &tx) => {}

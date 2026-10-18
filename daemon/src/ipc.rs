@@ -1,6 +1,6 @@
 //! Generic best-effort one-shot request/reply against another daemon.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{IpcCodec, Role};
@@ -9,33 +9,59 @@ use serde::Serialize;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
 
+/// Why a [`request`] got no reply.
+#[derive(Debug, thiserror::Error)]
+pub enum IpcError {
+    #[error("could not connect to {path}: {source}")]
+    Connect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("connection closed before a reply")]
+    Closed,
+}
+
 /// Connects to `socket` as a client of `role`, sends `req`, reads one reply.
-///
-/// Best-effort by design: callers poll this every reconcile tick, and "no
+/// Callers match the reply variant they expect.
+pub async fn request<Req, Ev>(socket: &Path, role: Role, req: Req) -> Result<Ev, IpcError>
+where
+    Req: Serialize,
+    Ev: DeserializeOwned,
+{
+    let stream = nos_pki::connect_role(socket, role)
+        .await
+        .map_err(|source| IpcError::Connect {
+            path: socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(r, IpcCodec::<Ev>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<Req>::default());
+    writer.send(req).await?;
+    match reader.next().await {
+        Some(Ok(ev)) => Ok(ev),
+        Some(Err(e)) => Err(IpcError::Io(e)),
+        None => Err(IpcError::Closed),
+    }
+}
+
+/// [`request`], best-effort: callers poll this every reconcile tick, and "no
 /// answer yet" (refused, closed, malformed reply) is a normal, recurring
-/// condition, so every failure is a `trace!` and `None`. Callers match the
-/// reply variant they expect.
+/// condition, so every failure is a `trace!` and `None`.
 pub async fn one_shot<Req, Ev>(socket: &Path, role: Role, req: Req) -> Option<Ev>
 where
     Req: Serialize,
     Ev: DeserializeOwned,
 {
-    let Ok(stream) = nos_pki::connect_role(socket, role).await else {
-        trace!(socket = %socket.display(), ?role, "one-shot connect failed");
-        return None;
-    };
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<Ev>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<Req>::default());
-    if writer.send(req).await.is_err() {
-        trace!(socket = %socket.display(), ?role, "one-shot send failed");
-        return None;
-    }
-    if let Some(Ok(ev)) = reader.next().await {
-        Some(ev)
-    } else {
-        trace!(socket = %socket.display(), ?role, "one-shot got no well-formed reply");
-        None
+    match request(socket, role, req).await {
+        Ok(ev) => Some(ev),
+        Err(e) => {
+            trace!(socket = %socket.display(), ?role, error = %e, "one-shot failed");
+            None
+        }
     }
 }
 
@@ -111,5 +137,36 @@ mod tests {
         let p = tmp.path().join("s.sock");
         serve(&p, Box::new(|_w| Box::pin(async {})));
         assert_eq!(one_shot::<u32, u32>(&p, Role::Ribd, 1).await, None);
+    }
+
+    #[tokio::test]
+    async fn request_errors_are_typed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("nope.sock");
+        assert!(matches!(
+            request::<u32, u32>(&p, Role::Ribd, 1).await,
+            Err(IpcError::Connect { .. })
+        ));
+        let p = tmp.path().join("c.sock");
+        serve(&p, Box::new(|_w| Box::pin(async {})));
+        assert!(matches!(
+            request::<u32, u32>(&p, Role::Ribd, 1).await,
+            Err(IpcError::Closed)
+        ));
+        let p = tmp.path().join("m.sock");
+        serve(
+            &p,
+            Box::new(|mut w| {
+                Box::pin(async move {
+                    let _ = w.write_all(&[1, 0, 0, 0, 9]).await;
+                    let _ = w.flush().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                })
+            }),
+        );
+        assert!(matches!(
+            request::<u32, bool>(&p, Role::Ribd, 1).await,
+            Err(IpcError::Io(_))
+        ));
     }
 }
