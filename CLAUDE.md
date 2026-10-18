@@ -28,6 +28,7 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `password/` | `nos-password` | argon2id password hashing/verification (`hash`/`verify`/`verify_or_dummy`) for local users — no NOS dependencies, like `nos-tcp-auth`; used by `nos-config` (hashing on the way in) and `nos-watchdog` (login verification, for `nos` and REST clients alike) |
 | `pki/` | `nos-pki` | Post-quantum mutual TLS (hybrid ML-KEM key exchange only, ML-DSA-65 certificates) over Unix sockets for every IPC connection, with `nos-watchdogd` as the certificate authority — identities are `nos://<role>/<name>` URI SANs, delivered to each daemon over its stdin and hot-rotated; also the TLS for `nos-restd`'s TCP listener and its clients (`nos_pki::rest`, a second CA); no NOS dependencies, like `nos-password` — see `pki/CLAUDE.md` |
 | `log-client/` | `nos-log-client` | The `tracing` → `nos-logd` forwarding layer every daemon installs — depends only on `nos-proto`, like `nos-tcp-auth`/`nos-rpl` |
+| `daemon/` | `nos-daemon` | Boilerplate every daemon shares: watchdog endpoint resolution, `nos-configd` fetch/subscribe, generic one-shot IPC query, `main()` identity + tracing bootstrap — see `daemon/CLAUDE.md` |
 | `config/` | `nos-config` | Configuration store and IPC server |
 | `bgp/` | `nos-bgp` | BGP-4 implementation |
 | `rib/` | `nos-rib` | Routing information base daemon — best-path selection per routing table, applied to the kernel via a Linux driver (VRF device + routes) |
@@ -35,7 +36,7 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `log/` | `nos-log` | Log collection daemon (`nos-logd`) — a single process collects structured log entries pushed by every other daemon into a bounded, disk-backed buffer, queryable by `nos-cli` |
 | `ospf/` | `nos-ospf` | OSPF daemon — one process per `OspfInstance`; real RFC 2328 Hello-protocol neighbor discovery plus DBD/LSR/LSU/LSAck adjacency formation, reaching `Full` with a real per-area LSDB, over point-to-point and broadcast links, plus real RFC 2328 §16 SPF route computation pushed to `nos-ribd` — see `ospf/CLAUDE.md` |
 | `ospf-common/` | `nos-ospf-common` | Address-family-agnostic pure logic shared by `nos-ospf`/`nos-ospfv3` — §9.4 DR/BDR election, §10.5 neighbor FSM, the generic LSA store (§13/§14) and DBD exchange (§10.6-10.8); no NOS dependencies, like `nos-proto` — see `ospf-common/CLAUDE.md` |
-| `ospfv3/` | `nos-ospfv3` | OSPFv3 (RFC 5340, IPv6 OSPF) daemon — Phase 1: one process per `Ospfv3Instance`, mirroring `nos-ospfd`'s architecture (Hello/DBD/LSR/LSU/LSAck reaching `Full` over point-to-point and broadcast links, SPF pushed to `nos-ribd`) over real IPv6 raw protocol-89 sockets instead of IPv4; plus RFC 7166 authentication trailers, ABR (Inter-Area-Prefix/Router-LSAs) and ASBR (AS-External-LSAs in an AS-scope LSDB); no stub areas/NSSA or RFC 5838 multi-instance yet — see `ospfv3/CLAUDE.md` |
+| `ospfv3/` | `nos-ospfv3` | OSPFv3 (RFC 5340, IPv6 OSPF) daemon — one process per `Ospfv3Instance`, mirroring `nos-ospfd` (adjacencies to `Full`, SPF pushed to `nos-ribd`) over IPv6 raw protocol-89 sockets; RFC 7166 auth trailers, ABR and ASBR; no stub/NSSA or RFC 5838 multi-instance yet — see `ospfv3/CLAUDE.md` |
 | `lacp/` | `nos-lacp` | LACP daemon (`nos-lacpd`) — a single fixed process (like `nos-interfaced`), running a real, from-scratch IEEE 802.1AX LACPDU exchange over raw `AF_PACKET` sockets for every `Lacp`-mode `PortAggregate` member port, pushing its negotiated active-member set to `nos-interfaced`; the kernel bond device itself stays owned by `nos-interfaced`, dataplane-only — see `lacp/CLAUDE.md` |
 | `stp/` | `nos-stp` | Spanning tree: pure IEEE 802.1Q RSTP core plus `nos-stpd`, one fixed process with a raw `AF_PACKET` BPDU socket per port, pushing states to `nos-interfaced` — see `stp/CLAUDE.md` |
 | `lldp/` | `nos-lldp` | LLDP daemon (`nos-lldpd`) — a single fixed process (like `nos-lacpd`), running a real, from-scratch IEEE 802.1AB LLDPDU exchange over raw `AF_PACKET` sockets for every physical `Interface` with `lldp transmit`/`lldp receive` enabled; records neighbors (`show lldp neighbors`); never touches rtnetlink — see `lldp/CLAUDE.md` |
@@ -85,7 +86,7 @@ nos-config      nos-bgp, nos-rib, nos-ospf, nos-cli, …
 (server)        (clients)
 ```
 
-Component crates depend on `nos-proto` for types and `nos-proto::IpcCodec` for the framing codec. They do **not** depend on `nos-config` internals.
+Component crates depend on `nos-proto` for types and `IpcCodec` for framing, plus `nos-daemon` for the shared client boilerplate. They do **not** depend on `nos-config` internals or on each other.
 
 
 ### Architecture details

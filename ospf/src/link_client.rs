@@ -8,14 +8,13 @@ use tokio::sync::watch;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{info, warn};
 
-use crate::watchdog_client;
+use nos_daemon::watchdog;
 
 /// Fixed reconnect delay, like every other reconnect loop here.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// `nos-interfaced`'s kernel link table as last streamed (`SubscribeLinks`).
 /// Kept when the stream drops: a lost stream says nothing about the links.
-/// Reimplemented per crate, like every other client (star dependency graph).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LinkTable {
     /// At least one `LinkSnapshot` seen; false (never connected) means no gating.
@@ -71,7 +70,7 @@ pub async fn run(
 ) {
     while !*shutdown.borrow() {
         if let Some(socket) =
-            watchdog_client::resolve_once(&watchdog_socket, &ServiceRef::Interfaces).await
+            watchdog::resolve_once(&watchdog_socket, &ServiceRef::Interfaces).await
         {
             tokio::select! {
                 () = stream(&socket, &tx) => {}

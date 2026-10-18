@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 nos-pki            = { workspace = true }
+nos-daemon         = { workspace = true } # shared ospf/src/{bfd,link}_client.rs use it; the rest migrates in #476
 tokio              = { workspace = true, features = ["signal"] }
 serde              = { workspace = true }
 tracing            = { workspace = true }

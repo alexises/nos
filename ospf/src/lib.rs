@@ -7,7 +7,6 @@ pub const DAEMON: &str = "ospf";
 
 pub mod bfd_client;
 pub mod boot;
-pub mod config_client;
 pub mod exchange;
 pub mod interface_client;
 pub mod link;
@@ -21,6 +20,5 @@ pub mod rib_push_client;
 pub mod server;
 pub mod socket;
 pub mod spf;
-pub mod watchdog_client;
 
 pub use nos_ospf_common::{bfd, election, neighbor};

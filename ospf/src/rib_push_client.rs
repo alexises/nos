@@ -28,7 +28,7 @@ use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
 
 use crate::link::LinkManager;
-use crate::watchdog_client::resolve_once;
+use nos_daemon::watchdog::resolve_once;
 
 // ponytail: the 2s poll is only a safety net for SPF inputs that don't touch
 // an LSDB (neighbor state, area reconcile); upgrade by notifying from them.
