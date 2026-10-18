@@ -2491,7 +2491,7 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
 }
 
 /// RFC 5340 §4.4.3.2's Router-LSA link entries for every currently-running
-/// link in one area — one point-to-point entry per link with at least one
+/// link in one area — one point-to-point entry per link with a fully adjacent
 /// neighbor, one transit-network entry per link with a resolved DR. Unlike
 /// `ospf::link::originate::router_lsa_links`, never a stub-network entry: v3's
 /// Router-LSA has nowhere to carry a prefix at all (see the module doc
@@ -2505,10 +2505,12 @@ fn router_lsa_links(
     for (cfg, status) in links {
         match cfg.network_type {
             NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+                // RFC 5340 §4.4.3.2: only a fully adjacent neighbor (a
+                // neighbor back in Init after a BFD kill must drop out, #463).
                 if let Some((neighbor_id, info)) = status
                     .neighbors
                     .iter()
-                    .find(|(_, n)| n.state != NeighborState::Down)
+                    .find(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
                 {
                     result.push(RouterLsaLink {
                         link_type: LINK_TYPE_POINT_TO_POINT,
@@ -2920,6 +2922,17 @@ pub(crate) mod tests {
         assert_eq!(links[0].neighbor_router_id, neighbor_id);
         assert_eq!(links[0].neighbor_interface_id, 7);
         assert_eq!(links[0].interface_id, cfg.interface_id);
+    }
+
+    /// #463, RFC 5340 §4.4.3.2: an Init neighbor is not fully adjacent.
+    #[test]
+    fn router_lsa_links_omits_p2p_link_until_full() {
+        let mut status = LinkStatus::new(NetworkType::PointToPoint);
+        status.neighbors.insert(
+            Ipv4Addr::new(9, 9, 9, 10),
+            neighbor_info(NeighborState::Init, "fe80::2".parse().unwrap(), 7),
+        );
+        assert!(router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(link("eth0.0", 10), status)]).is_empty());
     }
 
     #[test]

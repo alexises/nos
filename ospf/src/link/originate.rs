@@ -81,10 +81,13 @@ pub(super) fn router_lsa_links(
         }
         match cfg.network_type {
             NetworkType::PointToPoint => {
+                // RFC 2328 §12.4.1.1: only a fully adjacent neighbor. A
+                // neighbor back in Init (one Hello after a BFD kill, #463)
+                // must not keep the link alive in our Router-LSA.
                 if let Some((neighbor_id, _)) = status
                     .neighbors
                     .iter()
-                    .find(|(_, n)| n.state != NeighborState::Down)
+                    .find(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
                 {
                     result.push(RouterLink {
                         link_id: *neighbor_id,
