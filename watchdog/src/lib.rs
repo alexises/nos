@@ -1,9 +1,9 @@
 pub mod broker;
-pub mod config_client;
 pub mod instances;
 pub mod pki;
 pub mod registry;
 pub mod supervisor;
+pub mod users_client;
 
 pub use instances::{Endpoint, Managed};
 pub use pki::Pki;

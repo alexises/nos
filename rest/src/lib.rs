@@ -15,4 +15,3 @@ pub mod openapi;
 pub mod show;
 pub mod tls;
 pub mod tx;
-pub mod watchdog_client;

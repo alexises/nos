@@ -46,7 +46,7 @@ How `nos-lldp` is built, moved from `lldp/CLAUDE.md` (#264) so the always-loaded
 | `link.rs` | Per-interface task — `run()` owns the socket and drives it with `tokio::select!` over the next-transmit deadline (fast start, credit, `tx-interval`), the receive socket, and the next-expiry deadline. `handle_rx`/`expire`/`local_pdu`/`shutdown_pdu` are separately unit-tested. `SharedPorts` (`Arc<Mutex<HashMap<interface, Port { neighbors, stats }>>>`, one map and one lock for both) is what `server.rs` reads |
 | `reconcile.rs` | Subscribes to `DiffScope::{Interfaces, Hostname}` purely as a resync trigger, always re-fetching the whole config, and keeps one link per interface with either flag set. A change to that interface's flags or to the hostname (System Name) restarts its link (`LinkConfig` equality); a finished task is respawned; a fixed 10s safety-net tick retries a link whose interface wasn't there yet. `desired_links` is the pure, unit-tested part |
 | `server.rs` | Serves `nos_proto::lldp`'s `LldpRequest::GetNeighbors`/`GetStatistics` on `--listen-socket` (default `/run/nos/lldp.sock`, registered with the broker as `ServiceRef::Lldp`). Read-only, sorted by interface. Backs `nos-cli`'s `show lldp neighbors`/`statistics` and `GET /v1/lldp/{neighbors,statistics}` |
-| `config_client.rs` / `watchdog_client.rs` | Own reimplementations (`fetch_config`/`subscribe_diff`, `resolve_with_retry`/`resolve_once`) — per the root `CLAUDE.md`'s star dependency graph, not shared with the other daemons |
+| (none) | `fetch_config`/`subscribe_diff` and `resolve_with_retry`/`resolve_once` come from `nos-daemon` |
 
 ## `nos-e2e lldp`
 

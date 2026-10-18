@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nos_proto::SessionKey;
+use nos_proto::{RibEvent, RibRequest, Role, ServiceRef, SessionKey};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
 use tokio::task::JoinHandle;
@@ -42,8 +42,19 @@ use crate::packet;
 use crate::reflector::Reflector;
 use crate::sbfd::{self, SbfdPath};
 use crate::session::{rand_u32, EchoPath, EchoTx, Looped, Tx};
-use crate::watchdog_client;
+use nos_daemon::{ipc, watchdog};
 use nos_l2_socket::{L2Socket, L2Unicast};
+
+/// The Linux VRF device of routing table `table`, `None` while `nos-ribd`
+/// is unreachable or has not created it.
+pub async fn vrf_name(watchdog_socket: &std::path::Path, table: &str) -> Option<String> {
+    let rib =
+        watchdog::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string())).await?;
+    match ipc::one_shot(&rib, Role::Ribd, RibRequest::GetVrfName).await? {
+        RibEvent::VrfName(name) => name,
+        _ => None,
+    }
+}
 
 pub const BFD_PORT: u16 = 3784;
 /// RFC 5883 §2: multihop control packets.
@@ -707,7 +718,7 @@ impl ReflectorNet {
             keep
         });
         for table in tables {
-            let Some(vrf) = watchdog_client::vrf_name(&self.watchdog_socket, table).await else {
+            let Some(vrf) = vrf_name(&self.watchdog_socket, table).await else {
                 continue;
             };
             let idx = ifindex(&vrf);
@@ -780,7 +791,7 @@ impl UdpNet {
         disc: u32,
         unaffiliated: bool,
     ) -> io::Result<EchoPath> {
-        let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
+        let vrf = vrf_name(&self.watchdog_socket, &key.table)
             .await
             .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
         let (addr, iface) = local_for(key.peer, &vrf, key.interface.as_deref())
@@ -894,7 +905,7 @@ impl Net for UdpNet {
         if key.aggregate.is_some() {
             return self.open_micro(key);
         }
-        let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
+        let vrf = vrf_name(&self.watchdog_socket, &key.table)
             .await
             .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
         self.ensure_rx(&key.table, &vrf, key.peer.is_ipv6(), key.multihop)?;
@@ -907,14 +918,14 @@ impl Net for UdpNet {
     }
 
     async fn listen(&self, table: &str, v6: bool) -> io::Result<()> {
-        let vrf = watchdog_client::vrf_name(&self.watchdog_socket, table)
+        let vrf = vrf_name(&self.watchdog_socket, table)
             .await
             .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
         self.ensure_rx(table, &vrf, v6, false)
     }
 
     async fn open_sbfd(&self, key: &SessionKey) -> io::Result<SbfdPath> {
-        let vrf = watchdog_client::vrf_name(&self.watchdog_socket, &key.table)
+        let vrf = vrf_name(&self.watchdog_socket, &key.table)
             .await
             .ok_or_else(|| io::Error::other("the table has no VRF yet"))?;
         let device = key

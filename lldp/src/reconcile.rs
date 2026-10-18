@@ -15,7 +15,6 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::config_client;
 use crate::link::{self, LinkConfig, SharedPorts};
 use crate::packet;
 
@@ -185,7 +184,7 @@ pub async fn run(config_socket: PathBuf, ports: SharedPorts, mut shutdown: watch
     };
 
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
+        match nos_daemon::config::subscribe_diff(&config_socket, scopes.clone()).await {
             Ok(mut reader) => {
                 info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
@@ -234,7 +233,7 @@ pub async fn run(config_socket: PathBuf, ports: SharedPorts, mut shutdown: watch
 }
 
 async fn resync(config_socket: &Path, links: &mut Links, chassis_mac: [u8; 6]) {
-    let cfg = match config_client::fetch_config(config_socket).await {
+    let cfg = match nos_daemon::config::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
             warn!(error = %e, "failed to fetch running config, keeping previous state");

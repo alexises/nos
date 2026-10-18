@@ -24,7 +24,6 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::config_client;
 use crate::manager::Manager;
 use crate::socket::ReflectorNet;
 
@@ -228,7 +227,7 @@ pub async fn run(
         DiffScope::RoutingTables,
     ];
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
+        match nos_daemon::config::subscribe_diff(&config_socket, scopes.clone()).await {
             Ok(mut reader) => {
                 info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
                 let mut tick = tokio::time::interval(REAPPLY_INTERVAL);
@@ -267,7 +266,7 @@ pub async fn run(
 }
 
 async fn resync(config_socket: &Path, micro: &mut Micro, reflector: &ReflectorNet) {
-    match config_client::fetch_config(config_socket).await {
+    match nos_daemon::config::fetch_config(config_socket).await {
         Ok(cfg) => {
             let wanted = wanted(&cfg);
             debug!(sessions = wanted.len(), "reconciling micro-bfd sessions");

@@ -17,7 +17,6 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::aggregate::{AggregateManager, DEFAULT_PRIORITY};
-use crate::config_client;
 
 /// Every currently-configured `Lacp`-mode aggregate's manager, shared with
 /// `server.rs` so `show lacp` can read live state.
@@ -40,7 +39,7 @@ pub async fn run(
     let mut next_key: u16 = 1;
 
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
+        match nos_daemon::config::subscribe_diff(&config_socket, scopes.clone()).await {
             Ok(mut reader) => {
                 info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
@@ -96,7 +95,7 @@ async fn resync(
     next_key: &mut u16,
     push_tx: &mpsc::Sender<LacpAggregateMembers>,
 ) {
-    let cfg = match config_client::fetch_config(config_socket).await {
+    let cfg = match nos_daemon::config::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
             warn!(error = %e, "failed to fetch running config, keeping previous state");

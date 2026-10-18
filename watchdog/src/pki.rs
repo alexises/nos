@@ -34,8 +34,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config_client;
 use crate::supervisor::wait_or_shutdown;
+use crate::users_client;
 
 pub struct Pki {
     ca: Ca,
@@ -176,7 +176,7 @@ impl Pki {
         mut shutdown: watch::Receiver<bool>,
     ) {
         while !*shutdown.borrow() {
-            match config_client::subscribe_diff(
+            match users_client::subscribe_diff(
                 &self.identity,
                 &config_socket,
                 vec![DiffScope::Users],
@@ -235,7 +235,7 @@ impl Pki {
     async fn password_changed(&self, config_socket: &Path, user: &str) {
         let noted = lock(&self.rehashed).contains_key(user);
         if noted {
-            let current = config_client::fetch_users(&self.identity, config_socket)
+            let current = users_client::fetch_users(&self.identity, config_socket)
                 .await
                 .ok()
                 .and_then(|us| us.into_iter().find(|u| u.name == user))

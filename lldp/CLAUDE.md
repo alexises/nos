@@ -49,6 +49,6 @@ A change to any of these restarts the affected links (`LinkConfig` equality): a 
 | `link.rs` | Per-interface `run()`, `SharedPorts` read by `server.rs` |
 | `reconcile.rs` | Diff-triggered resync (`desired_links`), 10s tick |
 | `server.rs` | `GetNeighbors`/`GetStatistics` on `--listen-socket` (`ServiceRef::Lldp`) |
-| `config_client.rs`, `watchdog_client.rs` | Per-crate clients |
+| (no `config_client`/`watchdog_client`) | config, watchdog and `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`) |
 
 Details: [internals](../docs/internals/lldp.md) (TLVs sent, behaviour notes, per-module notes, `nos-e2e lldp` narrative), [LLDP guide](../docs/protocols/lldp.md), [e2e phases](../docs/e2e-phases.md).

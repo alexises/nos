@@ -1,11 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use futures::{SinkExt, StreamExt};
-use nos_proto::{
-    InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, PortAggregateStatus, Role,
-};
+use nos_daemon::ipc::{self, IpcError};
+use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, PortAggregateStatus, Role};
 use thiserror::Error;
-use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
 pub enum InterfaceClientError {
@@ -23,41 +20,28 @@ pub enum InterfaceClientError {
     Daemon(String),
 }
 
-async fn connect(
+async fn ask(
     interface_socket: &Path,
-) -> Result<
-    (
-        FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<InterfaceEvent>>,
-        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
-    ),
-    InterfaceClientError,
-> {
-    let stream = nos_pki::connect(interface_socket, Role::Interfaced, "")
+    req: InterfaceRequest,
+) -> Result<InterfaceEvent, InterfaceClientError> {
+    ipc::request(interface_socket, Role::Interfaced, req)
         .await
-        .map_err(|source| InterfaceClientError::Connect {
-            path: interface_socket.to_path_buf(),
-            source,
-        })?;
-    let (r, w) = tokio::io::split(stream);
-    Ok((
-        FramedRead::new(r, IpcCodec::<InterfaceEvent>::default()),
-        FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default()),
-    ))
+        .map_err(|e| match e {
+            IpcError::Connect { path, source } => InterfaceClientError::Connect { path, source },
+            IpcError::Io(e) => InterfaceClientError::Io(e),
+            IpcError::Closed => InterfaceClientError::ConnectionClosed,
+        })
 }
 
 /// Fetches every configured interface's reconciled status.
 pub async fn get_interfaces(
     interface_socket: &Path,
 ) -> Result<Vec<InterfaceStatus>, InterfaceClientError> {
-    let (mut reader, mut writer) = connect(interface_socket).await?;
-    writer.send(InterfaceRequest::GetInterfaces).await?;
-    match reader.next().await {
-        Some(Ok(InterfaceEvent::Interfaces(statuses))) => Ok(statuses),
-        Some(Ok(_)) => Err(InterfaceClientError::Daemon(
+    match ask(interface_socket, InterfaceRequest::GetInterfaces).await? {
+        InterfaceEvent::Interfaces(statuses) => Ok(statuses),
+        _ => Err(InterfaceClientError::Daemon(
             "unexpected event in reply to GetInterfaces".to_string(),
         )),
-        Some(Err(e)) => Err(InterfaceClientError::Io(e)),
-        None => Err(InterfaceClientError::ConnectionClosed),
     }
 }
 
@@ -67,20 +51,19 @@ pub async fn get_interface(
     interface_socket: &Path,
     name: &str,
 ) -> Result<Option<InterfaceStatus>, InterfaceClientError> {
-    let (mut reader, mut writer) = connect(interface_socket).await?;
-    writer
-        .send(InterfaceRequest::GetInterface {
+    match ask(
+        interface_socket,
+        InterfaceRequest::GetInterface {
             name: name.to_string(),
-        })
-        .await?;
-    match reader.next().await {
-        Some(Ok(InterfaceEvent::Interface(status))) => Ok(Some(status)),
-        Some(Ok(InterfaceEvent::NotFound)) => Ok(None),
-        Some(Ok(_)) => Err(InterfaceClientError::Daemon(
+        },
+    )
+    .await?
+    {
+        InterfaceEvent::Interface(status) => Ok(Some(status)),
+        InterfaceEvent::NotFound => Ok(None),
+        _ => Err(InterfaceClientError::Daemon(
             "unexpected event in reply to GetInterface".to_string(),
         )),
-        Some(Err(e)) => Err(InterfaceClientError::Io(e)),
-        None => Err(InterfaceClientError::ConnectionClosed),
     }
 }
 
@@ -88,15 +71,11 @@ pub async fn get_interface(
 pub async fn get_port_aggregates(
     interface_socket: &Path,
 ) -> Result<Vec<PortAggregateStatus>, InterfaceClientError> {
-    let (mut reader, mut writer) = connect(interface_socket).await?;
-    writer.send(InterfaceRequest::GetPortAggregates).await?;
-    match reader.next().await {
-        Some(Ok(InterfaceEvent::PortAggregates(statuses))) => Ok(statuses),
-        Some(Ok(_)) => Err(InterfaceClientError::Daemon(
+    match ask(interface_socket, InterfaceRequest::GetPortAggregates).await? {
+        InterfaceEvent::PortAggregates(statuses) => Ok(statuses),
+        _ => Err(InterfaceClientError::Daemon(
             "unexpected event in reply to GetPortAggregates".to_string(),
         )),
-        Some(Err(e)) => Err(InterfaceClientError::Io(e)),
-        None => Err(InterfaceClientError::ConnectionClosed),
     }
 }
 
@@ -106,19 +85,18 @@ pub async fn get_port_aggregate(
     interface_socket: &Path,
     name: &str,
 ) -> Result<Option<PortAggregateStatus>, InterfaceClientError> {
-    let (mut reader, mut writer) = connect(interface_socket).await?;
-    writer
-        .send(InterfaceRequest::GetPortAggregate {
+    match ask(
+        interface_socket,
+        InterfaceRequest::GetPortAggregate {
             name: name.to_string(),
-        })
-        .await?;
-    match reader.next().await {
-        Some(Ok(InterfaceEvent::PortAggregate(status))) => Ok(Some(status)),
-        Some(Ok(InterfaceEvent::NotFound)) => Ok(None),
-        Some(Ok(_)) => Err(InterfaceClientError::Daemon(
+        },
+    )
+    .await?
+    {
+        InterfaceEvent::PortAggregate(status) => Ok(Some(status)),
+        InterfaceEvent::NotFound => Ok(None),
+        _ => Err(InterfaceClientError::Daemon(
             "unexpected event in reply to GetPortAggregate".to_string(),
         )),
-        Some(Err(e)) => Err(InterfaceClientError::Io(e)),
-        None => Err(InterfaceClientError::ConnectionClosed),
     }
 }

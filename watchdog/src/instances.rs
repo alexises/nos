@@ -16,10 +16,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config_client;
 use crate::pki::Pki;
 use crate::registry::{EndpointKind, EndpointRegistry};
 use crate::supervisor::{supervise_one, wait_or_shutdown, BackoffPolicy, ProcessSpec};
+use crate::users_client;
 
 /// Fixed reconnect delay for the config subscription itself — distinct from
 /// `BackoffPolicy`, which governs per-child crash/restart backoff. Mirrors
@@ -89,8 +89,7 @@ pub async fn manage(m: Managed, mut shutdown: watch::Receiver<bool>) {
     let mut instances: HashMap<String, InstanceHandle> = HashMap::new();
 
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&m.pki.identity, &m.config_socket, vec![m.scope]).await
-        {
+        match users_client::subscribe_diff(&m.pki.identity, &m.config_socket, vec![m.scope]).await {
             Ok(reader) => {
                 info!("connected to nos-configd diff stream");
                 if follow(reader, &mut instances, &m, &mut shutdown).await {

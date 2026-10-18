@@ -11,9 +11,9 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::config_client;
 use crate::pki::Pki;
 use crate::registry::EndpointRegistry;
+use crate::users_client;
 
 /// A failed login costs the caller this much wall time, and the connection is
 /// dropped after `MAX_FAILED_LOGINS` of them.
@@ -217,7 +217,7 @@ async fn login(
     csr_der: &[u8],
     realm: Realm,
 ) -> WatchdogEvent {
-    let users = match config_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
+    let users = match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
         Ok(users) => users,
         Err(e) => {
             warn!(error = %e, "cannot read users from nos-configd, refusing login");
@@ -250,7 +250,7 @@ async fn login(
         // Best effort: never fail a correct login over an upgrade. Noted first,
         // so the users diff it causes is known not to be a password change.
         ctx.pki.note_rehash(user, &new);
-        match config_client::upgrade_password_hash(
+        match users_client::upgrade_password_hash(
             &ctx.pki.identity,
             &ctx.sockets.config,
             user,
@@ -273,7 +273,7 @@ async fn login(
 /// A still-valid certificate is proof enough — but a user deleted since must
 /// not be able to keep renewing.
 async fn renew(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogEvent {
-    match config_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
+    match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
         Ok(users) if users.iter().any(|u| u.name == user) => {
             let event = issue(ctx, user, csr_der, realm);
             if matches!(event, WatchdogEvent::Issued { .. }) {

@@ -11,14 +11,13 @@ workspace = true
 [dependencies]
 nos-proto          = { workspace = true }
 nos-pki            = { workspace = true }
-nos-log-client     = { workspace = true }
+nos-daemon         = { workspace = true }
 thiserror          = { workspace = true }
 md-5               = { workspace = true }
 sha1               = { workspace = true }
 tokio              = { workspace = true, features = ["signal"] }
 tokio-util         = { workspace = true }
 tracing            = { workspace = true }
-tracing-subscriber = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
 futures            = { workspace = true }

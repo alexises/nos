@@ -1716,8 +1716,8 @@ dependencies = [
  "md-5",
  "netlink-packet-route",
  "nix",
+ "nos-daemon",
  "nos-l2-socket",
- "nos-log-client",
  "nos-pki",
  "nos-proto",
  "rtnetlink",
@@ -1728,7 +1728,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1768,6 +1767,7 @@ dependencies = [
  "clap",
  "futures",
  "ipnet",
+ "nos-daemon",
  "nos-pki",
  "nos-proto",
  "nos-rpl",
@@ -1921,8 +1921,8 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "nos-daemon",
  "nos-l2-socket",
- "nos-log-client",
  "nos-pki",
  "nos-proto",
  "tempfile",
@@ -1930,7 +1930,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1940,8 +1939,8 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "nos-daemon",
  "nos-l2-socket",
- "nos-log-client",
  "nos-pki",
  "nos-proto",
  "tempfile",
@@ -1949,7 +1948,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2142,7 +2140,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "nos-config",
- "nos-log-client",
+ "nos-daemon",
  "nos-pki",
  "nos-proto",
  "percent-encoding",
@@ -2150,13 +2148,11 @@ dependencies = [
  "serde_json",
  "socket2",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-util",
  "tower",
  "tracing",
- "tracing-subscriber",
  "utoipa",
  "utoipa-axum",
  "utoipa-swagger-ui",
@@ -2211,8 +2207,8 @@ dependencies = [
  "futures",
  "hmac",
  "md-5",
+ "nos-daemon",
  "nos-l2-socket",
- "nos-log-client",
  "nos-pki",
  "nos-proto",
  "proptest",
@@ -2221,7 +2217,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

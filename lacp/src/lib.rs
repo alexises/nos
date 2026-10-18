@@ -6,7 +6,6 @@
 
 pub mod aggregate;
 pub mod churn_machine;
-pub mod config_client;
 pub mod interface_client;
 pub mod link;
 pub mod mux_machine;
@@ -17,4 +16,3 @@ pub mod reconcile;
 pub mod selection;
 pub mod server;
 pub mod socket;
-pub mod watchdog_client;

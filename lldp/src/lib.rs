@@ -3,11 +3,9 @@
 // LLDP-enabled physical interface, transmitting this system's identity and
 // recording the neighbors it hears. Never touches rtnetlink.
 
-pub mod config_client;
 pub mod link;
 pub mod neighbor;
 pub mod packet;
 pub mod reconcile;
 pub mod server;
 pub mod socket;
-pub mod watchdog_client;

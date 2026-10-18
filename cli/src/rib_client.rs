@@ -1,10 +1,9 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, Role};
+use nos_daemon::ipc::{self, IpcError};
+use nos_proto::{PrefixRoutes, RibEvent, RibRequest, Role};
 use thiserror::Error;
-use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
 pub enum RibClientError {
@@ -22,41 +21,25 @@ pub enum RibClientError {
     Daemon(String),
 }
 
-async fn connect(
-    rib_socket: &Path,
-) -> Result<
-    (
-        FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<RibEvent>>,
-        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<RibRequest>>,
-    ),
-    RibClientError,
-> {
-    let stream = nos_pki::connect_role(rib_socket, Role::Ribd)
+async fn ask(rib_socket: &Path, req: RibRequest) -> Result<RibEvent, RibClientError> {
+    ipc::request(rib_socket, Role::Ribd, req)
         .await
-        .map_err(|source| RibClientError::Connect {
-            path: rib_socket.to_path_buf(),
-            source,
-        })?;
-    let (r, w) = tokio::io::split(stream);
-    Ok((
-        FramedRead::new(r, IpcCodec::<RibEvent>::default()),
-        FramedWrite::new(w, IpcCodec::<RibRequest>::default()),
-    ))
+        .map_err(|e| match e {
+            IpcError::Connect { path, source } => RibClientError::Connect { path, source },
+            IpcError::Io(e) => RibClientError::Io(e),
+            IpcError::Closed => RibClientError::ConnectionClosed,
+        })
 }
 
 /// Fetches the whole table: every prefix, each with its full candidate list
 /// ordered best to worst, prefixes in ascending CIDR order.
 pub async fn get_routes(rib_socket: &Path) -> Result<Vec<PrefixRoutes>, RibClientError> {
-    let (mut reader, mut writer) = connect(rib_socket).await?;
-    writer.send(RibRequest::GetRoutes).await?;
-    match reader.next().await {
-        Some(Ok(RibEvent::Routes(routes))) => Ok(routes),
-        Some(Ok(RibEvent::Error(msg))) => Err(RibClientError::Daemon(msg)),
-        Some(Ok(_)) => Err(RibClientError::Daemon(
+    match ask(rib_socket, RibRequest::GetRoutes).await? {
+        RibEvent::Routes(routes) => Ok(routes),
+        RibEvent::Error(msg) => Err(RibClientError::Daemon(msg)),
+        _ => Err(RibClientError::Daemon(
             "unexpected event in reply to GetRoutes".to_string(),
         )),
-        Some(Err(e)) => Err(RibClientError::Io(e)),
-        None => Err(RibClientError::ConnectionClosed),
     }
 }
 
@@ -66,16 +49,12 @@ pub async fn lookup(
     rib_socket: &Path,
     addr: IpAddr,
 ) -> Result<Option<PrefixRoutes>, RibClientError> {
-    let (mut reader, mut writer) = connect(rib_socket).await?;
-    writer.send(RibRequest::Lookup { addr }).await?;
-    match reader.next().await {
-        Some(Ok(RibEvent::Match(routes))) => Ok(Some(routes)),
-        Some(Ok(RibEvent::NoMatch)) => Ok(None),
-        Some(Ok(RibEvent::Error(msg))) => Err(RibClientError::Daemon(msg)),
-        Some(Ok(_)) => Err(RibClientError::Daemon(
+    match ask(rib_socket, RibRequest::Lookup { addr }).await? {
+        RibEvent::Match(routes) => Ok(Some(routes)),
+        RibEvent::NoMatch => Ok(None),
+        RibEvent::Error(msg) => Err(RibClientError::Daemon(msg)),
+        _ => Err(RibClientError::Daemon(
             "unexpected event in reply to Lookup".to_string(),
         )),
-        Some(Err(e)) => Err(RibClientError::Io(e)),
-        None => Err(RibClientError::ConnectionClosed),
     }
 }

@@ -2,15 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_lldp::{link::SharedPorts, reconcile, server, watchdog_client};
-use nos_log_client::ForwardingLayer;
-use nos_pki::Identity;
+use nos_daemon::{bootstrap, watchdog};
+use nos_lldp::{link::SharedPorts, reconcile, server};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::{info, warn};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// Default listen socket. Like `nos-lacpd`/`nos-interfaced`, `nos-lldpd` is a
 /// single process handling every LLDP-enabled interface, so there's exactly
@@ -39,26 +36,17 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
-    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
+    let identity = bootstrap::identity()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace")),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .with(ForwardingLayer::install(
-            "nos-lldpd",
-            args.log_socket.clone(),
-            identity.clone(),
-            shutdown_rx.clone(),
-        ))
-        .init();
-    nos_log_client::install_panic_hook();
+    bootstrap::init_tracing(
+        "nos-lldpd",
+        args.log_socket.clone(),
+        identity.clone(),
+        shutdown_rx.clone(),
+    );
     info!(listen_socket = %args.listen_socket.display(), "nos-lldpd starting");
 
-    let Some(config_socket) = watchdog_client::resolve_with_retry(
+    let Some(config_socket) = watchdog::resolve_with_retry(
         &args.watchdog_socket,
         ServiceRef::Config,
         &mut shutdown_rx.clone(),
