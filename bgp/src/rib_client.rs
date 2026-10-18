@@ -1,9 +1,8 @@
 use std::path::Path;
 
-use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
-use nos_proto::{IpcCodec, RibEvent, RibRequest, Role};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use nos_daemon::ipc::one_shot;
+use nos_proto::{RibEvent, RibRequest, Role};
 use tracing::trace;
 
 /// One-shot query of a `nos-ribd` instance's Linux VRF interface name.
@@ -16,15 +15,9 @@ use tracing::trace;
 /// caller, which just retries next tick. Only a well-formed
 /// `RibEvent::VrfName` reply is distinguished from that.
 pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
-    let Ok(stream) = nos_pki::connect_role(rib_socket, Role::Ribd).await else {
-        trace!(socket = %rib_socket.display(), "failed to connect to nos-ribd for vrf name");
-        return None;
-    };
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(RibRequest::GetVrfName).await.ok()?;
-    if let Some(Ok(RibEvent::VrfName(name))) = reader.next().await {
+    if let RibEvent::VrfName(name) =
+        one_shot(rib_socket, Role::Ribd, RibRequest::GetVrfName).await?
+    {
         name
     } else {
         trace!("nos-ribd gave no well-formed GetVrfName reply");
@@ -35,13 +28,8 @@ pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
 /// One-shot query of every prefix's IGP cost (`RibRequest::IgpCosts`), for
 /// BGP decision step (d). `None` on any failure — the caller just polls again.
 pub async fn get_igp_costs(rib_socket: &Path) -> Option<Vec<(IpNet, u32)>> {
-    let stream = nos_pki::connect_role(rib_socket, Role::Ribd).await.ok()?;
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(RibRequest::IgpCosts).await.ok()?;
-    match reader.next().await {
-        Some(Ok(RibEvent::IgpCosts(costs))) => Some(costs),
+    match one_shot(rib_socket, Role::Ribd, RibRequest::IgpCosts).await? {
+        RibEvent::IgpCosts(costs) => Some(costs),
         _ => None,
     }
 }
@@ -49,13 +37,8 @@ pub async fn get_igp_costs(rib_socket: &Path) -> Option<Vec<(IpNet, u32)>> {
 /// One-shot query of how many BGP routes the table still holds
 /// (`RibRequest::BgpRouteCount`). `None` on any failure.
 pub async fn get_bgp_route_count(rib_socket: &Path) -> Option<u32> {
-    let stream = nos_pki::connect_role(rib_socket, Role::Ribd).await.ok()?;
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(RibRequest::BgpRouteCount).await.ok()?;
-    match reader.next().await {
-        Some(Ok(RibEvent::BgpRouteCount(n))) => Some(n),
+    match one_shot(rib_socket, Role::Ribd, RibRequest::BgpRouteCount).await? {
+        RibEvent::BgpRouteCount(n) => Some(n),
         _ => None,
     }
 }
@@ -63,6 +46,9 @@ pub async fn get_bgp_route_count(rib_socket: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
+    use nos_proto::IpcCodec;
+    use tokio_util::codec::{FramedRead, FramedWrite};
 
     fn serve_once(path: &Path, reply: impl Fn(RibRequest) -> Option<RibEvent> + Send + 'static) {
         let listener = nos_pki::testing::shared()

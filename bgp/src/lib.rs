@@ -3,7 +3,6 @@
 pub mod as_path;
 pub mod bfd_client;
 pub mod collision;
-pub mod config_client;
 pub mod damping;
 pub mod evpn;
 pub mod fdb_push_client;
@@ -24,4 +23,3 @@ pub mod server;
 pub mod session;
 pub mod status;
 pub mod tcp;
-pub mod watchdog_client;

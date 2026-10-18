@@ -1741,7 +1741,7 @@ dependencies = [
  "dhat",
  "futures",
  "ipnet",
- "nos-log-client",
+ "nos-daemon",
  "nos-pki",
  "nos-proto",
  "nos-rpl",
@@ -1890,6 +1890,7 @@ dependencies = [
  "netlink-packet-core",
  "netlink-packet-route",
  "netlink-sys",
+ "nos-daemon",
  "nos-log-client",
  "nos-pki",
  "nos-proto",
@@ -1902,7 +1903,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

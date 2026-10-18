@@ -10,13 +10,13 @@ use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::bfd_client;
-use crate::config_client;
 use crate::fsm;
 use crate::interface_client;
 use crate::policy::PolicyCache;
 use crate::rib_client;
 use crate::session::{LocalIdentity, ResolvedAuth, ResolvedPeer, SessionManager, VrfRequirement};
-use crate::watchdog_client;
+use nos_daemon::config;
+use nos_daemon::watchdog;
 
 /// Fixed reconnect delay for the config subscription, matching every other
 /// config-subscribing consumer in this codebase (`nos-rib`/`nos-interface`'s
@@ -45,7 +45,7 @@ pub async fn run(
     // Whether the graceful-restart startup check (`restart_check`) is done.
     let mut restart_decided = false;
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(
+        match config::subscribe_diff(
             &config_socket,
             vec![
                 DiffScope::BgpInstances,
@@ -180,7 +180,7 @@ async fn resync(
     policy_cache: &mut PolicyCache,
     restart_decided: &mut bool,
 ) {
-    let cfg = match config_client::fetch_config(config_socket).await {
+    let cfg = match config::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
             warn!(error = %e, "failed to fetch running config, keeping previous state");
@@ -388,7 +388,7 @@ async fn restart_check(
         return matches!(vrf, VrfRequirement::Invalid);
     };
     let Some(socket) =
-        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.clone())).await
+        watchdog::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.clone())).await
     else {
         return false;
     };
@@ -421,8 +421,7 @@ async fn restart_check(
 /// the caller's periodic re-apply tick.
 async fn resolve_vrf(watchdog_socket: &Path, table: &str) -> Option<String> {
     let socket =
-        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string()))
-            .await?;
+        watchdog::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string())).await?;
     rib_client::get_vrf_name(&socket).await
 }
 
@@ -455,8 +454,7 @@ async fn resolve_source_address(
             (format!("{LOOPBACK_PREFIX}{table}"), label.clone(), true)
         }
     };
-    let Some(socket) =
-        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await
+    let Some(socket) = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await
     else {
         return Vec::new();
     };
