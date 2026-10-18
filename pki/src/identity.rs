@@ -511,8 +511,15 @@ impl Identity {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
+        let inner = UnixListener::bind(path)?;
+        // The socket is created with the process umask; restrict it to the
+        // daemon's uid before any accept. A socket we cannot restrict must
+        // not serve. ponytail: a brief bind-to-chmod window at umask mode
+        // (no safe umask API); /run/nos is owner-only, upgrade to a umask
+        // guard if sockets ever live elsewhere.
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         Ok(Listener {
-            inner: UnixListener::bind(path)?,
+            inner,
             identity: self.0.clone(),
             optional,
         })
