@@ -117,7 +117,7 @@ docker-lint: ## Lint the Dockerfile with hadolint
 	@command -v hadolint >/dev/null 2>&1 || { echo "hadolint not found — install it (already available in this env)"; exit 1; }
 	hadolint Dockerfile
 
-docker-build: docker-lint ## Lint, then build the nos Docker image (nos-watchdogd + nos-configd + nos-bgpd + nos-ribd + nos-interfaced + nos-logd + nos-ospfd + nos)
+docker-build: docker-lint ## Lint, then build the nos Docker image (every daemon + the nos shell)
 	docker build --build-arg CARGO_FEATURES=$(CARGO_FEATURES) --build-arg NOS_BUILD_REV=$$(git rev-parse --short HEAD) -t $(IMAGE) .
 
 e2e-preflight: ## Kernel-module + image-capability checks nos-e2e needs (same script CI runs)
