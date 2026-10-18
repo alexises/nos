@@ -34,7 +34,7 @@ use tokio_util::codec::FramedWrite;
 use tracing::{debug, info, warn};
 
 use crate::session::SessionManager;
-use crate::watchdog_client::resolve_once;
+use nos_daemon::watchdog::resolve_once;
 
 /// Safety-net re-diff when no change was signalled.
 const FALLBACK_TICK: Duration = Duration::from_secs(10);

@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use crate::rib_client::get_igp_costs;
 use crate::session::SessionManager;
-use crate::watchdog_client::resolve_once;
+use nos_daemon::watchdog::resolve_once;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 

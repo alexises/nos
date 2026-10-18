@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 nos-pki            = { workspace = true }
+nos-daemon        = { workspace = true }
 tokio              = { workspace = true, features = ["signal"] }
 serde              = { workspace = true }
 tracing            = { workspace = true }
@@ -17,9 +18,7 @@ thiserror          = { workspace = true }
 bytes              = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
-tracing-subscriber = { workspace = true }
 nos-proto          = { workspace = true }
-nos-log-client     = { workspace = true }
 nos-tcp-auth       = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
@@ -40,6 +39,7 @@ path = "src/main.rs"
 nos-pki  = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["test-util"] }
 nos-test-support = { workspace = true, features = ["fakes"] }

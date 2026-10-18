@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, RibEvent, RibRequest, Role};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use nos_daemon::ipc::one_shot;
+use nos_proto::{RibEvent, RibRequest, Role};
 use tracing::trace;
 
 /// One-shot query of a `nos-ribd` instance's Linux VRF interface name.
@@ -15,15 +14,9 @@ use tracing::trace;
 /// surfacing as an error to the caller, which just retries next tick. Only
 /// a well-formed `RibEvent::VrfName` reply is distinguished from that.
 pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
-    let Ok(stream) = nos_pki::connect_role(rib_socket, Role::Ribd).await else {
-        trace!(socket = %rib_socket.display(), "failed to connect to nos-ribd for vrf name");
-        return None;
-    };
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(RibRequest::GetVrfName).await.ok()?;
-    if let Some(Ok(RibEvent::VrfName(name))) = reader.next().await {
+    if let RibEvent::VrfName(name) =
+        one_shot(rib_socket, Role::Ribd, RibRequest::GetVrfName).await?
+    {
         name
     } else {
         trace!("nos-ribd gave no well-formed GetVrfName reply");
@@ -35,15 +28,7 @@ pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
 /// Symmetric to `get_vrf_name` — same best-effort, "no answer yet is
 /// normal" contract.
 pub async fn get_table_id(rib_socket: &Path) -> Option<u32> {
-    let Ok(stream) = nos_pki::connect_role(rib_socket, Role::Ribd).await else {
-        trace!(socket = %rib_socket.display(), "failed to connect to nos-ribd for table id");
-        return None;
-    };
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(RibRequest::GetTableId).await.ok()?;
-    if let Some(Ok(RibEvent::TableId(id))) = reader.next().await {
+    if let RibEvent::TableId(id) = one_shot(rib_socket, Role::Ribd, RibRequest::GetTableId).await? {
         id
     } else {
         trace!("nos-ribd gave no well-formed GetTableId reply");
@@ -54,6 +39,9 @@ pub async fn get_table_id(rib_socket: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
+    use nos_proto::IpcCodec;
+    use tokio_util::codec::{FramedRead, FramedWrite};
 
     fn serve_once(path: &Path, reply: impl Fn(RibRequest) -> Option<RibEvent> + Send + 'static) {
         let listener = nos_pki::testing::shared()

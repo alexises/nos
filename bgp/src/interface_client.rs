@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use futures::{SinkExt, StreamExt};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, Role};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use nos_daemon::ipc::one_shot;
+use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, Role};
 use tracing::trace;
 
 /// One-shot query of `nos-interfaced` for one named interface's reconciled
@@ -17,20 +16,12 @@ use tracing::trace;
 /// Only a well-formed `InterfaceEvent::Interface` reply is distinguished
 /// from that.
 pub async fn get_interface(interface_socket: &Path, name: &str) -> Option<InterfaceStatus> {
-    let Ok(stream) = nos_pki::connect(interface_socket, Role::Interfaced, "").await else {
-        trace!(socket = %interface_socket.display(), "failed to connect to nos-interfaced");
-        return None;
+    let req = InterfaceRequest::GetInterface {
+        name: name.to_string(),
     };
-    let (r, w) = tokio::io::split(stream);
-    let mut reader = FramedRead::new(r, IpcCodec::<InterfaceEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
-    writer
-        .send(InterfaceRequest::GetInterface {
-            name: name.to_string(),
-        })
-        .await
-        .ok()?;
-    if let Some(Ok(InterfaceEvent::Interface(status))) = reader.next().await {
+    if let InterfaceEvent::Interface(status) =
+        one_shot(interface_socket, Role::Interfaced, req).await?
+    {
         Some(status)
     } else {
         trace!(
@@ -44,7 +35,9 @@ pub async fn get_interface(interface_socket: &Path, name: &str) -> Option<Interf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nos_proto::InterfaceAddress;
+    use futures::{SinkExt, StreamExt};
+    use nos_proto::{InterfaceAddress, IpcCodec};
+    use tokio_util::codec::{FramedRead, FramedWrite};
 
     fn serve_once(
         path: &Path,

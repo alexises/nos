@@ -29,6 +29,6 @@ Reconciles configured network interfaces against the OS (binary `nos-interfaced`
 | `driver/` | `mod.rs` trait, `noop.rs`, `linux.rs`, `links.rs` (pure link table), `bridge_registry.rs`, `port_aggregate_registry.rs`, `rib_client.rs`, `tc.rs` (hand-built BPDU trap) |
 | `reconcile.rs` | Diff-triggered full resync plus the 10s tick |
 | `server.rs` | Status queries, `PushLacpMembers`/`PushBfdMembers`, `SetStpPortStates`/`FlushFdb`, `SubscribeLinks` stream |
-| `config_client.rs`, `watchdog_client.rs` | Per-crate clients (star dependency graph) |
+| `driver/rib_client.rs` | One-shot queries over `nos_daemon::ipc::one_shot`; config/watchdog clients are `nos-daemon`'s |
 
 Details: [internals](../docs/internals/interface.md) (driver call sequences, registries, daemon-to-daemon links, per-module notes), [interfaces](../docs/protocols/interfaces.md), [L2 switching](../docs/protocols/l2-switching.md), [port aggregation](../docs/protocols/port-aggregation-lacp.md).

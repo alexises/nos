@@ -29,7 +29,7 @@ use super::{
 use crate::state::{
     BroadcastDomainState, InterfaceState, PortAggregateState, StpPorts, SubinterfaceState,
 };
-use crate::watchdog_client;
+use nos_daemon::watchdog;
 
 /// Both `Xor` and `Lacp` create the kernel bond in the same
 /// `BalanceXor` mode — **never** `BondMode::Ieee8023Ad`. The kernel's own
@@ -440,7 +440,7 @@ impl LinuxInterfaceDriver {
     /// expected, transient conditions, retried automatically by the
     /// caller's periodic re-apply tick.
     async fn resolve_vrf_name(&self, table_name: &str) -> Option<String> {
-        let socket = watchdog_client::resolve_once(
+        let socket = watchdog::resolve_once(
             &self.watchdog_socket,
             &ServiceRef::RibTable(table_name.to_string()),
         )
@@ -460,7 +460,7 @@ impl LinuxInterfaceDriver {
     /// `resolve_vrf_name` — same broker-resolve-then-query pattern, same
     /// "`None` is normal/transient" contract.
     async fn resolve_table_id(&self, table_name: &str) -> Option<u32> {
-        let socket = watchdog_client::resolve_once(
+        let socket = watchdog::resolve_once(
             &self.watchdog_socket,
             &ServiceRef::RibTable(table_name.to_string()),
         )

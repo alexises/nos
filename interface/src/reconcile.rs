@@ -8,9 +8,9 @@ use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::config_client;
 use crate::driver::InterfaceDriver;
 use crate::state::{build_from_config, Interfaces};
+use nos_daemon::config;
 
 /// Fixed reconnect delay for the config subscription, matching
 /// `nos-rib`'s `reconcile::RECONNECT_DELAY`/`nos-watchdog`'s
@@ -53,7 +53,7 @@ pub async fn run(
         DiffScope::SpanningTree,
     ];
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
+        match config::subscribe_diff(&config_socket, scopes.clone()).await {
             Ok(mut reader) => {
                 info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
@@ -108,7 +108,7 @@ async fn resync(
     interfaces: &Arc<RwLock<Interfaces>>,
     driver: &dyn InterfaceDriver,
 ) {
-    match config_client::fetch_config(config_socket).await {
+    match config::fetch_config(config_socket).await {
         Ok(cfg) => {
             let previous = interfaces.read().await.clone();
             let mut new_interfaces = build_from_config(&cfg, driver, &previous).await;
