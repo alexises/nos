@@ -1137,7 +1137,7 @@ pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) ->
     let mut lines = vec![format!("bgp instance {instance}:")];
     for c in caches {
         lines.push(format!(
-            "  {} port {} preference {} {:?}{} version {} session {} serial {} vrps {} updated {}",
+            "  {} port {} preference {} {:?}{} version {} session {} serial {} vrps {} updated {} auth {}",
             c.address,
             c.port,
             c.preference,
@@ -1148,6 +1148,7 @@ pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) ->
             opt(c.serial.map(|v| v.to_string())),
             c.vrp_count,
             opt(c.last_update_secs.map(|s| format!("{s}s ago"))),
+            if c.authenticated { "yes" } else { "no" },
         ));
     }
     lines.join("\n")
@@ -1997,11 +1998,12 @@ mod tests {
             serial: Some(42),
             vrp_count: 3,
             last_update_secs: Some(5),
+            authenticated: true,
         };
         assert_eq!(
             render_bgp_rpki("r1", &[c]),
             "bgp instance r1:\n  192.0.2.5 port 323 preference 1 Established (in use) version 1 \
-             session 7 serial 42 vrps 3 updated 5s ago"
+             session 7 serial 42 vrps 3 updated 5s ago auth yes"
         );
     }
 

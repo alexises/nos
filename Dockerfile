@@ -20,7 +20,7 @@ ARG CARGO_FEATURES=
 # Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
@@ -47,6 +47,9 @@ COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # A scriptable client (logs in like `nos` does) — for `nos-e2e`'s login checks
 # and for operators who want to provision without the interactive shell.
 COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provision
+# A test-only RTR cache (`nos-e2e`'s `rpki` phase, #498): it signs its TCP session
+# with TCP-MD5, which StayRTR cannot, and so needs CAP_NET_ADMIN.
+COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-stub
 
 # nos-ribd/nos-interfaced's Linux drivers need CAP_NET_ADMIN/CAP_NET_RAW to
 # program the kernel (VRF devices, addresses, routes) via rtnetlink, even
@@ -86,6 +89,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_raw,cap_net_bind_service=ep' /usr/local/bin/nos-bfdd \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-fdbd \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-restd \
+    && setcap 'cap_net_admin=ep' /usr/local/bin/nos-rtr-stub \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 

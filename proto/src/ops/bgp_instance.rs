@@ -434,6 +434,7 @@ mod tests {
             address: "192.0.2.9".parse().unwrap(),
             port,
             preference: 1,
+            auth: None,
         };
         for port in [323, 8282] {
             BgpInstanceOp::SetRpkiCache {

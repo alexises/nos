@@ -521,6 +521,10 @@ pub struct Args {
     #[arg(long)]
     pub rpki_cache: Vec<std::net::SocketAddr>,
 
+    /// TCP-MD5 password for every `--rpki-cache` session (RFC 8210 §9).
+    #[arg(long)]
+    pub rpki_cache_md5_password: Option<String>,
+
     /// An RFC 4271 §9.2.2.2 aggregate on `--bgp-instance`, repeatable
     /// (`BgpInstanceOp::SetAggregate`, with the two flags below).
     #[arg(long)]
@@ -2540,6 +2544,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 address: cache.ip(),
                 port: cache.port(),
                 preference: u8::try_from(preference).unwrap_or(u8::MAX),
+                auth: args.rpki_cache_md5_password.as_ref().map(|password| {
+                    nos_proto::BgpAuth::Md5 {
+                        password: password.clone(),
+                    }
+                }),
             },
         }));
     }
@@ -5352,6 +5361,8 @@ mod tests {
             "65102",
             "--rpki-cache",
             "192.0.2.5:3323",
+            "--rpki-cache-md5-password",
+            "cache-secret",
             "--announce-rpki-state",
             "--aggregate-address",
             "10.0.0.0/8",
@@ -5415,6 +5426,7 @@ mod tests {
         shows(&o, "SetConfederationIdentifier");
         assert_eq!(dump(&o).matches("AddConfederationPeer").count(), 2);
         shows(&o, "SetRpkiCache");
+        shows(&o, r#"auth: Some(Md5 { password: "cache-secret" })"#);
         shows(&o, "SetAnnounceRpkiState");
         shows(&o, "as_set: true");
         shows(&o, "summary_only: true");

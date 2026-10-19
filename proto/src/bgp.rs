@@ -159,6 +159,10 @@ pub struct RpkiCacheStatus {
     pub vrp_count: usize,
     /// Seconds since the last End of Data from this cache.
     pub last_update_secs: Option<u64>,
+    /// The RTR session is configured with TCP-MD5 or TCP-AO (RFC 8210 §9);
+    /// never the secret itself. Appended last: postcard is positional.
+    #[serde(default)]
+    pub authenticated: bool,
 }
 
 /// A single already-resolved winning route pushed by `nos-ribd` for

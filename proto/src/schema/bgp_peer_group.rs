@@ -715,7 +715,7 @@ pub enum BgpAoAlgorithm {
 /// socket options (`TCP_MD5SIG_MAXKEYLEN`/`TCP_AO_MAXKEYLEN`, both 80).
 const MAX_AUTH_KEY_LEN: usize = 80;
 
-fn valid_auth(auth: Option<&BgpAuth>) -> garde::Result {
+pub(crate) fn valid_auth(auth: Option<&BgpAuth>) -> garde::Result {
     match auth {
         None => Ok(()),
         Some(BgpAuth::Md5 { password }) => {

@@ -700,9 +700,31 @@ The cache's End of Data sets the refresh, retry and expire intervals (RFC 8210 �
 ```
 edge-1> show bgp rpki
 bgp instance r1:
-  192.0.2.50 port 323 preference 0 Established (in use) version 1 session 780 serial 4 vrps 412345 updated 12s ago
-  192.0.2.51 port 3323 preference 1 Idle version - session - serial - vrps 0 updated -
+  192.0.2.50 port 323 preference 0 Established (in use) version 1 session 780 serial 4 vrps 412345 updated 12s ago auth yes
+  192.0.2.51 port 3323 preference 1 Idle version - session - serial - vrps 0 updated - auth no
 ```
+
+#### Authenticating the cache session (RFC 8210 §9)
+
+Without a key the RTR session is plain TCP. RFC 8210 §9 then requires the router and the cache to share a trusted, controlled network, and prefers TCP-AO over TLS or TCP-MD5 (MD5 is obsoleted by TCP-AO). Set the same key on the cache:
+
+```
+set bgp instance r1 rpki-cache 192.0.2.50 md5-password s3cr3t
+set bgp instance r1 rpki-cache 192.0.2.50 ao-key 1 1 hmac-sha1 s3cr3t
+delete bgp instance r1 rpki-cache 192.0.2.50 auth
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '{"Md5":{"password":"s3cr3t"}}' \
+  $B/v1/transactions/t9/bgp-instance/r1/rpki-cache/192.0.2.50/auth
+```
+
+- The rules are those of a peer-group's `auth`: a key is 1 to 80 bytes, MD5 and TCP-AO are mutually exclusive, and TCP-AO needs exactly one current key. The `ao-key` sub-commands (`current`, `rnext`, `exclude-options`, `delete ao-key`) work the same.
+- Changing or removing the key restarts the session with that cache; the VRPs already held stay in use until the new session's first End of Data.
+- A cache that does not hold the same key never answers: the router logs `rpki cache unreachable`, and `show bgp rpki` keeps it `Idle`.
+- What it protects: the integrity of the session between the router and the cache. On an untrusted path, an attacker who can forge the session can make a hijack look valid or a legitimate route invalid. It does not hide the VRPs (they are public data), and it does not vouch for where the cache got them.
+- The secret is stored in clear text, like a peer-group's, and shows in `show config` and the REST config.
+- Expiry fails open: when no cache answers for the expire interval, the VRPs are dropped and every route is not-found, which a typical import policy accepts. A cache that is down, or whose key is wrong, therefore turns validation off rather than blocking routes.
 
 #### Sharing the state with iBGP peers (RFC 8097)
 
@@ -718,7 +740,7 @@ set bgp instance r1 peer-group core announce-rpki-state
 - It is refused on an eBGP peer-group at commit. Changing it restarts the peer-group's sessions.
 - `delete announce-rpki-state` turns it off.
 
-Not supported: RTR over SSH or TLS, TCP-MD5/TCP-AO toward the cache, BGPsec router keys (received and ignored), ASPA, and validating EVPN routes.
+Not supported: RTR over SSH or TLS, BGPsec router keys (received and ignored), ASPA, and validating EVPN routes.
 
 ### ADD-PATH (RFC 7911)
 
@@ -896,6 +918,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key a new connection starts signing with; a live session follows the peer's choice | `show bgp brief` (`ao-current`) |
 | ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key this router asks the peer to switch to; applied to the live session in place | `show bgp brief` (`ao-rnext`) |
 | exclude-options | `… ao-key <send-id> exclude-options` / `set ao-key <send-id> exclude-options`; `delete ao-key <send-id> exclude-options` | `exclude_options` in the key | boolean; default `false` | the key must exist | Leaves TCP options out of the MAC; both sides must agree | `show bgp brief` (session up) |
+| rpki-cache auth | `set bgp instance <i> rpki-cache <addr> md5-password <pw>` or `… ao-key …`; `delete … auth` | `…/rpki-cache/<addr>/auth`, as a peer-group's `auth` | default: none (plain TCP) | as a peer-group's `auth` | TCP-MD5 or TCP-AO on the RTR session; see [Authenticating the cache session](#authenticating-the-cache-session-rfc-8210-9) | `show bgp rpki` (`auth yes`) |
 | next-hop | `… next-hop self\|unchanged` / `set next-hop self\|unchanged`; `delete next-hop` | `…/next-hop`, `"SelfAddress"`, `"Unchanged"` or `null` | default: `self` for eBGP, `unchanged` for iBGP and route-server peer-groups | none | `NEXT_HOP` of advertised routes | `show config`; `show route` on the peer |
 | route-reflector-client | `… route-reflector-client` / `set route-reflector-client`; `delete route-reflector-client` | `…/route-reflector-client`, boolean | default `false`; required in a whole-object `PUT` | iBGP peer-group only; not with route-server-client | Reflects iBGP routes to and from these peers | `show config` |
 | route-server-client | `… route-server-client` / `set route-server-client`; `delete route-server-client` | `…/route-server-client`, boolean | default `false`; required in a whole-object `PUT` | eBGP peer-group only; not with route-reflector-client | Transparent AS path; ADD-PATH views | `show config` |

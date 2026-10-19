@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::bgp_peer_group;
-use super::{BgpPeer, BgpPeerGroup, Config};
+use super::{sugar, BgpAuth, BgpPeer, BgpPeerGroup, Config};
 use nos_proto_derive::Cli;
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -152,6 +152,13 @@ pub struct RpkiCache {
     #[serde(default)]
     #[cli(topic = BgpInstanceRpkiCachePreference)]
     pub preference: u8,
+    /// RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the
+    /// cache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated
+    /// session. Secrets are stored clear-text, like every field in this config.
+    /// Appended last: postcard is positional.
+    #[serde(default)]
+    #[cli(topic = BgpInstanceRpkiCacheAuth, render = sugar::render_bgp_auth, sugar(word = "md5-password", with = sugar::md5_password, topic = BgpInstanceRpkiCacheMd5Password), sugar(word = "ao-key", with = sugar::ao_key, topic = BgpInstanceRpkiCacheAoKey))]
+    pub auth: Option<BgpAuth>,
 }
 
 impl Default for RpkiCache {
@@ -160,6 +167,7 @@ impl Default for RpkiCache {
             address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: RPKI_RTR_PORT_DEFAULT,
             preference: 0,
+            auth: None,
         }
     }
 }
@@ -174,6 +182,7 @@ fn valid_rpki_caches(caches: &[RpkiCache]) -> garde::Result {
         if caches[..i].iter().any(|o| o.address == c.address) {
             return Err(garde::Error::new("rpki cache addresses must be unique"));
         }
+        bgp_peer_group::valid_auth(c.auth.as_ref())?;
     }
     Ok(())
 }
@@ -833,6 +842,7 @@ mod tests {
     #[test]
     fn rpki_caches_are_checked() {
         use super::RpkiCache;
+        use crate::schema::BgpAuth;
         let check = |caches: Vec<RpkiCache>| {
             let mut inst = instance("r1", 65000);
             inst.rpki_caches = caches;
@@ -843,6 +853,7 @@ mod tests {
             address: a.parse().unwrap(),
             port,
             preference: 0,
+            auth: None,
         };
         assert!(check(vec![
             cache("192.0.2.1", 323),
@@ -864,6 +875,24 @@ mod tests {
         );
         let c: RpkiCache = serde_json::from_str(r#"{"address":"192.0.2.1"}"#).unwrap();
         assert_eq!((c.port, c.preference), (323, 0));
+        assert_eq!(c.auth, None, "a saved cache without auth loads");
+        // Same key rules as a peer-group's auth.
+        let md5 = |pw: String| {
+            let mut c = cache("192.0.2.1", 323);
+            c.auth = Some(BgpAuth::Md5 { password: pw });
+            c
+        };
+        assert!(check(vec![md5("s3cr3t".into())]));
+        assert!(!check(vec![md5(String::new())]), "empty md5 password");
+        assert!(!check(vec![md5("x".repeat(81))]), "81-byte md5 password");
+        let mut ao = cache("192.0.2.1", 323);
+        ao.auth = Some(BgpAuth::Ao { keys: vec![] });
+        assert!(!check(vec![ao]), "ao with no key");
+        let json = serde_json::to_string(&md5("k".into())).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RpkiCache>(&json).unwrap(),
+            md5("k".into())
+        );
     }
 
     #[test]

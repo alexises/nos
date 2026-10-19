@@ -488,6 +488,7 @@ async fn rpki_validation_follows_the_cache() {
         address: cache_addr.ip(),
         port: cache_addr.port(),
         preference: 0,
+        auth: None,
     }];
     a.apply(vec![peer(B, A, 65002)]).await;
     b.apply_with(vec![to_a], &caches).await;

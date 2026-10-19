@@ -329,6 +329,12 @@ topics! {
     BgpInstanceRpkiCachePort,
     /// `RpkiCache.preference`
     BgpInstanceRpkiCachePreference,
+    /// `RpkiCache.auth`
+    BgpInstanceRpkiCacheAuth,
+    /// `md5-password` sugar on `RpkiCache.auth`
+    BgpInstanceRpkiCacheMd5Password,
+    /// `ao-key` sugar on `RpkiCache.auth`
+    BgpInstanceRpkiCacheAoKey,
     /// `BgpInstance.aggregates`
     BgpInstanceAggregate,
     /// `BgpAggregate.as_set`
