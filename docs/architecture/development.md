@@ -90,3 +90,13 @@ cargo fmt --all
 - `dtolnay/rust-toolchain` has no per-toolchain tags: it is pinned at `master` and always gets an explicit `toolchain:` (the canaries pass `stable`/`nightly`, so they still float). `taiki-e/install-action` is pinned at a release and selects the tool with `with: tool:`.
 - To add an action: write `uses: o/r@v1`, run `tools/ci/pin-actions.sh`, commit the result.
 - Repo setting (admin, after the pins are merged): Settings, Actions, General, "Require actions to be pinned to a full-length commit SHA".
+
+## Fuzzing
+
+- `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `lacp_packet`. Property: no panic, abort or OOM.
+- Install: `make tools` (adds `cargo-fuzz`); needs a nightly toolchain.
+- Smoke run: `make fuzz-smoke` (`FUZZ_SECS` per target, default 60; `FUZZ_TARGETS` to narrow; `FUZZ_RSS_MB` caps libFuzzer memory, default 2048 — do not use `ulimit -v`, ASan cannot start under it; the target sets `RUSTFLAGS=--cap-lints allow` because cargo-fuzz adds `-D warnings`, which trips on nightly-only deprecations). CI runs it as `fuzz-smoke` (nightly cron or `workflow_dispatch`); a crash fails the job, feeds the `ci-red` alert and uploads `fuzz-artifacts`.
+- Longer run of one target: `cd fuzz && cargo +nightly fuzz run <target> -- -max_total_time=600`.
+- Reproduce a crash: `cd fuzz && cargo +nightly fuzz run <target> artifacts/<target>/<crash-file>`.
+- A found crash becomes a regression unit test in the owning crate (minimised input as a `const` byte array) before the fix.
+- No seeds are committed (no binaries in the repo): `fuzz/corpus`, `fuzz/artifacts` and `fuzz/target` are git-ignored. Locally the corpus builds up in `fuzz/corpus/<target>/`; CI keeps it between nightly runs with `actions/cache`. Add a target by adding a `[[bin]]` plus a file under `fuzz/fuzz_targets/`, and its name to `FUZZ_TARGETS`.

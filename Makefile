@@ -10,7 +10,7 @@ CARGO_FEATURES ?=
 COVERAGE_MIN ?= 90
 
 .PHONY: help ci-image toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
-        deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
+        deny audit sast miri coverage mutants fuzz-smoke check ci tools docker-lint docker-build \
         e2e-preflight docs-fix claude-md-size
 
 help: ## Show this help
@@ -100,6 +100,15 @@ mutants: ## Run mutation testing, memory-capped (needs nightly; MUTANTS_JOBS/MUT
 	env -u CARGO_TARGET_DIR TMPDIR=$(MUTANTS_TMPDIR) $(MUTANTS_SCOPE) $(MUTANTS_CARGO) mutants --workspace -j $(MUTANTS_JOBS) $(MUTANTS_ARGS); rc=$$?; \
 	[ $$rc -eq 0 ] || [ $$rc -eq 2 ] || [ $$rc -eq 3 ] || exit $$rc  # 2 = missed, 3 = timeout: report only (#362)
 
+FUZZ_SECS ?= 60
+FUZZ_RSS_MB ?= 2048
+FUZZ_CARGO ?= cargo +nightly
+FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_codec lldp_packet lacp_packet
+
+fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightly + cargo-fuzz; nightly CI job, not part of check)
+	@command -v cargo-fuzz >/dev/null 2>&1 || { echo "cargo-fuzz not found — run 'make tools'"; exit 1; }
+	cd fuzz && for t in $(FUZZ_TARGETS); do RUSTFLAGS="--cap-lints allow" $(FUZZ_CARGO) fuzz run $$t -- -max_total_time=$(FUZZ_SECS) -rss_limit_mb=$(FUZZ_RSS_MB) || exit 1; done
+
 docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
 
@@ -111,7 +120,7 @@ check: claude-md-size build fmt clippy test ## Fast local check: build + fmt + c
 ci: check deny audit ## Everything check does, plus deny/audit (skips slow nightly-only miri/mutants)
 
 tools: ## Install optional cargo subcommands used by deny/audit/coverage/mutants/test targets
-	cargo install --locked cargo-nextest cargo-deny cargo-audit cargo-llvm-cov cargo-mutants
+	cargo install --locked cargo-nextest cargo-deny cargo-audit cargo-llvm-cov cargo-mutants cargo-fuzz
 
 docker-lint: ## Lint the Dockerfile with hadolint
 	@command -v hadolint >/dev/null 2>&1 || { echo "hadolint not found — install it (already available in this env)"; exit 1; }
