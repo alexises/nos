@@ -683,7 +683,11 @@ Each route is valid, invalid or not-found (RFC 6811):
 
 The origin AS is the last AS in the AS path. A route whose path ends in an `AS_SET` has no origin AS, so it is invalid when covered. A route with no AS in its path, such as a redistributed one, has this router's AS as origin.
 
-Validation changes nothing by itself (RFC 8481): an import or export policy decides what to do with `this.bgp.validation_state`. For example, to drop invalid routes:
+Validation changes nothing by itself (RFC 6811, RFC 8481):
+
+- By default NOS accepts invalid routes. A peer-group whose policy never reads `this.bgp.validation_state` keeps them.
+- Rejecting invalid routes is done only in the routing policy; there is no peer-group setting for it.
+- To reject them, put this in the policy and set it as the `import-policy` of the eBGP peer-group (`set import-policy <name>`, see [Routing policy](routing-policy.md)):
 
 ```
 if this.bgp.validation_state == rpki.invalid:
@@ -693,7 +697,7 @@ accept
 
 When the VRPs change, NOS re-validates every route it holds. A route the import policy rejected is not held, so about 5 seconds after a change NOS asks each established peer whose import policy reads the state for a route refresh. A peer that did not advertise the route refresh capability is not asked; its routes are checked again on its next session. The session is never reset.
 
-The cache's End of Data sets the refresh, retry and expire intervals (RFC 8210 §6; version 0 uses the defaults 3600, 600 and 7200 seconds). If no cache answers for the expire interval, the VRPs are dropped and every route is not-found.
+The cache's End of Data sets the refresh, retry and expire intervals (RFC 8210 §6; version 0 uses the defaults 3600, 600 and 7200 seconds). If no cache answers for the expire interval, the VRPs are dropped and every route is not-found, so the policy above accepts them again. Until then the last VRPs stay in use.
 
 `show bgp rpki` (`GET /v1/bgp/rpki`) shows each cache: its state, whether its VRPs are in use, the protocol version, session ID, serial, VRP count and the time since its last update:
 
