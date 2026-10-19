@@ -858,6 +858,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            max_remote_macs: None,
             stp_instance: None,
             stp_priority: None,
             stp_hello_time: None,

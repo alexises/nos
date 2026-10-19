@@ -57,6 +57,8 @@ pub struct Ready {
     pub es_ports: Vec<EsPort>,
     /// `neigh-suppress`: ARP/ND suppression on the VXLAN bridge port.
     pub neigh_suppress: bool,
+    /// `max-remote-macs`: ceiling on installed remote MACs (lowest win).
+    pub max_remote_macs: Option<u32>,
     /// RFC 9135 symmetric IRB: the IP-VRF of the routing table the SVI is in,
     /// when that table has an L3 VNI on our BGP instance (asked of its
     /// `nos-ribd`). `None` is asymmetric.
@@ -187,12 +189,16 @@ enum Installed {
 /// The A-D index of `received`: only routes carrying one of our import Route
 /// Targets count (a per-ES route carries the RTs of the EVIs on the segment),
 /// and never our own. A per-EVI route also has to name this domain's VNI.
-/// Type-4s carry only an ES-Import RT, so they skip the RT filter.
+/// Type-4s carry only an ES-Import RT: one counts only for a segment we are
+/// attached to and when it carries that segment's ES-Import RT (RFC 7432 §7.6).
 fn ad_index(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Ads {
     let mut out = Ads::new();
     for route in received.values() {
         if let EvpnKey::EthernetSegment { esi, origin, .. } = &route.key {
-            if *origin != r.vtep {
+            if *origin != r.vtep
+                && r.es_ports.iter().any(|p| p.esi == *esi)
+                && route.ext_communities.contains(&es_import_rt(esi))
+            {
                 out.entry(*esi).or_default().es_pes.insert(*origin);
             }
             continue;
@@ -694,6 +700,10 @@ struct Inner {
     /// The `neigh_suppress` last applied by `ensure_vxlan` (what `show fdb`
     /// reports).
     neigh_suppress: bool,
+    /// The remote MACs admitted under `max_remote_macs` (`None`: no ceiling).
+    admitted: Option<BTreeSet<Mac>>,
+    /// The ceiling warning fired and the count has not dropped back since.
+    ceiling_warned: bool,
 }
 
 /// Recomputes `g.ads` and returns the segments whose PE set changed.
@@ -771,6 +781,7 @@ impl Fdb {
         // change only re-publishes the local routes: no rebuild for either.
         if let (Some(old), Some(new)) = (g.ready.as_mut(), ready.as_ref()) {
             old.neigh_suppress = new.neigh_suppress;
+            old.max_remote_macs = new.max_remote_macs;
             if old.irb != new.irb {
                 old.irb.clone_from(&new.irb);
                 info!(domain = %self.domain, l3_vni = ?new.irb.as_ref().map(|i| i.l3_vni), "symmetric irb changed");
@@ -836,9 +847,7 @@ impl Fdb {
         }
         refresh_ads(&mut g);
         let keys: Vec<EvpnKey> = g.received.keys().cloned().collect();
-        for k in keys {
-            self.sync_key(&mut g, &k).await;
-        }
+        self.sync_keys(&mut g, keys).await;
         self.sync_df(&mut g).await;
     }
 
@@ -1010,9 +1019,7 @@ impl Fdb {
                 })
                 .map(|(k, _)| k.clone())
                 .collect();
-            for k in keys {
-                self.sync_key(g, &k).await;
-            }
+            self.sync_keys(g, keys).await;
         }
     }
 
@@ -1186,11 +1193,62 @@ impl Fdb {
                     .map(|(k, _)| k.clone()),
             );
         }
-        for k in keys {
-            self.sync_key(&mut g, &k).await;
-        }
+        self.sync_keys(&mut g, keys).await;
         if segments_changed {
             self.sync_df(&mut g).await;
+        }
+    }
+
+    /// Re-decides which remote MACs fit under `max-remote-macs` and syncs
+    /// `keys` plus every route whose MAC was admitted or evicted by it.
+    /// ponytail: O(received) per call; a lower MAC arriving later evicts a
+    /// higher one (deterministic, arrival-order independent).
+    async fn sync_keys(&self, g: &mut Inner, mut keys: Vec<EvpnKey>) {
+        let Some(ready) = g.ready.clone() else { return };
+        let pins = pinnable(&g.segments);
+        let cands: BTreeSet<Mac> = g
+            .received
+            .values()
+            .flat_map(|r| desired(&ready, r, &g.ads, &g.local, &pins))
+            .filter_map(|i| match i {
+                Installed::Mac { mac, .. } | Installed::MacGroup { mac, .. } => Some(mac),
+                _ => None,
+            })
+            .collect();
+        let new = ready.max_remote_macs.map(|n| {
+            cands
+                .iter()
+                .take(n as usize)
+                .copied()
+                .collect::<BTreeSet<_>>()
+        });
+        let over = ready
+            .max_remote_macs
+            .is_some_and(|n| cands.len() > n as usize);
+        if over && !g.ceiling_warned {
+            warn!(domain = %self.domain, max = ready.max_remote_macs.unwrap_or(0), "remote mac ceiling reached");
+        }
+        g.ceiling_warned = over;
+        if g.admitted != new {
+            let affected: BTreeSet<Mac> = match (&g.admitted, &new) {
+                (Some(a), Some(b)) => a.symmetric_difference(b).copied().collect(),
+                _ => cands.clone(),
+            };
+            g.admitted = new;
+            keys.extend(
+                g.received
+                    .keys()
+                    .filter(|k| match k {
+                        EvpnKey::Mac { mac, .. } | EvpnKey::MacIp { mac, .. } => {
+                            affected.contains(mac)
+                        }
+                        _ => false,
+                    })
+                    .cloned(),
+            );
+        }
+        for k in keys {
+            self.sync_key(g, &k).await;
         }
     }
 
@@ -1198,11 +1256,17 @@ impl Fdb {
     async fn sync_key(&self, g: &mut Inner, key: &EvpnKey) {
         let Some(ready) = g.ready.clone() else { return };
         let pins = pinnable(&g.segments);
-        let want = g
+        let mut want = g
             .received
             .get(key)
             .map(|r| desired(&ready, r, &g.ads, &g.local, &pins))
             .unwrap_or_default();
+        if let Some(adm) = &g.admitted {
+            want.retain(|i| match i {
+                Installed::Mac { mac, .. } | Installed::MacGroup { mac, .. } => adm.contains(mac),
+                _ => true,
+            });
+        }
         let have = g.installed.get(key).cloned().unwrap_or_default();
         if want == have {
             return;
@@ -1389,9 +1453,7 @@ impl Fdb {
             })
             .cloned()
             .collect();
-        for k in keys {
-            self.sync_key(&mut g, &k).await;
-        }
+        self.sync_keys(&mut g, keys).await;
     }
 
     /// The local-MAC loop: a kernel FDB notification (debounced) or the tick
@@ -1571,6 +1633,7 @@ mod tests {
             connected: Vec::new(),
             es_ports: Vec::new(),
             neigh_suppress: false,
+            max_remote_macs: None,
             irb: None,
         }
     }
@@ -1988,6 +2051,93 @@ mod tests {
 
     fn calls(d: &Recorder) -> Vec<String> {
         std::mem::take(&mut *d.0.lock().unwrap())
+    }
+
+    #[test]
+    fn type4_counts_only_for_our_segment_with_its_es_import_rt() {
+        let other: Esi = [9; 10];
+        let mut received = HashMap::new();
+        for route in [
+            es_route(ESI, "192.0.2.20"),
+            es_route(other, "192.0.2.21"),
+            EvpnRoute {
+                ext_communities: vec![1],
+                ..es_route(ESI, "192.0.2.22")
+            },
+        ] {
+            received.insert(route.key.clone(), route);
+        }
+        let ads = ad_index(&ready_with_segment(), &received);
+        assert_eq!(ads.len(), 1);
+        assert_eq!(
+            ads[&ESI].es_pes,
+            BTreeSet::from(["192.0.2.20".parse::<IpAddr>().unwrap()])
+        );
+        assert!(ad_index(&ready(), &received).is_empty());
+    }
+
+    /// The remote MACs `calls` shows as installed (`set`) minus removed (`del`).
+    fn live(calls: &[String]) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for c in calls {
+            match c.split_once(' ') {
+                Some(("set", r)) => out.insert(r.to_string()),
+                Some(("del", r)) => out.remove(r),
+                _ => false,
+            };
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn max_remote_macs_keeps_the_lowest_whatever_the_arrival_order() {
+        for order in [[1u8, 2], [2, 1]] {
+            let driver = Arc::new(Recorder::default());
+            let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+            fdb.set_ready(Some(Ready {
+                max_remote_macs: Some(1),
+                ..ready()
+            }))
+            .await;
+            let mut all = Vec::new();
+            for m in order {
+                fdb.apply_push(EvpnUpdate::Add(mac_route(m, 10100, RT, REMOTE)))
+                    .await;
+                all.extend(calls(&driver));
+            }
+            assert_eq!(
+                live(&all),
+                BTreeSet::from([format!("{} {REMOTE}", format_mac([0, 0, 0, 0, 0, 1]))]),
+                "{order:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn max_remote_macs_admits_the_next_on_withdraw_and_lifts_in_place() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        let capped = Ready {
+            max_remote_macs: Some(1),
+            ..ready()
+        };
+        fdb.set_ready(Some(capped.clone())).await;
+        for m in [1, 2] {
+            fdb.apply_push(EvpnUpdate::Add(mac_route(m, 10100, RT, REMOTE)))
+                .await;
+        }
+        let mut all = calls(&driver);
+        let mac = |m: u8| format!("{} {REMOTE}", format_mac([0, 0, 0, 0, 0, m]));
+        fdb.apply_push(EvpnUpdate::Remove(mac_route(1, 10100, RT, REMOTE).key))
+            .await;
+        all.extend(calls(&driver));
+        assert_eq!(live(&all), BTreeSet::from([mac(2)]));
+        // Back under the ceiling the warning flag resets; lifting it installs all.
+        fdb.apply_push(EvpnUpdate::Add(mac_route(1, 10100, RT, REMOTE)))
+            .await;
+        fdb.set_ready(Some(ready())).await;
+        all.extend(calls(&driver));
+        assert_eq!(live(&all), BTreeSet::from([mac(1), mac(2)]));
     }
 
     #[tokio::test]

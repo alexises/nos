@@ -162,6 +162,7 @@ mod tests {
             connected: Vec::new(),
             es_ports: Vec::new(),
             neigh_suppress: false,
+            max_remote_macs: None,
             irb: None,
         }))
         .await;

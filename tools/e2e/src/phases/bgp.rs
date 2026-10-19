@@ -3388,6 +3388,66 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&installed(EVPN_REMOTE_MAC), installed_base, 60)
         .await?;
 
+    log("remote MAC ceiling (#503): max-remote-macs 1 evicts the higher of two MACs, lifting it brings it back");
+    gobgp_owned(
+        w,
+        macadv("add", EVPN_EXTRA_MAC, rt_g)
+            .into_iter()
+            // Its own IP: a second MAC on EVPN_REMOTE_IP would replace the first neighbour.
+            .map(|x| {
+                if x == EVPN_REMOTE_IP {
+                    EVPN_EXTRA_IP.to_string()
+                } else {
+                    x
+                }
+            })
+            .collect(),
+    )
+    .await?;
+    a.wait(&installed(EVPN_EXTRA_MAC)).await?;
+    let ceiling = "remote mac ceiling reached";
+    let (ceiling_base, evict_base) = (a.count(ceiling), a.count(&removed(EVPN_EXTRA_MAC)));
+    let mut capped = flags.clone();
+    capped.extend(strings(&["--evpn-max-remote-macs", "1"]));
+    a.provision_flags(&capped).await?;
+    a.wait_new(ceiling, ceiling_base, 60).await?;
+    a.wait_new(&removed(EVPN_EXTRA_MAC), evict_base, 30).await?;
+    let body = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    // Only MAC entries count: the evicted MAC's neighbour stays.
+    let macs: Vec<String> = serde_json::from_str::<serde_json::Value>(&body)?["macs"]
+        .as_array()
+        .context("show fdb has no macs")?
+        .iter()
+        .filter_map(|m| m["mac"].as_str().map(String::from))
+        .collect();
+    if macs != [EVPN_REMOTE_MAC] {
+        bail!("the ceiling did not keep exactly the lowest MAC: {body}");
+    }
+    let readmit_base = a.count(&installed(EVPN_EXTRA_MAC));
+    let mut lifted = flags.clone();
+    lifted.extend(strings(&["--evpn-max-remote-macs", "0"]));
+    a.provision_flags(&lifted).await?;
+    a.wait_new(&installed(EVPN_EXTRA_MAC), readmit_base, 60)
+        .await?;
+    let base = a.count(&removed(EVPN_EXTRA_MAC));
+    gobgp_owned(
+        w,
+        macadv("del", EVPN_EXTRA_MAC, rt_g)
+            .into_iter()
+            .map(|x| {
+                if x == EVPN_REMOTE_IP {
+                    EVPN_EXTRA_IP.to_string()
+                } else {
+                    x
+                }
+            })
+            .collect(),
+    )
+    .await?;
+    a.wait_new(&removed(EVPN_EXTRA_MAC), base, 30).await?;
+
     log("a withdrawal removes the MAC again");
     let base = a.count(&removed(EVPN_REMOTE_MAC));
     gobgp_owned(w, macadv("del", EVPN_REMOTE_MAC, rt_g)).await?;

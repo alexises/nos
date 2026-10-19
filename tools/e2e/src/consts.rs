@@ -143,6 +143,10 @@ pub const EVPN_RT_EXPORT: &str = "65001:10100";
 pub const EVPN_LOCAL_MAC: &str = "02:00:00:00:00:01";
 pub const EVPN_REMOTE_MAC: &str = "aa:bb:cc:00:00:01";
 pub const EVPN_OTHER_RT_MAC: &str = "aa:bb:cc:00:00:02";
+/// A second matching-RT MAC, numerically above `EVPN_REMOTE_MAC`: the one a
+/// `max-remote-macs 1` ceiling evicts (the lowest MAC address wins).
+pub const EVPN_EXTRA_MAC: &str = "aa:bb:cc:00:00:03";
+pub const EVPN_EXTRA_IP: &str = "192.0.2.11";
 pub const EVPN_PORT: &str = "evpn0";
 /// `evpn-fdb`'s Type-2-with-IP checks: an ARP binding pinned on the bridge for
 /// `EVPN_LOCAL_MAC`, the domain's SVI address (`redistribute from connected`),

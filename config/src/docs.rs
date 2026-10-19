@@ -899,6 +899,13 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              port either, so remote hosts only learn a moved local IP once their cache \
              expires. Requires a vni. `delete` turns it off.",
         ),
+        Topic::BroadcastDomainMaxRemoteMacs => (
+            "Cap the remote MAC addresses installed for this domain from EVPN.",
+            "Ceiling on the remote MAC entries installed in the domain's bridge from received \
+             EVPN Type-2 routes. Beyond it the lowest MAC addresses are kept, whatever the \
+             arrival order, and a warning is logged. Unlimited when unset; at least 1. \
+             Requires a vni. `delete` removes the ceiling.",
+        ),
         Topic::SwitchingProfile => (
             "Create a switching profile in the transaction if it doesn't already exist.",
             concat!(
