@@ -749,6 +749,11 @@ impl SessionManager {
             .collect()
     }
 
+    /// Every unicast route held, for `BgpRequest::GetRoutes` (`show bgp routes`).
+    pub async fn route_summaries(&self) -> Vec<nos_proto::BgpRouteSummary> {
+        self.bgp_rib.lock().await.routes()
+    }
+
     /// Tells every established peer we're going (Cease/Administrative
     /// Shutdown — a Hard Reset once RFC 8538's N is exchanged, so a
     /// graceful-restart peer doesn't keep forwarding to us: the watchdog

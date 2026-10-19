@@ -4135,6 +4135,15 @@
         ],
         "type": "string"
       },
+      "RpkiValidationState": {
+        "description": "RFC 6811 origin validation state of a route, for `show bgp routes`.",
+        "enum": [
+          "Valid",
+          "Invalid",
+          "NotFound"
+        ],
+        "type": "string"
+      },
       "SbfdReflector": {
         "description": "The S-BFD reflector: answers probes whose Your Discriminator is one of\n`discriminators`, on UDP 7784 in every routing table's VRF. Off while the\nlist is empty. Keeps no per-initiator state.",
         "properties": {
@@ -5653,6 +5662,37 @@
           }
         },
         "summary": "Received EVPN routes, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/bgp/routes": {
+      "get": {
+        "operationId": "bgp_routes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "IPv4/IPv6 unicast routes with RPKI origin validation state, per instance",
         "tags": [
           "show"
         ]

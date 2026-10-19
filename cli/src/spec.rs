@@ -685,6 +685,20 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowBgpRpki),
+    cmd!(["show" "bgp" "routes"],
+        Doc::Local {
+            summary: "Show every BGP instance's IPv4/IPv6 unicast routes with their RPKI validation state.",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for the routes it holds: prefix, advertising peer (or \
+                     `local` for a redistributed route), next-hop, AS path, origin AS, \
+                     LOCAL_PREF and the RFC 6811 origin validation state (valid, invalid, \
+                     not-found). `>` marks the best path. A route an import policy rejected, \
+                     including via `rpki-reject-invalid`, is not held and not shown. An \
+                     instance whose nos-bgpd isn't running is reported individually rather \
+                     than aborting the whole command.",
+        },
+        Always,
+        Command::ShowBgpRoutes),
     cmd!(["show" "ospf" "neigh"],
         Doc::Local {
             summary: "Show a one-line-per-neighbor OSPF adjacency summary across every instance.",

@@ -1128,6 +1128,35 @@ pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
     lines.join("\n")
 }
 
+/// One BGP instance's unicast routes, one line per path — `show bgp routes`.
+pub fn render_bgp_routes(instance: &str, routes: &[nos_proto::BgpRouteSummary]) -> String {
+    use nos_proto::RpkiValidationState as S;
+    if routes.is_empty() {
+        return format!("bgp instance {instance}: no routes");
+    }
+    let mut lines = vec![format!("bgp instance {instance}:")];
+    for r in routes {
+        let state = match r.validation_state {
+            S::Valid => "valid",
+            S::Invalid => "invalid",
+            S::NotFound => "not-found",
+        };
+        let opt = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
+        lines.push(format!(
+            "  {} {} from {} next-hop {} as-path [{}] origin-as {} local-pref {} {}",
+            if r.best { ">" } else { " " },
+            r.prefix,
+            r.peer.map_or("local".to_string(), |p| p.to_string()),
+            opt(r.next_hop.map(|p| p.to_string())),
+            r.as_path,
+            opt(r.origin_as.map(|a| a.to_string())),
+            r.local_pref,
+            state
+        ));
+    }
+    lines.join("\n")
+}
+
 /// One BGP instance's RPKI caches, one line each — `show bgp rpki`.
 pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) -> String {
     if caches.is_empty() {
@@ -2004,6 +2033,38 @@ mod tests {
             render_bgp_rpki("r1", &[c]),
             "bgp instance r1:\n  192.0.2.5 port 323 preference 1 Established (in use) version 1 \
              session 7 serial 42 vrps 3 updated 5s ago auth yes"
+        );
+    }
+
+    #[test]
+    fn render_bgp_routes_marks_best_and_state() {
+        use nos_proto::{BgpRouteSummary, RpkiValidationState as S};
+        assert_eq!(render_bgp_routes("r1", &[]), "bgp instance r1: no routes");
+        let r = |peer: Option<&str>, best, state| BgpRouteSummary {
+            prefix: "192.0.2.0/24".to_string(),
+            peer: peer.map(|p| p.parse().unwrap()),
+            next_hop: peer.map(|p| p.parse().unwrap()),
+            as_path: "65001 65002".to_string(),
+            origin_as: Some(65002),
+            local_pref: 100,
+            best,
+            validation_state: state,
+        };
+        let local = BgpRouteSummary {
+            as_path: String::new(),
+            origin_as: None,
+            ..r(None, false, S::NotFound)
+        };
+        assert_eq!(
+            render_bgp_routes(
+                "r1",
+                &[
+                    r(Some("10.0.0.2"), true, S::Valid),
+                    r(Some("10.0.0.3"), false, S::Invalid),
+                    local
+                ]
+            ),
+            "bgp instance r1:\n  > 192.0.2.0/24 from 10.0.0.2 next-hop 10.0.0.2 as-path [65001 65002] origin-as 65002 local-pref 100 valid\n    192.0.2.0/24 from 10.0.0.3 next-hop 10.0.0.3 as-path [65001 65002] origin-as 65002 local-pref 100 invalid\n    192.0.2.0/24 from local next-hop - as-path [] origin-as - local-pref 100 not-found"
         );
     }
 

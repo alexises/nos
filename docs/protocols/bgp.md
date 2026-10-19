@@ -309,6 +309,8 @@ A malformed attribute in a received UPDATE does not reset the session: the route
 
 - A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6, or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
 
+- A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6, or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
+
 ### Address families
 
 `set address-family ipv4|ipv6|l2vpn-evpn` adds an address family to a peer-group, and `delete address-family <af>` removes one. A peer-group needs at least one. The address families are independent of whether the peer is reached over IPv4 or IPv6: an IPv6 peer can carry IPv4 routes and the reverse.
@@ -707,6 +709,18 @@ bgp instance r1:
   192.0.2.50 port 323 preference 0 Established (in use) version 1 session 780 serial 4 vrps 412345 updated 12s ago auth yes
   192.0.2.51 port 3323 preference 1 Idle version - session - serial - vrps 0 updated - auth no
 ```
+
+To see the state of each route, use `show bgp routes` (`GET /v1/bgp/routes`):
+
+```
+edge-1> show bgp routes
+bgp instance r1:
+  > 198.51.100.0/24 from 10.0.0.2 next-hop 10.0.0.2 as-path [65002] origin-as 65002 local-pref 100 valid
+    203.0.113.0/24 from local next-hop - as-path [] origin-as - local-pref 100 not-found
+```
+
+- One line per path (every ADD-PATH path), IPv4 and IPv6 unicast; EVPN stays in `show bgp evpn`. `>` marks the best path; `from local` is a redistributed route.
+- The state is `valid`, `invalid` or `not-found`. A route your import policy rejects (for example with `rpki.invalid`) is never held, so it is not listed; a route learned through RFC 8097 keeps the state its peer sent.
 
 #### Authenticating the cache session (RFC 8210 §9)
 

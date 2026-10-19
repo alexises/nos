@@ -264,6 +264,7 @@ pub async fn handle_action(
         | Resolved::ShowBgpBrief
         | Resolved::ShowBgpEvpn
         | Resolved::ShowBgpRpki
+        | Resolved::ShowBgpRoutes
         | Resolved::ShowOspfNeigh
         | Resolved::ShowOspfDatabase
         | Resolved::ShowOspfv3Neigh
@@ -368,6 +369,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowBgpEvpn => {
             show_bgp_evpn(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowBgpRoutes => {
+            show_bgp_routes(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpRpki => {
@@ -911,6 +916,36 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_evpn_routes(&bgp_socket).await {
                 Ok(routes) => println!("{}", format::render_bgp_evpn(&instance.name, &routes)),
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show bgp routes` — same shape as `show_bgp_evpn`.
+async fn show_bgp_routes(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    if cfg.bgp_instances.is_empty() {
+        println!("no bgp instances configured");
+        return;
+    }
+    for instance in &cfg.bgp_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::BgpInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(bgp_socket)) => match bgp_client::get_routes(&bgp_socket).await {
+                Ok(routes) => println!("{}", format::render_bgp_routes(&instance.name, &routes)),
                 Err(e) => eprintln!("error: {e}"),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),

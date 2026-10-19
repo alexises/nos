@@ -2313,6 +2313,39 @@ async fn ensure_exabgp(w: &World) -> anyhow::Result<()> {
         .await
 }
 
+/// #500: polls `GET /v1/bgp/routes` until `prefix` is listed with
+/// `validation_state` `want` (`Valid`/`Invalid`/`NotFound`) and, with `best`,
+/// the best-path flag.
+async fn expect_route_state(
+    r: &Router,
+    prefix: &str,
+    want: &str,
+    best: bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = r
+            .rest_expect(Method::GET, "/v1/bgp/routes", None, 200)
+            .await?;
+        let json: serde_json::Value = serde_json::from_str(&last)?;
+        let hit = json.as_array().into_iter().flatten().any(|inst| {
+            inst["result"].as_array().into_iter().flatten().any(|rt| {
+                rt["prefix"] == prefix
+                    && rt["validation_state"] == want
+                    && (!best || rt["best"] == true)
+            })
+        });
+        if hit {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: GET /v1/bgp/routes never listed {prefix} as {want} (best={best}): {last}",
+        r.name()
+    )
+}
+
 /// RFC 6811 origin validation fed over RFC 8210 by a real cache (StayRTR,
 /// self-contained): router-a validates router-b's redistributed prefix and
 /// its import policy rejects `rpki.invalid`.
@@ -2325,6 +2358,9 @@ async fn ensure_exabgp(w: &World) -> anyhow::Result<()> {
 ///   each route's state from router-a's `announce-rpki-state` community
 ///   (valid, invalid, not-found); ExaBGP (eBGP, `router-g`) gets no
 ///   non-transitive extended community, and its own RFC 8097 tag is ignored;
+/// - `GET /v1/bgp/routes` (#500) shows the state: valid on router-a after the
+///   serial update, invalid on router-c (RFC 8097; router-a's reject-invalid
+///   policy never stores the invalid route), not-found after the expiry;
 /// - StayRTR goes away: after its 10s expire interval the VRPs are dropped and
 ///   the prefix is not-found (still accepted).
 pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
@@ -2524,6 +2560,8 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     a.wait_new(&valid, valid_before, 30).await?;
+    log("GET /v1/bgp/routes (#500): router-a lists the route as valid and best");
+    expect_route_state(a, REDISTRIBUTE_PREFIX, "Valid", true).await?;
 
     log("RFC 8097: router-c (no cache) takes each state from router-a's community");
     let learned_as = |prefix: &str, state: &str| {
@@ -2531,6 +2569,8 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     };
     c.wait(&learned_as(REDISTRIBUTE_PREFIX, "Valid")).await?;
     c.wait(&learned_as(RPKI_INVALID_PREFIX, "Invalid")).await?;
+    log("GET /v1/bgp/routes (#500): router-c lists the RFC 8097 route as invalid");
+    expect_route_state(c, RPKI_INVALID_PREFIX, "Invalid", false).await?;
     log("RFC 8097: ExaBGP's own \"invalid\" tag is ignored over eBGP");
     a.wait(&learned_as(RPKI_TAGGED_PREFIX, "NotFound")).await?;
     c.wait(&learned_as(RPKI_TAGGED_PREFIX, "NotFound")).await?;
@@ -2575,6 +2615,7 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     a.wait_new(&not_found, not_found_before, 30).await?;
+    expect_route_state(a, REDISTRIBUTE_PREFIX, "NotFound", true).await?;
     anyhow::ensure!(
         a.count("bgp session established") == sessions,
         "a VRP change reset the BGP session"

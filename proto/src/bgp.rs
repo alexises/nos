@@ -121,6 +121,42 @@ pub struct EvpnRouteSummary {
     pub extended_communities: Vec<String>,
 }
 
+/// RFC 6811 origin validation state of a route, for `show bgp routes`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RpkiValidationState {
+    /// A covering VRP validates the origin AS.
+    Valid,
+    /// A covering VRP exists but none matches.
+    Invalid,
+    /// No covering VRP.
+    NotFound,
+}
+
+/// One IPv4/IPv6 unicast route known to a BGP instance, for `show bgp routes`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BgpRouteSummary {
+    /// The prefix, `192.0.2.0/24`.
+    pub prefix: String,
+    /// The advertising peer; `None` for a locally redistributed route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub peer: Option<IpAddr>,
+    /// The BGP next hop as received; `None` for a locally redistributed route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub next_hop: Option<IpAddr>,
+    /// The AS path as text (`65001 65002 {65003,65004}`); empty when local.
+    pub as_path: String,
+    /// RFC 6811 origin AS (`None` for a trailing `AS_SET`).
+    pub origin_as: Option<u32>,
+    /// Effective `LOCAL_PREF`.
+    pub local_pref: u32,
+    /// This path is the Loc-RIB best path for the prefix.
+    pub best: bool,
+    /// RFC 6811 origin validation state.
+    pub validation_state: RpkiValidationState,
+}
+
 /// RFC 8210 session state of one configured RPKI cache, as seen by one
 /// `nos-bgpd`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -245,6 +281,8 @@ pub enum BgpRequest {
         /// The EVPN route change.
         update: crate::fdb::EvpnUpdate,
     },
+    /// One-shot: every IPv4/IPv6 unicast route held (`show bgp routes`).
+    GetRoutes,
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
@@ -264,4 +302,6 @@ pub enum BgpEvent {
     PeerCleared,
     /// Reply to `GetRpkiSummary`.
     RpkiSummary(Vec<RpkiCacheStatus>),
+    /// Reply to `GetRoutes`.
+    Routes(Vec<BgpRouteSummary>),
 }
