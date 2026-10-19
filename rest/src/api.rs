@@ -4,7 +4,9 @@
 //! `openapi::document`. Swagger UI is served at `/swagger-ui/`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::Value;
@@ -14,6 +16,7 @@ use utoipa_axum::routes;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::auth::{client_auth, MutualTlsScheme};
+use crate::error::ApiError;
 use crate::ipc::Daemons;
 use crate::{clear, login, openapi, show, tx};
 
@@ -98,6 +101,17 @@ pub fn openapi_document() -> Value {
     openapi::document(&openapi_routes().1)
 }
 
+/// Bounds a handler until it returns its response (headers), body reads
+/// included; a streamed body (the SSE log follow) is not bounded.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn request_timeout(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    match tokio::time::timeout(REQUEST_TIMEOUT, next.run(req)).await {
+        Ok(resp) => resp,
+        Err(_) => ApiError::RequestTimeout.into_response(),
+    }
+}
+
 pub fn router(daemons: Daemons) -> Router {
     let (router, base) = openapi_routes();
     let doc = Arc::new(openapi::document(&base));
@@ -123,9 +137,73 @@ pub fn router(daemons: Daemons) -> Router {
         // Last, so it wraps every route above — the merged Swagger UI, the
         // OpenAPI document and the SSE log stream included.
         .layer(axum::middleware::from_fn_with_state(daemons, client_auth))
+        // Inside the problem-document layer so the 408 is one too.
+        .layer(axum::middleware::from_fn(request_timeout))
         // Outermost: also covers the framework's own 404/405/rejections.
         .layer(axum::middleware::map_response(
             crate::error::problem_for_framework_errors,
         ))
         .layer(axum::middleware::from_fn(crate::error::security_headers))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use axum::body::Body;
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    fn app() -> Router {
+        Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(REQUEST_TIMEOUT * 2).await;
+                    "late"
+                }),
+            )
+            // Headers at once, body trickling well past the timeout (the SSE shape).
+            .route(
+                "/stream",
+                get(|| async {
+                    Body::from_stream(futures::stream::unfold(0, |n| async move {
+                        if n == 3 {
+                            return None;
+                        }
+                        tokio::time::sleep(REQUEST_TIMEOUT).await;
+                        Some((Ok::<_, Infallible>(bytes::Bytes::from("x")), n + 1))
+                    }))
+                }),
+            )
+            .route("/fast", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(request_timeout))
+            .layer(axum::middleware::map_response(
+                crate::error::problem_for_framework_errors,
+            ))
+    }
+
+    fn get_req(path: &str) -> axum::http::Request<Body> {
+        axum::http::Request::get(path).body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_handler_gets_a_408_problem_and_a_fast_one_passes() {
+        assert_eq!(app().oneshot(get_req("/fast")).await.unwrap().status(), 200);
+        let resp = app().oneshot(get_req("/slow")).await.unwrap();
+        assert_eq!(resp.status(), 408);
+        assert_eq!(
+            resp.headers()[axum::http::header::CONTENT_TYPE],
+            crate::error::PROBLEM_JSON
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_outliving_the_timeout_is_not_cut() {
+        let resp = app().oneshot(get_req("/stream")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 16).await.unwrap();
+        assert_eq!(&body[..], b"xxx"); // 3 * REQUEST_TIMEOUT of body
+    }
 }

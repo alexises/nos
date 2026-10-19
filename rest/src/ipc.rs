@@ -34,6 +34,9 @@ use crate::error::{ApiError, ApiResult};
 const MAX_IDLE_PER_DAEMON: usize = 8;
 /// A parked connection older than this is discarded rather than trusted.
 const MAX_IDLE_AGE: Duration = Duration::from_secs(300);
+/// Longest a daemon may take to accept a request or to answer it; below
+/// `api::REQUEST_TIMEOUT`, so the 504 names the daemon, not the request.
+const IPC_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Shared by every handler: where to find `nos-configd` (resolved once at
 /// startup), the broker used to find everything else, and the connection pool.
@@ -86,21 +89,45 @@ impl Pool {
 // Short-lived and moved once per call: boxing the stream would cost an
 // allocation on every request to save nothing.
 #[allow(clippy::large_enum_variant)]
-enum Exchange<Ev> {
+enum Exchange<Ev, S = Stream> {
     /// The reply, and the connection if it is clean enough to reuse.
-    Done(Option<Stream>, Ev),
+    Done(Option<S>, Ev),
     /// The connection was dead before any reply arrived.
     Stale,
     Bad(ApiError),
 }
 
 /// Writes one pre-encoded request and reads the first event back.
-async fn exchange<Ev: DeserializeOwned>(mut stream: Stream, frame: &[u8]) -> Exchange<Ev> {
-    if stream.write_all(frame).await.is_err() || stream.flush().await.is_err() {
-        return Exchange::Stale;
+async fn exchange<Ev: DeserializeOwned>(stream: Stream, frame: &[u8]) -> Exchange<Ev> {
+    exchange_within(IPC_TIMEOUT, stream, frame).await
+}
+
+async fn exchange_within<Ev: DeserializeOwned, S>(
+    limit: Duration,
+    mut stream: S,
+    frame: &[u8],
+) -> Exchange<Ev, S>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // Not `Stale`: a daemon that hung is not retried on a fresh connection,
+    // and this connection is dropped, not parked.
+    let timed_out = || Exchange::Bad(ApiError::GatewayTimeout("ipc call timed out".to_string()));
+    let sent = tokio::time::timeout(limit, async {
+        stream.write_all(frame).await?;
+        stream.flush().await
+    })
+    .await;
+    match sent {
+        Err(_) => return timed_out(),
+        Ok(Err(_)) => return Exchange::Stale,
+        Ok(Ok(())) => {}
     }
     let mut reader = FramedRead::new(stream, IpcCodec::<Ev>::default());
-    match reader.next().await {
+    let Ok(next) = tokio::time::timeout(limit, reader.next()).await else {
+        return timed_out();
+    };
+    match next {
         Some(Ok(ev)) => {
             let clean = reader.read_buffer().is_empty();
             Exchange::Done(clean.then(|| reader.into_inner()), ev)
@@ -295,4 +322,16 @@ pub fn unexpected(daemon: &str, ev: &impl std::fmt::Debug) -> ApiError {
     let dbg = format!("{ev:?}");
     let variant = dbg.split([' ', '(', '{']).next().unwrap_or("");
     ApiError::BadGateway(format!("{daemon} sent an unexpected reply: {variant}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_daemon_that_never_replies_is_a_gateway_timeout_not_a_stale_connection() {
+        let (client, _silent_daemon) = tokio::io::duplex(1024);
+        let r = exchange_within::<u8, _>(Duration::from_secs(1), client, b"req").await;
+        assert!(matches!(r, Exchange::Bad(ApiError::GatewayTimeout(_))));
+    }
 }
