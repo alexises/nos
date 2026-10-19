@@ -69,6 +69,7 @@ pub fn summaries(status: &SharedStatus) -> Vec<RpkiCacheStatus> {
             serial: s.serial,
             vrp_count: s.vrp_count,
             last_update_secs: s.last_update.map(|t| t.elapsed().as_secs()),
+            authenticated: s.cache.auth.is_some(),
         })
         .collect()
 }

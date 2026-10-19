@@ -489,6 +489,7 @@ fn rpki_cache_list() {
             address: "192.0.2.50".parse().unwrap(),
             port: 3323,
             preference: 1,
+            auth: None,
         }]
     );
 }

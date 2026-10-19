@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 use super::vrp::{Vrp, VrpTable};
 use super::SharedStatus;
+use crate::session::ResolvedAuth;
 use crate::tcp;
 
 const SERIAL_NOTIFY: u8 = 0;
@@ -407,9 +408,10 @@ impl Client {
     }
 
     async fn connect(&self, i: usize) -> io::Result<TcpStream> {
+        let auth = self.caches[i].auth.as_ref().map(ResolvedAuth::from);
         tokio::time::timeout(
             CONNECT_TIMEOUT,
-            tcp::connect(self.addr(i), None, self.vrf.as_deref(), None, None),
+            tcp::connect(self.addr(i), None, self.vrf.as_deref(), auth.as_ref(), None),
         )
         .await
         .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")))
@@ -825,6 +827,7 @@ mod tests {
             address: addr.ip(),
             port: addr.port(),
             preference,
+            auth: None,
         }
     }
 

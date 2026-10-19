@@ -258,6 +258,36 @@ impl Dock {
         seed: (&str, &str, &[u8]),
         caps: &[&str],
     ) -> anyhow::Result<()> {
+        self.start_plain_inner(name, image, network, ip, None, cmd, Some(seed), caps)
+            .await
+    }
+
+    /// A tool shipped in the nos image (`IMAGE`) run in place of its
+    /// `nos-watchdogd` entrypoint, e.g. `nos-rtr-stub`.
+    pub async fn start_nos_tool(
+        &self,
+        name: &str,
+        network: &str,
+        ip: &str,
+        argv: &[&str],
+        caps: &[&str],
+    ) -> anyhow::Result<()> {
+        self.start_plain_inner(name, IMAGE, network, ip, Some(argv), &[], None, caps)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_plain_inner(
+        &self,
+        name: &str,
+        image: &str,
+        network: &str,
+        ip: &str,
+        entrypoint: Option<&[&str]>,
+        cmd: &[&str],
+        seed: Option<(&str, &str, &[u8])>,
+        caps: &[&str],
+    ) -> anyhow::Result<()> {
         self.container_remove(name).await;
         let endpoint = EndpointSettings {
             ipam_config: Some(EndpointIpamConfig {
@@ -268,6 +298,7 @@ impl Dock {
         };
         let body = ContainerCreateBody {
             image: Some(image.to_string()),
+            entrypoint: entrypoint.map(|e| e.iter().map(|s| (*s).to_string()).collect()),
             cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
             host_config: Some(HostConfig {
                 network_mode: Some(network.to_string()),
@@ -284,8 +315,9 @@ impl Dock {
             .create_container(Some(opts), body)
             .await
             .with_context(|| format!("creating container {name}"))?;
-        let (dir, file, contents) = seed;
-        self.upload(name, dir, file, contents).await?;
+        if let Some((dir, file, contents)) = seed {
+            self.upload(name, dir, file, contents).await?;
+        }
         self.docker
             .start_container(name, None)
             .await

@@ -2199,6 +2199,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-rtr-stub"
+version = "0.1.0"
+dependencies = [
+ "nos-tcp-auth",
+ "tokio",
+]
+
+[[package]]
 name = "nos-stp"
 version = "0.1.0"
 dependencies = [

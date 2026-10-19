@@ -2579,6 +2579,83 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
         a.count("bgp session established") == sessions,
         "a VRP change reset the BGP session"
     );
+
+    rpki_cache_auth(w).await
+}
+
+/// #498, RFC 8210 §9: the RTR session to a cache that requires TCP-MD5
+/// (`nos-rtr-stub`, because StayRTR cannot sign its session).
+///
+/// - router-a is configured with the wrong key: the kernel drops the unsigned
+///   SYN-ACK, the cache is unreachable and the stub accepts nothing;
+/// - with the right key the session comes up (RTR v1, one VRP) and
+///   `GET /v1/bgp/rpki` reports it active and `authenticated`.
+async fn rpki_cache_auth(w: &mut World) -> anyhow::Result<()> {
+    w.dock
+        .start_nos_tool(
+            RTR_STUB,
+            NET,
+            IP_RTR_STUB,
+            &[
+                "nos-rtr-stub",
+                "0.0.0.0:323",
+                "192.0.2.0/24",
+                "24",
+                "64496",
+                RTR_STUB_KEY,
+                IP_A,
+            ],
+            &["NET_ADMIN"],
+        )
+        .await?;
+    let a = w.a()?;
+    let cache = format!("cache={IP_RTR_STUB}:323");
+    let with_key = |key: &str| {
+        let mut flags = A.base_flags();
+        flags.extend(strings(&[
+            "--rpki-cache",
+            &format!("{IP_RTR_STUB}:323"),
+            "--rpki-cache-md5-password",
+            key,
+        ]));
+        flags
+    };
+
+    log("a wrong key: the unsigned SYN-ACK is dropped and the stub accepts nothing");
+    a.provision_flags(&with_key("not-the-key")).await?;
+    a.wait(&format!("rpki cache unreachable {cache}")).await?;
+    anyhow::ensure!(
+        !w.dock.logs(RTR_STUB).await?.contains("accepted"),
+        "the stub accepted a session signed with the wrong key"
+    );
+
+    log("the right key: the session comes up and is reported authenticated");
+    let a = w.a()?;
+    a.provision_flags(&with_key(RTR_STUB_KEY)).await?;
+    a.wait(&format!("rpki cache connected {cache} version=1"))
+        .await?;
+    a.wait(&format!("rpki end of data {cache} .*vrps=1"))
+        .await?;
+    let summary = a
+        .rest_expect(Method::GET, "/v1/bgp/rpki", None, 200)
+        .await?;
+    let entry = summary
+        .split("\"address\":")
+        .find(|e| e.starts_with(&format!("\"{IP_RTR_STUB}\"")))
+        .unwrap_or_default();
+    anyhow::ensure!(
+        entry.contains("\"state\":\"Established\"")
+            && entry.contains("\"active\":true")
+            && entry.contains("\"authenticated\":true"),
+        "GET /v1/bgp/rpki does not show the signed session in use: {summary}"
+    );
+    anyhow::ensure!(
+        w.dock
+            .logs(RTR_STUB)
+            .await?
+            .contains(&format!("accepted peer={IP_A}")),
+        "the stub never accepted router-a"
+    );
     Ok(())
 }
 

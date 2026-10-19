@@ -1357,6 +1357,25 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Lower is preferred (RFC 8210 §10); defaults to 0. A cache is used only while every \
              more preferred one is unreachable.",
         ),
+        Topic::BgpInstanceRpkiCacheAuth => (
+            "The RPKI cache's RTR session authentication: an MD5 password or TCP-AO keys.",
+            "Usually set with `md5-password` or `ao-key`; the cache must be configured with the \
+             same key. `delete auth` reverts the session to no transport authentication. \
+             Protects the integrity of the RTR session (RFC 8210 §9), not the confidentiality \
+             of the VRPs.",
+        ),
+        Topic::BgpInstanceRpkiCacheMd5Password => (
+            "Set the RPKI cache's TCP MD5 password.",
+            "Sets a single RFC 2385 TCP MD5 signature password (1 to 80 bytes) on the RTR \
+             session, replacing any TCP-AO keys: the two are mutually exclusive. Stored \
+             clear-text, like every other field in this config.",
+        ),
+        Topic::BgpInstanceRpkiCacheAoKey => (
+            "Set (or replace) one of the RPKI cache's TCP-AO keys.",
+            "Adds one RFC 5925 TCP-AO key to the RTR session, identified by its send-id; same \
+             key rules as a peer-group's `ao-key` (exactly one current key, unique ids). \
+             Stored clear-text, like every other field in this config.",
+        ),
         Topic::BgpInstanceAggregate => (
             "Originate an aggregate route covering more specific BGP routes.",
             concat!(
