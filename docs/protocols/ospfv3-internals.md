@@ -68,6 +68,7 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - **No IP header strip**: Linux IPv6 raw sockets deliver only the payload.
 - **Hop limit 1**: unicast and multicast hops are both set to 1 on the socket (link-local scope; there are no virtual links). `ospf/src/socket.rs` does the same for IPv4 TTL.
 - **DBD pagination** (RFC 2328 §10.8): the per-packet header budget is `exchange::mtu_based_max_headers(LinkConfig.mtu)` — MTU minus IPv6 (40) + OSPFv3 header (16) + DBD body (12), over the 20-byte LSA header. `Ospfv3Profile.mtu` overrides the interface MTU (`reconcile::resolve_effective_mtu`); `--dbd-max-headers` is a test/debug override only. Verified by `nos-e2e ospfv3-mtu-pagination`. The RFC 5340 A.3.3 Interface MTU check (`exchange::mtu_acceptable`, `link::handle_dbd`, `ospfv3 dbd rejected`) and `Ospfv3Profile.mtu_ignore` work as in `nos-ospfd`; verified by `nos-e2e ospfv3-mtu-mismatch`.
+- **Receive hardening** (#394): a packet whose source is not link-local is dropped with a `debug!` before any other check (RFC 5340 §4.2.2, every packet type); `handle_hello` caps a link at `MAX_NEIGHBORS_PER_LINK` (64) neighbors and rate-limits its mismatch warnings. Details in `ospf-internals.md`.
 - Timers (`--lsa-age-multiplier`) are test-only, like in `nos-ospfd`.
 
 ## Verification

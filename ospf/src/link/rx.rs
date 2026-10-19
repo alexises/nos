@@ -1,6 +1,8 @@
 //! Hello/DBD/LSR/LSU/LSAck receive handling, crypto sequence numbers and the DR/BDR election driver.
 //! Moved verbatim out of `link.rs`.
 
+use nos_ospf_common::ratelimit::{WarnLimiter, MAX_NEIGHBORS_PER_LINK};
+
 use super::grace::{in_grace, on_grace_lsa};
 use super::originate::local_netmask;
 use super::{
@@ -10,6 +12,21 @@ use super::{
     LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket, StatusHandle,
     SystemTime, UNIX_EPOCH,
 };
+
+/// `warn!` through the link's `WarnLimiter` (#394): a peer sending bad Hellos
+/// must not turn them into unbounded log lines. A line that follows dropped
+/// ones is preceded by a count of them.
+macro_rules! warn_limited {
+    ($limiter:expr, $($arg:tt)+) => {
+        if $limiter.allow(Instant::now().into_std()) {
+            let suppressed = $limiter.take_suppressed();
+            if suppressed > 0 {
+                warn!(suppressed, "ospf hello warnings were rate limited");
+            }
+            warn!($($arg)+);
+        }
+    };
+}
 
 /// Wall-clock unix-seconds floor for the outgoing crypto sequence number —
 /// mirrors `initial_dd_sequence_number`'s use of `SystemTime`, but must
@@ -150,6 +167,7 @@ pub(super) fn hello_options(cfg: &LinkConfig) -> u8 {
 /// Returns whether this Hello caused a broadcast link to leave `Waiting`
 /// early (RFC 2328's "`BackupSeen`" shortcut — a neighbor already declaring
 /// itself DR means the election result is already knowable).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_hello(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
@@ -158,27 +176,31 @@ pub(super) fn handle_hello(
     hello: &packet::HelloPacket,
     p2p_dead_deadline: &mut Instant,
     waiting: bool,
+    limiter: &mut WarnLimiter,
 ) -> bool {
     // RFC 2328 §10.5's packet-validity check precedes any neighbor event —
     // a mismatched area/timer/mask/E-bit is logged and dropped, not fed into
     // the FSM (a peer with different timers would otherwise be accepted and
     // the adjacency would flap at whichever dead interval is shorter).
     if hello.area_id != cfg.area_id {
-        warn!(
+        warn_limited!(
+            limiter,
             link = %cfg.attach_point, area = %hello.area_id, expected = %cfg.area_id,
             "dropping ospf hello with mismatched area"
         );
         return false;
     }
     if hello.hello_interval != cfg.hello_interval {
-        warn!(
+        warn_limited!(
+            limiter,
             link = %cfg.attach_point, hello_interval = hello.hello_interval, expected = cfg.hello_interval,
             "dropping ospf hello with mismatched hello-interval"
         );
         return false;
     }
     if hello.dead_interval != u32::from(cfg.dead_interval) {
-        warn!(
+        warn_limited!(
+            limiter,
             link = %cfg.attach_point, dead_interval = hello.dead_interval, expected = cfg.dead_interval,
             "dropping ospf hello with mismatched dead-interval"
         );
@@ -190,7 +212,8 @@ pub(super) fn handle_hello(
     if cfg.network_type == NetworkType::Broadcast {
         let expected_mask = local_netmask(cfg);
         if hello.network_mask != expected_mask {
-            warn!(
+            warn_limited!(
+            limiter,
                 link = %cfg.attach_point, network_mask = %hello.network_mask, expected = %expected_mask,
                 "dropping ospf hello with mismatched network mask"
             );
@@ -200,7 +223,8 @@ pub(super) fn handle_hello(
     // RFC 2328 §10.5: the E-bit is clear exactly in a stub area, so both
     // ends must agree on whether the area is one.
     if (hello.options & packet::OPTION_E != 0) == cfg.stub {
-        warn!(
+        warn_limited!(
+            limiter,
             link = %cfg.attach_point, neighbor = %hello.router_id,
             "dropping ospf hello with mismatched e-bit"
         );
@@ -208,11 +232,26 @@ pub(super) fn handle_hello(
     }
     // RFC 3101 §2.1: the N-bit is set exactly in an NSSA.
     if (hello.options & packet::OPTION_N != 0) != cfg.nssa {
-        warn!(
+        warn_limited!(
+            limiter,
             link = %cfg.attach_point, neighbor = %hello.router_id,
             "dropping ospf hello with mismatched n-bit"
         );
         return false;
+    }
+
+    // A segment peer cycling router-ids must not grow the table without bound
+    // (#394); known neighbors keep refreshing at the cap.
+    {
+        let known = status.borrow().neighbors.contains_key(&hello.router_id);
+        if !known && status.borrow().neighbors.len() >= MAX_NEIGHBORS_PER_LINK {
+            warn_limited!(
+                limiter,
+                link = %cfg.attach_point, neighbor = %hello.router_id,
+                "ospf neighbor limit reached, dropping hello"
+            );
+            return false;
+        }
     }
 
     let saw_self = hello.neighbors.contains(&local_router_id);

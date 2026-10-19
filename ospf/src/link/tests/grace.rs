@@ -20,6 +20,7 @@ async fn grace_holds_full_through_a_hello_that_does_not_list_us() {
             &matching_hello(&cfg, Ipv4Addr::new(9, 9, 9, 10)),
             &mut deadline,
             false,
+            &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );
         assert_eq!(state_of(&status), expected);
     }
