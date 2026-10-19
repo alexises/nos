@@ -630,6 +630,10 @@ pub struct Args {
     pub import_policy: String,
     #[arg(long, default_value = "accept-all")]
     pub export_policy: String,
+    /// If set, points `--peer-group`'s EVPN import policy at this policy
+    /// (define it with `--policy-name`); unset leaves it as is (accept all).
+    #[arg(long)]
+    pub evpn_import_policy: Option<String>,
 
     /// If set, ensures a loopback interface for `--routing-table` (named
     /// `loopback-<routing-table>`, per `nos_proto::LOOPBACK_PREFIX` — the
@@ -2319,6 +2323,16 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }),
     ]);
 
+    if let Some(policy) = &args.evpn_import_policy {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetEvpnImportPolicy {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                evpn_import_policy: policy.clone(),
+            },
+        ));
+    }
+
     if args.wants_bfd_profile() {
         ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
             name: BFD_PROFILE.to_string(),
@@ -3805,6 +3819,19 @@ mod tests {
 
     fn has(ops: &[ConfigOp], op: &ConfigOp) {
         assert!(ops.contains(op), "{op:?} missing from {ops:#?}");
+    }
+
+    #[test]
+    fn evpn_import_policy_flag_sets_the_peer_group_policy() {
+        let ops = ops(&["--evpn-import-policy", "rt-only"]).unwrap();
+        has(
+            &ops,
+            &ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetEvpnImportPolicy {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                evpn_import_policy: "rt-only".into(),
+            }),
+        );
     }
 
     #[test]

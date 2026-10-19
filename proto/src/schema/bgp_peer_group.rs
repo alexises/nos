@@ -598,6 +598,15 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupStrictMode)]
     pub strict_mode: bool,
+
+    /// Accept/reject filter for EVPN routes received from this group's
+    /// peers (Type-1/2/3/5; Type-4 bypasses it). Unlike `import_policy`,
+    /// `None` accepts every EVPN route, so existing deployments keep
+    /// working. Rewrites are ignored.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = BgpPeerGroupEvpnImportPolicy)]
+    pub evpn_import_policy: Option<String>,
 }
 
 impl BgpPeerGroup {
@@ -910,6 +919,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            evpn_import_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

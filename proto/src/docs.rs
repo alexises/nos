@@ -123,6 +123,8 @@ topics! {
     BgpPeerGroupImportPolicy,
     /// `BgpPeerGroup.export_policy`
     BgpPeerGroupExportPolicy,
+    /// `BgpPeerGroup.evpn_import_policy`
+    BgpPeerGroupEvpnImportPolicy,
     /// `BgpPeerGroup.shutdown`
     BgpPeerGroupShutdown,
     /// `BgpInstance.peers`

@@ -120,6 +120,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            evpn_import_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

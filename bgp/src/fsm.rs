@@ -1260,6 +1260,11 @@ async fn report_established(
     rib.set_peer_damping(peer.remote_address, peer.damping);
     rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
     rib.set_peer_asn(peer.remote_address, *remote_asn);
+    rib.set_peer_evpn_import_policy(
+        peer.remote_address,
+        slot.peer.evpn_import_policy.clone(),
+        remote_is_ibgp,
+    );
     rib.set_peer_confed(peer.remote_address, kind == PeerKind::ConfedExternal);
     rib.set_peer_local_as(
         peer.remote_address,

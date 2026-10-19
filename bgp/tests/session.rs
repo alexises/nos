@@ -46,6 +46,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         route_server_client: false,
         import_policy: accept.clone(),
         export_policy: accept,
+        evpn_import_policy: None,
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,

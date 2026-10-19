@@ -14,6 +14,7 @@ mod aggregate;
 mod confed;
 mod decision;
 mod evpn;
+mod evpn_import;
 mod gr;
 mod next_hop;
 mod policy;

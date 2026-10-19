@@ -501,6 +501,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Filter the routes we advertise to this peer-group's peers through a routing policy.",
             "Names a policy-definition applied to every route before it is advertised to this peer-group's peers. Unset, the direction defaults to the built-in deny-all: nothing is advertised. `accept-all` and `deny-all` are always available.",
         ),
+        Topic::BgpPeerGroupEvpnImportPolicy => (
+            "Filter the EVPN routes this peer-group's peers send us through a routing policy.",
+            "Names a policy-definition applied to every EVPN route (types 1, 2, 3 and 5) received from this peer-group's peers; a rejected route is dropped as if withdrawn. Match on route targets with `this.bgp.extended_communities.contains(...)`. Only accept/reject counts: attribute rewrites are ignored. Ethernet-segment routes (type 4) are never filtered. Unlike import-policy, unset accepts every EVPN route.",
+        ),
         Topic::BgpPeerGroupShutdown => (
             "Administratively shut every peer in a peer-group.",
             concat!(

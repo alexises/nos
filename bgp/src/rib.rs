@@ -511,12 +511,14 @@ pub struct BgpRib {
     max_prefix: HashMap<IpAddr, nos_proto::BgpMaximumPrefix>,
     max_prefix_warned: HashSet<(IpAddr, AddressFamily)>,
     /// Received EVPN (RFC 7432) routes per peer, keyed by NLRI.
-    // ponytail: Adj-RIB-In only — no best-path, Route-Target import filtering,
-    // import policy (RPL's `Input` is prefix-shaped) or re-advertisement, since
-    // nothing consumes EVPN routes yet. Add a Loc-RIB when a MAC-VRF does.
+    // ponytail: Adj-RIB-In only, filtered by `evpn_import` (accept/reject) —
+    // no best-path or re-advertisement; add a Loc-RIB when a MAC-VRF needs one.
     /// Keyed by `EvpnNlri::route_key` (RFC 7432 §7.2: labels and ESI are
     /// attributes, not identity).
     evpn_adj_rib_in: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
+    /// Peers with an EVPN import policy (`set_peer_evpn_import_policy`); a
+    /// peer absent here accepts every EVPN route.
+    evpn_import: HashMap<IpAddr, Arc<CompiledPolicy>>,
     /// RFC 7313: paths (prefix, path id) in a peer's Adj-RIB-In marked stale
     /// by a `BoRR` and not yet re-announced; purged by the matching `EoRR`.
     stale: HashMap<IpAddr, HashSet<(IpNet, u32)>>,
@@ -644,6 +646,7 @@ impl BgpRib {
             max_prefix: HashMap::new(),
             max_prefix_warned: HashSet::new(),
             evpn_adj_rib_in: HashMap::new(),
+            evpn_import: HashMap::new(),
             stale: HashMap::new(),
             evpn_stale: HashMap::new(),
             gr: HashMap::new(),
@@ -794,6 +797,33 @@ impl BgpRib {
             Some(r) => self.role_peers.insert(peer, r),
             None => self.role_peers.remove(&peer),
         };
+    }
+
+    /// Sets `peer`'s EVPN import policy (`None`: accept all) and re-runs the
+    /// routes it already holds through it, dropping the rejected ones — a
+    /// policy change restarts the session, but a graceful restart keeps the
+    /// stored routes. Call before `peer_established`.
+    pub fn set_peer_evpn_import_policy(
+        &mut self,
+        peer: IpAddr,
+        policy: Option<Arc<CompiledPolicy>>,
+        is_ibgp: bool,
+    ) {
+        let Some(policy) = policy else {
+            self.evpn_import.remove(&peer);
+            return;
+        };
+        let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
+        if let Some(table) = self.evpn_adj_rib_in.get_mut(&peer) {
+            table.retain(|key, route| {
+                let rejected = adj_in::evpn_rejected(&policy, route, peer, peer_as, is_ibgp);
+                if rejected {
+                    warn!(peer = %peer, route_type = key.route_type(), route = %key, "evpn route rejected by import policy");
+                }
+                !rejected
+            });
+        }
+        self.evpn_import.insert(peer, policy);
     }
 
     /// Our configured RFC 9234 role toward `peer`, if any.

@@ -156,6 +156,10 @@ fn resolve_peers(
             route_server_client: group.route_server_client,
             import_policy: policy_cache.resolve(group.import_policy.as_deref()),
             export_policy: policy_cache.resolve(group.export_policy.as_deref()),
+            evpn_import_policy: group
+                .evpn_import_policy
+                .as_deref()
+                .map(|n| policy_cache.resolve(Some(n))),
             shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
             maximum_prefix: group.maximum_prefix,
             announce_rpki_state: group.announce_rpki_state,

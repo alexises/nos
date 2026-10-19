@@ -439,6 +439,22 @@ pub enum BgpPeerGroupOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Sets the EVPN import policy of the BGP peer group to `evpn_import_policy`.
+    SetEvpnImportPolicy {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+        /// Name of the policy applied to EVPN routes received from the peer.
+        evpn_import_policy: String,
+    },
+    /// Clears the EVPN import policy of the BGP peer group (accept all).
+    ClearEvpnImportPolicy {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -495,7 +511,9 @@ impl BgpPeerGroupOp {
             | BgpPeerGroupOp::SetImportPolicy { .. }
             | BgpPeerGroupOp::ClearImportPolicy { .. }
             | BgpPeerGroupOp::SetExportPolicy { .. }
-            | BgpPeerGroupOp::ClearExportPolicy { .. } => self.apply_part3(config),
+            | BgpPeerGroupOp::ClearExportPolicy { .. }
+            | BgpPeerGroupOp::SetEvpnImportPolicy { .. }
+            | BgpPeerGroupOp::ClearEvpnImportPolicy { .. } => self.apply_part3(config),
         }
     }
 
@@ -525,6 +543,7 @@ impl BgpPeerGroupOp {
                         route_server_client: false,
                         import_policy: None,
                         export_policy: None,
+                        evpn_import_policy: None,
                         shutdown: None,
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                         announce_rpki_state: false,
@@ -897,6 +916,19 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.export_policy = None;
                 Ok(())
             }
+            BgpPeerGroupOp::SetEvpnImportPolicy {
+                instance,
+                name,
+                evpn_import_policy,
+            } => {
+                find_group_mut(config, instance, name)?.evpn_import_policy =
+                    Some(evpn_import_policy.clone());
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearEvpnImportPolicy { instance, name } => {
+                find_group_mut(config, instance, name)?.evpn_import_policy = None;
+                Ok(())
+            }
             _ => unreachable!("routed by `apply`"),
         }
     }
@@ -995,6 +1027,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            evpn_import_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
@@ -1220,6 +1253,31 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].import_policy, None);
+    }
+
+    #[test]
+    fn set_and_clear_evpn_import_policy() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetEvpnImportPolicy {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            evpn_import_policy: "rt-only".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0]
+                .evpn_import_policy
+                .as_deref(),
+            Some("rt-only")
+        );
+        BgpPeerGroupOp::ClearEvpnImportPolicy {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].evpn_import_policy, None);
     }
 
     #[test]

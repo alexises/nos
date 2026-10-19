@@ -295,6 +295,7 @@ fn resolved_peer(addr: &str, shutdown: bool) -> ResolvedPeer {
         route_server_client: false,
         import_policy: accept.clone(),
         export_policy: accept,
+        evpn_import_policy: None,
         shutdown: shutdown.then_some(BgpShutdown { message: None }),
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
