@@ -3360,6 +3360,34 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
         .context("show fdb has no bridge name")?
         .to_string();
 
+    log("EVPN import policy (#502): a reject-all policy keeps the MAC out, accept-all brings it back");
+    let reject_file = policy_file("evpn-reject-all", "reject\n")?;
+    let rejected = "evpn route rejected by import policy";
+    let rejected_base = a.count(rejected);
+    let mut with_policy = flags.clone();
+    with_policy.extend(strings(&[
+        "--policy-name",
+        "evpn-reject-all",
+        "--policy-source-file",
+        &reject_file,
+        "--evpn-import-policy",
+        "evpn-reject-all",
+    ]));
+    a.provision_flags(&with_policy).await?;
+    a.wait_new(rejected, rejected_base, 60).await?;
+    let body = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    if body.contains(EVPN_REMOTE_MAC) {
+        bail!("a route the EVPN import policy rejects reached the fdb: {body}");
+    }
+    let installed_base = a.count(&installed(EVPN_REMOTE_MAC));
+    let mut accept = flags.clone();
+    accept.extend(strings(&["--evpn-import-policy", "accept-all"]));
+    a.provision_flags(&accept).await?;
+    a.wait_new(&installed(EVPN_REMOTE_MAC), installed_base, 60)
+        .await?;
+
     log("a withdrawal removes the MAC again");
     let base = a.count(&removed(EVPN_REMOTE_MAC));
     gobgp_owned(w, macadv("del", EVPN_REMOTE_MAC, rt_g)).await?;

@@ -107,6 +107,8 @@ pub struct ResolvedPeer {
     /// peer-group's `import_policy`/`export_policy` names.
     pub import_policy: Arc<nos_rpl::CompiledPolicy>,
     pub export_policy: Arc<nos_rpl::CompiledPolicy>,
+    /// The peer-group's EVPN import policy; `None` accepts every EVPN route.
+    pub evpn_import_policy: Option<Arc<nos_rpl::CompiledPolicy>>,
     /// Effective administrative shutdown (the peer's own, else its
     /// peer-group's): no session is opened or accepted while set.
     pub shutdown: Option<BgpShutdown>,
@@ -1480,6 +1482,7 @@ mod tests {
             route_server_client: false,
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            evpn_import_policy: None,
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

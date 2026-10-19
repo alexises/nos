@@ -128,6 +128,23 @@ broadcast-domain bd100: vni 10100, bridge br1, vxlan vx10100
 
 From then on, every MAC address the bridge learns on a local port is advertised as a MAC route (Type 2), and withdrawn when the bridge forgets it.
 
+### Filter received EVPN routes (trust model)
+
+By default every EVPN route a peer sends is accepted and stored; `nos-fdbd` then keeps only those carrying one of the domain's import route targets. To drop routes earlier, point the peer-group at a routing policy:
+
+```
+edge-1(t1/bgp-instance:r1/peer-group:pg-evpn)> set evpn-import-policy only-tenant-a
+```
+
+- The policy is an ordinary [RPL](routing-policy.md) policy. Match route targets with `this.bgp.extended_communities.contains(<rt>)`; a two-octet-AS route target `65000:10000` is the extended community `0:2:279172874250000` (the AS times 2^32 plus the number). Aliases and groups work too.
+- Example policy: `if this.bgp.extended_communities.contains(0:2:279172874250000):` then `accept`, else `reject`.
+- Applies to Type-1, 2, 3 and 5. A rejected route is treated like a withdrawal: it is not stored, not given to `nos-fdbd`, and `nos-bgpd` logs `evpn route rejected by import policy`.
+- Type-4 (Ethernet Segment) routes are never filtered: their route target is the ES-Import one, so an RT match would reject all of them.
+- Only accept/reject counts; attribute rewrites are ignored. `this.prefix` is the Type-5 prefix, `0.0.0.0/0` for the other types.
+- Unset means accept everything (unlike `import-policy`, which defaults to `deny-all`), so existing EVPN setups keep working.
+- Changing the policy restarts the peer's sessions; routes stored from before are re-checked against the new policy.
+- MAC mobility (RFC 7432 section 15) is the defense against a peer claiming a MAC you own: `nos-bgpd` arbitrates by sequence number, a rejected Type-2 never takes part, and a MAC that moves too often is frozen on its last holder.
+
 ### Also advertise IP addresses
 
 Two optional rules add IP addresses to the MAC routes. Both must name the same BGP instance as `redistribute from mac`:

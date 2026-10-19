@@ -45,7 +45,7 @@ Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-v
 
 ## Aggregation (#78)
 
-All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; the aggregate is a local candidate in `BgpRib.aggregated`, next-hop-self and never pushed to `nos-ribd` (no discard route); a route-server client's `propagate_add_path` view is untouched. `ATOMIC_AGGREGATE`/`AGGREGATOR` pass through verbatim; RPL cannot read them.
+All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; the aggregate is a local candidate in `BgpRib.aggregated`, next-hop-self and never pushed to `nos-ribd` (no discard route).
 
 ## Malformed UPDATE (RFC 7606)
 
@@ -110,10 +110,10 @@ Well-known values get no suppression; the RFC 4360 transitive bit is enforced on
 
 ## EVPN and MAC mobility
 
-- `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); import policy and best path do not apply (RFC 7432 §15 aside).
+- `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); best path does not apply (RFC 7432 §15 aside). `evpn_import_policy` (#502, `None` = accept all) gates Type-1/2/3/5 in `learn_evpn` before mobility (reject = withdraw, Type-4 exempt).
 - MAC mobility has **no withdraw**: a sequence number only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; otherwise PEs on one segment bump each other into a frozen duplicate.
-- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`); Route-Target filtering is the consumer's.
+- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`).
 
 ## Backup path, multipath (#70)
 

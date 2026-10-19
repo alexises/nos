@@ -219,6 +219,7 @@ A list field (the AS path, the cluster list and the communities) cannot be used 
   - a standard community (RFC 1997) is `<AS>:<value>`, each 0 to 65535: `65001:100`;
   - an extended community (RFC 4360) is `<type>:<subtype>:<value>`, with type and subtype 0 to 255 and a 48-bit value: `0:2:100`;
   - a large community (RFC 8092) is `<global>:<local1>:<local2>`, each 0 to 4294967295: `65001:1:1`.
+- A route target for an EVPN import policy is an extended community: `65000:10000` is `0:2:279172874250000`. See [Filter received EVPN routes](evpn-vxlan.md#filter-received-evpn-routes-trust-model).
 - Strings in double quotes, used only as the regular expression of `.matches(…)`.
 - `origin.igp`, `origin.egp`, `origin.incomplete`, `rpki.valid`, `rpki.invalid`, `rpki.not_found`, and `self` (only as a next hop).
 - A bare name refers to a prefix list, community alias or group, or AS-path list, depending on where it is used. A name that is not defined is a compile error.

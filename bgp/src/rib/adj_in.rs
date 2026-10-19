@@ -21,9 +21,53 @@ pub(super) fn evpn_mac_key(nlri: &EvpnNlri) -> Option<(u32, [u8; 6], [u8; 10])> 
     }
 }
 
+/// Runs the peer's EVPN import policy over one route (accept/reject only:
+/// rewrites are ignored). Type-4 and unknown types bypass it: the ES-Import
+/// RT lives on Type-4 only, so an RT match would reject every one.
+pub(super) fn evpn_rejected(
+    policy: &CompiledPolicy,
+    route: &EvpnRoute,
+    from: IpAddr,
+    peer_as: u32,
+    ibgp: bool,
+) -> bool {
+    let prefix = match &route.nlri {
+        EvpnNlri::EthernetSegment { .. } | EvpnNlri::Unknown { .. } => return false,
+        EvpnNlri::IpPrefix { prefix, .. } => *prefix,
+        // ponytail: Type-1/2/3 have no prefix; scripts see 0.0.0.0/0.
+        _ => IpNet::V4(ipnet::Ipv4Net::default()),
+    };
+    let input = nos_rpl::Input {
+        prefix,
+        bgp: nos_rpl::BgpInput {
+            origin: nos_rpl::Origin::Igp,
+            as_path: &[],
+            local_pref: DEFAULT_LOCAL_PREF,
+            med: None,
+            next_hop: Some(route.next_hop),
+            learned_via_ibgp: ibgp,
+            router_id: None,
+            originator_id: None,
+            cluster_list: &[],
+            peer: Some(from),
+            peer_as,
+            communities: &[],
+            extended_communities: &route.extended_communities,
+            large_communities: &[],
+            validation_state: nos_rpl::ValidationState::NotFound,
+        },
+    };
+    !matches!(
+        nos_rpl::vm::run(policy, &input),
+        nos_rpl::Verdict::Accept { .. }
+    )
+}
+
 /// Stores one `MP_REACH_NLRI` batch's EVPN routes in a peer's EVPN Adj-RIB-In,
 /// logging only routes that are new or changed, and registers each Type-2's
-/// `(VNI, MAC)` as an RFC 7432 §15 mobility candidate.
+/// `(VNI, MAC)` as an RFC 7432 §15 mobility candidate. A route the peer's
+/// EVPN import policy (`ctx`: policy, peer AS, iBGP flag; `None` accepts
+/// all) rejects is treated as a withdrawal and never reaches mobility.
 pub(super) fn learn_evpn(
     table: &mut HashMap<EvpnNlri, EvpnRoute>,
     mac_mobility: &mut MacMobility,
@@ -31,6 +75,7 @@ pub(super) fn learn_evpn(
     mp: &message::MpReachNlri,
     extended_communities: &[u64],
     pmsi: Option<message::Pmsi>,
+    ctx: Option<(&CompiledPolicy, u32, bool)>,
 ) {
     for nlri in &mp.evpn {
         let route = EvpnRoute {
@@ -39,6 +84,13 @@ pub(super) fn learn_evpn(
             pmsi_vni: pmsi.map(|p| p.vni),
             extended_communities: extended_communities.to_vec(),
         };
+        if let Some((policy, peer_as, ibgp)) = ctx
+            && evpn_rejected(policy, &route, from, peer_as, ibgp)
+        {
+            table.remove(&nlri.route_key());
+            warn!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route rejected by import policy");
+            continue;
+        }
         if let Some((vni, mac, esi)) = evpn_mac_key(nlri) {
             let (seq, sticky) = extended_communities
                 .iter()
@@ -538,6 +590,9 @@ impl BgpRib {
                     mp,
                     &attrs.extended_communities,
                     attrs.pmsi,
+                    self.evpn_import
+                        .get(&from)
+                        .map(|p| (p.as_ref(), peer_as, remote_is_ibgp)),
                 );
                 evpn_recheck.extend(
                     mp.evpn
