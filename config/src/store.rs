@@ -211,7 +211,7 @@ impl ConfigStore {
         &self,
         name: &str,
         if_match: Option<u64>,
-    ) -> Result<(), ConfigError> {
+    ) -> Result<Vec<String>, ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get(name)
@@ -225,6 +225,7 @@ impl ConfigStore {
         }
         let mut config = txn.config.clone();
         sync_routing_table_refs(&mut config);
+        let warnings = crate::warnings::commit_warnings(&config);
         txs.remove(name);
         drop(txs);
 
@@ -235,7 +236,7 @@ impl ConfigStore {
         info!(transaction = %name, "config committed");
         // Ignore send errors — no active receivers is not a failure.
         let _ = self.0.tx.send(Arc::new(CommitUpdate { config, diff }));
-        Ok(())
+        Ok(warnings)
     }
 
     /// Swaps `user`'s password hash `old` for `new` in the running config

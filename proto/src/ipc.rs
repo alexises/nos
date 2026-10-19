@@ -141,8 +141,12 @@ pub enum Event {
     /// `ApplyOp`, or `GetTransaction`.
     Transaction(TransactionSnapshot),
     /// A named transaction was successfully committed, in reply to
-    /// `CommitTransaction`.
-    Committed,
+    /// `CommitTransaction` (or a password-hash upgrade, with no warnings).
+    /// `warnings` are non-blocking advice about the committed config (#501).
+    Committed {
+        /// Non-blocking advice about the committed config.
+        warnings: Vec<String>,
+    },
     /// A named transaction was successfully discarded, in reply to
     /// `DiscardTransaction`.
     Discarded,

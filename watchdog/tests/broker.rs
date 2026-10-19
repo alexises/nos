@@ -105,7 +105,7 @@ fn stub_reply(users: &Mutex<Vec<User>>, request: Request) -> Option<Event> {
             {
                 Some(u) => {
                     u.password = new;
-                    Event::Committed
+                    Event::Committed { warnings: vec![] }
                 }
                 None => Event::Error("stale".into()),
             }

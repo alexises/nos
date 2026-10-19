@@ -297,7 +297,10 @@ async fn transaction_lifecycle_over_the_config_tree() {
     assert!(d["bgp_instances"].is_array());
 
     let (s, v) = send(app, Method::POST, "/v1/transactions/t1/commit", None).await;
-    assert_eq!((s, v), (StatusCode::OK, json!({ "committed": "t1" })));
+    assert_eq!(
+        (s, v),
+        (StatusCode::OK, json!({ "committed": "t1", "warnings": [] }))
+    );
     let (_, running) = send(app, Method::GET, "/v1/config", None).await;
     assert_eq!(running["hostname"], "rest-host");
     assert_eq!(running["bgp_instances"][0]["asn"], 65001);

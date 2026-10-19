@@ -22,7 +22,7 @@ Server → Client:
   Event::Error(String)              error from the daemon
   Event::Saved                      confirms the running config was persisted (reply to Save)
   Event::Transaction(Snapshot)      a named transaction's current state (reply to Open/Apply/Get/SetTransactionPath), incl. its generation (0 at open, +1 per edit — nos-restd's ETag)
-  Event::Committed                  confirms a transaction was committed
+  Event::Committed { warnings }     confirms a commit, with non-blocking advice (#501)
   Event::Discarded                  confirms a transaction was discarded
   Event::Description(CommandDoc)    one operation's documentation (reply to Describe)
 ```

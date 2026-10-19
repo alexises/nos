@@ -85,7 +85,7 @@ pub async fn upgrade_password_hash(
             })
             .await?;
         match reader.next().await {
-            Some(Ok(Event::Committed)) => Ok(()),
+            Some(Ok(Event::Committed { .. })) => Ok(()),
             Some(Ok(other)) => Err(io::Error::other(format!("{other:?}"))),
             Some(Err(e)) => Err(e),
             None => Err(io::ErrorKind::UnexpectedEof.into()),

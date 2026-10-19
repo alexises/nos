@@ -661,7 +661,10 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
         })
         .await
         .unwrap();
-    assert!(matches!(next_event(&mut reader).await, Event::Committed));
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Committed { warnings } if warnings.is_empty()
+    ));
 
     // Fresh connection, one-shot Get, matching the CLI's actual usage pattern.
     let (mut reader2, mut writer2) = connect(&sock_path).await;
@@ -931,7 +934,10 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
         })
         .await
         .unwrap();
-    assert!(matches!(next_event(&mut reader_b).await, Event::Committed));
+    assert!(matches!(
+        next_event(&mut reader_b).await,
+        Event::Committed { .. }
+    ));
 
     // Connection A must receive the broadcast update.
     let update = tokio::time::timeout(Duration::from_millis(200), reader_a.next())
@@ -1000,7 +1006,10 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
         })
         .await
         .unwrap();
-    assert!(matches!(next_event(&mut reader_c).await, Event::Committed));
+    assert!(matches!(
+        next_event(&mut reader_c).await,
+        Event::Committed { .. }
+    ));
 
     // Both subscribers — every connected client — must see the new hostname.
     for reader in [&mut reader_a, &mut reader_b] {
@@ -1069,7 +1078,10 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
         })
         .await
         .unwrap();
-    assert!(matches!(next_event(&mut reader).await, Event::Committed));
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Committed { .. }
+    ));
 
     let (mut reader2, mut writer2) = connect(&path).await;
     writer2.send(Request::Get).await.unwrap();

@@ -169,7 +169,11 @@ pub async fn get_transaction(
 }
 
 /// Validates and commits a named transaction, replacing the running config.
-pub async fn commit_transaction(socket_path: &Path, name: &str) -> Result<(), ClientError> {
+/// Returns the daemon's commit warnings.
+pub async fn commit_transaction(
+    socket_path: &Path,
+    name: &str,
+) -> Result<Vec<String>, ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;
     writer
         .send(Request::CommitTransaction {
@@ -179,7 +183,7 @@ pub async fn commit_transaction(socket_path: &Path, name: &str) -> Result<(), Cl
         })
         .await?;
     match reader.next().await {
-        Some(Ok(Event::Committed)) => Ok(()),
+        Some(Ok(Event::Committed { warnings })) => Ok(warnings),
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
         Some(Ok(_)) => Err(ClientError::Daemon(
             "unexpected event in reply to CommitTransaction".to_string(),

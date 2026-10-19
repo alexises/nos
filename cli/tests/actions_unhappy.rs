@@ -209,7 +209,7 @@ fn fake_configd(path: &Path, kind: Configd) {
             Request::CommitTransaction { name, .. } if named(&name) || name == "refused" => {
                 Event::Error("invalid".to_string())
             }
-            Request::CommitTransaction { .. } => Event::Committed,
+            Request::CommitTransaction { .. } => Event::Committed { warnings: vec![] },
             Request::DiscardTransaction { name, .. } if named(&name) => {
                 Event::Error("no".to_string())
             }

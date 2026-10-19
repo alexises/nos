@@ -328,7 +328,7 @@ async fn commit_transaction_returns_ok_on_success() {
             name: "demo".to_string(),
             if_match: None,
         },
-        Event::Committed,
+        Event::Committed { warnings: vec![] },
     ));
 
     commit_transaction(&path, "demo").await.unwrap();

@@ -139,9 +139,12 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
             if_match,
             actor,
         } => match store.commit_transaction(&name, if_match).await {
-            Ok(()) => {
+            Ok(warnings) => {
                 info!(transaction = ?name, actor = ?effective_actor(caller, actor), "config commit audit");
-                Event::Committed
+                for w in &warnings {
+                    warn!(transaction = ?name, warning = %w, "commit warning");
+                }
+                Event::Committed { warnings }
             }
             Err(e) => {
                 warn!(transaction = %name, error = %e, "commit failed");
@@ -184,7 +187,7 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
         }
         Request::UpgradePasswordHash { user, old, new } => {
             match store.upgrade_password_hash(&user, &old, new).await {
-                Ok(()) => Event::Committed,
+                Ok(()) => Event::Committed { warnings: vec![] },
                 Err(e) => {
                     debug!(user = ?user, error = %e, "password hash upgrade refused");
                     Event::Error(e.to_string())
