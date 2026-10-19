@@ -139,11 +139,19 @@ edge-1(t1/bgp-instance:r1/peer-group:pg-evpn)> set evpn-import-policy only-tenan
 - The policy is an ordinary [RPL](routing-policy.md) policy. Match route targets with `this.bgp.extended_communities.contains(<rt>)`; a two-octet-AS route target `65000:10000` is the extended community `0:2:279172874250000` (the AS times 2^32 plus the number). Aliases and groups work too.
 - Example policy: `if this.bgp.extended_communities.contains(0:2:279172874250000):` then `accept`, else `reject`.
 - Applies to Type-1, 2, 3 and 5. A rejected route is treated like a withdrawal: it is not stored, not given to `nos-fdbd`, and `nos-bgpd` logs `evpn route rejected by import policy`.
-- Type-4 (Ethernet Segment) routes are never filtered: their route target is the ES-Import one, so an RT match would reject all of them.
+- Type-4 (Ethernet Segment) routes are never filtered by this policy: their route target is the ES-Import one, so an RT match would reject all of them. `nos-fdbd` applies the ES-Import check itself (below).
 - Only accept/reject counts; attribute rewrites are ignored. `this.prefix` is the Type-5 prefix, `0.0.0.0/0` for the other types.
 - Unset means accept everything (unlike `import-policy`, which defaults to `deny-all`), so existing EVPN setups keep working.
 - Changing the policy restarts the peer's sessions; routes stored from before are re-checked against the new policy.
 - MAC mobility (RFC 7432 section 15) is the defense against a peer claiming a MAC you own: `nos-bgpd` arbitrates by sequence number, a rejected Type-2 never takes part, and a MAC that moves too often is frozen on its last holder.
+
+### Limit what a peer can install
+
+- `set max-remote-macs <n>` on the broadcast domain (at least 1, needs a `vni`; `delete` lifts it) caps the remote MAC entries `nos-fdbd` installs from received Type-2 routes.
+- Beyond the cap the lowest MAC addresses win, whatever order the routes arrived in: a lower MAC arriving later evicts a higher one. `nos-fdbd` logs `remote mac ceiling reached` once per crossing.
+- Only remote MAC entries count: not neighbours (IP bindings), flood entries, or MACs pinned to one of our own segments.
+- A remote Type-2 for a MAC learned locally is still installed (bgpd's MAC mobility arbitrates and freezes a MAC that moves too often); the cap bounds the damage a peer can do.
+- Type-1/Type-4 ES check: `nos-fdbd` counts a Type-4 only for a segment this domain is attached to and only when it carries that segment's ES-Import route target (RFC 7432 section 7.6). A foreign Type-4 cannot win the DF election.
 
 ### Also advertise IP addresses
 
@@ -543,7 +551,7 @@ A `PortAggregate` with an `esi` (config: `set port-aggregate <n> esi <10 hex byt
 
 - **Aliasing** (§8.4.1.1, receiver side, all-active only): a remote MAC on a segment we are *not* attached to is reached through every PE that advertises **both** the segment (per-ES A-D) and this domain's EVI (per-EVI A-D), provided there are at least two, the MAC's own PE is one of them and they all share our VTEP's address family (`alias_group`: the kernel refuses a mixed-family group, or one whose family differs from the VXLAN device's `local` — a mixed-family segment keeps the single-PE entry). Those PEs become an **FDB nexthop group** (`ip nexthop add id N via <vtep> fdb`, `… group A/B fdb`, then the FDB entry with `NDA_NH_ID`) and the kernel balances flows over it; otherwise the plain single-PE entry is used. The group shrinks when a PE's per-ES or per-EVI A-D goes (`remote mac group installed|removed … vteps=`, `show fdb` lists all `vteps` of a MAC, `(aliased)` in the CLI). Two Type-2 routes for one MAC from two PEs want the *same* group item, so they neither reinstall nor flap each other. The FDB entry has to be **deleted before it changes form** (the kernel keeps the old form on a `replace`), which `set_remote_mac_group` and `sync_key`'s uninstall-then-install order both do. No `netlink-packet-route`/`rtnetlink` support exists for nexthops, so `driver/nexthop.rs` hand-encodes `RTM_NEWNEXTHOP`/`RTM_DELNEXTHOP` (a unit test pins the byte layout) and sends them on a plain `netlink-sys` socket from `spawn_blocking`. Ids are `vni << 8 | slot` so the per-domain `nos-fdbd` processes sharing a netns never collide; `ponytail:` 255 nexthops + groups per domain, deleted only with the domain (`remove_vxlan`). Gateways are IPv4 (`AF_INET`, 4 octets) or IPv6 (`AF_INET6`, 16 octets), so aliasing works over an IPv6 underlay too: `nos-e2e evpn-v6` (three PEs, labelled IPv6 VTEPs, real forwarding) proves it, the IPv6 VXLAN device in a VRF and EVPN over IPv6 sessions with it; `net.ipv4.udp_l3mdev_accept` also governs udp6 sockets. **Spike (2026-09-21, kernel 7.2):** an FDB nexthop group forwards through a VXLAN whose underlay device is in a VRF — the `via`/`NDA_IFINDEX` problem does not recur, since the nexthop path takes the VXLAN device's underlay — so no operator prerequisite beyond the existing `udp_l3mdev_accept`.
 
-Ceilings (`ponytail:`): no ES-Import filtering; local bias ceilings below. `nos-e2e evpn-esi` proves the control plane, the Type-1/mass-withdrawal behaviour and the kernel port flags and tc filters, `evpn-single-active` the single-active state machine and failover with real traffic, `evpn-dataplane` and `evpn-v6` all-active forwarding and local bias with real broadcasts (below).
+Ceilings (`ponytail:`): the remote-MAC ceiling is recomputed over all received routes on every change; local bias ceilings below. `nos-e2e evpn-esi` proves the control plane, the Type-1/mass-withdrawal behaviour and the kernel port flags and tc filters, `evpn-single-active` the single-active state machine and failover with real traffic, `evpn-dataplane` and `evpn-v6` all-active forwarding and local bias with real broadcasts (below).
 
 #### Local bias (RFC 8365 §8.3.1, #24)
 

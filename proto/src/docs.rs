@@ -209,6 +209,8 @@ topics! {
     BroadcastDomainConnectedRedistribute,
     /// `BroadcastDomain.neigh_suppress`
     BroadcastDomainNeighSuppress,
+    /// `BroadcastDomain.max_remote_macs`
+    BroadcastDomainMaxRemoteMacs,
     /// `Config.switching_profiles`
     SwitchingProfile,
     /// `SwitchingProfile.members`

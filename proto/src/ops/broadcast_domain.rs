@@ -176,6 +176,13 @@ pub enum BroadcastDomainOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// `max-remote-macs`: ceiling on installed remote MACs (`None` clears it).
+    SetMaxRemoteMacs {
+        /// Name of the broadcast domain this op targets.
+        name: String,
+        /// The ceiling, or `None` for unlimited.
+        max: Option<u32>,
+    },
 }
 
 impl BroadcastDomainOp {
@@ -206,7 +213,8 @@ impl BroadcastDomainOp {
             | BroadcastDomainOp::ClearArpRedistribute { .. }
             | BroadcastDomainOp::SetConnectedRedistribute { .. }
             | BroadcastDomainOp::ClearConnectedRedistribute { .. }
-            | BroadcastDomainOp::SetNeighSuppress { .. } => self.apply_part2(config),
+            | BroadcastDomainOp::SetNeighSuppress { .. }
+            | BroadcastDomainOp::SetMaxRemoteMacs { .. } => self.apply_part2(config),
         }
     }
 
@@ -231,6 +239,7 @@ impl BroadcastDomainOp {
                         arp_redistribute: None,
                         connected_redistribute: None,
                         neigh_suppress: false,
+                        max_remote_macs: None,
                         stp_instance: None,
                         stp_priority: None,
                         stp_hello_time: None,
@@ -402,6 +411,10 @@ impl BroadcastDomainOp {
                 find_domain_mut(config, name)?.neigh_suppress = *enabled;
                 Ok(())
             }
+            BroadcastDomainOp::SetMaxRemoteMacs { name, max } => {
+                find_domain_mut(config, name)?.max_remote_macs = *max;
+                Ok(())
+            }
             _ => unreachable!("routed by `apply`"),
         }
     }
@@ -438,6 +451,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            max_remote_macs: None,
             stp_instance: None,
             stp_priority: None,
             stp_hello_time: None,
@@ -464,6 +478,22 @@ mod tests {
         assert!(cfg.broadcast_domains[0].neigh_suppress);
         op(false).apply(&mut cfg).unwrap();
         assert!(!cfg.broadcast_domains[0].neigh_suppress);
+    }
+
+    #[test]
+    fn set_max_remote_macs_sets_and_clears() {
+        let mut cfg = Config {
+            broadcast_domains: vec![domain("bd1")],
+            ..Default::default()
+        };
+        let op = |max| BroadcastDomainOp::SetMaxRemoteMacs {
+            name: "bd1".to_string(),
+            max,
+        };
+        op(Some(5)).apply(&mut cfg).unwrap();
+        assert_eq!(cfg.broadcast_domains[0].max_remote_macs, Some(5));
+        op(None).apply(&mut cfg).unwrap();
+        assert_eq!(cfg.broadcast_domains[0].max_remote_macs, None);
     }
 
     #[test]

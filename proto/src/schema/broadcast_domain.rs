@@ -120,6 +120,14 @@ pub struct BroadcastDomain {
     #[cli(topic = BroadcastDomainNeighSuppress, words = "neigh-suppress")]
     pub neigh_suppress: bool,
 
+    /// Ceiling on the remote MAC entries `nos-fdbd` installs for this domain
+    /// from received EVPN routes; beyond it the lowest MAC addresses win.
+    /// `None`: unlimited. Requires a `vni`.
+    #[serde(default)]
+    #[garde(range(min = 1))]
+    #[cli(topic = BroadcastDomainMaxRemoteMacs, words = "max-remote-macs")]
+    pub max_remote_macs: Option<u32>,
+
     /// The MST instance (`spanning-tree mst-instance`) this domain's VLAN
     /// belongs to under `mode mstp`. `None`: the CIST. Inert until `nos-stpd`.
     #[serde(default)]
@@ -241,10 +249,11 @@ pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain], ctx: &Config)
                 || d.mac_redistribute.is_some()
                 || d.arp_redistribute.is_some()
                 || d.connected_redistribute.is_some()
-                || d.neigh_suppress)
+                || d.neigh_suppress
+                || d.max_remote_macs.is_some())
         {
             return Err(garde::Error::new(
-                "rd, route-targets, vtep-source, redistribute and neigh-suppress require a vni on the same broadcast domain",
+                "rd, route-targets, vtep-source, redistribute, neigh-suppress and max-remote-macs require a vni on the same broadcast domain",
             ));
         }
         if d.mac_redistribute.is_some() && (d.rd.is_none() || d.vtep_source.is_none()) {
@@ -311,6 +320,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            max_remote_macs: None,
             stp_instance: None,
             stp_priority: None,
             stp_hello_time: None,

@@ -158,6 +158,7 @@ async fn resolve(cfg: &Config, d: &BroadcastDomain, watchdog_socket: &Path) -> O
         },
         es_ports,
         neigh_suppress: d.neigh_suppress,
+        max_remote_macs: d.max_remote_macs,
         irb,
     })
 }

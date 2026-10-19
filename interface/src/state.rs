@@ -967,6 +967,7 @@ mod tests {
                 arp_redistribute: None,
                 connected_redistribute: None,
                 neigh_suppress: false,
+                max_remote_macs: None,
                 ..Default::default()
             },
             nos_proto::BroadcastDomain {
@@ -984,6 +985,7 @@ mod tests {
                 arp_redistribute: None,
                 connected_redistribute: None,
                 neigh_suppress: false,
+                max_remote_macs: None,
                 ..Default::default()
             },
         ];
@@ -1020,6 +1022,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            max_remote_macs: None,
             ..Default::default()
         }];
         build_from_config(&config, &driver, &Interfaces::new()).await;
@@ -1055,6 +1058,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            max_remote_macs: None,
             ..Default::default()
         }];
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
@@ -1089,6 +1093,7 @@ mod tests {
             arp_redistribute: None,
             connected_redistribute: None,
             neigh_suppress: false,
+            max_remote_macs: None,
             ..Default::default()
         }];
         let previous = build_from_config(&config_with_domain, &driver, &Interfaces::new()).await;

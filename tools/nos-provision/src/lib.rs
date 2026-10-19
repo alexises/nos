@@ -746,6 +746,10 @@ pub struct Args {
     #[arg(long)]
     pub evpn_neigh_suppress: Option<bool>,
 
+    /// `max-remote-macs` on `--broadcast-domain`: the ceiling, `0` clears it.
+    #[arg(long)]
+    pub evpn_max_remote_macs: Option<u32>,
+
     /// EVPN IP-VRF: the routing table (ensured) `--l3vni*` apply to, with
     /// `--bgp-instance` as its underlay instance.
     #[arg(long, default_value = "tenant")]
@@ -1415,7 +1419,8 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.evpn_redistribute_bgp.is_some()
         || args.evpn_redistribute_arp_bgp.is_some()
         || args.evpn_redistribute_connected_bgp.is_some()
-        || args.evpn_neigh_suppress.is_some();
+        || args.evpn_neigh_suppress.is_some()
+        || args.evpn_max_remote_macs.is_some();
     if args.evpn_clear && setting {
         bail!("--evpn-clear is mutually exclusive with the other --evpn-* setting flags");
     }
@@ -1438,6 +1443,10 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(op(BroadcastDomainOp::SetNeighSuppress {
             name: name(),
             enabled: false,
+        }));
+        ops.push(op(BroadcastDomainOp::SetMaxRemoteMacs {
+            name: name(),
+            max: None,
         }));
         ops.push(op(BroadcastDomainOp::ClearArpRedistribute { name: name() }));
         ops.push(op(BroadcastDomainOp::ClearConnectedRedistribute {
@@ -1508,6 +1517,12 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(op(BroadcastDomainOp::SetNeighSuppress {
             name: name(),
             enabled,
+        }));
+    }
+    if let Some(n) = args.evpn_max_remote_macs {
+        ops.push(op(BroadcastDomainOp::SetMaxRemoteMacs {
+            name: name(),
+            max: (n > 0).then_some(n),
         }));
     }
     Ok(ops)
@@ -3795,6 +3810,19 @@ fn parse_ospf_crypto_key(spec: &str) -> anyhow::Result<OspfCryptoKey> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn evpn_max_remote_macs_sets_and_zero_clears() {
+        for (n, max) in [("7", Some(7)), ("0", None)] {
+            let o = ops(&["--broadcast-domain", "bd1", "--evpn-max-remote-macs", n]).unwrap();
+            assert!(o.contains(&ConfigOp::BroadcastDomain(
+                BroadcastDomainOp::SetMaxRemoteMacs {
+                    name: "bd1".into(),
+                    max
+                }
+            )));
+        }
+    }
+
     /// `build_ops` over the required base flags plus `extra`.
     fn ops(extra: &[&str]) -> anyhow::Result<Vec<ConfigOp>> {
         let base = [
@@ -4557,6 +4585,13 @@ mod tests {
             &ConfigOp::BroadcastDomain(BroadcastDomainOp::SetNeighSuppress {
                 name: "bd-svi".into(),
                 enabled: false,
+            }),
+        );
+        has(
+            &all,
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::SetMaxRemoteMacs {
+                name: "bd-svi".into(),
+                max: None,
             }),
         );
         has(
