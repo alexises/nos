@@ -21,6 +21,7 @@ fn handle_hello_matches_the_e_bit_to_the_stub_flag() {
             &hello,
             &mut Instant::now(),
             false,
+            &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );
         assert_eq!(status.borrow().neighbors.contains_key(&peer), accepted);
     }
@@ -56,6 +57,7 @@ fn handle_hello_matches_the_n_bit_to_the_nssa_flag() {
             &hello,
             &mut Instant::now(),
             false,
+            &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );
         assert_eq!(
             status.borrow().neighbors.contains_key(&peer),

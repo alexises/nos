@@ -37,7 +37,7 @@ use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::bfd;
 use crate::bfd_client::{Host, Target, Want};
@@ -296,6 +296,16 @@ fn accepts_packet(cfg: &LinkConfig, source: Ipv4Addr, data: &[u8]) -> bool {
     }
 }
 
+/// RFC 2328 §8.2: a packet's source must be on the receiving link's subnet.
+/// A virtual link is already pinned to its endpoint by `accepts_packet`, and a
+/// point-to-point link may be unnumbered (`/32` peers share no subnet).
+/// Anything else off-subnet is dropped (#394).
+fn source_on_link(cfg: &LinkConfig, source: Ipv4Addr) -> bool {
+    cfg.virtual_link.is_some()
+        || cfg.network_type == NetworkType::PointToPoint
+        || local_subnet(cfg).is_some_and(|n| n.contains(&source))
+}
+
 /// One link's resolved OSPF authentication — `OspfProfile.auth` translated
 /// into `packet.rs`'s own key-material shape.
 #[derive(Debug, Clone, PartialEq)]
@@ -546,6 +556,7 @@ pub async fn run(
     dead_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let wait_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
     let mut waiting = is_broadcast;
+    let mut warn_limiter = nos_ospf_common::ratelimit::WarnLimiter::default();
 
     let mut rxmt_sweep = tokio::time::interval(RXMT_INTERVAL);
     rxmt_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -583,6 +594,9 @@ pub async fn run(
             result = socket.recv_packet() => {
                 match result {
                     Ok((source, data)) if !accepts_packet(&cfg, source, &data) => {}
+                    Ok((source, _)) if !source_on_link(&cfg, source) => {
+                        debug!(link = %cfg.attach_point, source = %source, "ospf packet from off-link source, dropping");
+                    }
                     Ok((source, data)) => {
                         let policy = cfg.auth.as_policy(source);
                         match packet::decode(&data, &policy) {
@@ -600,7 +614,7 @@ pub async fn run(
                                     OspfPacket::Hello(hello) => {
                                         let left_waiting = handle_hello(
                                             &cfg, local_router_id, &status, source, &hello,
-                                            &mut p2p_dead_deadline, waiting,
+                                            &mut p2p_dead_deadline, waiting, &mut warn_limiter,
                                         );
                                         if left_waiting {
                                             waiting = false;

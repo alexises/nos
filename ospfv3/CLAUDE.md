@@ -24,6 +24,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Graceful restart** (RFC 5187): same shape as v2 minus the IP-address TLV (`lsa::LSA_TYPE_GRACE` `0x000B`); only SIGTERM announces; nothing is aged on shutdown, the restarter resyncs cold.
 - **DBD pagination**: `exchange::mtu_based_max_headers(LinkConfig.mtu)` (IPv6 40 + OSPFv3 16 + DBD 12 header bytes); `Ospfv3Profile.mtu` overrides the interface MTU (`reconcile::resolve_effective_mtu`); `--dbd-max-headers` is test-only.
 - **Redistribution**: `Ospfv3Request::RedistributeRoutes` is `ribd`'s only (`server::allowed`); `reconcile::resolve_redistribute_policy` is a `ponytail:` copy of v2's.
+- **Receive hardening** (#394): non-link-local sources are dropped in `link::run`; same neighbor cap and `warn_limited!` as v2.
 - **Not built**: stub areas/NSSA, area ranges, virtual links, RFC 5838 multi-AF, RFC 8362 sparse mode; list in `docs/protocols/ospfv3.md`.
 - `reconcile_tests.rs` (#343) drives `resync`/`run` against `nos-test-support`'s fakes and a real `LinkManager` over `link::tests::wire`; attach points use `nostst0`, a device no host has, so an ungated link exercises the "not present yet" branch. The `cfg(test)` getters on `LinkManager` (`loopback_prefixes`, `bfd_wanted`, ...) are its read side.
 - Verify kernel, IPC or wire changes with the matching `nos-e2e` phase (`ospfv3*`, `docs/e2e-phases.md`); `link::tests::abr_and_asbr_reach_across_areas` runs three routers over two areas on the in-memory wire.

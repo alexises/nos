@@ -343,6 +343,7 @@ pub async fn run(
     let wait_deadline =
         Instant::now() + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
     let mut waiting = is_broadcast;
+    let mut warn_limiter = nos_ospf_common::ratelimit::WarnLimiter::default();
 
     let mut rxmt_sweep = tokio::time::interval(RXMT_INTERVAL);
     rxmt_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -361,6 +362,7 @@ pub async fn run(
             }
             result = socket.recv_packet() => {
                 match result {
+                    Ok((source, _)) if drops_non_link_local(&cfg, source) => {}
                     Ok((source, data)) => {
                         // Before the trailer check: another instance's packets on a
                         // shared link are routine and may use other keys (RFC 5838).
@@ -395,7 +397,7 @@ pub async fn run(
                                     OspfPacket::Hello(hello) => {
                                         let left_waiting = handle_hello(
                                             &cfg, local_router_id, &status, source, &hello,
-                                            &mut p2p_dead_deadline, waiting,
+                                            &mut p2p_dead_deadline, waiting, &mut warn_limiter,
                                         );
                                         if left_waiting {
                                             waiting = false;
@@ -537,6 +539,30 @@ fn send_hello(
     }
 }
 
+/// RFC 5340 §4.2.2: every packet is sent from a link-local address; anything
+/// else is off-link or spoofed and is dropped (`debug!` only, #394).
+fn drops_non_link_local(cfg: &LinkConfig, source: Ipv6Addr) -> bool {
+    let drop = !source.is_unicast_link_local();
+    if drop {
+        debug!(link = %cfg.attach_point, source = %source, "ospfv3 packet from non-link-local source, dropping");
+    }
+    drop
+}
+
+/// `warn!` through the link's `WarnLimiter` (#394); a line that follows
+/// dropped ones is preceded by a count of them.
+macro_rules! warn_limited {
+    ($limiter:expr, $($arg:tt)+) => {
+        if $limiter.allow(Instant::now().into_std()) {
+            let suppressed = $limiter.take_suppressed();
+            if suppressed > 0 {
+                warn!(suppressed, "ospfv3 hello warnings were rate limited");
+            }
+            warn!($($arg)+);
+        }
+    };
+}
+
 /// Returns whether this Hello caused a broadcast link to leave `Waiting`
 /// early — mirrors `ospf::link::rx::handle_hello`'s shape, `source`/`address`
 /// now `Ipv6Addr`, and records the neighbor's own `interface_id` from the
@@ -550,13 +576,32 @@ fn handle_hello(
     hello: &packet::HelloPacket,
     p2p_dead_deadline: &mut Instant,
     waiting: bool,
+    limiter: &mut nos_ospf_common::ratelimit::WarnLimiter,
 ) -> bool {
     if hello.area_id != cfg.area_id {
-        warn!(
+        warn_limited!(
+            limiter,
             link = %cfg.attach_point, area = %hello.area_id, expected = %cfg.area_id,
             "dropping ospfv3 hello with mismatched area"
         );
         return false;
+    }
+
+    // A segment peer cycling router-ids must not grow the table without bound
+    // (#394); known neighbors keep refreshing at the cap.
+    {
+        let st = status.borrow();
+        if !st.neighbors.contains_key(&hello.router_id)
+            && st.neighbors.len() >= nos_ospf_common::ratelimit::MAX_NEIGHBORS_PER_LINK
+        {
+            drop(st);
+            warn_limited!(
+                limiter,
+                link = %cfg.attach_point, neighbor = %hello.router_id,
+                "ospfv3 neighbor limit reached, dropping hello"
+            );
+            return false;
+        }
     }
 
     let saw_self = hello.neighbors.contains(&local_router_id);
@@ -2755,6 +2800,55 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn non_link_local_sources_are_dropped() {
+        let cfg = link("eth0.0", 10);
+        assert!(drops_non_link_local(&cfg, "2001:db8::2".parse().unwrap()));
+        assert!(!drops_non_link_local(&cfg, "fe80::2".parse().unwrap()));
+    }
+
+    #[test]
+    fn handle_hello_caps_neighbors_but_keeps_refreshing_known_ones() {
+        use nos_ospf_common::ratelimit::{WarnLimiter, MAX_NEIGHBORS_PER_LINK};
+        let cfg = link("eth0.0", 10);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        let mut deadline = Instant::now();
+        let mut limiter = WarnLimiter::default();
+        let first = Ipv4Addr::from(0x0901_0000);
+        let hello = |n: u32| packet::HelloPacket {
+            router_id: Ipv4Addr::from(0x0901_0000 + n),
+            area_id: cfg.area_id,
+            interface_id: 4,
+            router_priority: 1,
+            options: 0,
+            hello_interval: cfg.hello_interval,
+            dead_interval: cfg.dead_interval,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: vec![],
+        };
+        let mut send = |n: u32| {
+            handle_hello(
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                "fe80::2".parse().unwrap(),
+                &hello(n),
+                &mut deadline,
+                false,
+                &mut limiter,
+            );
+        };
+        for n in 0..70 {
+            send(n);
+        }
+        assert_eq!(status.borrow().neighbors.len(), MAX_NEIGHBORS_PER_LINK);
+        status.send_modify(|s| s.neighbors.get_mut(&first).unwrap().priority = 99);
+        send(0);
+        assert_eq!(status.borrow().neighbors[&first].priority, 1);
+        assert_eq!(limiter.take_suppressed(), 1);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn running_config_follows_the_task() {
         let wire = Arc::new(wire::Wire::default());
@@ -3475,6 +3569,7 @@ pub(crate) mod tests {
                 &restarted_hello(),
                 &mut deadline,
                 false,
+                &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
             );
             assert_eq!(state_of(&status), expected);
         }

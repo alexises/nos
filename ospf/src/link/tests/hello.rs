@@ -100,6 +100,7 @@ fn handle_hello_accepts_a_matching_hello() {
         &matching_hello(&cfg, peer),
         &mut deadline,
         false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
     assert_eq!(
         status.borrow().neighbors.get(&peer).unwrap().state,
@@ -131,6 +132,7 @@ fn p2mp_handle_hello_keeps_several_neighbors_ignoring_mask_and_election() {
             &hello,
             &mut deadline,
             false,
+            &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );
     }
     let s = status.borrow();
@@ -188,6 +190,7 @@ fn handle_hello_drops_mismatched_hello_interval() {
         &hello,
         &mut deadline,
         false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
     assert!(!status.borrow().neighbors.contains_key(&peer));
 }
@@ -209,6 +212,7 @@ fn handle_hello_drops_mismatched_dead_interval() {
         &hello,
         &mut deadline,
         false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
     assert!(!status.borrow().neighbors.contains_key(&peer));
 }
@@ -230,6 +234,7 @@ fn handle_hello_skips_network_mask_check_on_point_to_point() {
         &hello,
         &mut deadline,
         false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
     assert!(status.borrow().neighbors.contains_key(&peer));
 }
@@ -252,6 +257,7 @@ fn handle_hello_drops_mismatched_network_mask_on_broadcast() {
         &hello,
         &mut deadline,
         false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
     assert!(!status.borrow().neighbors.contains_key(&peer));
 }
@@ -273,6 +279,7 @@ fn handle_hello_drops_mismatched_e_bit() {
         &hello,
         &mut deadline,
         false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
     assert!(!status.borrow().neighbors.contains_key(&peer));
 }
@@ -417,4 +424,64 @@ async fn stub_area_gets_a_default_and_ranges_summarize() {
         .await;
     settle(4).await;
     assert!(route(&b.compute_routes().await, "192.0.2.0/24").is_none());
+}
+
+fn router_id(n: u32) -> Ipv4Addr {
+    Ipv4Addr::from(0x0901_0000 + n)
+}
+
+#[test]
+fn handle_hello_caps_neighbors_but_keeps_refreshing_known_ones() {
+    let cfg = link("eth0.0", 10);
+    let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    let mut deadline = Instant::now();
+    let mut limiter = nos_ospf_common::ratelimit::WarnLimiter::default();
+    let mut send = |n: u32| {
+        handle_hello(
+            &cfg,
+            Ipv4Addr::new(1, 1, 1, 1),
+            &status,
+            Ipv4Addr::new(10, 0, 0, 2),
+            &matching_hello(&cfg, router_id(n)),
+            &mut deadline,
+            false,
+            &mut limiter,
+        );
+    };
+    for n in 0..70 {
+        send(n);
+    }
+    assert_eq!(
+        status.borrow().neighbors.len(),
+        nos_ospf_common::ratelimit::MAX_NEIGHBORS_PER_LINK
+    );
+    assert!(!status.borrow().neighbors.contains_key(&router_id(64)));
+    status.send_modify(|s| s.neighbors.get_mut(&router_id(0)).unwrap().priority = 99);
+    send(0);
+    assert_eq!(status.borrow().neighbors[&router_id(0)].priority, 1);
+    // 6 refused Hellos at the cap: the limiter allowed 5, suppressed 1.
+    assert_eq!(limiter.take_suppressed(), 1);
+}
+
+#[test]
+fn source_on_link_exempts_p2p_and_virtual_links_only() {
+    let off = Ipv4Addr::new(192, 0, 2, 9);
+    let on = Ipv4Addr::new(10, 0, 0, 2);
+    let mut bcast = link("eth0", 10);
+    bcast.network_type = NetworkType::Broadcast;
+    assert!(source_on_link(&bcast, on));
+    assert!(!source_on_link(&bcast, off));
+    let mut p2mp = bcast.clone();
+    p2mp.network_type = NetworkType::PointToMultipoint;
+    assert!(!source_on_link(&p2mp, off));
+    assert!(source_on_link(&link("eth0", 10), off));
+    let vlink = LinkConfig {
+        virtual_link: Some(VirtualLinkEnd {
+            transit_area: Ipv4Addr::new(0, 0, 0, 1),
+            endpoint: Ipv4Addr::new(3, 3, 3, 3),
+            neighbor: off,
+        }),
+        ..bcast
+    };
+    assert!(source_on_link(&vlink, off));
 }

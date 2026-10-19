@@ -5,6 +5,7 @@ Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS d
 ## Modules
 
 - `neighbor`, `election`: RFC 2328 §10.5 neighbor FSM and §9.4 DR/BDR election (identical in RFC 5340).
+- `ratelimit`: `WarnLimiter` (token bucket for peer-triggerable `warn!`s) and `MAX_NEIGHBORS_PER_LINK`.
 - `bfd`: `bfd_wanted`, the neighbor-state rule for which neighbors get a BFD session.
 - `lsa`: the `LsaHeader` and `Lsa` traits, `MAX_AGE`, and the RFC 2328 §13.1 `is_newer` ordering (a provided method of `LsaHeader`).
 - `lsdb`: the generic `Lsdb<L: Lsa>` store, `InstallOutcome`, `MIN_LS_ARRIVAL`, `MAX_AGE_HOLD_TICKS`.

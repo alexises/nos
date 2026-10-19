@@ -190,6 +190,14 @@ A port of `nos-ospfv3d`'s RFC 5187 work ([OSPFv3 internals](ospfv3-internals.md)
 - Same in `nos-ospfv3d` (`ospfv3/src/link.rs`).
 - Tests: `link::tests::note_alive_only_refreshes_an_adjacency`, `link::tests::{point_to_point,broadcast}_adjacency_survives_lost_hellos` (in-memory wire with `Wire::drop_hellos`), in both crates. No e2e phase: scheduling and timer bookkeeping only, nothing new on the wire, in the kernel or over IPC; the existing `ospf*`/`ospfv3*` phases cover adjacency and dead detection.
 
+### Receive hardening (#394)
+
+- **Source address** (RFC 2328 §8.2): `link::source_on_link` drops, with a `debug!` only (an off-link flood must not become log amplification), any packet whose source is outside the link's subnet. Exempt: point-to-point links (unnumbered / `/32` peers share no subnet) and virtual links (already pinned to the endpoint by `accepts_packet`).
+- **Neighbor cap**: `nos_ospf_common::ratelimit::MAX_NEIGHBORS_PER_LINK` (64, a constant, `ponytail:`). `handle_hello` refuses a Hello from an unknown router-id once the link holds that many neighbors; known neighbors keep refreshing. Log: `ospf neighbor limit reached, dropping hello`.
+- **Warning limit**: every `warn!` a bad Hello can trigger in `handle_hello` goes through one `WarnLimiter` per link run loop (burst 5, one more per second). The next allowed line is preceded by `ospf hello warnings were rate limited suppressed=N`.
+- Same in `nos-ospfv3d`, except the source check is "must be link-local" (RFC 5340 §4.2.2) and applies to every packet type.
+- Tests: `link::tests::{handle_hello_caps_neighbors_but_keeps_refreshing_known_ones,source_on_link_exempts_p2p_and_virtual_links_only}` (v3: the first only), `ratelimit::tests`. No new e2e phase (drops only); `ospf-suite` and `ospfv3` cover the exemptions.
+
 ### Link state from `nos-interfaced` (#277)
 
 - **Stream**: `link_client::run` resolves `ServiceRef::Interfaces`, sends `InterfaceRequest::SubscribeLinks` and folds `LinkSnapshot`/`LinkChanged`/`LinkRemoved` into a `watch<LinkTable>`; `send_if_modified` wakes nobody for an event that changes nothing. On loss the table is kept (`connected = false`) and the client retries every 1s; a fresh snapshot replaces the whole table.
