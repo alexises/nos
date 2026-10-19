@@ -15,6 +15,7 @@ mod confed;
 mod decision;
 mod evpn;
 mod evpn_import;
+mod first_as;
 mod gr;
 mod next_hop;
 mod policy;

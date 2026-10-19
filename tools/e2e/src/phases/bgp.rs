@@ -1878,7 +1878,8 @@ pub async fn local_as(w: &mut World) -> anyhow::Result<()> {
         "neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
          local-as {ASN_G};\n    peer-as {LOCAL_AS};\n    family {{ ipv4 unicast; }}\n    \
          static {{\n        route {LOCAL_AS_LEARNED_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ];\n        \
-         route {LOCAL_AS_LOOP_PREFIX} next-hop {IP_G} as-path [ {ASN_G} {LOCAL_AS} ];\n    }}\n}}\n"
+         route {LOCAL_AS_LOOP_PREFIX} next-hop {IP_G} as-path [ {ASN_G} {LOCAL_AS} ];\n        \
+         route {LOCAL_AS_FORGED_PREFIX} next-hop {IP_G} as-path [ {FORGED_FIRST_AS} ];\n    }}\n}}\n"
     );
     w.dock
         .start_plain(
@@ -1910,6 +1911,13 @@ pub async fn local_as(w: &mut World) -> anyhow::Result<()> {
         "router-a installed {LOCAL_AS_LOOP_PREFIX}"
     );
 
+    log("first-AS check (#392): a path not starting with the peer's AS is treated as a withdraw");
+    a.wait("first AS of as_path is not the peer's AS").await?;
+    anyhow::ensure!(
+        a.count(&format!("loc-rib best path for {LOCAL_AS_FORGED_PREFIX}")) == 0,
+        "router-a installed {LOCAL_AS_FORGED_PREFIX}"
+    );
+
     log("outbound: ExaBGP parses router-a's route as AS_SEQUENCE [LOCAL_AS, ASN_A]");
     let both = format!("as-path .* len 0x0a payload 0202 0000 {LOCAL_AS:04X} 0000 {ASN_A:04X}");
     exabgp_parsed(w, &both, 0, None).await?;
@@ -1926,7 +1934,21 @@ pub async fn local_as(w: &mut World) -> anyhow::Result<()> {
 
     log("replace-as: ExaBGP parses [LOCAL_AS] alone, ASN_A nowhere");
     let only = format!("as-path .* len 0x06 payload 0201 0000 {LOCAL_AS:04X}");
-    exabgp_parsed(w, &only, seen, Some(&format!("{ASN_A:04X}"))).await
+    exabgp_parsed(w, &only, seen, Some(&format!("{ASN_A:04X}"))).await?;
+
+    log("no-enforce-first-as: a new session accepts the forged route");
+    let est_before = a.count(&est);
+    a.provision_flags(&with(&[
+        "--local-as-no-prepend",
+        "--local-as-replace-as",
+        "--no-enforce-first-as",
+    ]))
+    .await?;
+    a.wait_new(&est, est_before, 60).await?;
+    a.wait(&format!(
+        "loc-rib best path for {LOCAL_AS_FORGED_PREFIX} updated .*as_path=\\[{FORGED_FIRST_AS}\\]"
+    ))
+    .await
 }
 
 /// Waits for ExaBGP's parser log (router-g) to show a line matching `want`

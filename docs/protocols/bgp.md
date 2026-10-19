@@ -326,6 +326,14 @@ Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Un
 
 AS numbers can be anywhere from 1 to 4294967294. With a peer that does not support four-octet AS numbers, NOS uses the RFC 6793 transition mechanism: its own AS appears as 23456 (`AS_TRANS`) in the OPEN, and AS paths are exchanged as two-octet paths plus an `AS4_PATH` attribute. You configure the real AS numbers on both sides in all cases. A received `AS4_PATH` that is malformed, or that carries confederation segments, is ignored and the route is kept with its two-octet path (RFC 7606 §7.11).
 
+### First-AS check (RFC 4271 §6.3)
+
+- On an eBGP session the first AS of a received `AS_PATH` must be the peer's AS; otherwise the UPDATE is treated as a withdraw (the peer's earlier route for those prefixes is removed too) and a warning is logged, at most once per 10 seconds per peer (with `suppressed=<n>`). The session stays up.
+- It is on by default. Turn it off per peer-group: `set enforce-first-as false` (REST: `"enforce_first_as": false`); `delete enforce-first-as` returns to the default.
+- Never checked: iBGP, confederation members, and `route-server-client` peer-groups (an RFC 7947 route server does not prepend its own AS).
+- A first segment that is an `AS_SET`, or an empty path, from an eBGP peer is a violation too.
+- With `local-as`, the check compares against the AS in the peer's OPEN, i.e. the `remote-as` you configured.
+
 ### Source address
 
 By default the session's source address is whatever the kernel picks to reach the peer. `source-address` makes the session use the address of a given interface instead:

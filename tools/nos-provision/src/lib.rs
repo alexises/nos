@@ -362,6 +362,11 @@ pub struct Args {
     #[arg(long)]
     pub route_server_client: bool,
 
+    /// If set, turns the RFC 4271 §6.3 first-AS check off on `--peer-group`
+    /// (`BgpPeerGroupOp::SetEnforceFirstAs`).
+    #[arg(long)]
+    pub no_enforce_first_as: bool,
+
     /// If set, `--peer-group` exchanges RFC 8097 RPKI validation states
     /// (requires an iBGP peer-group).
     #[arg(long)]
@@ -2507,6 +2512,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         ));
     }
+    if args.no_enforce_first_as {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetEnforceFirstAs {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            enabled: false,
+        }));
+    }
     if args.announce_rpki_state {
         ops.push(ConfigOp::BgpPeerGroup(
             BgpPeerGroupOp::SetAnnounceRpkiState {
@@ -3847,6 +3859,19 @@ mod tests {
 
     fn has(ops: &[ConfigOp], op: &ConfigOp) {
         assert!(ops.contains(op), "{op:?} missing from {ops:#?}");
+    }
+
+    #[test]
+    fn no_enforce_first_as_flag_turns_the_check_off() {
+        let ops = ops(&["--no-enforce-first-as"]).unwrap();
+        has(
+            &ops,
+            &ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetEnforceFirstAs {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                enabled: false,
+            }),
+        );
     }
 
     #[test]

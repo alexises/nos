@@ -607,6 +607,15 @@ pub struct BgpPeerGroup {
     #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
     #[cli(topic = BgpPeerGroupEvpnImportPolicy)]
     pub evpn_import_policy: Option<String>,
+
+    /// RFC 4271 §6.3 first-AS check: on an eBGP session, an UPDATE whose
+    /// `AS_PATH` does not start with the peer's AS is treated as a withdraw.
+    /// `None` is on. A `route_server_client` group is always exempt (RFC 7947
+    /// §2.2.2.1).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupEnforceFirstAs)]
+    pub enforce_first_as: Option<bool>,
 }
 
 impl BgpPeerGroup {
@@ -920,6 +929,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             evpn_import_policy: None,
+            enforce_first_as: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

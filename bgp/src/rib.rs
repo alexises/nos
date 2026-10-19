@@ -216,6 +216,8 @@ fn family_index(prefix: IpNet) -> usize {
 /// omits the attribute (or for every locally-redistributed route, which
 /// carries no wire attributes at all).
 const DEFAULT_LOCAL_PREF: u32 = 100;
+/// Minimum spacing of the per-peer "first AS is not the peer's" warning.
+const FIRST_AS_WARN_EVERY: Duration = Duration::from_secs(10);
 
 fn family_of(net: IpNet) -> AddressFamily {
     match net {
@@ -490,6 +492,11 @@ pub struct BgpRib {
     local_as_peers: HashMap<IpAddr, nos_proto::BgpLocalAs>,
     /// Peers with a configured RFC 9234 role (`set_peer_role`), ours toward them.
     role_peers: HashMap<IpAddr, nos_proto::BgpRole>,
+    /// Peers whose first AS is checked (`set_peer_enforce_first_as`).
+    first_as_peers: HashSet<IpAddr>,
+    /// Per peer: when the first-AS warning last fired and how many were
+    /// suppressed since (`first_as_warn_due`).
+    first_as_warned: HashMap<IpAddr, (Instant, u64)>,
     /// iBGP peers exchanging RFC 8097 states (`set_peer_rpki_state`).
     rpki_state_peers: HashSet<IpAddr>,
     /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
@@ -638,6 +645,8 @@ impl BgpRib {
             confed_peers: HashSet::new(),
             local_as_peers: HashMap::new(),
             role_peers: HashMap::new(),
+            first_as_peers: HashSet::new(),
+            first_as_warned: HashMap::new(),
             rpki_state_peers: HashSet::new(),
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
@@ -788,6 +797,33 @@ impl BgpRib {
             Some(l) => self.local_as_peers.insert(peer, l),
             None => self.local_as_peers.remove(&peer),
         };
+    }
+
+    /// Records whether `peer`'s UPDATEs must start with its own AS (RFC 4271
+    /// §6.3; eBGP only, applied in `handle_update`). Call before `peer_established`.
+    pub fn set_peer_enforce_first_as(&mut self, peer: IpAddr, enforce: bool) {
+        if enforce {
+            self.first_as_peers.insert(peer);
+        } else {
+            self.first_as_peers.remove(&peer);
+        }
+    }
+
+    /// At most one first-AS warning per peer per `FIRST_AS_WARN_EVERY`: the
+    /// count suppressed since the last one, or `None` to stay quiet.
+    fn first_as_warn_due(&mut self, peer: IpAddr) -> Option<u64> {
+        let now = Instant::now();
+        if let Some((last, n)) = self.first_as_warned.get_mut(&peer)
+            && now.duration_since(*last) < FIRST_AS_WARN_EVERY
+        {
+            *n += 1;
+            return None;
+        }
+        Some(
+            self.first_as_warned
+                .insert(peer, (now, 0))
+                .map_or(0, |e| e.1),
+        )
     }
 
     /// Records our configured RFC 9234 role toward `peer` (`None`: none).
@@ -1113,6 +1149,7 @@ impl BgpRib {
             _ => Vec::new(),
         };
         self.max_prefix_warned.retain(|(p, _)| *p != peer);
+        self.first_as_warned.remove(&peer);
         // ponytail: a session reset forgets its flap history (RFC 2439 allows
         // keeping it); keep entries across resets to damp session flaps too.
         self.damping.clear_peer(peer);
