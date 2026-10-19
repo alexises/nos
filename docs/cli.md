@@ -51,7 +51,7 @@ The shell is always in one of two modes, and the prompt shows which.
 
 In **operational mode** the prompt is just the hostname, such as `edge-1>`. Here you look at the router with `show …`, act on live sessions with `clear …`, write the running config to disk with `save`, and enter configuration mode with `configure`.
 
-In **configuration mode** the prompt adds the transaction name and your position in the config tree, such as `edge-1(doc2)>` or `edge-1(doc2/bgp-instance:r1)>`. Here you change the transaction with `edit`, `set` and `delete`, inspect it with `show this` and `diff`, and finish with `commit` or `discard`. The `show` commands still work; `save` and `configure` do not.
+In **configuration mode** the prompt adds the transaction name and your position in the config tree, such as `edge-1(doc2)>` or `edge-1(doc2/bgp-instance:r1)>`. Here you change the transaction with `edit`, `set` and `delete`, inspect it with `show this` and `diff`, and finish with `commit` or `discard`. A commit can print `warning:` lines after `committed`; they are advice, the commit went through. The `show` commands still work; `save` and `configure` do not.
 
 `edge-1` is the router's `hostname`, so the prompt changes when a commit changes it.
 

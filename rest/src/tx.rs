@@ -30,6 +30,8 @@ const PREFIX: &str = "/v1/transactions/";
 #[derive(serde::Serialize, ToSchema)]
 pub struct CommitResult {
     committed: String,
+    /// Non-blocking advice about the committed config; `[]` when none.
+    warnings: Vec<String>,
 }
 
 /// `(transaction name, config path segments)` from the request URI.
@@ -270,7 +272,10 @@ pub async fn commit(
         })
         .await?
     {
-        Event::Committed => Ok(Json(json!(CommitResult { committed: name }))),
+        Event::Committed { warnings } => Ok(Json(json!(CommitResult {
+            committed: name,
+            warnings
+        }))),
         other => Err(unexpected("nos-configd", &other)),
     }
 }
@@ -297,6 +302,19 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(name, HeaderValue::from_str(value).unwrap());
         h
+    }
+
+    #[test]
+    fn commit_result_always_carries_warnings() {
+        let r = |warnings: Vec<String>| {
+            serde_json::to_value(CommitResult {
+                committed: "t".into(),
+                warnings,
+            })
+            .unwrap()
+        };
+        assert_eq!(r(vec![]), json!({"committed": "t", "warnings": []}));
+        assert_eq!(r(vec!["w".into()])["warnings"], json!(["w"]));
     }
 
     #[test]

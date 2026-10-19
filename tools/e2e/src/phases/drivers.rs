@@ -2738,6 +2738,7 @@ async fn rest_etag(a: &Router) -> anyhow::Result<()> {
         Ok(())
     })
     .await
+    .map(drop)
 }
 
 /// The transport itself: post-quantum key exchange is mandatory, and requests

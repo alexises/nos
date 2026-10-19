@@ -76,7 +76,7 @@ $ $C -X PUT -H 'Content-Type: application/json' -d '"r1"' \
     $B/v1/transactions/bgp1/routing-table/rt1/bgp-instance
 "r1"
 $ $C -X POST $B/v1/transactions/bgp1/commit
-{"committed":"bgp1"}
+{"committed":"bgp1","warnings":[]}
 ```
 
 To add a peer-group or a peer to an existing instance, `PUT` just that element:
@@ -239,6 +239,7 @@ The request fails with `404` over REST if the peer is not configured or its sess
 - Each family has its own limit and its own count.
 - One prefix over the limit closes the session with a Cease NOTIFICATION, subcode 1 (Maximum Number of Prefixes Reached), carrying the family and the limit.
 - The peer then stays down: NOS neither connects to it nor accepts its connections.
+- Committing an eBGP peer-group (its `remote-as` differs from the instance `asn`) with no limit for a negotiated family prints a warning, e.g. `warning: bgp-instance 'r1' peer-group 'ext': eBGP, no maximum-prefix for ipv4 (...)`. The commit still succeeds; set the limit to silence it. Over REST the commit reply lists them in `warnings` (`[]` when none).
 
 ```
 edge-1(t3/bgp-instance:r1/peer-group:pg1)> set maximum-prefix ipv4 limit 1000

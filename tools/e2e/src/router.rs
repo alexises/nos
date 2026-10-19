@@ -385,6 +385,12 @@ impl Router {
     /// Like `provision`, but with the complete flag list (for a phase whose
     /// base differs, e.g. a routed subinterface's own `--address`).
     pub async fn provision_flags(&self, flags: &[String]) -> anyhow::Result<()> {
+        self.provision_flags_body(flags).await.map(drop)
+    }
+
+    /// Like `provision_flags`, returning the commit reply's JSON body
+    /// (`{"committed": …, "warnings": […]}`).
+    pub async fn provision_flags_body(&self, flags: &[String]) -> anyhow::Result<String> {
         let mut flags = flags.to_vec();
         with_fast_retry(&mut flags);
         log(format!("provisioning {}: {}", self.name(), flags.join(" ")));
@@ -407,7 +413,7 @@ impl Router {
     pub async fn edit(
         &self,
         f: impl FnOnce(&mut Config) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         let tx = "/v1/transactions/e2e";
         // A leftover transaction (a failed commit keeps it) would be resumed.
         let _ = self.rest(Method::DELETE, tx, None).await;
@@ -437,7 +443,7 @@ impl Router {
             200,
         )
         .await
-        .map(drop)
+        .map(|(_, body)| body)
     }
 
     // --- logs ---

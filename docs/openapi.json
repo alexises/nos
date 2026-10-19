@@ -1196,10 +1196,18 @@
         "properties": {
           "committed": {
             "type": "string"
+          },
+          "warnings": {
+            "description": "Non-blocking advice about the committed config; `[]` when none.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
-          "committed"
+          "committed",
+          "warnings"
         ],
         "type": "object"
       },

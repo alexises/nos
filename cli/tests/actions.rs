@@ -68,7 +68,7 @@ fn fake_configd(path: &Path) {
             Request::CommitTransaction { name, .. } if name == "refused" => {
                 Event::Error("invalid".to_string())
             }
-            Request::CommitTransaction { .. } => Event::Committed,
+            Request::CommitTransaction { .. } => Event::Committed { warnings: vec![] },
             Request::DiscardTransaction { .. } => Event::Discarded,
             Request::DiffTransaction { name } if name == "unchanged" => {
                 Event::Diff(ConfigDiff::default())

@@ -2286,6 +2286,30 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
     ]))
     .await?;
     a.wait_new(cease1, ceases + 1, 40).await?;
+
+    log("#501: an eBGP group without a limit commits with a warning, with one it does not");
+    let warn = "commit warning.*no maximum-prefix for ipv4";
+    let warned_before = a.count(warn);
+    let body = a
+        .provision_flags_body(&with(&["--clear-maximum-prefix", "ipv4"]))
+        .await?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    anyhow::ensure!(
+        json["warnings"].as_array().is_some_and(|w| w.len() == 1
+            && w[0]
+                .as_str()
+                .is_some_and(|m| m.contains("'r1'") && m.contains("no maximum-prefix for ipv4"))),
+        "commit without a limit did not warn once: {body}"
+    );
+    a.wait_new(warn, warned_before, 10).await?;
+    let body = a
+        .provision_flags_body(&with(&["--maximum-prefix", "ipv4=5"]))
+        .await?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    anyhow::ensure!(
+        json["warnings"].as_array().is_some_and(Vec::is_empty),
+        "commit with a limit still warned: {body}"
+    );
     Ok(())
 }
 

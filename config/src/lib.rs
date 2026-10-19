@@ -5,6 +5,7 @@ pub mod persistence;
 pub mod server;
 pub mod store;
 pub mod users;
+pub mod warnings;
 
 pub use error::ConfigError;
 pub use nos_proto::{BgpInstance, Config};

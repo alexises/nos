@@ -182,7 +182,7 @@ Configuration changes over REST use the same named transactions as the shell (se
 | `PUT /v1/transactions/{tx}` | Replace the transaction's whole config with the JSON body | `200` |
 | `GET` / `PUT` / `DELETE /v1/transactions/{tx}/{path}` | Read, set or remove one part of the config (see [the next section](#the-config-tree-as-urls)) | `200` / `200` / `204` |
 | `GET /v1/transactions/{tx}/diff` | What committing would change | `200` |
-| `POST /v1/transactions/{tx}/commit` | Validate and commit; `422` if invalid (the transaction stays open) | `200` `{"committed":"<tx>"}` |
+| `POST /v1/transactions/{tx}/commit` | Validate and commit; `422` if invalid (the transaction stays open) | `200` `{"committed":"<tx>","warnings":[...]}` (advice, `[]` when none) |
 | `DELETE /v1/transactions/{tx}` | Discard | `204` |
 
 A full change, from opening to commit, adding a static route and linking it into `rt1`:
@@ -202,7 +202,7 @@ $ $C -X PUT -H 'Content-Type: application/json' -d '"s1"' \
 $ $C $B/v1/transactions/doc1/diff | jq -c .static_routing_instances
 [{"header":"static-routing-instance s1","name":"s1","status":"Added","fields":[],"subsections":[{"header":"route 192.0.2.0/24","name":"192.0.2.0/24","status":"Added","fields":[{"label":"gateway","old":null,"new":"10.50.0.3"}],"subsections":[]}]}]
 $ $C -X POST $B/v1/transactions/doc1/commit
-{"committed":"doc1"}
+{"committed":"doc1","warnings":[]}
 ```
 
 The diff lists every section. Each changed object carries a `status` (`Added`, `Removed`, `Modified`), its changed `fields` (each with `label`, `old`, `new`) and its changed `subsections`. This is the same diff the shell's `diff` command renders. Section headers and field labels are the CLI words (`bgp instance r1`, `route-reflector-client`), and every config field is diffed, so a commit that changes one field alone still produces an entry.
