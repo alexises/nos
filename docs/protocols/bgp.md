@@ -164,6 +164,7 @@ Adding `policy <name>` to the redistribute command filters the static routes bef
 Three timers are set per peer-group:
 
 - `hold-time` (default 90 seconds) is the hold time this router proposes in its OPEN. The session uses the lower of the two sides' values. `0` turns off both the hold timer and keepalives; otherwise the minimum is 3.
+- A peer that offers hold time 0 is refused (NOTIFICATION OPEN / Unacceptable Hold Time, RFC 4271 §6.2) unless this peer-group's `hold-time` is `0` too.
 - `keepalive-interval` (default: a third of the negotiated hold time) must be lower than `hold-time` when both are set.
 - `connect-retry-time` (default 120 seconds) is how long NOS waits between two attempts to connect to a peer.
 

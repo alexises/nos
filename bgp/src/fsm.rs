@@ -469,6 +469,10 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
     if !message::is_valid_bgp_identifier(open.bgp_identifier) {
         return reject(OpenMessageSubcode::BadBgpIdentifier);
     }
+    // RFC 4271 §6.2: a speaker MAY reject hold time 0; we do unless we configured 0 ourselves.
+    if open.hold_time == 0 && ctx.local_hold_time != 0 {
+        return reject(OpenMessageSubcode::UnacceptableHoldTime);
+    }
     if open.hold_time != 0 && open.hold_time < HOLD_TIME_FLOOR {
         return reject(OpenMessageSubcode::UnacceptableHoldTime);
     }
@@ -2019,11 +2023,25 @@ mod tests {
     }
 
     #[test]
+    fn remote_hold_zero_is_rejected_unless_local_is_zero() {
+        let (next, actions) = step(
+            State::OpenSent,
+            Event::OpenReceived(valid_open(65002, 0)),
+            &ctx_with(65002, 90, None),
+        );
+        assert_eq!(next, None);
+        assert!(actions.contains(&Action::SendNotification(
+            ErrorCode::OpenMessage as u8,
+            OpenMessageSubcode::UnacceptableHoldTime as u8
+        )));
+    }
+
+    #[test]
     fn hold_time_zero_disables_both_timers() {
         let (next, actions) = step(
             State::OpenSent,
             Event::OpenReceived(valid_open(65002, 0)),
-            &ctx(65002),
+            &ctx_with(65002, 0, None),
         );
         assert!(matches!(next, Some(State::OpenConfirm(_))));
         assert!(actions.contains(&Action::ArmHoldTimer(Duration::ZERO)));
