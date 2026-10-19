@@ -11,8 +11,8 @@
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::Extension;
@@ -28,7 +28,7 @@ use nos_proto::{
 };
 use socket2::SockRef;
 use tokio::net::{TcpListener, TcpSocket};
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tower::ServiceExt as _;
@@ -36,11 +36,16 @@ use tracing::{debug, info, warn};
 
 use crate::auth::PeerUser;
 use crate::ipc::Daemons;
+use crate::ratelimit::LogLimiter;
 
 const TICK: Duration = Duration::from_secs(1);
 
 /// HTTP/2 streams one client may have in flight on a connection.
 const MAX_STREAMS: u32 = 128;
+
+/// Open TCP connections (handshaking or serving) at once. A connection past
+/// this is dropped before any post-quantum handshake work is spent on it.
+pub const MAX_CONNECTIONS: usize = 256;
 
 /// What one bound listener was bound *to*, so a later tick can tell whether
 /// it is still the right one.
@@ -196,7 +201,13 @@ impl Listener {
             .await
             .map_err(|e| format!("cannot get a REST listener certificate: {e}"))?;
         let (stop_tx, stop_rx) = watch::channel(false);
-        let task = tokio::spawn(serve(listener, self.router.clone(), tls, stop_rx));
+        let task = tokio::spawn(serve(
+            listener,
+            self.router.clone(),
+            tls,
+            stop_rx,
+            MAX_CONNECTIONS,
+        ));
         Ok(Bound {
             want: want.clone(),
             ifindex: ifindex(&vrf),
@@ -217,6 +228,7 @@ pub async fn serve(
     app: axum::Router,
     tls: Arc<RestServer>,
     mut stop: watch::Receiver<bool>,
+    max_connections: usize,
 ) {
     let mut http = auto::Builder::new(TokioExecutor::new());
     http.http1()
@@ -229,6 +241,9 @@ pub async fn serve(
         .keep_alive_timeout(Duration::from_secs(20));
     let http = Arc::new(http);
     let graceful = GracefulShutdown::new();
+    let slots = Arc::new(Semaphore::new(max_connections));
+    let log = Arc::new(Mutex::new(LogLimiter::default()));
+    let mut refused_log = LogLimiter::default();
 
     loop {
         let accepted = tokio::select! {
@@ -243,13 +258,32 @@ pub async fn serve(
                 continue;
             }
         };
-        let (tls, app, http, watcher) =
-            (tls.clone(), app.clone(), http.clone(), graceful.watcher());
+        // try_acquire, never an awaiting acquire: that would stall the stop path.
+        let Ok(permit) = slots.clone().try_acquire_owned() else {
+            if let Some(n) = refused_log.allow(peer.ip(), Instant::now()) {
+                warn!(%peer, suppressed = n, max = max_connections, "rest connection refused: too many open connections");
+            }
+            continue; // `tcp` dropped: closed before any TLS work
+        };
+        let (tls, app, http, watcher, log) = (
+            tls.clone(),
+            app.clone(),
+            http.clone(),
+            graceful.watcher(),
+            log.clone(),
+        );
         tokio::spawn(async move {
+            let _permit = permit; // held through handshake and serving
             let accepted = match tls.accept(tcp).await {
                 Ok(accepted) => accepted,
                 Err(e) => {
-                    debug!(%peer, error = %e, "rest tls handshake failed");
+                    let allowed = log
+                        .lock()
+                        .expect("log limiter")
+                        .allow(peer.ip(), Instant::now());
+                    if let Some(n) = allowed {
+                        warn!(%peer, error = %e, suppressed = n, "rest tls handshake failed");
+                    }
                     return;
                 }
             };

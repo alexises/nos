@@ -1572,6 +1572,10 @@ mod over_tls {
     }
 
     async fn start() -> Tls {
+        start_capped(nos_rest::listen::MAX_CONNECTIONS).await
+    }
+
+    async fn start_capped(cap: usize) -> Tls {
         let f = fixture(vec![]).await;
         let ca = Ca::new(KeyAlg::EcdsaP256).unwrap();
         let server = Arc::new(RestServer::new(ca.cert_der()).unwrap());
@@ -1592,6 +1596,7 @@ mod over_tls {
             f.app.clone(),
             server,
             stop_rx,
+            cap,
         ));
         Tls {
             ca,
@@ -1647,6 +1652,37 @@ mod over_tls {
             statuses.iter().all(|s| *s == StatusCode::OK),
             "{statuses:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_connection_past_the_cap_is_closed_unhandshaken_and_its_slot_is_reused() {
+        use tokio::io::AsyncReadExt;
+        let t = start_capped(1).await;
+        let (cert, key) = user_cert(&t.ca, USER);
+        let first = t.connect(Some((&cert, &key))).await;
+        assert_eq!(get(first.clone(), "/v1/config").await, StatusCode::OK);
+
+        let mut second = TcpStream::connect(t.addr).await.unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(5), second.read(&mut buf))
+            .await
+            .expect("refused connection must be closed promptly");
+        assert!(matches!(n, Ok(0) | Err(_)), "{n:?}");
+
+        drop(first);
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let tcp = TcpStream::connect(t.addr).await.unwrap();
+            let cfg = client_config(t.ca.cert_pem().as_bytes(), Some((&cert, &key))).unwrap();
+            if TlsConnector::from(Arc::new(cfg))
+                .connect(ServerName::IpAddress(Ipv4Addr::LOCALHOST.into()), tcp)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+        }
+        panic!("the slot was never released");
     }
 
     #[tokio::test]

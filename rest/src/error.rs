@@ -22,6 +22,10 @@ pub enum ApiError {
     Unavailable(String),
     /// A daemon answered with something this endpoint can't interpret.
     BadGateway(String),
+    /// The request (handler plus body read) outlived `api::REQUEST_TIMEOUT`.
+    RequestTimeout,
+    /// A daemon accepted the request and never answered (`ipc::IPC_TIMEOUT`).
+    GatewayTimeout(String),
 }
 
 impl ApiError {
@@ -81,6 +85,17 @@ impl IntoResponse for ApiError {
                 (
                     StatusCode::BAD_GATEWAY,
                     "a backend daemon returned an unexpected reply".to_string(),
+                )
+            }
+            ApiError::RequestTimeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "the request took too long".to_string(),
+            ),
+            ApiError::GatewayTimeout(m) => {
+                tracing::warn!(detail = %m, "504 to client");
+                (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "a backend daemon did not answer in time".to_string(),
                 )
             }
         };

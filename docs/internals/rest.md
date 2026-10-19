@@ -18,6 +18,13 @@ Mutual TLS replaces per-request credentials: the password crosses the network on
 - **One connection, many requests.** HTTP/2 multiplexes concurrent requests over one TLS handshake; a client should reuse its connection pool.
 - **Behind it, IPC connections are pooled** (`Daemons::call` in `ipc.rs`). Every IPC connection is a mutual-TLS handshake, and a request used to cost three (config `Get` for auth, the broker to resolve, the daemon itself). Now a finished call parks its connection (up to 8 idle per daemon, discarded after 5 minutes) and the next call to that daemon reuses it, and broker answers are cached (socket paths are fixed per daemon name; a failed call drops the entry, and a "not running" answer is never cached). The one rule this leans on: **a plain request gets exactly one event back, and the server keeps reading requests on the same connection** — true of every daemon's server; streaming replies (`LogRequest::Tail`) use `open_stream` and a connection of their own. A parked connection whose daemon restarted shows up as "dead before any reply" and is retried once on a fresh connection; only that case is retried, so a request the daemon received is never sent twice.
 
+- **Limits (what a client sees).**
+  - 256 open connections (`listen::MAX_CONNECTIONS`, handshaking or serving): the 257th is closed straight after `accept`, before any ML-KEM work; the client sees a reset/EOF. Logged as a rate-limited `warn!`.
+  - 30s per request (`api::REQUEST_TIMEOUT`), covering the handler and the request body read: `408` problem document. A streamed reply (`GET /v1/logs/follow`) only has to start within it.
+  - 20s per daemon call (`ipc::IPC_TIMEOUT`, send and reply each): `504` "a backend daemon did not answer in time". The connection is dropped, not parked or retried.
+  - Failed TLS handshakes are `warn!` lines rate-limited per peer IP (`ratelimit::LogLimiter`: burst 3, one more per 10s, `suppressed=N` on the next line, 1024 peers tracked). No per-peer refusal; the connection cap bounds the CPU cost.
+  - All four are constants, not config.
+
 ## Listening (`listen.rs`)
 
 Every 1s tick — and immediately on a routing-table config diff — `Listener` compares what config *wants* (this table's `rest_api`) with what is *bound* and converges:

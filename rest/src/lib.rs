@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod listen;
 pub mod login;
 pub mod openapi;
+pub mod ratelimit;
 pub mod show;
 pub mod tls;
 pub mod tx;
