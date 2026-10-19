@@ -33,6 +33,13 @@ Server → Client:
 
 Editing the config happens inside a **named transaction**, held server-side in `nos-config`, not tied to any one connection. `OpenTransaction` creates it from a blank config or a clone of the running config (`TransactionBase::Blank`/`Current`), or — if a transaction with that name already exists — resumes its current in-progress state unchanged. `CommitTransaction` validates the transaction and, if valid, atomically replaces the running config and broadcasts it to every `Subscribe`d connection (the same fan-out `Get`/`Subscribe` already use); on invalid input the transaction is left alive so the caller can keep editing. `DiscardTransaction` deletes it outright. Because transactions live only in the daemon and are addressed by name, a client can disconnect (crash, Ctrl-C, network drop) and resume the same transaction later from a fresh connection — see `nos-cli`'s `configure <name>` command.
 
+### Persistence
+
+- `save_to_disk` writes a temp file, fsyncs it, renames it over `config.yaml`, then fsyncs the directory.
+- Before each save the previous `config.yaml` is copied (same durable write) to `config.yaml.bak`, but only if it still parses, so a corrupt primary never replaces the last good backup.
+- On start, a primary that fails to parse falls back to `config.yaml.bak` with an `error!` ("primary config corrupt, loaded backup"); the next commit rewrites the primary.
+- If the backup is missing or also corrupt, `nos-configd` refuses to start (never a silent default).
+
 ### Config plane vs data plane
 
 | Plane | Transport | Pattern |
