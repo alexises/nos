@@ -1549,6 +1549,7 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
 /// treated as a withdraw, not reset the session. ExaBGP announces such a route
 /// beside a good one; router-a (no redistribution, so nothing that crashes
 /// ExaBGP's AS4 merge, see `as4`) must learn only the good one and stay up.
+/// A third route with next hop 240.0.0.1 (RFC 4271 §6.3) must be withdrawn too.
 pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
     let flags = strings(&[
         "--address",
@@ -1569,7 +1570,8 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
          local-as {ASN_G};\n    peer-as {ASN_A};\n    family {{ ipv4 unicast; }}\n    \
          static {{\n        route {AS4_LEARNED_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ];\n        \
          route {AS4_BAD_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
-         attribute [ 0x08 0xc0 0x010203 ];\n    }}\n}}\n"
+         attribute [ 0x08 0xc0 0x010203 ];\n        \
+         route {BAD_NEXT_HOP_PREFIX} next-hop 240.0.0.1 as-path [ {ASN_G} ];\n    }}\n}}\n"
     );
     w.dock
         .start_plain(
@@ -1589,6 +1591,12 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait("treating announced routes as withdrawn").await?;
+    a.wait("treating bgp update as withdraw: invalid next hop")
+        .await?;
+    anyhow::ensure!(
+        a.count(&format!("loc-rib best path for {BAD_NEXT_HOP_PREFIX}")) == 0,
+        "router-a learned {BAD_NEXT_HOP_PREFIX} despite its class-E next hop"
+    );
     anyhow::ensure!(
         a.count(&format!("loc-rib best path for {AS4_BAD_PREFIX}")) == 0,
         "router-a learned {AS4_BAD_PREFIX} despite its malformed COMMUNITY"

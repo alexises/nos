@@ -307,6 +307,8 @@ Every OPEN advertises these capabilities, with no option to turn them off:
 
 A malformed attribute in a received UPDATE does not reset the session: the routes in that UPDATE are treated as withdrawn and logged (RFC 7606). Attributes whose flags conflict with their type are treated the same way; a repeated attribute keeps its first occurrence (a repeated multiprotocol attribute resets the session). Only a message that cannot be parsed at all closes the session.
 
+- A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6, or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
+
 ### Address families
 
 `set address-family ipv4|ipv6|l2vpn-evpn` adds an address family to a peer-group, and `delete address-family <af>` removes one. A peer-group needs at least one. The address families are independent of whether the peer is reached over IPv4 or IPv6: an IPv6 peer can carry IPv4 routes and the reverse.

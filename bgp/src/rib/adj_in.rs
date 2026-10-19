@@ -290,7 +290,30 @@ impl BgpRib {
                 .contains(self.confed_id.unwrap_or(self.local_asn))
                 || (self.confed_id.is_some() && attrs.as_path.contains_confed(self.local_asn))
                 || local_as.is_some_and(|l| attrs.as_path.contains(l.asn));
-            if stray_confed {
+            // RFC 4271 §6.3 / §5.1.3: an unusable NEXT_HOP (legacy attribute
+            // or any MP_REACH batch) makes the whole UPDATE a withdraw.
+            let own = self.peer_outboxes.get(&from).and_then(|o| o.local_addr);
+            // A peer reached over loopback may itself advertise loopback.
+            let martian = |nh: IpAddr| {
+                message::next_hop_is_martian(nh, own) && !(nh.is_loopback() && from.is_loopback())
+            };
+            let bad_next_hop = (!update.nlri.is_empty() && martian(attrs.next_hop.into()))
+                .then(|| IpAddr::from(attrs.next_hop))
+                .or_else(|| {
+                    update
+                        .mp_reach
+                        .iter()
+                        .filter(|m| !m.nlri.is_empty() || !m.evpn.is_empty())
+                        .find(|m| martian(m.next_hop))
+                        .map(|m| m.next_hop)
+                });
+            if let Some(next_hop) = bad_next_hop {
+                warn!(
+                    peer = %from, next_hop = %next_hop,
+                    "treating bgp update as withdraw: invalid next hop"
+                );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else if stray_confed {
                 warn!(
                     peer = %from, as_path = ?attrs.as_path,
                     "treating bgp update as withdraw: as_path has confederation segments from outside the confederation"

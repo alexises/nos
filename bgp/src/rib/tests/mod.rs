@@ -15,6 +15,7 @@ mod confed;
 mod decision;
 mod evpn;
 mod gr;
+mod next_hop;
 mod policy;
 mod propagation;
 

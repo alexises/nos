@@ -582,6 +582,29 @@ pub fn is_valid_bgp_identifier(id: Ipv4Addr) -> bool {
     !id.is_unspecified() && !id.is_broadcast() && !id.is_multicast()
 }
 
+/// RFC 4271 §5.1.3 / §6.3: a `NEXT_HOP` no speaker can forward to — the
+/// unspecified, "this network" (`0/8`), loopback, multicast, class-E
+/// (incl. broadcast) and IPv4-mapped addresses, or `own`, the receiving
+/// session's local address. A link-local IPv6 next hop is valid (RFC 2545).
+// ponytail: `own` is the session address only, not every local interface
+// address; widening needs interface data from `nos-interfaced`.
+pub fn next_hop_is_martian(nh: IpAddr, own: Option<IpAddr>) -> bool {
+    if own == Some(nh) {
+        return true;
+    }
+    match nh {
+        IpAddr::V4(a) => {
+            a.octets()[0] == 0 || a.is_loopback() || a.is_multicast() || a.octets()[0] >= 240
+        }
+        IpAddr::V6(a) => {
+            a.is_unspecified()
+                || a.is_loopback()
+                || a.is_multicast()
+                || a.to_ipv4_mapped().is_some()
+        }
+    }
+}
+
 /// `add_path_afis` is empty by default (identical wire behavior to before
 /// RFC 7911 support existed) and is set once, right after this session
 /// reaches `Established` and negotiation is known — see
