@@ -151,6 +151,8 @@ pub enum Resolved {
     ShowBgpEvpn,
     /// `show bgp rpki` — data-plane, valid in any mode, router-wide.
     ShowBgpRpki,
+    /// `show bgp routes` — data-plane, valid in any mode, router-wide.
+    ShowBgpRoutes,
     /// `show ospf neigh` — data-plane, valid in any mode. Router-wide (no
     /// instance argument), mirroring `ShowBgpBrief`: the caller iterates
     /// every `OspfInstance` in the running config itself.
@@ -249,6 +251,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowBgpEvpn => Resolved::ShowBgpEvpn,
         Command::ShowBgpRpki => Resolved::ShowBgpRpki,
+        Command::ShowBgpRoutes => Resolved::ShowBgpRoutes,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
         Command::ShowOspfDatabase => Resolved::ShowOspfDatabase,
         Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
@@ -357,6 +360,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowBgpBrief
         | Command::ShowBgpEvpn
         | Command::ShowBgpRpki
+        | Command::ShowBgpRoutes
         | Command::ShowOspfNeigh
         | Command::ShowOspfDatabase
         | Command::ShowOspfv3Neigh

@@ -812,3 +812,45 @@ fn otc_egress_per_remote_role() {
         }
     }
 }
+
+/// #500: `routes()` lists every Adj-RIB-In path and the redistributed route
+/// with its validation state and the best flag.
+#[test]
+fn routes_lists_paths_local_routes_and_states() {
+    use crate::rpki::{Vrp, VrpTable};
+    use nos_proto::RpkiValidationState as S;
+    let mut rib = new_rib(65000);
+    let (p1, p2) = (addr("10.0.0.1"), addr("10.0.0.2"));
+    let _rx1 = register_peer(&mut rib, p1, false, addr("10.0.0.254"));
+    let _rx2 = register_peer(&mut rib, p2, false, addr("10.0.0.253"));
+    let mut t = VrpTable::default();
+    t.announce(Vrp {
+        prefix: prefix("1.2.0.0/16"),
+        max_len: 24,
+        asn: 65001,
+    });
+    rib.set_vrps(Arc::new(t));
+    let accept = &nos_rpl::ACCEPT_ALL;
+    let u = |asn| ebgp_update(vec!["1.2.3.0/24"], vec![asn], "10.0.0.1");
+    rib.handle_update(p1, false, v4("192.0.2.1"), &u(65001), accept);
+    rib.handle_update(p2, false, v4("192.0.2.2"), &u(65099), accept);
+    rib.apply_redistribute_update(full_update(vec![("9.9.9.0/24", "10.0.0.9")]));
+
+    let routes = rib.routes();
+    assert_eq!(routes.len(), 3);
+    assert_eq!(routes[0].prefix, "1.2.3.0/24");
+    assert_eq!(routes[0].peer, Some(p1));
+    assert_eq!(routes[0].validation_state, S::Valid);
+    assert_eq!(routes[0].origin_as, Some(65001));
+    assert_eq!(routes[0].as_path, "65001");
+    assert_eq!(routes[1].peer, Some(p2));
+    assert_eq!(routes[1].validation_state, S::Invalid);
+    assert_eq!(
+        routes.iter().filter(|r| r.best).count(),
+        2,
+        "one best per prefix"
+    );
+    assert!(routes[2].peer.is_none() && routes[2].best);
+    assert_eq!(routes[2].validation_state, S::NotFound);
+    assert_eq!(routes[2].origin_as, Some(65000), "local route: our own AS");
+}

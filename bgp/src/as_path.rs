@@ -204,6 +204,25 @@ impl PartialEq<Vec<u32>> for AsPath {
     }
 }
 
+/// Operator text: sequence ASNs space-separated, `{..}` set, `(..)` confed
+/// sequence, `[..]` confed set (`show bgp routes`).
+impl fmt::Display for AsPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let join =
+            |s: &[u32], sep: &str| s.iter().map(u32::to_string).collect::<Vec<_>>().join(sep);
+        let parts: Vec<String> = self
+            .segments()
+            .map(|(k, s)| match k {
+                SegKind::Sequence => join(s, " "),
+                SegKind::Set => format!("{{{}}}", join(s, ",")),
+                SegKind::ConfedSequence => format!("({})", join(s, " ")),
+                SegKind::ConfedSet => format!("[{}]", join(s, ",")),
+            })
+            .collect();
+        f.write_str(&parts.join(" "))
+    }
+}
+
 /// A pure `AS_SEQUENCE` path prints like a `Vec` (`[65001, 65002]`), so log
 /// lines are unchanged for the common case; otherwise a confederation
 /// sequence is `(..)`, a set `{..}`, a confederation set `[..]`.
@@ -226,6 +245,13 @@ impl fmt::Debug for AsPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_is_operator_text() {
+        let p = path(&[(SegKind::Sequence, &[1, 2]), (SegKind::Set, &[3, 4])]);
+        assert_eq!(p.to_string(), "1 2 {3,4}");
+        assert_eq!(AsPath::default().to_string(), "");
+    }
 
     fn path(segs: &[(SegKind, &[u32])]) -> AsPath {
         let mut p = AsPath::default();

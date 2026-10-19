@@ -48,8 +48,9 @@ pub use bfd::{
     ReflectorView, SessionKey,
 };
 pub use bgp::{
-    BgpEvent, BgpRequest, BgpSessionState, EvpnRouteSummary, GrSummary, PeerSummary,
-    RedistributeUpdate, RedistributedRoute, RpkiCacheStatus, RpkiSessionState,
+    BgpEvent, BgpRequest, BgpRouteSummary, BgpSessionState, EvpnRouteSummary, GrSummary,
+    PeerSummary, RedistributeUpdate, RedistributedRoute, RpkiCacheStatus, RpkiSessionState,
+    RpkiValidationState,
 };
 pub use broker::{Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
 pub use codec::IpcCodec;

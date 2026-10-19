@@ -27,6 +27,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show bgp brief` | `GET /v1/bgp/summary` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
 | `show bgp rpki` | `GET /v1/bgp/rpki` |
+| `show bgp routes` | `GET /v1/bgp/routes` |
 | `show ospf neigh` / `show ospf database` | `GET /v1/ospf/neighbors` / `GET /v1/ospf/database` |
 | `show ospfv3 neigh` / `show ospfv3 database` | `GET /v1/ospfv3/neighbors` / `GET /v1/ospfv3/database` |
 | `show fdb <domain>` | `GET /v1/fdb/{domain}` |

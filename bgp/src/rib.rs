@@ -905,6 +905,43 @@ impl BgpRib {
         out
     }
 
+    /// Every IPv4/IPv6 unicast path held (each Adj-RIB-In path, all ADD-PATH
+    /// ones, plus the locally redistributed routes) for `show bgp routes`,
+    /// ordered by prefix then peer (local first).
+    pub fn routes(&self) -> Vec<nos_proto::BgpRouteSummary> {
+        use nos_proto::RpkiValidationState as S;
+        let local = self.confed_id.unwrap_or(self.local_asn);
+        let summary =
+            |prefix: IpNet, peer: Option<IpAddr>, r: &RibRoute| nos_proto::BgpRouteSummary {
+                prefix: prefix.to_string(),
+                peer,
+                next_hop: r.next_hop,
+                as_path: r.as_path.to_string(),
+                origin_as: crate::rpki::origin_as(&r.as_path, local),
+                local_pref: r.local_pref,
+                best: self.loc_rib.get(&prefix) == Some(r),
+                validation_state: match r.validation_state {
+                    nos_rpl::ValidationState::Valid => S::Valid,
+                    nos_rpl::ValidationState::Invalid => S::Invalid,
+                    nos_rpl::ValidationState::NotFound => S::NotFound,
+                },
+            };
+        let mut out: Vec<(IpNet, Option<IpAddr>, u32, nos_proto::BgpRouteSummary)> = self
+            .redistributed
+            .iter()
+            .map(|(p, r)| (*p, None, 0, summary(*p, None, r)))
+            .collect();
+        for (peer, table) in &self.adj_rib_in {
+            for (prefix, paths) in table {
+                for (id, r) in paths {
+                    out.push((*prefix, Some(*peer), *id, summary(*prefix, Some(*peer), r)));
+                }
+            }
+        }
+        out.sort_by_key(|(p, peer, id, _)| (*p, *peer, *id));
+        out.into_iter().map(|(.., s)| s).collect()
+    }
+
     /// Enables (or with `None` disables) RFC 2439 damping of routes from `peer`.
     /// Records the remote ASN negotiated in a peer's OPEN, so import and
     /// export policies can match `this.bgp.peer_as`. Call before
