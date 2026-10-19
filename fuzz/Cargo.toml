@@ -1,0 +1,80 @@
+[package]
+name    = "nos-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Own workspace: stays out of `make check`, deny, coverage and mutants (#409).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes         = "1"
+tokio-util    = { version = "0.7", features = ["codec"] }
+nos-bgp       = { path = "../bgp" }
+nos-ospf      = { path = "../ospf" }
+nos-ospfv3    = { path = "../ospfv3" }
+nos-lldp      = { path = "../lldp" }
+nos-lacp      = { path = "../lacp" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "bgp_codec"
+path = "fuzz_targets/bgp_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ospfv3_lsa"
+path = "fuzz_targets/ospfv3_lsa.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ospfv3_packet"
+path = "fuzz_targets/ospfv3_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ospf_packet"
+path = "fuzz_targets/ospf_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "evpn_nlris"
+path = "fuzz_targets/evpn_nlris.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtr_codec"
+path = "fuzz_targets/rtr_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lldp_packet"
+path = "fuzz_targets/lldp_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lacp_packet"
+path = "fuzz_targets/lacp_packet.rs"
+test = false
+doc = false
+bench = false
