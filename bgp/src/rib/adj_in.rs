@@ -7,6 +7,7 @@ use super::{
     Ipv4Addr, MacMobility, RibRoute, RouteOrigin, SmallVec, UpdateMessage, CHANGE_PENALTY,
     DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
 };
+use crate::as_path::SegKind;
 use nos_proto::BgpRole::{Peer, Provider, RouteServer};
 
 /// A Type-2 route's `(VNI, MAC)` mobility identity, plus its ESI — `None`
@@ -359,6 +360,14 @@ impl BgpRib {
                         .find(|m| martian(m.next_hop))
                         .map(|m| m.next_hop)
                 });
+            // RFC 4271 §6.3: an eBGP AS_PATH starts with the peer's own AS
+            // (an AS_SET first, or an empty path, is a violation too).
+            let first_as_forged = peer_as != 0
+                && !remote_is_ibgp
+                && !from_confed
+                && self.first_as_peers.contains(&from)
+                && !matches!(attrs.as_path.segments().next(),
+                    Some((SegKind::Sequence, s)) if s[0] == peer_as);
             if let Some(next_hop) = bad_next_hop {
                 warn!(
                     peer = %from, next_hop = %next_hop,
@@ -370,6 +379,14 @@ impl BgpRib {
                     peer = %from, as_path = ?attrs.as_path,
                     "treating bgp update as withdraw: as_path has confederation segments from outside the confederation"
                 );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else if first_as_forged {
+                if let Some(suppressed) = self.first_as_warn_due(from) {
+                    warn!(
+                        peer = %from, expected = peer_as, as_path = ?attrs.as_path, suppressed,
+                        "treating bgp update as withdraw: first AS of as_path is not the peer's AS"
+                    );
+                }
                 self.withdraw_announced(from, update, &announced, &mut touched);
             } else if looped {
                 // RFC 4271 §9.1.2: a looped route is unfeasible, so it

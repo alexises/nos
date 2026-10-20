@@ -118,6 +118,9 @@ pub struct ResolvedPeer {
     pub announce_rpki_state: bool,
     /// The peer-group's vendor `local-as` (see `BgpRib::set_peer_local_as`).
     pub local_as: Option<nos_proto::BgpLocalAs>,
+    /// The peer-group's `enforce_first_as` with its default (on) applied; a
+    /// route-server client is exempt regardless (`BgpRib::set_peer_enforce_first_as`).
+    pub enforce_first_as: bool,
     /// RFC 7911 ADD-PATH mode with its default applied
     /// (`BgpPeerGroup::effective_add_path`); in the OPEN, so a change
     /// restarts the session (`diff_peers`).
@@ -1483,6 +1486,7 @@ mod tests {
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             evpn_import_policy: None,
+            enforce_first_as: true,
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

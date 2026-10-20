@@ -455,6 +455,22 @@ pub enum BgpPeerGroupOp {
         /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the first-AS check of the BGP peer group (see `BgpPeerGroup::enforce_first_as`).
+    SetEnforceFirstAs {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+        /// `false` accepts a path whose first AS is not the peer's.
+        enabled: bool,
+    },
+    /// Clears the first-AS check setting of the BGP peer group (back to on).
+    ClearEnforceFirstAs {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -513,7 +529,9 @@ impl BgpPeerGroupOp {
             | BgpPeerGroupOp::SetExportPolicy { .. }
             | BgpPeerGroupOp::ClearExportPolicy { .. }
             | BgpPeerGroupOp::SetEvpnImportPolicy { .. }
-            | BgpPeerGroupOp::ClearEvpnImportPolicy { .. } => self.apply_part3(config),
+            | BgpPeerGroupOp::ClearEvpnImportPolicy { .. }
+            | BgpPeerGroupOp::SetEnforceFirstAs { .. }
+            | BgpPeerGroupOp::ClearEnforceFirstAs { .. } => self.apply_part3(config),
         }
     }
 
@@ -544,6 +562,7 @@ impl BgpPeerGroupOp {
                         import_policy: None,
                         export_policy: None,
                         evpn_import_policy: None,
+                        enforce_first_as: None,
                         shutdown: None,
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                         announce_rpki_state: false,
@@ -925,6 +944,18 @@ impl BgpPeerGroupOp {
                     Some(evpn_import_policy.clone());
                 Ok(())
             }
+            BgpPeerGroupOp::SetEnforceFirstAs {
+                instance,
+                name,
+                enabled,
+            } => {
+                find_group_mut(config, instance, name)?.enforce_first_as = Some(*enabled);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearEnforceFirstAs { instance, name } => {
+                find_group_mut(config, instance, name)?.enforce_first_as = None;
+                Ok(())
+            }
             BgpPeerGroupOp::ClearEvpnImportPolicy { instance, name } => {
                 find_group_mut(config, instance, name)?.evpn_import_policy = None;
                 Ok(())
@@ -1028,6 +1059,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             evpn_import_policy: None,
+            enforce_first_as: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
@@ -1278,6 +1310,29 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].evpn_import_policy, None);
+    }
+
+    #[test]
+    fn set_and_clear_enforce_first_as() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetEnforceFirstAs {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            enabled: false,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].enforce_first_as,
+            Some(false)
+        );
+        BgpPeerGroupOp::ClearEnforceFirstAs {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].enforce_first_as, None);
     }
 
     #[test]

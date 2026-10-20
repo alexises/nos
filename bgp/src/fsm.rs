@@ -1275,6 +1275,10 @@ async fn report_established(
         slot.peer.local_as.filter(|_| kind == PeerKind::External),
     );
     rib.set_peer_role(peer.remote_address, slot.peer.role);
+    rib.set_peer_enforce_first_as(
+        peer.remote_address,
+        slot.peer.enforce_first_as && !slot.peer.route_server_client,
+    );
     rib.set_peer_add_path_send_count(peer.remote_address, slot.peer.add_path_send_count);
     rib.set_peer_rpki_state(
         peer.remote_address,

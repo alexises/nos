@@ -505,6 +505,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Filter the EVPN routes this peer-group's peers send us through a routing policy.",
             "Names a policy-definition applied to every EVPN route (types 1, 2, 3 and 5) received from this peer-group's peers; a rejected route is dropped as if withdrawn. Match on route targets with `this.bgp.extended_communities.contains(...)`. Only accept/reject counts: attribute rewrites are ignored. Ethernet-segment routes (type 4) are never filtered. Unlike import-policy, unset accepts every EVPN route.",
         ),
+        Topic::BgpPeerGroupEnforceFirstAs => (
+            "Require the first AS of a received AS_PATH to be the peer's AS.",
+            "On by default for eBGP (RFC 4271 section 6.3): an UPDATE whose AS_PATH does not start with the peer's AS is treated as a withdraw and logged. Set to false to accept such paths. A route-server-client peer-group is always exempt. iBGP and confederation peers are never checked.",
+        ),
         Topic::BgpPeerGroupShutdown => (
             "Administratively shut every peer in a peer-group.",
             concat!(

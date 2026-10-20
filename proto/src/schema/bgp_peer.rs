@@ -121,6 +121,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             evpn_import_policy: None,
+            enforce_first_as: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

@@ -125,6 +125,8 @@ topics! {
     BgpPeerGroupExportPolicy,
     /// `BgpPeerGroup.evpn_import_policy`
     BgpPeerGroupEvpnImportPolicy,
+    /// `BgpPeerGroup.enforce_first_as`
+    BgpPeerGroupEnforceFirstAs,
     /// `BgpPeerGroup.shutdown`
     BgpPeerGroupShutdown,
     /// `BgpInstance.peers`

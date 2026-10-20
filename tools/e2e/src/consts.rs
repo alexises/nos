@@ -88,6 +88,10 @@ pub const CONFED_BAD_PREFIX: &str = "203.0.119.0/24";
 pub const LOCAL_AS: u32 = 65020;
 pub const LOCAL_AS_LEARNED_PREFIX: &str = "203.0.122.0/24";
 pub const LOCAL_AS_LOOP_PREFIX: &str = "203.0.123.0/24";
+/// `local-as` (#392): announced with a first AS (`FORGED_FIRST_AS`) that is
+/// not ExaBGP's (`ASN_G`), the peer AS router-a is configured with.
+pub const LOCAL_AS_FORGED_PREFIX: &str = "198.18.77.0/24";
+pub const FORGED_FIRST_AS: u32 = 65777;
 /// `add-path`: the prefix ExaBGP (router-g) announces to router-a as RFC
 /// 7911 path 1 (MED `ADD_PATH_MED_1`), path 2 (`ADD_PATH_MED_2`, the best)
 /// and, for the send half, path 3 (`ADD_PATH_MED_3`): router-a ranks them 2,
