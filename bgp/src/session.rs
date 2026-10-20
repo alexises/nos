@@ -877,11 +877,22 @@ impl SessionManager {
     }
 
     async fn accept_loop(self: Arc<Self>, listener: TcpListener) {
+        // A persistent accept error (EMFILE, ...) must not spin the core:
+        // back off 10 ms doubling to 1 s, log once per burst (#396).
+        let mut failing: Option<Duration> = None;
         loop {
             match listener.accept().await {
-                Ok((stream, addr)) => self.handle_inbound(stream, addr.ip()).await,
+                Ok((stream, addr)) => {
+                    failing = None;
+                    self.handle_inbound(stream, addr.ip()).await;
+                }
                 Err(e) => {
-                    warn!(instance = %self.instance, error = %e, "bgp listener accept failed");
+                    if failing.is_none() {
+                        warn!(instance = %self.instance, error = %e, "bgp listener accept failed");
+                    }
+                    let delay = accept_backoff(failing);
+                    failing = Some(delay);
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -1436,9 +1447,27 @@ fn jittered(d: Duration) -> Duration {
     d.mul_f64(0.75 + 0.25 * r)
 }
 
+/// Next accept-error sleep: 10 ms, doubling to 1 s (`None` = first failure).
+fn accept_backoff(prev: Option<Duration>) -> Duration {
+    prev.map_or(Duration::from_millis(10), |d| {
+        (d * 2).min(Duration::from_secs(1))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_backoff_doubles_to_one_second() {
+        let mut d = accept_backoff(None);
+        let mut seq = vec![d.as_millis()];
+        for _ in 0..8 {
+            d = accept_backoff(Some(d));
+            seq.push(d.as_millis());
+        }
+        assert_eq!(seq, [10, 20, 40, 80, 160, 320, 640, 1000, 1000]);
+    }
 
     /// RFC 5882 §4.3: established -> Cease/10 (flushing only with C at both
     /// ends); down with stale routes -> abort the restart only with C.

@@ -859,7 +859,7 @@
           },
           "maximum_prefix": {
             "$ref": "#/components/schemas/BgpMaximumPrefix",
-            "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+            "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit` (`limit 0` = explicitly uncapped). A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
           },
           "mrai": {
             "description": "RFC 4271 §9.2.1.1 `MinRouteAdvertisementInterval`, in seconds: at most\none batch of advertisements per this interval to each peer (withdrawals\nare exempt). `None` (or 0) disables pacing — every change is sent at once.",
@@ -15675,7 +15675,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpMaximumPrefix",
-                  "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+                  "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit` (`limit 0` = explicitly uncapped). A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
                 }
               }
             },
@@ -15733,7 +15733,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BgpMaximumPrefix",
-                "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+                "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit` (`limit 0` = explicitly uncapped). A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
               }
             }
           },
@@ -15745,7 +15745,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpMaximumPrefix",
-                  "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+                  "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit` (`limit 0` = explicitly uncapped). A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
                 }
               }
             },

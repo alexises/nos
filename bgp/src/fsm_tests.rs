@@ -3,7 +3,7 @@
 //! command or message per branch. The negotiation core (`step`) keeps its
 //! unit tests in `fsm.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -605,7 +605,7 @@ struct Cls {
     slot: Arc<PeerSlot>,
     peer: PeerContext,
     rx: Receiver<OutboundUpdate>,
-    stale: HashMap<AddressFamily, Instant>,
+    stale: RefreshState,
 }
 
 impl Cls {
@@ -632,7 +632,7 @@ impl Cls {
             peer: pctx(&rp),
             slot: PeerSlot::new(rp),
             rx,
-            stale: HashMap::new(),
+            stale: RefreshState::default(),
         }
     }
 
@@ -857,13 +857,13 @@ async fn enhanced_refresh_markers_arm_and_cancel_the_stale_timer() {
     // Stale time 0: a BoRR never arms the timer.
     let est = State::Established(remote(true, true));
     c.feed(marker(message::REFRESH_BORR), &est).await;
-    assert_eq!(c.stale.len(), 0);
+    assert_eq!(c.stale.stale_until.len(), 0);
 
     c.peer.route_refresh_stale_time = Duration::from_secs(30);
     c.feed(marker(message::REFRESH_BORR), &est).await;
-    assert!(c.stale.contains_key(&v4));
+    assert!(c.stale.stale_until.contains_key(&v4));
     c.feed(marker(message::REFRESH_EORR), &est).await;
-    assert!(c.stale.is_empty(), "EoRR cancels it");
+    assert!(c.stale.stale_until.is_empty(), "EoRR cancels it");
 
     // Without the negotiated capability markers mean nothing.
     c.feed(
@@ -871,10 +871,10 @@ async fn enhanced_refresh_markers_arm_and_cancel_the_stale_timer() {
         &State::Established(remote(false, true)),
     )
     .await;
-    assert_eq!(c.stale.len(), 0);
+    assert_eq!(c.stale.stale_until.len(), 0);
     // Nor does an unknown subtype.
     c.feed(marker(200), &est).await;
-    assert_eq!(c.stale.len(), 0);
+    assert_eq!(c.stale.stale_until.len(), 0);
 }
 
 async fn script_pair() -> (

@@ -617,7 +617,7 @@ async fn classify_inbound(
     remote_is_ibgp: bool,
     bgp_rib: &SharedRib,
     slot: &PeerSlot,
-    stale_until: &mut HashMap<AddressFamily, Instant>,
+    refresh: &mut RefreshState,
 ) -> Option<Event> {
     match msg {
         BgpMessage::Open(open) => Some(Event::OpenReceived(open)),
@@ -656,7 +656,7 @@ async fn classify_inbound(
             None
         }
         BgpMessage::RouteRefresh(rr) => {
-            resend_loc_rib(rr, state, peer, bgp_rib, stale_until).await;
+            resend_loc_rib(rr, state, peer, bgp_rib, refresh).await;
             None
         }
         BgpMessage::EndOfRib { afi, safi } => {
@@ -683,6 +683,14 @@ async fn classify_inbound(
     }
 }
 
+/// Per-session route-refresh state: RFC 7313 stale deadlines and the
+/// peer-driven request limiter.
+#[derive(Default)]
+struct RefreshState {
+    stale_until: HashMap<AddressFamily, Instant>,
+    limiter: crate::refresh_limit::RefreshLimiter,
+}
+
 /// RFC 2918 inbound: re-send the Loc-RIB for the requested address family.
 /// RFC 7313 `BoRR`/`EoRR` arm/cancel the family's stale timer in `stale_until`.
 async fn resend_loc_rib(
@@ -690,7 +698,7 @@ async fn resend_loc_rib(
     state: &State,
     peer: &PeerContext,
     bgp_rib: &SharedRib,
-    stale_until: &mut HashMap<AddressFamily, Instant>,
+    refresh: &mut RefreshState,
 ) {
     if !matches!(state, State::Established(_)) {
         debug!(
@@ -713,24 +721,33 @@ async fn resend_loc_rib(
     let mut rib = bgp_rib.lock().await;
     match rr.subtype {
         message::REFRESH_REQUEST => {
-            rib.resend_all(peer.remote_address, family, remote.enhanced_refresh);
-            info!(
-                peer = %peer.remote_address, afi = rr.afi,
-                "bgp: received route refresh, resending loc-rib"
-            );
+            if refresh.limiter.allow(Instant::now()) {
+                rib.resend_all(peer.remote_address, family, remote.enhanced_refresh);
+                info!(
+                    peer = %peer.remote_address, afi = rr.afi,
+                    "bgp: received route refresh, resending loc-rib"
+                );
+            } else {
+                debug!(
+                    peer = %peer.remote_address, afi = rr.afi,
+                    "bgp: route refresh rate-limited, not resending"
+                );
+            }
         }
         message::REFRESH_BORR if remote.enhanced_refresh => {
             rib.begin_refresh_in(peer.remote_address, family);
             // RFC 7313 §4: bound how long the marks may wait for an EoRR; a
             // repeated BoRR restarts the timer.
             if !peer.route_refresh_stale_time.is_zero() {
-                stale_until.insert(family, Instant::now() + peer.route_refresh_stale_time);
+                refresh
+                    .stale_until
+                    .insert(family, Instant::now() + peer.route_refresh_stale_time);
             }
             debug!(peer = %peer.remote_address, afi = rr.afi, "bgp: received BoRR");
         }
         message::REFRESH_EORR if remote.enhanced_refresh => {
             rib.end_refresh_in(peer.remote_address, family);
-            stale_until.remove(&family);
+            refresh.stale_until.remove(&family);
             debug!(peer = %peer.remote_address, afi = rr.afi, "bgp: received EoRR");
         }
         subtype => debug!(
@@ -1417,7 +1434,7 @@ pub async fn run(
         crate::rib::outbox_channel(peer.remote_address, crate::rib::OUTBOX_CAPACITY);
     let mut mrai = crate::mrai::Mrai::new(peer.mrai);
     // RFC 7313 §4 stale-route deadlines, per family; die with the session.
-    let mut stale_until: HashMap<AddressFamily, Instant> = HashMap::new();
+    let mut refresh = RefreshState::default();
 
     let (read_half, write_half) = stream.into_split();
     let mut reader = FramedRead::new(read_half, BgpCodec::default());
@@ -1501,7 +1518,7 @@ pub async fn run(
                         if let Some(period) = timers.hold_period {
                             timers.hold_deadline = Some(Instant::now() + period);
                         }
-                        match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib, &slot, &mut stale_until).await {
+                        match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib, &slot, &mut refresh).await {
                             Some(event) => event,
                             None => continue,
                         }
@@ -1537,8 +1554,8 @@ pub async fn run(
                     }
                     continue;
                 }
-                () = sleep_until_opt(stale_until.values().min().copied()) => {
-                    expire_stale(&cx, &mut stale_until).await;
+                () = sleep_until_opt(refresh.stale_until.values().min().copied()) => {
+                    expire_stale(&cx, &mut refresh.stale_until).await;
                     continue;
                 }
                 () = sleep_until_opt(mrai.deadline()) => {

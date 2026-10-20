@@ -242,7 +242,8 @@ The request fails with `404` over REST if the peer is not configured or its sess
 - Each family has its own limit and its own count.
 - One prefix over the limit closes the session with a Cease NOTIFICATION, subcode 1 (Maximum Number of Prefixes Reached), carrying the family and the limit.
 - The peer then stays down: NOS neither connects to it nor accepts its connections.
-- Committing an eBGP peer-group (its `remote-as` differs from the instance `asn`) with no limit for a negotiated family prints a warning, e.g. `warning: bgp-instance 'r1' peer-group 'ext': eBGP, no maximum-prefix for ipv4 (...)`. The commit still succeeds; set the limit to silence it. Over REST the commit reply lists them in `warnings` (`[]` when none).
+- There is no built-in cap: with no `maximum-prefix` for a family, a peer may send any number of prefixes. `limit 0` is the explicit form of that: nothing is enforced and the warning below is silenced.
+- Committing an eBGP peer-group (its `remote-as` differs from the instance `asn`) with no limit for a negotiated family prints a warning, e.g. `warning: bgp-instance 'r1' peer-group 'ext': eBGP, no maximum-prefix for ipv4 (...)`. The commit still succeeds; set a limit to silence it, or `limit 0` to say the peer-group is deliberately uncapped. Over REST the commit reply lists them in `warnings` (`[]` when none).
 
 ```
 edge-1(t3/bgp-instance:r1/peer-group:pg1)> set maximum-prefix ipv4 limit 1000
@@ -517,7 +518,7 @@ See [Shutting a session down](#shutting-a-session-down). While a peer is shut do
 
 ### Route refresh (RFC 2918, RFC 7313)
 
-When a peer asks for a route refresh, NOS resends its routes for that address family. If both sides support enhanced route refresh, the resent routes are framed by begin and end markers, and routes the peer no longer sends are removed at the end. `clear bgp … soft-in` asks the peer to do the same (see [Asking a peer to resend its routes](#asking-a-peer-to-resend-its-routes)). A peer that did not advertise the route refresh capability is never sent a request: the router logs `route refresh not sent` instead.
+When a peer asks for a route refresh, NOS resends its routes for that address family. A peer may ask at most twice in a burst and then once every 10 seconds, per session; a request over that is not answered and logged at `debug` (`route refresh rate-limited`). The limit is fixed. If both sides support enhanced route refresh, the resent routes are framed by begin and end markers, and routes the peer no longer sends are removed at the end. `clear bgp … soft-in` asks the peer to do the same (see [Asking a peer to resend its routes](#asking-a-peer-to-resend-its-routes)). A peer that did not advertise the route refresh capability is never sent a request: the router logs `route refresh not sent` instead.
 
 If a peer starts an enhanced route refresh and never sends the end marker, NOS still removes the routes it did not resend once `route-refresh-stale-time` has passed (RFC 7313 §4). The router logs `route refresh stale timer expired` and the session stays up.
 
@@ -956,7 +957,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | export-policy | `… export-policy <policy>` / `set export-policy <policy>`; `delete export-policy` | `…/export-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | as import-policy | Filters and modifies advertised routes | `show config`; `show route` on the peer |
 | evpn-import-policy | `… evpn-import-policy <policy>` / `set evpn-import-policy <policy>`; `delete evpn-import-policy` | `…/evpn-import-policy`, a policy name or `null` | policy name; default: accept every EVPN route | `accept-all`, `deny-all` or an existing policy-definition | Accepts or rejects received EVPN routes (types 1, 2, 3, 5), see [EVPN](evpn-vxlan.md#filter-received-evpn-routes-trust-model) | `show config`; `show bgp evpn` |
 | shutdown | `… shutdown [<message>]` / `set shutdown [<message>]`; `delete shutdown` | `…/shutdown`, `{"message":"…"}` or `{"message":null}` or `null` | message up to 255 bytes; default: not shut | message ≤ 255 bytes | Closes and keeps closed every session of the group | `show bgp brief` (`Idle (shutdown)`) |
-| maximum-prefix | `… maximum-prefix ipv4\|ipv6\|l2vpn-evpn limit <n> [warning-only] [restart-interval <s>]` / `set maximum-prefix …`; `delete maximum-prefix <family>` | `…/maximum-prefix/<family>`, `{"limit":1000,"warning_only":false,"restart_interval":0}` or `null` | limit 1 to 4294967295; default: no limit; restart-interval 0 (stay down) | limit ≥ 1; the family must be in address-family | Closes the session with Cease subcode 1 when a peer sends more prefixes | `show bgp brief` (`Idle (max-prefix)`, `prefixes`) |
+| maximum-prefix | `… maximum-prefix ipv4\|ipv6\|l2vpn-evpn limit <n> [warning-only] [restart-interval <s>]` / `set maximum-prefix …`; `delete maximum-prefix <family>` | `…/maximum-prefix/<family>`, `{"limit":1000,"warning_only":false,"restart_interval":0}` or `null` | limit 0 (uncapped) to 4294967295; default: no limit; restart-interval 0 (stay down) | the family must be in address-family | Closes the session with Cease subcode 1 when a peer sends more prefixes | `show bgp brief` (`Idle (max-prefix)`, `prefixes`) |
 
 `show config` and `show this` end each peer-group line with its `import-policy` and `export-policy` (`default (deny-all)` when unset). Over REST, `GET …/peer-group/<g>/import-policy`.
 

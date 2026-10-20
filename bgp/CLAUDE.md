@@ -37,11 +37,11 @@ Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-v
 
 ## BGP finite state machine
 
-- `fsm::step` is the pure transition core, unit-tested; `fsm::run` owns the framed socket and timers. `UPDATE`/`ROUTE_REFRESH` bypass `step` (short-circuited in `run`'s read branch, meaningful only once `Established`).
+- `fsm::step` is the pure transition core, unit-tested; `fsm::run` owns the framed socket and timers. `UPDATE`/`ROUTE_REFRESH` bypass `step` (handled in `run`'s read branch, only once `Established`).
 - Send to a peer only via `OutboxTx::send` (bounded, coalescing, #395).
 - Every well-formed inbound message resets the hold timer (RFC 4271 §4.4), centrally in the read branch.
-- Hold/keepalive/connect-retry defaults and floors live in `nos_proto` because `nos-config` validates the same rules; the OPEN check order is in the internals page.
-- The `PeerSlot` command channel is polled only while `Established` (collision resolves before), so one task contends for it.
+- Hold/keepalive/connect-retry defaults and floors live in `nos_proto` (`nos-config` validates the same rules); OPEN check order: internals page.
+- The `PeerSlot` command channel is polled only while `Established`, so one task contends for it.
 - 4-octet AS: `AS_TRANS` without capability 65 is a bad peer AS; a peer without it gets `BgpCodec::two_octet_as` (`AS4_PATH` merge). RFC 9072 OPEN is emitted only above 255 bytes.
 
 ## Aggregation (#78)
@@ -66,11 +66,11 @@ Penalty is keyed by (peer, prefix) in `damping::Damping`; an identical re-announ
 
 ## Maximum prefixes
 
-Counters (`path_counts`) are kept only by `put_path`/`take_path`, the sole Adj-RIB-In mutators (`prefix_counters_match_a_recount_through_every_mutation`). The hold lives on `PeerSlot`; the Cease is queued once (a queued command outlives the session). 
+Counters (`path_counts`) change only in `put_path`/`take_path`, the sole Adj-RIB-In mutators (`prefix_counters_match_a_recount_through_every_mutation`). The hold lives on `PeerSlot`; the Cease is queued once (a queued command outlives the session). No built-in cap; `limit 0` = explicitly uncapped.
 
 ## Route refresh
 
-Route Refresh (2) and Enhanced (70) are advertised unconditionally. The RFC 7313 stale deadline is one per family, scoped to the session (`stale_until`). `send_route_refresh` sends nothing without the peer's capability.
+Route Refresh (2) and Enhanced (70) are always advertised. The RFC 7313 stale deadline is one per family, scoped to the session (`stale_until`). Peer requests pass `RefreshLimiter` (burst 2, 1/10s, per session); internal refreshes bypass it. `send_route_refresh` sends nothing without the peer's capability.
 
 ## RPKI
 
@@ -107,7 +107,7 @@ Route-server candidates (`rs_candidates`) are never filtered by feasibility or a
 
 ## Communities
 
-Well-known values get no suppression; the RFC 4360 transitive bit is enforced on eBGP export (#162).
+The RFC 4360 transitive bit is enforced on eBGP export (#162).
 
 ## EVPN and MAC mobility
 
@@ -130,7 +130,7 @@ Well-known values get no suppression; the RFC 4360 transitive bit is enforced on
 
 ## Performance
 
-Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE, per-route `info!`): run `tools/bench-bgp.sh` around RIB changes. `--features dhat-heap` profiles memory (`docs/architecture/development.md`).
+Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE): run `tools/bench-bgp.sh` around RIB changes. `--features dhat-heap` profiles memory (`docs/architecture/development.md`).
 
 ## Modules
 
