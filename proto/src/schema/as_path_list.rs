@@ -17,10 +17,11 @@ use nos_proto_derive::Cli;
 pub struct AsPathList {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.as_path_lists, |l| &l.name))
     )]
     #[cli(key)]
-    /// List name, 1 to 64 characters, unique among AS-path lists.
+    /// List name, 1 to 64 characters (letters, digits, `_`, `-`), unique among AS-path lists.
     pub name: String,
 
     #[garde(custom(|p: &Vec<String>, _ctx: &Config| valid_patterns(p)))]

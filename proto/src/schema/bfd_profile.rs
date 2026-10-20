@@ -40,10 +40,11 @@ pub const PADDED_PDU_MAX: u16 = 9000;
 pub struct BfdProfile {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.bfd_profiles, |p| &p.name))
     )]
     #[cli(key)]
-    /// Profile name, 1 to 64 characters, unique among BFD profiles; the key sessions reference.
+    /// Profile name, 1 to 64 characters (letters, digits, `_`, `-`), unique among BFD profiles; the key sessions reference.
     pub name: String,
 
     /// Desired minimum transmit interval, milliseconds.

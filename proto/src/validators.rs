@@ -158,9 +158,65 @@ pub fn hostname_charset(value: &str) -> garde::Result {
     Ok(())
 }
 
+/// Object-name rule (#387): non-empty, only ASCII letters, digits, `_` and
+/// `-`, and no leading `-` (a name may end up as an argv word or a path
+/// component, so `/`, `..`, whitespace and control characters never pass).
+pub fn name_charset(value: &str) -> garde::Result {
+    let ok = !value.is_empty()
+        && !value.starts_with('-')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !ok {
+        return Err(garde::Error::new(
+            "must contain only ASCII letters, digits, '_' and '-', and must not start with '-'",
+        ));
+    }
+    Ok(())
+}
+
+/// `name_charset` plus the kernel's 15-byte `IFNAMSIZ` limit, for names that
+/// become a netdev name.
+pub fn device_name(value: &str) -> garde::Result {
+    name_charset(value)?;
+    if value.len() > 15 {
+        return Err(garde::Error::new(
+            "kernel interface name must be at most 15 characters",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_charset_accepts_and_rejects() {
+        for ok in ["a", "rt1", "Peer_Group-2", "loopback-rt1"] {
+            assert!(name_charset(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "-x",
+            "../../tmp/x",
+            "a b",
+            "a\nb",
+            "a\u{1b}[31m",
+            "a.b",
+            "a:b",
+            "é",
+        ] {
+            assert!(name_charset(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn device_name_caps_at_15() {
+        assert!(device_name("abcdefghijklmno").is_ok());
+        assert!(device_name("abcdefghijklmnop").is_err());
+        assert!(device_name("a b").is_err());
+    }
 
     #[test]
     fn hostname_charset_accepts_mixed_case_and_hyphen() {

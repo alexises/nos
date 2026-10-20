@@ -192,6 +192,7 @@ pub struct RoutingTableEvpn {
 pub struct RoutingTable {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.routing_tables, |t| &t.name))
     )]
     #[cli(key)]

@@ -191,6 +191,7 @@ pub(crate) fn valid_subinterface_list(subinterfaces: &[Subinterface]) -> garde::
 pub struct Interface {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| interface_name_valid(n, ctx))
     )]
     #[cli(key)]
@@ -329,12 +330,16 @@ fn interface_name_valid(name: &String, ctx: &Config) -> garde::Result {
             "interface name must not contain '.' (reserved for subinterface addressing, e.g. eth0.100)",
         ));
     }
-    if let Some(table) = loopback_table_name(name)
-        && !ctx.routing_tables.iter().any(|t| t.name == table)
-    {
-        return Err(garde::Error::new(
-            "loopback interface's routing table does not exist",
-        ));
+    if let Some(table) = loopback_table_name(name) {
+        // The kernel device is `lo<table_id>`, so the name is not a netdev name.
+        if !ctx.routing_tables.iter().any(|t| t.name == table) {
+            return Err(garde::Error::new(
+                "loopback interface's routing table does not exist",
+            ));
+        }
+    } else {
+        // ponytail: `<name>.<tag>` subinterface length is not checked (Subinterface does not see its parent's name); the driver surfaces the kernel error.
+        crate::validators::device_name(name)?;
     }
     Ok(())
 }
@@ -1158,5 +1163,24 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("bfd profile 'fast' does not exist"), "{err}");
+    }
+
+    #[test]
+    fn names_follow_charset_and_device_length() {
+        let ok = |ifaces: Vec<Interface>, tables: Vec<RoutingTable>| {
+            let cfg = config_with(ifaces, tables);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(ok(vec![interface("eth0", &[], None)], vec![]));
+        assert!(ok(vec![interface("abcdefghijklmno", &[], None)], vec![]));
+        assert!(!ok(vec![interface("abcdefghijklmnop", &[], None)], vec![]));
+        assert!(!ok(vec![interface("-eth0", &[], None)], vec![]));
+        assert!(!ok(vec![interface("../x", &[], None)], vec![]));
+        assert!(!ok(vec![], vec![table("a b")]));
+        // `loopback-<table>` is not a netdev name (`lo<id>`), so it may exceed 15.
+        assert!(ok(
+            vec![interface("loopback-a-long-table-name", &[], None)],
+            vec![table("a-long-table-name")]
+        ));
     }
 }

@@ -110,10 +110,11 @@ pub enum DfAlgorithm {
 pub struct PortAggregate {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| port_aggregate_name_valid(n, ctx))
     )]
     #[cli(key)]
-    /// Bond name, 1 to 64 characters, unique among interfaces and aggregates.
+    /// Bond name, 1 to 64 characters (letters, digits, `_`, `-`), unique among interfaces and aggregates.
     pub name: String,
 
     #[garde(skip)]

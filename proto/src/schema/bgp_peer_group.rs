@@ -396,9 +396,13 @@ pub(super) fn valid_shutdown(s: Option<&BgpShutdown>) -> garde::Result {
 #[allow(clippy::struct_excessive_bools)] // each bool is an independent schema field
 /// Session settings shared by every `BgpPeer` that names this group.
 pub struct BgpPeerGroup {
-    #[garde(length(min = 1, max = 64), custom(|n, ctx: &Config| unique_name(n, ctx)))]
+    #[garde(
+        length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
+        custom(|n, ctx: &Config| unique_name(n, ctx))
+    )]
     #[cli(key)]
-    /// Group name, 1 to 64 characters, unique within the instance.
+    /// Group name, 1 to 64 characters (letters, digits, `_`, `-`), unique within the instance.
     pub name: String,
 
     // RFC 6793: ASN 0 and 4_294_967_295 are reserved.

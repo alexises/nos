@@ -17,6 +17,7 @@ use nos_proto_derive::Cli;
 pub struct PolicyDefinition {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| valid_name(n, ctx))
     )]
     #[cli(key)]

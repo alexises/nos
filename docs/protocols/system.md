@@ -32,6 +32,13 @@ $C -X PUT -H 'Content-Type: application/json' -d '"edge-1"' $B/v1/transactions/n
 
 A hostname is 1 to 253 characters: ASCII letters, digits and hyphens, not starting or ending with a hyphen. Dots are not allowed, so use a plain name rather than a fully qualified one. An open shell picks up the new name as soon as the commit is done. There is no `delete hostname`; set it back to `nos` to restore the default.
 
+### Object names
+
+- Every named object (BGP instance, peer group, routing table, interface, bond, policy, prefix list, profile, domain, and so on) takes 1 to 64 characters: ASCII letters, digits, `_` and `-`, not starting with `-`. `/`, `..`, dots, colons, spaces and control characters are refused at commit.
+- A physical interface name is a kernel device name and is limited to 15 characters. `loopback-<table>` and bonds are exempt: their kernel devices are named from ids.
+- User names follow their own rule (see [Users and passwords](#users-and-passwords)).
+- Upgrading: a saved configuration holding a name that breaks the rule fails validation when `nos-configd` loads it. Rename the object in the saved file before upgrading.
+
 ## Users and passwords
 
 Every local user is a full administrator: there are no roles or read-only accounts. A user logs in to the shell with a user name and password, and REST clients trade the same user name and password for a certificate (see [The REST API](../api.md#getting-a-client-certificate)).

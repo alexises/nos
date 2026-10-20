@@ -80,10 +80,11 @@ fn valid_vlan_tag(tag: VlanTag) -> garde::Result {
 pub struct SwitchingProfile {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.switching_profiles, |p| &p.name))
     )]
     #[cli(key)]
-    /// Profile name, 1 to 64 characters, unique among switching profiles.
+    /// Profile name, 1 to 64 characters (letters, digits, `_`, `-`), unique among switching profiles.
     pub name: String,
 
     #[garde(dive, custom(|members, _ctx: &Config| unique_broadcast_domains(members)))]
