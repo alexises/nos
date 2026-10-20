@@ -50,7 +50,7 @@ transaction 'users' committed
 - `delete user <name>` removes the user, even if their certificates have not expired:
   - their REST certificates stop working at their next request;
   - their shell certificates are revoked at once, so their shell can't open a new connection to any service. A connection that is already open is not cut.
-- Changing a user's password also revokes that user's shell certificates: every shell they are logged in to must log in again. Their REST certificates keep working until they expire.
+- Changing a user's password also revokes that user's shell certificates: every shell they are logged in to must log in again. Their REST certificates are refused at their next request too: they must log in again with the new password.
 - A commit that would leave no user is refused, so you cannot lock yourself out:
   ```
   error: nos-configd reported an error: refusing to commit: it would remove every user and lock everyone out
@@ -113,7 +113,7 @@ docker cp nos-watchdog:/run/nos/pki/rest-ca.crt .
 
 The router creates a new certificate authority each time it starts. After a restart, copy `rest-ca.crt` again, and every client must log in again: certificates issued before the restart are no longer accepted.
 
-**Certificate lifetime.** Client certificates last 8 hours; clients renew them before they expire. The lifetime is a start-up option (`--pki-user-lifetime`, see [below](#start-up-options)).
+**Certificate lifetime.** Client certificates last 8 hours; clients renew them before they expire, for at most 7 days after the password login (`--pki-rest-session-max`). The lifetime is a start-up option (`--pki-user-lifetime`, see [below](#start-up-options)).
 
 **Saving over REST.** A change committed over REST is live but not on disk; `POST /v1/config/save` writes it, like the shell's `save` (see [below](#saving-the-configuration)).
 
@@ -248,6 +248,7 @@ services:
       RUST_LOG: info
 ```
 
+- `--pki-rest-session-max=<seconds>` (default 604800, 7 days): how long renewals can keep one REST login alive. Past it, `POST /v1/renew` answers 401 and the client logs in again with its password.
 - `--pki-user-lifetime=<seconds>` (default 28800, 8 hours): how long a user certificate is valid, for the shell and for REST clients alike. Clients renew at half this time.
 - `--pki-leaf-lifetime=<seconds>` (default 86400) and `--pki-rotate-every=<seconds>` (default 28800): lifetime of the certificates the router's own services use between themselves, and how often they are renewed. The second must be shorter than the first. When a service stops or restarts (a crash, or its object removed from the configuration), its certificates are revoked at once rather than left valid until they expire.
 - `--pki-dir=<dir>` (default `/run/nos/pki`): where `ca.crt` and `rest-ca.crt` are published. If you change it, start the shell with `nos --pki-ca <dir>/ca.crt`.

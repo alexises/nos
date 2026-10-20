@@ -230,6 +230,11 @@ struct Args {
     /// is valid for; the client renews it at half-life.
     #[arg(long, default_value_t = 8 * 3600)]
     pki_user_lifetime: u64,
+
+    /// Seconds a REST login (`nos-restd`) may be extended by certificate
+    /// renewals; after that the client logs in with its password again.
+    #[arg(long, default_value_t = 7 * 24 * 3600)]
+    pki_rest_session_max: u64,
 }
 
 #[tokio::main]
@@ -245,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(args.pki_user_lifetime),
     )
     .context("starting the ipc certificate authority")?;
+    pki.set_rest_session_max(Duration::from_secs(args.pki_rest_session_max));
     tracing_subscriber::registry()
         // `RUST_LOG` support: defaults to `trace`, i.e. exactly the
         // unfiltered behavior this process had before, so an unset
@@ -606,6 +612,7 @@ mod tests {
             (a.pki_leaf_lifetime, a.pki_rotate_every, a.pki_user_lifetime),
             (86_400, 28_800, 28_800)
         );
+        assert_eq!(a.pki_rest_session_max, 604_800);
         assert!(a.logd_flags.is_empty() && a.restd_flags.is_empty());
     }
 

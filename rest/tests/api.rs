@@ -134,6 +134,16 @@ async fn fixture_with(services: Vec<(ServiceRef, PathBuf)>, config_file: Option<
             WatchdogRequest::RestLogin { .. } => {
                 WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string())
             }
+            // The watchdog's allowlist, reduced to: serial "revoked" is not live.
+            WatchdogRequest::RestCertCheck { serial, .. } if serial != "revoked" => {
+                WatchdogEvent::Ok
+            }
+            WatchdogRequest::RestCertCheck { .. } => {
+                WatchdogEvent::Denied("session expired".to_string())
+            }
+            WatchdogRequest::RestRenew { serial, .. } if serial == "revoked" => {
+                WatchdogEvent::Denied("session expired".to_string())
+            }
             WatchdogRequest::RestRenew { user, .. } if user == USER => WatchdogEvent::Issued {
                 cert_der: vec![4, 5, 6],
                 lifetime_secs: 60,
@@ -177,7 +187,10 @@ async fn send_full(
         .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
-        .extension(PeerUser(user.map(str::to_string)));
+        .extension(PeerUser(
+            user.map(str::to_string),
+            user.map(|_| "live".to_string()),
+        ));
     if let Some((name, value)) = extra {
         req = req.header(name, value);
     }
@@ -1005,7 +1018,10 @@ async fn errors_are_problem_json_with_the_right_status() {
         let req = HttpRequest::builder()
             .method(method)
             .uri(uri)
-            .extension(PeerUser(user.map(str::to_string)))
+            .extension(PeerUser(
+                user.map(str::to_string),
+                user.map(|_| "live".to_string()),
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -1071,7 +1087,7 @@ async fn serves_swagger_ui_from_vendored_assets() {
     for (uri, csp) in [("/swagger-ui/", true), ("/openapi.json", false)] {
         let req = HttpRequest::builder()
             .uri(uri)
-            .extension(PeerUser(Some(USER.to_string())))
+            .extension(PeerUser(Some(USER.to_string()), Some("live".into())))
             .body(Body::empty())
             .unwrap();
         let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -1134,7 +1150,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
 
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?source=nos-x")
-        .extension(PeerUser(Some(USER.to_string())))
+        .extension(PeerUser(Some(USER.to_string()), Some("live".into())))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -1156,7 +1172,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
     // `limit` trims the backlog only: the newest backlog entry and the live line remain.
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?limit=1")
-        .extension(PeerUser(Some(USER.to_string())))
+        .extension(PeerUser(Some(USER.to_string()), Some("live".into())))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -1456,7 +1472,7 @@ async fn too_many_failed_logins_get_429_with_retry_after() {
             .method(Method::POST)
             .uri("/v1/login")
             .header(header::CONTENT_TYPE, "application/json")
-            .extension(PeerUser(None))
+            .extension(PeerUser(None, None))
             .body(Body::from(body.to_string()))
             .unwrap()
     };
@@ -1479,6 +1495,27 @@ async fn too_many_failed_logins_get_429_with_retry_after() {
         "application/problem+json"
     );
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
+}
+
+/// A certificate the watchdog no longer vouches for (password changed,
+/// session past its cap) is refused on every route, renewal included.
+#[tokio::test]
+async fn a_revoked_certificate_gets_401_everywhere_including_renew() {
+    let f = fixture(vec![]).await;
+    for (method, uri, body) in [
+        (Method::GET, "/v1/config", None),
+        (Method::POST, "/v1/renew", Some(json!({"csr": "AQID"}))),
+    ] {
+        let req = HttpRequest::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(PeerUser(Some(USER.to_string()), Some("revoked".into())))
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap();
+        let resp = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
 }
 
 #[tokio::test]

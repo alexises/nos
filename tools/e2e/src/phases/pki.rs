@@ -135,6 +135,20 @@ async fn revoke_user(w: &World) -> anyhow::Result<()> {
     if !saved_cert_works(w).await? {
         bail!("a fresh user certificate was refused");
     }
+    // The same user's REST certificate: the REST CA has no CRL, so the
+    // watchdog's allowlist (checked by nos-restd on every request) revokes it.
+    let Ok(rest_id) = a.rest.login(REVOKED_USER, "first-password").await? else {
+        bail!("{REVOKED_USER} could not log in over REST");
+    };
+    let rest_client = a.rest.with_identity(&rest_id)?;
+    let config = |client: reqwest::Client| async move {
+        a.rest_with(&client, Method::GET, "/v1/config", None)
+            .await
+            .map(|(status, _)| status)
+    };
+    if config(rest_client.clone()).await? != 200 {
+        bail!("a fresh REST certificate was refused");
+    }
 
     log("changing its password revokes that certificate");
     let (revocations, refusals) = (a.count(&revoked), a.count(refused));
@@ -145,6 +159,15 @@ async fn revoke_user(w: &World) -> anyhow::Result<()> {
         bail!("a certificate issued before the password change still opens nos-configd");
     }
     a.wait_new(refused, refusals, 15).await?;
+    if config(rest_client).await? != 401 {
+        bail!("a REST certificate issued before the password change still works");
+    }
+    let Ok(fresh) = a.rest.login(REVOKED_USER, "second-password").await? else {
+        bail!("{REVOKED_USER} could not log in over REST with the new password");
+    };
+    if config(a.rest.with_identity(&fresh)?).await? != 200 {
+        bail!("a REST certificate issued after the password change was refused");
+    }
     login_keeping_cert(w, "second-password").await?;
     if !saved_cert_works(w).await? {
         bail!("a certificate issued after the password change was refused");

@@ -31,7 +31,7 @@ use tracing::debug;
 use crate::ca::err;
 use crate::identity::certified_key;
 use crate::policy::{provider, Policy};
-use crate::PeerId;
+use crate::{PeerId, Serial};
 
 /// The server side of an accepted REST TLS connection.
 pub type RestStream = tokio_rustls::server::TlsStream<TcpStream>;
@@ -75,6 +75,8 @@ pub struct Accepted {
     pub stream: RestStream,
     /// The user the client's certificate names; `None` if it sent none.
     pub user: Option<String>,
+    /// Hex serial of that certificate (`Serial`'s spelling), for the watchdog's liveness check.
+    pub serial: Option<String>,
     /// `true` when HTTP/2 was negotiated.
     pub h2: bool,
 }
@@ -124,12 +126,15 @@ impl RestServer {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timed out"))??;
         let (_, conn) = stream.get_ref();
-        let user = conn
-            .peer_certificates()
-            .and_then(|c| c.first())
+        let leaf = conn.peer_certificates().and_then(|c| c.first());
+        let user = leaf
             .and_then(|c| PeerId::from_cert_der(c))
             .filter(|p| p.role == "user")
             .map(|p| p.name);
+        let serial = leaf
+            .and_then(|c| Serial::of(c).ok())
+            .filter(|_| user.is_some())
+            .map(|s| s.to_string());
         let h2 = conn.alpn_protocol() == Some(b"h2");
         debug!(
             user = ?user.as_deref().unwrap_or("none"),
@@ -138,7 +143,12 @@ impl RestServer {
                 .map(rustls::crypto::SupportedKxGroup::name),
             "rest tls handshake ok"
         );
-        Ok(Accepted { stream, user, h2 })
+        Ok(Accepted {
+            stream,
+            user,
+            serial,
+            h2,
+        })
     }
 }
 

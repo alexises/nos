@@ -52,7 +52,9 @@ pub use bgp::{
     PeerSummary, RedistributeUpdate, RedistributedRoute, RpkiCacheStatus, RpkiSessionState,
     RpkiValidationState,
 };
-pub use broker::{Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
+pub use broker::{
+    Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED,
+};
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};

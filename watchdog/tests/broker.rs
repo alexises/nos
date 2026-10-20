@@ -416,7 +416,12 @@ async fn only_restd_may_use_the_rest_requests() {
             rest_login("alice", "s3cret", csr.clone()),
             WatchdogRequest::RestRenew {
                 user: "alice".into(),
+                serial: "00".into(),
                 csr_der: csr.clone(),
+            },
+            WatchdogRequest::RestCertCheck {
+                user: "alice".into(),
+                serial: "00".into(),
             },
             WatchdogRequest::IssueRestServerCert {
                 addresses: vec!["127.0.0.1".parse().unwrap()],
@@ -441,8 +446,16 @@ async fn only_restd_may_use_the_rest_requests() {
     }
     let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
     for request in requests() {
+        // Allowed for restd; the made-up serial is just not a live certificate.
+        let unknown_serial = matches!(
+            request,
+            WatchdogRequest::RestRenew { .. } | WatchdogRequest::RestCertCheck { .. }
+        );
         let event = ask(&mut conn, request).await;
-        assert!(!matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+        match event {
+            WatchdogEvent::Denied(m) => assert!(unknown_serial && m == "session expired"),
+            _ => assert!(!unknown_serial || matches!(event, WatchdogEvent::Ok)),
+        }
     }
 }
 
@@ -507,14 +520,115 @@ async fn rest_login_failures_are_not_throttled_by_the_broker_connection() {
     assert!(started.elapsed() < Duration::from_secs(4));
 }
 
+/// A REST login as `user` (password `s3cret`), returning the certificate's serial.
+async fn rest_serial(conn: &mut Conn, user: &str) -> String {
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } = ask(conn, rest_login(user, "s3cret", csr)).await
+    else {
+        panic!("rest login refused");
+    };
+    nos_pki::Serial::of(&cert_der).unwrap().to_string()
+}
+
+fn check(user: &str, serial: &str) -> WatchdogRequest {
+    WatchdogRequest::RestCertCheck {
+        user: user.into(),
+        serial: serial.into(),
+    }
+}
+
+/// A revoked user's REST certificates fail the per-request check and cannot
+/// renew; other users and fresh logins are untouched.
+#[tokio::test]
+async fn revoking_a_user_kills_their_rest_certificates() {
+    let e = env(vec![user("alice", "s3cret"), user("bob", "s3cret")]).await;
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let (a, b) = (
+        rest_serial(&mut conn, "alice").await,
+        rest_serial(&mut conn, "bob").await,
+    );
+    assert!(matches!(
+        ask(&mut conn, check("alice", &a)).await,
+        WatchdogEvent::Ok
+    ));
+    // A certificate is only good for the user it names.
+    assert!(matches!(
+        ask(&mut conn, check("bob", &a)).await,
+        WatchdogEvent::Denied(_)
+    ));
+
+    e.pki.revoke_user("alice");
+    assert!(matches!(
+        ask(&mut conn, check("alice", &a)).await,
+        WatchdogEvent::Denied(_)
+    ));
+    let renew = WatchdogRequest::RestRenew {
+        user: "alice".into(),
+        serial: a,
+        csr_der: csr,
+    };
+    assert!(matches!(
+        ask(&mut conn, renew).await,
+        WatchdogEvent::Denied(_)
+    ));
+    assert!(matches!(
+        ask(&mut conn, check("bob", &b)).await,
+        WatchdogEvent::Ok
+    ));
+    let fresh = rest_serial(&mut conn, "alice").await;
+    assert!(matches!(
+        ask(&mut conn, check("alice", &fresh)).await,
+        WatchdogEvent::Ok
+    ));
+}
+
+/// Renewals inherit the login time, so they stop at the session cap.
+#[tokio::test]
+async fn rest_renewals_stop_at_the_session_cap() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    e.pki.set_rest_session_max(Duration::from_secs(3));
+
+    let first = rest_serial(&mut conn, "alice").await;
+    let renew = |serial: &str| WatchdogRequest::RestRenew {
+        user: "alice".into(),
+        serial: serial.into(),
+        csr_der: csr.clone(),
+    };
+    let WatchdogEvent::Issued { cert_der, .. } = ask(&mut conn, renew(&first)).await else {
+        panic!("renewal inside the cap refused");
+    };
+    let second = nos_pki::Serial::of(&cert_der).unwrap().to_string();
+
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(matches!(
+        ask(&mut conn, check("alice", &second)).await,
+        WatchdogEvent::Denied(_)
+    ));
+    assert!(matches!(
+        ask(&mut conn, renew(&second)).await,
+        WatchdogEvent::Denied(_)
+    ));
+    // Logging in with the password starts a new session.
+    let third = rest_serial(&mut conn, "alice").await;
+    assert!(matches!(
+        ask(&mut conn, check("alice", &third)).await,
+        WatchdogEvent::Ok
+    ));
+}
+
 #[tokio::test]
 async fn rest_renewal_is_refused_for_a_deleted_user_and_server_certs_carry_the_rest_ca() {
     let e = env(vec![user("alice", "s3cret")]).await;
     let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
     let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
 
+    let serial = rest_serial(&mut conn, "alice").await;
     let renew = |user: &str| WatchdogRequest::RestRenew {
         user: user.into(),
+        serial: serial.clone(),
         csr_der: csr.clone(),
     };
     assert!(matches!(
