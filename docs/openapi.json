@@ -2961,7 +2961,7 @@
         "type": "string"
       },
       "OspfAuth": {
-        "description": "A profile's own authentication — RFC 2328 Appendix D. Mutually exclusive\nmechanisms, mirroring `BgpAuth`'s exact shape (`schema::bgp_peer_group`).\nStored clear-text, like every field in this config. `OspfProfile.auth ==\nNone` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.",
+        "description": "A profile's own authentication — RFC 2328 Appendix D. Mutually exclusive\nmechanisms, mirroring `BgpAuth`'s exact shape (`schema::bgp_peer_group`).\nKeys are labels of `Config.admin` keystore entries, never inline secrets.\n`OspfProfile.auth == None` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.",
         "oneOf": [
           {
             "description": "RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,\ncarried directly in the OSPF header's 8-byte Authentication field.",
@@ -2969,13 +2969,13 @@
               "Simple": {
                 "description": "RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,\ncarried directly in the OSPF header's 8-byte Authentication field.",
                 "properties": {
-                  "password": {
-                    "description": "The password, at most 8 bytes.",
+                  "key": {
+                    "description": "Label of the admin key holding the password (at most 8 bytes).",
                     "type": "string"
                   }
                 },
                 "required": [
-                  "password"
+                  "key"
                 ],
                 "type": "object"
               }
@@ -3035,7 +3035,7 @@
             "type": "boolean"
           },
           "key": {
-            "description": "Shared secret, stored clear-text like every config value.",
+            "description": "Label of the admin key holding the shared secret.",
             "type": "string"
           },
           "key_id": {
@@ -37149,7 +37149,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Shared secret, stored clear-text like every config value.",
+                  "description": "Label of the admin key holding the shared secret.",
                   "type": "string"
                 }
               }
@@ -37225,7 +37225,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Shared secret, stored clear-text like every config value.",
+                "description": "Label of the admin key holding the shared secret.",
                 "type": "string"
               }
             }
@@ -37237,7 +37237,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Shared secret, stored clear-text like every config value.",
+                  "description": "Label of the admin key holding the shared secret.",
                   "type": "string"
                 }
               }

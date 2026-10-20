@@ -190,28 +190,34 @@ Authentication is set on the profile, so it applies to every link using that pro
 
 ```
 configure auth
+set admin key ospf-p1-key1 secret s3cret-one
 edit ospf instance o1 area 0.0.0.0 profile p1
-set crypto-key 1 hmac-sha256 s3cret-one
+set crypto-key 1 hmac-sha256 ospf-p1-key1
 set crypto-key 1 current
 show this
 commit
 ```
 
-A key has a key ID (0 to 255), an algorithm (`md5`, `hmac-sha1`, `hmac-sha256`, `hmac-sha384` or `hmac-sha512`) and a secret of 1 to 80 bytes. Exactly one key must be `current`: it signs what the router sends. Every configured key is accepted on receive. The same on router-b over REST, where `auth` is replaced whole:
+Secrets are not typed into the profile: they live in the admin keystore under a label (`set admin key <label> secret <value>`), and the key names the label. A key has a key ID (0 to 255), an algorithm (`md5`, `hmac-sha1`, `hmac-sha256`, `hmac-sha384` or `hmac-sha512`) and the label of an admin key whose secret is 1 to 80 bytes. The secret reads `<hidden>` in `show config`, `GET /v1/config` and the logs; `show config` displays the label. The commit fails if a label does not exist, and deleting an admin key an OSPF profile still references fails it too. Exactly one key must be `current`: it signs what the router sends. Every configured key is accepted on receive. The same on router-b over REST, where `auth` is replaced whole:
 
 ```sh
 $C -X POST $B/v1/transactions/auth
 $C -X PUT -H 'Content-Type: application/json' \
-  -d '{"Crypto":{"keys":[{"key_id":1,"algorithm":"HmacSha256","key":"s3cret-one","is_current":true}]}}' \
+  -d '{"label":"ospf-p1-key1","secret":"s3cret-one"}' $B/v1/transactions/auth/admin/key/ospf-p1-key1
+$C -X PUT -H 'Content-Type: application/json' \
+  -d '{"Crypto":{"keys":[{"key_id":1,"algorithm":"HmacSha256","key":"ospf-p1-key1","is_current":true}]}}' \
   $B/v1/transactions/auth/ospf-instance/o1/area/0.0.0.0/profile/p1/auth
 $C -X POST $B/v1/transactions/auth/commit
 ```
+
+To replace a secret in place, set the same label to a new value on both routers (`set admin key ospf-p1-key1 secret <new>`): the link restarts and the adjacency comes back with the new secret. Breaking change: a `config.yaml` saved with an inline `password` or `key` no longer loads; move the secret to an admin key and reference its label.
 
 To change the key without dropping the adjacency, do it in three commits, on both routers each time: add the new key; once both have it, make it current; once both use it, delete the old one.
 
 ```
 configure roll1
-set ospf instance o1 area 0.0.0.0 profile p1 crypto-key 2 hmac-sha256 s3cret-two
+set admin key ospf-p1-key2 secret s3cret-two
+set ospf instance o1 area 0.0.0.0 profile p1 crypto-key 2 hmac-sha256 ospf-p1-key2
 commit
 configure roll2
 set ospf instance o1 area 0.0.0.0 profile p1 crypto-key 2 current
@@ -239,7 +245,7 @@ $C -X PUT -H 'Content-Type: application/json' -d 'true' \
 $C -X POST $B/v1/transactions/ext/commit
 ```
 
-The other two authentication modes are a plain-text password of up to 8 bytes (`set simple-password <password>`), which only protects against misconfiguration, and none (`delete auth`), the default.
+The other two authentication modes are a plain-text password of up to 8 bytes (`set simple-password <label>`, the label of an admin key of 1 to 8 bytes), which only protects against misconfiguration, and none (`delete auth`), the default.
 
 ### Redistribute static routes (ASBR)
 
@@ -647,7 +653,7 @@ The instance's JSON also carries `routing_table`, `redistribute_policy`, `redist
 | NSSA translate always | `set … area <area-id> nssa-translate-always enable`; `delete … nssa-translate-always` | `…/area/<area-id>/nssa-translate-always` | `true`/`false`; `false` by default | only on an NSSA | as an ABR, always translate the area's type-7 LSAs, not only when elected | `show ospf database` in another area |
 | NSSA default originate | `set … area <area-id> nssa-default-originate enable`; `delete … nssa-default-originate` | `…/area/<area-id>/nssa-default-originate` | `true`/`false`; `false` by default | only on an NSSA | as an ABR, originate a `0.0.0.0/0` type-7 LSA into the area | `show route <table> 0.0.0.0` inside the area |
 | ranges | `set … area <area-id> range <cidr> [not-advertise]`; `delete … range <cidr>`; `delete … range <cidr> not-advertise` | `…/area/<area-id>/range/<cidr>` (`/` as `%2F`) | IPv4 prefix, `not_advertise` false by default | prefixes unique within the area | as an ABR, the area's prefixes inside the range are advertised to the other areas as one type-3 LSA (largest cost) with a local discard route, or not at all with `not-advertise` | `show ospf database` in another area, `show route <table>` on the ABR |
-| virtual links | `set … area <area-id> virtual-link <router-id> [hello-interval <s>] [dead-interval <s>] [simple-password <p> \| crypto-key …]`; `delete … virtual-link <router-id>` | `…/area/<area-id>/virtual-link/<router-id>` | list keyed by the far endpoint's router ID; timers and auth as in [Profile](#profile) | not on `0.0.0.0`, a stub area or an NSSA; endpoint unique within the area and not this router's own ID; dead interval above hello interval; auth as a profile's (key ID 0-255) | a backbone adjacency to that router across this transit area, up while it is reachable here (RFC 2328 §15, §16.7); routes across it (§16.1-§16.3) | `show ospf neigh` (`vlink-<area-id>-<router-id>`), `virtual_links`/`router_flags` in `GET /v1/ospf/database` |
+| virtual links | `set … area <area-id> virtual-link <router-id> [hello-interval <s>] [dead-interval <s>] [simple-password <label> \| crypto-key …]`; `delete … virtual-link <router-id>` | `…/area/<area-id>/virtual-link/<router-id>` | list keyed by the far endpoint's router ID; timers and auth as in [Profile](#profile) | not on `0.0.0.0`, a stub area or an NSSA; endpoint unique within the area and not this router's own ID; dead interval above hello interval; auth as a profile's (key ID 0-255) | a backbone adjacency to that router across this transit area, up while it is reachable here (RFC 2328 §15, §16.7); routes across it (§16.1-§16.3) | `show ospf neigh` (`vlink-<area-id>-<router-id>`), `virtual_links`/`router_flags` in `GET /v1/ospf/database` |
 
 ### Profile
 
@@ -663,8 +669,8 @@ Absolute forms start with `set ospf instance <name> area <area-id> profile <prof
 | MTU ignore | `set … profile <p> mtu-ignore enable`; relative `set mtu-ignore enable` / `delete mtu-ignore` | `mtu-ignore` | `true`/`false`; default `false` | | Skip the RFC 2328 §10.6 check that a neighbour's advertised MTU is not larger than the link's | `GET …/profile/<p>/mtu-ignore` |
 | MTU | `set … profile <p> mtu <bytes>`; relative `set mtu <bytes>` / `delete mtu` *(relative only)* | `mtu` | integer 0 to 65535; default: the link's own MTU (1500 if unknown) | | MTU advertised in database-description packets and used to size them; the interface's real MTU is not changed | `GET …/profile/<p>/mtu` |
 | network type | `set … profile <p> network-type point-to-point\|broadcast\|point-to-multipoint`; relative `set network-type …` / `delete network-type` *(relative only)* | `network-type`, `"PointToPoint"`, `"Broadcast"` or `"PointToMultipoint"` | default: point-to-point on a subinterface or loopback, broadcast on a broadcast domain | | forces the network type on every link using the profile | `show ospf neigh` (link state) |
-| simple password | `set … profile <p> simple-password <password>`; relative `set simple-password <password>` | `auth`, `{"Simple":{"password":"…"}}` | 1 to 8 bytes; replaces any crypto keys | | RFC 2328 plain-text authentication; stored and shown in clear | `show this` in the profile |
-| crypto key | `set … profile <p> crypto-key <id> <algorithm> <key>`; relative `set crypto-key <id> <algorithm> <key>` / `delete crypto-key <id>` *(relative only)* | `auth`, `{"Crypto":{"keys":[{"key_id":1,"algorithm":"HmacSha256","key":"…","is_current":true}]}}` | ID 0 to 255 (up to 65535 with extended sequence numbers); algorithm `md5`, `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512` (`Md5`, `HmacSha1`, … in JSON); key 1 to 80 bytes | key IDs unique; at least one key; exactly one current | adds or replaces one key; a new key list replaces a simple password | `show this` in the profile |
+| simple password | `set … profile <p> simple-password <label>`; relative `set simple-password <label>` | `auth`, `{"Simple":{"key":"<label>"}}` | label of an admin key whose secret is 1 to 8 bytes; replaces any crypto keys | the label must exist | RFC 2328 plain-text authentication; the secret is never shown | `show this` in the profile |
+| crypto key | `set … profile <p> crypto-key <id> <algorithm> <label>`; relative `set crypto-key <id> <algorithm> <label>` / `delete crypto-key <id>` *(relative only)* | `auth`, `{"Crypto":{"keys":[{"key_id":1,"algorithm":"HmacSha256","key":"<label>","is_current":true}]}}` | ID 0 to 255 (up to 65535 with extended sequence numbers); algorithm `md5`, `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512` (`Md5`, `HmacSha1`, … in JSON); label of an admin key whose secret is 1 to 80 bytes | labels must exist; key IDs unique; at least one key; exactly one current | adds or replaces one key; a new key list replaces a simple password | `show this` in the profile |
 | current key | `set … profile <p> crypto-key <id> current`; relative `set crypto-key <id> current` | `is_current` of each key | exactly one key | the key must exist | the key that signs sent packets; all keys verify | `show this` in the profile |
 | no authentication | relative `delete auth` *(relative only)* | `DELETE …/auth` | default | | no authentication | `show this` in the profile |
 | extended sequence numbers | `set … profile <p> extended-sequence-numbers enable\|disable`; relative the same | `extended-sequence-numbers` | boolean; default `false` | needs crypto authentication with HMAC-SHA keys only | RFC 7474 authentication, protecting against replay across restarts; both ends must agree | `show this` in the profile |

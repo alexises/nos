@@ -106,8 +106,20 @@ fn instance(areas: Vec<OspfArea>) -> OspfInstance {
 }
 
 /// One instance, area 0 with profile `p1`, `eth0.0` 10.0.0.1/30 in `rt1`.
+/// Admin keystore: label `pw` holds the secret `pw`, `k<id>` holds `k<id>`.
+fn keystore() -> nos_proto::schema::Admin {
+    let key = |l: &str| nos_proto::schema::AdminKey {
+        label: l.into(),
+        secret: l.into(),
+    };
+    nos_proto::schema::Admin {
+        keys: ["pw", "secret", "k1", "k9"].into_iter().map(key).collect(),
+    }
+}
+
 fn p2p_cfg() -> Config {
     Config {
+        admin: keystore(),
         ospf_instances: vec![instance(vec![area("0.0.0.0", vec![profile("p1")])])],
         interfaces: vec![iface(
             "eth0",
@@ -292,9 +304,7 @@ async fn resync_profile_knobs_override_the_defaults() {
             mtu: Some(1400),
             mtu_ignore: true,
             network_type: Some(NetworkType::Broadcast),
-            auth: Some(OspfAuth::Simple {
-                password: "pw".into(),
-            }),
+            auth: Some(OspfAuth::Simple { key: "pw".into() }),
             ..profile("p1")
         }],
     );
@@ -314,6 +324,24 @@ async fn resync_profile_knobs_override_the_defaults() {
     assert_eq!(l.area_id, Ipv4Addr::new(0, 0, 0, 1));
     assert!(l.stub && l.nssa);
     assert!(matches!(l.auth, LinkAuthConfig::Simple { ref password } if password == b"pw"));
+}
+
+#[tokio::test]
+async fn resync_dangling_auth_label_does_not_start_the_link() {
+    let mut cfg = p2p_cfg();
+    cfg.ospf_instances[0].areas = vec![area(
+        "0.0.0.0",
+        vec![OspfProfile {
+            auth: Some(OspfAuth::Simple { key: "nope".into() }),
+            ..profile("p1")
+        }],
+    )];
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+    assert!(
+        e.running("eth0.0").await.is_none(),
+        "must fail closed, not start unauthenticated"
+    );
 }
 
 #[tokio::test]
@@ -646,9 +674,7 @@ fn virtual_links_defaults_and_flattening() {
             router_id: Ipv4Addr::new(3, 3, 3, 3),
             hello_interval: Some(3),
             dead_interval: Some(12),
-            auth: Some(OspfAuth::Simple {
-                password: "pw".into(),
-            }),
+            auth: Some(OspfAuth::Simple { key: "pw".into() }),
         },
     ];
     let mut a2 = area("0.0.0.2", vec![]);
@@ -656,7 +682,7 @@ fn virtual_links_defaults_and_flattening() {
         router_id: Ipv4Addr::new(4, 4, 4, 4),
         ..Default::default()
     }];
-    let v = virtual_links(&[a1, area("0.0.0.9", vec![]), a2]);
+    let v = virtual_links(&[a1, area("0.0.0.9", vec![]), a2], &p2p_cfg());
 
     assert_eq!(v.len(), 3);
     assert_eq!(v[0].transit_area, Ipv4Addr::new(0, 0, 0, 1));
@@ -736,14 +762,23 @@ fn resolve_effective_mtu_table() {
 
 #[test]
 fn resolve_auth_table() {
-    assert!(matches!(resolve_auth(None, true), LinkAuthConfig::None));
+    let cfg = p2p_cfg();
+    assert!(matches!(
+        resolve_auth(None, true, &cfg),
+        Ok(LinkAuthConfig::None)
+    ));
     let simple = OspfAuth::Simple {
-        password: "secret".into(),
+        key: "secret".into(),
     };
     assert!(matches!(
-        resolve_auth(Some(&simple), false),
-        LinkAuthConfig::Simple { ref password } if password == b"secret"
+        resolve_auth(Some(&simple), false, &cfg),
+        Ok(LinkAuthConfig::Simple { ref password }) if password == b"secret"
     ));
+    let dangling = OspfAuth::Simple { key: "nope".into() };
+    assert_eq!(
+        resolve_auth(Some(&dangling), false, &cfg).unwrap_err(),
+        "nope"
+    );
     let key = |id, algorithm, is_current| OspfCryptoKey {
         key_id: id,
         algorithm,
@@ -756,7 +791,7 @@ fn resolve_auth_table() {
             key(9, OspfCryptoAlgorithm::HmacSha256, true),
         ],
     };
-    match resolve_auth(Some(&crypto), true) {
+    match resolve_auth(Some(&crypto), true, &cfg).unwrap() {
         LinkAuthConfig::Crypto {
             keys,
             current_key_id,
@@ -774,12 +809,20 @@ fn resolve_auth_table() {
         keys: vec![key(1, OspfCryptoAlgorithm::HmacSha1, false)],
     };
     assert!(matches!(
-        resolve_auth(Some(&none_current), false),
-        LinkAuthConfig::Crypto {
+        resolve_auth(Some(&none_current), false, &cfg),
+        Ok(LinkAuthConfig::Crypto {
             current_key_id: 0,
             ..
-        }
+        })
     ));
+    // A dangling label in a crypto list fails the whole list.
+    let mut bad = key(1, OspfCryptoAlgorithm::HmacSha1, true);
+    bad.key = "nope".into();
+    let dangling = OspfAuth::Crypto { keys: vec![bad] };
+    assert_eq!(
+        resolve_auth(Some(&dangling), false, &cfg).unwrap_err(),
+        "nope"
+    );
 }
 
 #[test]

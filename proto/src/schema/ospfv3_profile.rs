@@ -77,7 +77,7 @@ pub struct Ospfv3Profile {
     /// `key_id` is the 16-bit Security Association ID. HMAC-SHA only — RFC
     /// 7166 §4.3 defines no MD5 option. Same rotation model as
     /// `OspfAuth::Crypto` (`is_current` signs, every key verifies).
-    #[garde(custom(|a: &Option<Vec<OspfCryptoKey>>, _ctx: &Config| valid_auth(a.as_deref())))]
+    #[garde(custom(|a: &Option<Vec<OspfCryptoKey>>, ctx: &Config| valid_auth(a.as_deref(), ctx)))]
     #[serde(default)]
     #[cli(topic = Ospfv3ProfileAuth, render = sugar::render_ospfv3_auth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
     pub auth: Option<Vec<OspfCryptoKey>>,
@@ -107,9 +107,9 @@ fn valid_instance_id(id: Option<u8>) -> garde::Result {
     }
 }
 
-fn valid_auth(keys: Option<&[OspfCryptoKey]>) -> garde::Result {
+fn valid_auth(keys: Option<&[OspfCryptoKey]>, cfg: &Config) -> garde::Result {
     let Some(keys) = keys else { return Ok(()) };
-    valid_crypto_keys(keys)?;
+    valid_crypto_keys(keys, cfg)?;
     if keys.iter().any(|k| k.algorithm == OspfCryptoAlgorithm::Md5) {
         return Err(garde::Error::new(
             "ospfv3 authentication supports hmac-sha keys only (RFC 7166 has no md5)",
@@ -224,6 +224,11 @@ mod tests {
         assert!(validate_auth(vec![crypto_key(1, sha, false)]).is_err());
         assert!(validate_auth(vec![crypto_key(1, sha, true), crypto_key(2, sha, true)]).is_err());
         assert!(validate_auth(vec![crypto_key(1, OspfCryptoAlgorithm::Md5, true)]).is_err());
+        // Dangling label and empty secret.
+        let sha1 = OspfCryptoAlgorithm::HmacSha1;
+        let mut k = crypto_key(1, sha1, true);
+        k.key = "nope".to_string();
+        assert!(validate_auth(vec![k.clone()]).is_err());
     }
 
     fn area(area_id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
@@ -248,7 +253,18 @@ mod tests {
     fn config_with(instances: Vec<Ospfv3Instance>) -> Config {
         Config {
             ospfv3_instances: instances,
+            admin: keystore(),
             ..Default::default()
+        }
+    }
+
+    fn keystore() -> crate::schema::Admin {
+        let key = |l: &str, s: &str| crate::schema::AdminKey {
+            label: l.to_string(),
+            secret: s.to_string(),
+        };
+        crate::schema::Admin {
+            keys: vec![key("secret", "s3cr3t")],
         }
     }
 

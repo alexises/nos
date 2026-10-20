@@ -13,7 +13,7 @@ A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925
 
 ## Secrets and the admin keystore (#383, #507)
 
-- `Config.admin` is a keystore of `label -> secret`; sections that need a key reference the label (BGP MD5/TCP-AO and RPKI cache auth do since #508; OSPF and BFD still hold theirs inline until #509-#510). `nos-bgpd` resolves BGP labels itself, subscribed to `DiffScope::Admin`. It is the one place daemons read a secret from, via `Config::key`.
+- `Config.admin` is a keystore of `label -> secret`; sections that need a key reference the label (BGP MD5/TCP-AO and RPKI cache auth do since #508; OSPFv2/OSPFv3 simple and crypto keys, incl. virtual links, since #509; BFD still holds its own inline until #510). `nos-bgpd`, `nos-ospfd` and `nos-ospfv3d` resolve their labels themselves, subscribed to `DiffScope::Admin`. It is the one place daemons read a secret from, via `Config::key`.
 - Masking happens at the presentation edges only, never in the stored `Config` (daemons read the real value over IPC):
   - **Logs:** `ConfigStore::apply_op` logs `ConfigOp::kind()`, not `?op`; `AdminKey`, `Admin`, `AdminOp` and `UserOp` also have a `Debug` that prints `<hidden>`.
   - **REST:** `Config::redacted()` backs `GET /v1/config` and every transaction response.

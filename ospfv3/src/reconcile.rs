@@ -9,7 +9,7 @@ use ipnet::{IpNet, Ipv6Net};
 use nos_proto::{DiffScope, Event, NetworkType, OspfCryptoAlgorithm, ServiceRef};
 use nos_rpl::CompiledPolicy;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::interface_client;
 use crate::link::{LinkConfig, LinkManager};
@@ -86,7 +86,12 @@ pub async fn run(
     let mut state = State::default();
     let mut link_open = true;
     while !*shutdown.borrow() {
-        match config::subscribe_diff(&ctx.config_socket, vec![DiffScope::Ospfv3Instances]).await {
+        match config::subscribe_diff(
+            &ctx.config_socket,
+            vec![DiffScope::Ospfv3Instances, DiffScope::Admin],
+        )
+        .await
+        {
             Ok(mut reader) => {
                 info!(instance = %ctx.instance, "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
@@ -171,6 +176,7 @@ struct ProfileCtx<'a> {
     dead_interval: u16,
     priority: u8,
     cost: u16,
+    auth: Option<packet::TrailerAuth>,
 }
 
 /// The `subinterface` attach points of one profile, split out of `resync` for
@@ -261,7 +267,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             priority,
             mtu: resolve_effective_mtu(profile, m.mtu),
             mtu_ignore: profile.mtu_ignore,
-            auth: resolve_auth(profile),
+            auth: pc.auth.clone(),
             instance_id: profile.instance_id.unwrap_or(0),
         });
     }
@@ -393,7 +399,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             priority,
             mtu: resolve_effective_mtu(profile, None),
             mtu_ignore: profile.mtu_ignore,
-            auth: resolve_auth(profile),
+            auth: pc.auth.clone(),
             instance_id: profile.instance_id.unwrap_or(0),
         });
     }
@@ -482,6 +488,15 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                 .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
             let priority = profile.priority.unwrap_or(nos_proto::PRIORITY_DEFAULT);
             let cost = profile.cost.unwrap_or(1);
+            // Fail closed: a dangling label (commit validation prevents it)
+            // must never start the link unauthenticated.
+            let auth = match resolve_auth(profile, &cfg) {
+                Ok(a) => a,
+                Err(label) => {
+                    error!(instance = %instance, profile = %profile.name, label = %label, "ospfv3 profile references an unknown admin key, not starting its links");
+                    continue;
+                }
+            };
             let pc = ProfileCtx {
                 area,
                 profile,
@@ -489,6 +504,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                 dead_interval,
                 priority,
                 cost,
+                auth,
             };
             resolve_subinterface_links(&env, &mut wanted, &pc).await;
             resolve_loopback_links(&env, &mut wanted, &pc).await;
@@ -904,24 +920,29 @@ const DEFAULT_OSPF_MTU: u16 = 1500;
 /// `ospf::reconcile::resolve_auth`. `current_key_id` needs no fallback:
 /// commit-time validation guarantees exactly one `is_current` key, and no
 /// MD5 key (`packet::CryptoAlgorithm` has no such arm).
-fn resolve_auth(profile: &nos_proto::Ospfv3Profile) -> Option<packet::TrailerAuth> {
-    let keys = profile.auth.as_ref()?;
-    Some(packet::TrailerAuth {
-        keys: keys
-            .iter()
-            .filter_map(|k| {
-                let algorithm = match k.algorithm {
-                    OspfCryptoAlgorithm::Md5 => return None,
-                    OspfCryptoAlgorithm::HmacSha1 => packet::CryptoAlgorithm::HmacSha1,
-                    OspfCryptoAlgorithm::HmacSha256 => packet::CryptoAlgorithm::HmacSha256,
-                    OspfCryptoAlgorithm::HmacSha384 => packet::CryptoAlgorithm::HmacSha384,
-                    OspfCryptoAlgorithm::HmacSha512 => packet::CryptoAlgorithm::HmacSha512,
-                };
-                Some((k.key_id, algorithm, k.key.clone().into_bytes()))
-            })
-            .collect(),
+fn resolve_auth(
+    profile: &nos_proto::Ospfv3Profile,
+    cfg: &nos_proto::Config,
+) -> Result<Option<packet::TrailerAuth>, String> {
+    let Some(keys) = profile.auth.as_ref() else {
+        return Ok(None);
+    };
+    let mut resolved = Vec::new();
+    for k in keys {
+        let algorithm = match k.algorithm {
+            OspfCryptoAlgorithm::Md5 => continue,
+            OspfCryptoAlgorithm::HmacSha1 => packet::CryptoAlgorithm::HmacSha1,
+            OspfCryptoAlgorithm::HmacSha256 => packet::CryptoAlgorithm::HmacSha256,
+            OspfCryptoAlgorithm::HmacSha384 => packet::CryptoAlgorithm::HmacSha384,
+            OspfCryptoAlgorithm::HmacSha512 => packet::CryptoAlgorithm::HmacSha512,
+        };
+        let secret = cfg.key(&k.key).ok_or_else(|| k.key.clone())?;
+        resolved.push((k.key_id, algorithm, secret.as_bytes().to_vec()));
+    }
+    Ok(Some(packet::TrailerAuth {
+        keys: resolved,
         current_key_id: keys.iter().find(|k| k.is_current).map_or(0, |k| k.key_id),
-    })
+    }))
 }
 
 /// Mirrors `ospf::reconcile::resolve_effective_mtu` exactly.

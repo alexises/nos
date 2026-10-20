@@ -39,16 +39,16 @@ pub enum NetworkType {
 
 /// A profile's own authentication — RFC 2328 Appendix D. Mutually exclusive
 /// mechanisms, mirroring `BgpAuth`'s exact shape (`schema::bgp_peer_group`).
-/// Stored clear-text, like every field in this config. `OspfProfile.auth ==
-/// None` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.
+/// Keys are labels of `Config.admin` keystore entries, never inline secrets.
+/// `OspfProfile.auth == None` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum OspfAuth {
     /// RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,
     /// carried directly in the OSPF header's 8-byte Authentication field.
     Simple {
-        /// The password, at most 8 bytes.
-        password: String,
+        /// Label of the admin key holding the password (at most 8 bytes).
+        key: String,
     },
     /// RFC 2328 Appendix D.3 / RFC 5709 — one or more keys, supporting
     /// rotation via `key_id`/`is_current`, mirroring `BgpAoKey`.
@@ -79,7 +79,7 @@ pub struct OspfCryptoKey {
     /// HMAC algorithm of this key.
     pub algorithm: OspfCryptoAlgorithm,
     #[cli(topic = OspfProfileCryptoKey)]
-    /// Shared secret, stored clear-text like every config value.
+    /// Label of the admin key holding the shared secret.
     pub key: String,
     #[cli(topic = OspfProfileCryptoKey)]
     /// Whether this key signs outgoing packets.
@@ -118,7 +118,7 @@ const CLASSIC_KEY_ID_MAX: u16 = 255;
 /// The checks every crypto key list shares between `OspfAuth::Crypto` and
 /// `Ospfv3Profile.auth`: non-empty, unique ids, key length, exactly one
 /// current key.
-pub(crate) fn valid_crypto_keys(keys: &[OspfCryptoKey]) -> garde::Result {
+pub(crate) fn valid_crypto_keys(keys: &[OspfCryptoKey], cfg: &Config) -> garde::Result {
     if keys.is_empty() {
         return Err(garde::Error::new(
             "crypto auth must have at least one key (or be cleared)",
@@ -127,9 +127,7 @@ pub(crate) fn valid_crypto_keys(keys: &[OspfCryptoKey]) -> garde::Result {
     let mut seen_key_ids: Vec<u16> = Vec::new();
     let mut current_count = 0;
     for key in keys {
-        if key.key.is_empty() || key.key.len() > MAX_AUTH_KEY_LEN {
-            return Err(garde::Error::new("crypto key must be 1 to 80 bytes long"));
-        }
+        valid_key_ref(&key.key, cfg, MAX_AUTH_KEY_LEN, "crypto key")?;
         if seen_key_ids.contains(&key.key_id) {
             return Err(garde::Error::new(
                 "crypto key-id must be unique within a profile",
@@ -152,18 +150,26 @@ pub(crate) fn valid_crypto_keys(keys: &[OspfCryptoKey]) -> garde::Result {
 /// convention.
 const SIMPLE_PASSWORD_MAX_LEN: usize = 8;
 
-pub(crate) fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
+/// The referenced admin secret must exist and be 1..=`max` bytes long.
+fn valid_key_ref(label: &str, cfg: &Config, max: usize, what: &str) -> garde::Result {
+    match cfg.key(label) {
+        None => Err(garde::Error::new(format!(
+            "{what} references unknown admin key '{label}'"
+        ))),
+        Some(s) if s.is_empty() || s.len() > max => Err(garde::Error::new(format!(
+            "admin key '{label}' must be 1 to {max} bytes long to be used as a {what}"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
+pub(crate) fn valid_auth(auth: Option<&OspfAuth>, cfg: &Config) -> garde::Result {
     match auth {
         None => Ok(()),
-        Some(OspfAuth::Simple { password }) => {
-            if password.is_empty() || password.len() > SIMPLE_PASSWORD_MAX_LEN {
-                return Err(garde::Error::new(
-                    "simple password must be 1 to 8 bytes long",
-                ));
-            }
-            Ok(())
+        Some(OspfAuth::Simple { key }) => {
+            valid_key_ref(key, cfg, SIMPLE_PASSWORD_MAX_LEN, "simple password")
         }
-        Some(OspfAuth::Crypto { keys }) => valid_crypto_keys(keys),
+        Some(OspfAuth::Crypto { keys }) => valid_crypto_keys(keys, cfg),
     }
 }
 
@@ -248,7 +254,7 @@ pub struct OspfProfile {
     pub network_type: Option<NetworkType>,
 
     /// `None` is RFC 2328 `AuType` 0 (Null) — no authentication.
-    #[garde(custom(|a: &Option<OspfAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
+    #[garde(custom(|a: &Option<OspfAuth>, ctx: &Config| valid_auth(a.as_ref(), ctx)))]
     #[cli(topic = OspfProfileAuth, render = sugar::render_ospf_auth, sugar(word = "simple-password", with = sugar::simple_password, topic = OspfProfileSimplePassword), sugar(word = "crypto-key", with = sugar::ospf_crypto_key, topic = OspfProfileCryptoKey))]
     pub auth: Option<OspfAuth>,
 
@@ -391,7 +397,24 @@ mod tests {
     fn config_with(instances: Vec<OspfInstance>) -> Config {
         Config {
             ospf_instances: instances,
+            admin: keystore(),
             ..Default::default()
+        }
+    }
+
+    /// Admin keystore holding the labels these auth tests reference.
+    fn keystore() -> crate::schema::Admin {
+        let key = |l: &str, s: &str| crate::schema::AdminKey {
+            label: l.to_string(),
+            secret: s.to_string(),
+        };
+        crate::schema::Admin {
+            keys: vec![
+                key("secret", "s3cr3t"),
+                key("k", "kk"),
+                key("pw8", "abcdefgh"),
+                key("pw9", "123456789"),
+            ],
         }
     }
 
@@ -608,7 +631,7 @@ mod tests {
     fn valid_simple_password_passes() {
         let mut p = profile("p1");
         p.auth = Some(OspfAuth::Simple {
-            password: "abcdefgh".to_string(),
+            key: "pw8".to_string(),
         });
         let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
         cfg.validate_with(&cfg).unwrap();
@@ -618,20 +641,73 @@ mod tests {
     fn simple_password_over_8_bytes_fails() {
         let mut p = profile("p1");
         p.auth = Some(OspfAuth::Simple {
-            password: "123456789".to_string(),
+            key: "pw9".to_string(),
         });
         let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]
-    fn empty_simple_password_fails() {
+    fn unknown_labels_fail_naming_the_label() {
+        for auth in [
+            OspfAuth::Simple { key: "nope".into() },
+            OspfAuth::Crypto {
+                keys: vec![OspfCryptoKey {
+                    key: "nope".into(),
+                    ..crypto_key(1, true)
+                }],
+            },
+        ] {
+            let mut p = profile("p1");
+            p.auth = Some(auth);
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+            assert!(err.contains("nope"), "{err}");
+        }
+    }
+
+    #[test]
+    fn crypto_secret_length_bounds() {
+        // The keystore's own rules bound real secrets to 1..=80 bytes, so call
+        // the helper directly with out-of-range ones.
+        let with = |n: usize| {
+            let cfg = Config {
+                admin: crate::schema::Admin {
+                    keys: vec![crate::schema::AdminKey {
+                        label: "l".into(),
+                        secret: "x".repeat(n),
+                    }],
+                },
+                ..Default::default()
+            };
+            let key = OspfCryptoKey {
+                key: "l".into(),
+                ..crypto_key(1, true)
+            };
+            super::valid_crypto_keys(&[key], &cfg).is_ok()
+        };
+        assert!(with(80));
+        assert!(!with(81));
+        assert!(!with(0));
+    }
+
+    #[test]
+    fn deleting_a_referenced_admin_key_fails_but_an_unreferenced_one_passes() {
         let mut p = profile("p1");
-        p.auth = Some(OspfAuth::Simple {
-            password: String::new(),
-        });
-        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
-        assert!(cfg.validate_with(&cfg).is_err());
+        p.auth = Some(OspfAuth::Simple { key: "pw8".into() });
+        let mut cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        cfg.admin.keys.retain(|k| k.label != "k");
+        cfg.validate_with(&cfg).unwrap();
+        cfg.admin.keys.retain(|k| k.label != "pw8");
+        let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(err.contains("pw8"), "{err}");
+    }
+
+    #[test]
+    fn debug_of_auth_shows_the_label_only() {
+        let auth = OspfAuth::Simple { key: "lbl".into() };
+        assert!(format!("{auth:?}").contains("lbl"));
+        assert!(!format!("{:?}", keystore()).contains("abcdefgh"));
     }
 
     #[test]

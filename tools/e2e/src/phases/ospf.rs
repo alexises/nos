@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::bail;
 use reqwest::Method;
 
+use super::bgp::no_leak;
 use crate::consts::*;
 use crate::router::{log, strings, Id, Router, A, B, C, D, E};
 use crate::world::World;
@@ -918,6 +919,31 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
 
     log("restoring the matching crypto key on router-a");
     a.provision_flags(&with_base(A, with_key("topsecretkey", OSPF_ROUTER_ID)))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await?;
+
+    log("the secrets live in the admin keystore only: not in the config view, not in any log (#509)");
+    for r in [a, b] {
+        no_leak(r, &["topsecretkey", "wrong-key"]).await?;
+    }
+
+    log("rotating the secret under the same admin label on both routers re-forms Full");
+    let rotated = "rotated-ospf-secret";
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    a.provision_flags(&with_base(A, with_key(rotated, OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, with_key(rotated, OSPF_ROUTER_ID_B)))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await?;
+    for r in [a, b] {
+        no_leak(r, &[rotated]).await?;
+    }
+
+    log("rotating back to the original secret on both routers");
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    a.provision_flags(&with_base(A, with_key("topsecretkey", OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, with_key("topsecretkey", OSPF_ROUTER_ID_B)))
         .await?;
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await?;
 
@@ -2277,6 +2303,29 @@ pub async fn ospfv3_auth(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await?;
+
+    log("the secrets live in the admin keystore only: not in the config view, not in any log (#509)");
+    for r in [a, b] {
+        no_leak(r, &["topsecretkey", "wrong-key"]).await?;
+    }
+
+    log("rotating the secret under the same admin label on both routers re-forms Full");
+    let rotated = "rotated-v3-secret";
+    let before = a.count(&full(OSPFV3_ROUTER_ID_B));
+    a.provision_flags(&with_base(
+        A,
+        with_key(rotated, OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        with_key(rotated, OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await?;
+    for r in [a, b] {
+        no_leak(r, &[rotated]).await?;
+    }
     let replays = a.count("ospfv3 packet crypto sequence number not increasing");
     a.assert_quiet(
         "ospfv3 packet crypto sequence number not increasing",

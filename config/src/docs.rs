@@ -1206,11 +1206,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              authentication).",
         ),
         Topic::OspfProfileSimplePassword => (
-            "Set an OSPF profile's simple password.",
-            "Sets a single RFC 2328 Appendix D.2 plaintext password (up to 8 bytes) on a \
-             profile's Hello/DBD/LSR/LSU/LSAck packets, replacing any crypto keys that were set \
-             — the two mechanisms are mutually exclusive. Stored clear-text, like every other \
-             field in this config.",
+            "Set an OSPF profile's simple password, by admin key label.",
+            "`simple-password <label>` puts the secret of the admin key `<label>` (`set admin key \
+             <label> secret <value>`, up to 8 bytes) in an RFC 2328 Appendix D.2 plaintext \
+             password on a profile's Hello/DBD/LSR/LSU/LSAck packets, replacing any crypto keys \
+             that were set — the two mechanisms are mutually exclusive. The commit fails if the \
+             label does not exist; the secret itself is never shown.",
         ),
         Topic::OspfProfileCryptoKey => (
             "Set (or replace) one of an OSPF profile's cryptographic auth keys.",
@@ -1221,8 +1222,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              place. If the profile's auth wasn't already crypto (unset, or a simple password), \
              this starts a fresh key list containing just this key. Exactly one key across the \
              whole list must be marked current, for the profile to validate at commit time — \
-             see set-ospf-profile-crypto-current-key. Stored clear-text, like every other field \
-             in this config.",
+             see set-ospf-profile-crypto-current-key. `crypto-key <key-id> <algorithm> <label>` \
+             takes the secret (1 to 80 bytes) from the admin key `<label>`; the commit fails if \
+             it does not exist.",
                 " ",
                 "Remove one of an OSPF profile's cryptographic auth keys by key-id.",
                 " ",
@@ -1259,7 +1261,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::Ospfv3ProfileCryptoKey => (
             "Add, remove or select an RFC 7166 authentication-trailer key.",
-            "`crypto-key <sa-id> <algorithm> <key>` adds or replaces a key (SA ID 1-65535, an HMAC-SHA algorithm; md5 is not allowed); `crypto-key <sa-id> current` makes it the key that signs outgoing packets; `delete crypto-key <sa-id>` removes it.",
+            "`crypto-key <sa-id> <algorithm> <label>` adds or replaces a key (SA ID 1-65535, an HMAC-SHA algorithm; md5 is not allowed) whose secret is the admin key `<label>`; `crypto-key <sa-id> current` makes it the key that signs outgoing packets; `delete crypto-key <sa-id>` removes it.",
         ),
         Topic::Ospfv3ProfileInstanceId => (
             "Set an OSPFv3 profile's instance id.",
@@ -1497,15 +1499,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              AuType 0 (no authentication).",
         ),
         Topic::OspfVirtualLinkSimplePassword => (
-            "Set a virtual link's simple password.",
-            "Sets one RFC 2328 Appendix D.2 plaintext password (up to 8 bytes), replacing any \
-             crypto keys. Stored clear-text, like every other field in this config.",
+            "Set a virtual link's simple password, by admin key label.",
+            "`simple-password <label>` sets one RFC 2328 Appendix D.2 plaintext password (up to \
+             8 bytes) from the secret of the admin key `<label>`, replacing any crypto keys.",
         ),
         Topic::OspfVirtualLinkCryptoKey => (
             "Set (or replace) one of a virtual link's cryptographic auth keys.",
             concat!(
                 "Adds one RFC 2328 Appendix D.3 / RFC 5709 key, by key-id and algorithm, \
-             replacing a key with the same id; exactly one key must be current to validate.",
+             replacing a key with the same id; `<label>` names the admin key holding the secret; \
+             exactly one key must be current to validate.",
                 " ",
                 "Remove one of a virtual link's cryptographic auth keys by key-id.",
                 " ",

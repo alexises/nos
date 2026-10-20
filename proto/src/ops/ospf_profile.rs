@@ -185,8 +185,8 @@ pub enum OspfProfileOp {
         area_id: Ipv4Addr,
         /// Name of the OSPF profile this op targets.
         name: String,
-        /// Password for the entry.
-        password: String,
+        /// Label of the admin key holding the password.
+        key: String,
     },
     /// Upserts one crypto key by `key_id`. If `auth` isn't already `Crypto`
     /// (unset, or `Simple`), starts a fresh key list with just this key.
@@ -445,11 +445,10 @@ impl OspfProfileOp {
                 instance,
                 area_id,
                 name,
-                password,
+                key,
             } => {
-                find_profile_mut(config, instance, *area_id, name)?.auth = Some(OspfAuth::Simple {
-                    password: password.clone(),
-                });
+                find_profile_mut(config, instance, *area_id, name)?.auth =
+                    Some(OspfAuth::Simple { key: key.clone() });
                 Ok(())
             }
             OspfProfileOp::SetCryptoKey {
@@ -924,14 +923,14 @@ mod tests {
             instance: "o1".to_string(),
             area_id: area_id("0.0.0.0"),
             name: "p1".to_string(),
-            password: "abcdefgh".to_string(),
+            key: "abcdefgh".to_string(),
         }
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(
             cfg.ospf_instances[0].areas[0].profiles[0].auth,
             Some(OspfAuth::Simple {
-                password: "abcdefgh".to_string()
+                key: "abcdefgh".to_string()
             })
         );
     }
@@ -946,7 +945,7 @@ mod tests {
             instance: "o1".to_string(),
             area_id: area_id("0.0.0.0"),
             name: "p1".to_string(),
-            password: "abcdefgh".to_string(),
+            key: "abcdefgh".to_string(),
         }
         .apply(&mut cfg)
         .unwrap();
@@ -1091,7 +1090,7 @@ mod tests {
             instance: "o1".to_string(),
             area_id: area_id("0.0.0.0"),
             name: "p1".to_string(),
-            password: "abcdefgh".to_string(),
+            key: "abcdefgh".to_string(),
         }
         .apply(&mut cfg)
         .unwrap();

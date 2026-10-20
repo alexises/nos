@@ -115,8 +115,26 @@ const V6: &str = "2001:db8:1::1/64";
 const LL: &str = "fe80::1";
 
 /// One instance, area 0 with profile `p1`, `nostst0.0` with `2001:db8:1::1/64` in `rt1`.
+/// Admin keystore: label `k<id>` holds the secret `k<id>`.
+fn keystore() -> Config {
+    let key = |l: &str| nos_proto::schema::AdminKey {
+        label: l.into(),
+        secret: l.into(),
+    };
+    Config {
+        admin: nos_proto::schema::Admin {
+            keys: ["k1", "k2", "k3", "k4", "k5", "k9"]
+                .into_iter()
+                .map(key)
+                .collect(),
+        },
+        ..Default::default()
+    }
+}
+
 fn p2p_cfg() -> Config {
     Config {
+        admin: keystore().admin,
         ospfv3_instances: vec![instance(vec![area("0.0.0.0", vec![profile("p1")])])],
         interfaces: vec![iface(IF, vec![sub(0, &[V6], Some("rt1"), Some("p1"))])],
         ..Default::default()
@@ -359,6 +377,25 @@ async fn resync_profile_knobs_override_the_defaults() {
         auth.keys,
         [(9, P::HmacSha256, b"k9".to_vec())],
         "the md5 key is not representable and is dropped"
+    );
+}
+
+#[tokio::test]
+async fn resync_dangling_auth_label_does_not_start_the_link() {
+    let mut cfg = p2p_cfg();
+    let mut p = profile("p1");
+    p.auth = Some(vec![OspfCryptoKey {
+        key_id: 1,
+        algorithm: OspfCryptoAlgorithm::HmacSha256,
+        key: "nope".into(),
+        is_current: true,
+    }]);
+    cfg.ospfv3_instances[0].areas = vec![area("0.0.0.0", vec![p])];
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+    assert!(
+        e.running(&format!("{IF}.0")).await.is_none(),
+        "must fail closed, not start unauthenticated"
     );
 }
 
@@ -722,7 +759,8 @@ fn resolve_effective_mtu_table() {
 
 #[test]
 fn resolve_auth_table() {
-    assert!(resolve_auth(&profile("p")).is_none());
+    let cfg = keystore();
+    assert_eq!(resolve_auth(&profile("p"), &cfg), Ok(None));
     let key = |key_id, algorithm, is_current| OspfCryptoKey {
         key_id,
         algorithm,
@@ -733,13 +771,17 @@ fn resolve_auth_table() {
         auth: Some(keys),
         ..profile("p")
     };
-    let a = resolve_auth(&keyed(vec![
-        key(1, OspfCryptoAlgorithm::Md5, false),
-        key(2, OspfCryptoAlgorithm::HmacSha1, false),
-        key(3, OspfCryptoAlgorithm::HmacSha256, false),
-        key(4, OspfCryptoAlgorithm::HmacSha384, true),
-        key(5, OspfCryptoAlgorithm::HmacSha512, false),
-    ]))
+    let a = resolve_auth(
+        &keyed(vec![
+            key(1, OspfCryptoAlgorithm::Md5, false),
+            key(2, OspfCryptoAlgorithm::HmacSha1, false),
+            key(3, OspfCryptoAlgorithm::HmacSha256, false),
+            key(4, OspfCryptoAlgorithm::HmacSha384, true),
+            key(5, OspfCryptoAlgorithm::HmacSha512, false),
+        ]),
+        &cfg,
+    )
+    .unwrap()
     .unwrap();
     assert_eq!(
         a.keys,
@@ -752,8 +794,17 @@ fn resolve_auth_table() {
     );
     assert_eq!(a.current_key_id, 4);
     // No current key (commit validation forbids it): falls back to 0.
-    let b = resolve_auth(&keyed(vec![key(1, OspfCryptoAlgorithm::HmacSha1, false)])).unwrap();
+    let b = resolve_auth(
+        &keyed(vec![key(1, OspfCryptoAlgorithm::HmacSha1, false)]),
+        &cfg,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(b.current_key_id, 0);
+    // A dangling label fails the whole list.
+    let mut bad = key(1, OspfCryptoAlgorithm::HmacSha1, true);
+    bad.key = "nope".into();
+    assert_eq!(resolve_auth(&keyed(vec![bad]), &cfg), Err("nope".into()));
 }
 
 #[test]

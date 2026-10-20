@@ -40,7 +40,7 @@ fn simple_and_md5_password_take_exactly_one_word_on_set() {
     let o = Value::Null;
     assert_eq!(
         simple_password_value(Set, &["pw"], &o),
-        Some(json!({ "Simple": { "password": "pw" } }))
+        Some(json!({ "Simple": { "key": "pw" } }))
     );
     assert_eq!(
         md5_password_value(Set, &["pw"], &o),
@@ -176,7 +176,7 @@ fn ospf_crypto_key_upserts_flags_and_deletes() {
     assert_eq!(out, json!({ "Crypto": { "keys": [crypto(1, false)] } }));
     // `current` needs existing Crypto auth (and the key).
     assert_eq!(ospf_crypto_key_value(Set, &["1", "current"], &none), None);
-    let simple = json!({ "auth": { "Simple": { "password": "p" } } });
+    let simple = json!({ "auth": { "Simple": { "key": "p" } } });
     assert_eq!(ospf_crypto_key_value(Set, &["1", "current"], &simple), None);
     // Upsert replaces the same id rather than appending, a new id appends.
     let p = crypto_profile(&[crypto(1, true)]);
@@ -204,7 +204,7 @@ fn ospf_crypto_key_upserts_flags_and_deletes() {
 #[test]
 fn delete_crypto_key_without_auth_needs_one_valid_id() {
     let none = json!({ "auth": null });
-    let simple = json!({ "auth": { "Simple": { "password": "p" } } });
+    let simple = json!({ "auth": { "Simple": { "key": "p" } } });
     for bad in [&[][..], &["x"], &["70000"], &["1", "2"]] {
         assert_eq!(ospf_crypto_key_value(Delete, bad, &none), None, "{bad:?}");
         assert_eq!(ospfv3_crypto_key_value(Delete, bad, &none), None, "{bad:?}");
@@ -271,7 +271,7 @@ fn replay(
 #[test]
 fn render_ospf_auth_lines_and_round_trip() {
     assert_eq!(
-        render_ospf_auth(&json!({ "Simple": { "password": "pw" } })),
+        render_ospf_auth(&json!({ "Simple": { "key": "pw" } })),
         ["simple-password pw"]
     );
     let c = json!({ "Crypto": { "keys": [crypto(1, false), crypto(2, true)] } });
@@ -354,7 +354,7 @@ fn public_entry_points_wrap_the_value_in_sugar_out() {
     );
     assert_eq!(
         v(simple_password(Set, &["p"], &none)),
-        json!({ "Simple": { "password": "p" } })
+        json!({ "Simple": { "key": "p" } })
     );
     assert!(ao_key(Set, &["1", "2", "hmac-sha1", "k"], &none).is_some());
     assert!(ospf_crypto_key(Set, &["1", "hmac-sha1", "k"], &none).is_some());
