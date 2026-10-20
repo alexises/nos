@@ -2332,6 +2332,19 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
         json["warnings"].as_array().is_some_and(Vec::is_empty),
         "commit with a limit still warned: {body}"
     );
+
+    log("#396: limit 0 is explicitly uncapped: no warning, all routes in, no cease");
+    let (est_before, ceases) = (a.count(est), a.count(cease1));
+    let body = a
+        .provision_flags_body(&with(&["--maximum-prefix", "ipv4=0"]))
+        .await?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    anyhow::ensure!(
+        json["warnings"].as_array().is_some_and(Vec::is_empty),
+        "commit with limit 0 warned: {body}"
+    );
+    a.wait_new(est, est_before, 30).await?;
+    a.assert_quiet(cease1, ceases, 8).await?;
     Ok(())
 }
 

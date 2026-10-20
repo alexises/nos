@@ -1053,7 +1053,8 @@ impl BgpRib {
             let Some(limit) = limits.get(family) else {
                 continue;
             };
-            if count <= limit.limit {
+            // `limit 0` is explicitly uncapped.
+            if limit.limit == 0 || count <= limit.limit {
                 self.max_prefix_warned.remove(&(peer, family));
                 continue;
             }
@@ -1375,10 +1376,10 @@ impl BgpRib {
             return;
         }
         if let Some(route) = &best {
-            info!(origin = ?route.origin, as_path = ?route.as_path, communities = ?route.communities, med = ?route.med, next_hop = ?route.next_hop, "bgp: loc-rib best path for {prefix} updated");
+            debug!(origin = ?route.origin, as_path = ?route.as_path, communities = ?route.communities, med = ?route.med, next_hop = ?route.next_hop, "bgp: loc-rib best path for {prefix} updated");
             self.loc_rib.insert(prefix, route.clone());
         } else {
-            info!("bgp: loc-rib route for {prefix} withdrawn");
+            debug!("bgp: loc-rib route for {prefix} withdrawn");
             self.loc_rib.remove(&prefix);
         }
         // Before the fan-out, so a `summary-only` aggregate this prefix

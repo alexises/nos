@@ -1303,7 +1303,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::BgpPeerGroupMaximumPrefixLimit => (
             "Set the most prefixes a peer may send in this address family.",
-            "At least 1. One more accepted prefix than this trips the limit.",
+            "One more accepted prefix than this trips the limit. 0 means explicitly uncapped: nothing is enforced, and the commit warning for an eBGP peer-group without a limit is silenced.",
         ),
         Topic::BgpPeerGroupMaximumPrefixWarningOnly => (
             "Only log when the maximum-prefix limit is exceeded.",

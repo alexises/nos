@@ -321,6 +321,25 @@ fn selection_deferral_skips_peers_without_gr_or_restarting() {
 }
 
 #[test]
+fn no_limit_and_limit_zero_never_trip() {
+    let mut rib = new_rib(65000);
+    let peer = addr("10.0.0.1");
+    let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+    let accept = &nos_rpl::ACCEPT_ALL;
+    let upd = ebgp_update(vec!["1.0.0.0/24", "2.0.0.0/24"], vec![65001], "10.0.0.1");
+    rib.handle_update(peer, false, v4("192.0.2.1"), &upd, accept);
+    assert_eq!(rib.check_max_prefix(peer), None, "nothing configured");
+    rib.set_peer_max_prefix(
+        peer,
+        nos_proto::BgpMaximumPrefix {
+            ipv4: Some(nos_proto::BgpPrefixLimit::default()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(rib.check_max_prefix(peer), None, "limit 0 is uncapped");
+}
+
+#[test]
 fn maximum_prefix_families_are_independent_and_warning_only_never_trips() {
     let mut rib = new_rib(65000);
     let peer = addr("10.0.0.1");
