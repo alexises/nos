@@ -1355,6 +1355,62 @@ async fn every_route_requires_a_certificate_of_an_existing_user() {
 }
 
 #[tokio::test]
+async fn secrets_never_leave_and_the_mask_round_trips() {
+    let f = fixture_with(vec![], Some("config.yaml")).await;
+    let app = &f.app;
+    let saved = || std::fs::read_to_string(f.dir.path().join("config.yaml")).unwrap();
+
+    send(app, Method::POST, "/v1/transactions/t1", None).await;
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t1/admin/key/k1",
+        Some(json!({"label": "k1", "secret": "needle-one"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // The PUT reply, a section GET and the whole-transaction GET are all masked.
+    let (_, whole) = send(app, Method::GET, "/v1/transactions/t1", None).await;
+    let (_, key) = send(app, Method::GET, "/v1/transactions/t1/admin/key/k1", None).await;
+    assert_eq!(key, json!({"label": "k1", "secret": "<hidden>"}));
+    assert!(!whole.to_string().contains("needle-one"), "{whole}");
+    let (s, _) = send(app, Method::POST, "/v1/transactions/t1/commit", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, running) = send(app, Method::GET, "/v1/config", None).await;
+    assert_eq!(running["admin"]["keys"][0]["secret"], "<hidden>");
+    assert!(!running.to_string().contains("needle-one"), "{running}");
+
+    // GET, then PUT the same document back: the stored secret survives.
+    send(app, Method::POST, "/v1/transactions/t2", None).await;
+    let (_, cfg) = send(app, Method::GET, "/v1/transactions/t2", None).await;
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t2",
+        Some(cfg["config"].clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(app, Method::POST, "/v1/transactions/t2/commit", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(app, Method::POST, "/v1/config/save", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(saved().contains("needle-one"), "mask destroyed the secret");
+    assert!(!saved().contains("<hidden>"));
+
+    // The mask on a label that does not exist is refused, not stored.
+    send(app, Method::POST, "/v1/transactions/t3", None).await;
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t3/admin/key/ghost",
+        Some(json!({"label": "ghost", "secret": "<hidden>"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn a_user_deleted_from_the_config_is_locked_out_on_the_next_request() {
     let f = fixture(vec![]).await;
     let app = &f.app;
@@ -1373,10 +1429,8 @@ async fn a_user_deleted_from_the_config_is_locked_out_on_the_next_request() {
     .await;
     assert_eq!(s, StatusCode::OK);
     let (_, snap) = send(app, Method::GET, "/v1/transactions/t1/user/bob", None).await;
-    assert!(
-        snap["password"].as_str().unwrap().starts_with("$argon2id$"),
-        "clear text must never be stored: {snap}"
-    );
+    // Neither the clear text nor even the hash is returned (#507).
+    assert_eq!(snap["password"], "<hidden>", "{snap}");
     // …still refused while the user only exists in an open transaction…
     let (s, _) = send_as(app, Method::GET, "/v1/config", None, Some("bob")).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);

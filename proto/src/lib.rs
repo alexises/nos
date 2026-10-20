@@ -77,12 +77,12 @@ pub use lacp::{
 pub use lldp::{LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest};
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
-    AsPathListOp, BfdProfileOp, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
-    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp, LoggingOp, OpError,
-    OspfAreaOp, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
-    PolicyDefinitionOp, PortAggregateOp, PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp,
-    StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp,
-    UserOp,
+    AdminOp, AsPathListOp, BfdProfileOp, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
+    BroadcastDomainOp, CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp,
+    LoggingOp, OpError, OspfAreaOp, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp,
+    Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateOp, PortAggregateSubinterfaceOp,
+    PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp,
+    SubinterfaceOp, SwitchingProfileOp, UserOp,
 };
 pub use ospf::{
     LinkInterfaceState, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest,
@@ -97,10 +97,10 @@ pub use rib::{
     RibRequest, RouteEntry, RouteSourceKind,
 };
 pub use schema::{
-    loopback_table_name, parse_fingerprint, AddressFamily, AsPathList, BfdAuth, BfdAuthMethod,
-    BfdProfile, BgpAddPath, BgpAggregate, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpConfederation,
-    BgpDamping, BgpGracefulRestart, BgpInstance, BgpLocalAs, BgpMaximumPrefix, BgpPeer,
-    BgpPeerGroup, BgpPrefixLimit, BgpRole, BgpShutdown, BroadcastDomain, CommunityAlias,
+    loopback_table_name, parse_fingerprint, AddressFamily, Admin, AdminKey, AsPathList, BfdAuth,
+    BfdAuthMethod, BfdProfile, BgpAddPath, BgpAggregate, BgpAoAlgorithm, BgpAoKey, BgpAuth,
+    BgpConfederation, BgpDamping, BgpGracefulRestart, BgpInstance, BgpLocalAs, BgpMaximumPrefix,
+    BgpPeer, BgpPeerGroup, BgpPrefixLimit, BgpRole, BgpShutdown, BroadcastDomain, CommunityAlias,
     CommunityGroup, Config, DfAlgorithm, EsRedundancy, Interface, InterfaceAddress, LacpMode,
     LacpRate, LldpDestination, LldpSettings, LoggingSettings, NetworkType, NextHopMode, OspfArea,
     OspfAreaRange, OspfAreaType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance,

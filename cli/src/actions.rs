@@ -245,6 +245,7 @@ pub async fn handle_action(
             Outcome::Continue(mode)
         }
         action @ (Resolved::ShowRunningConfig
+        | Resolved::ShowAdminConfig
         | Resolved::ShowTransaction
         | Resolved::ShowRoute { .. }
         | Resolved::ShowFdb { .. }
@@ -293,6 +294,13 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
     match action {
         Resolved::ShowRunningConfig => {
             show_running_config(socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowAdminConfig => {
+            match client::fetch_running_config(socket).await {
+                Ok(cfg) => println!("{}", format::render_admin_config(&cfg)),
+                Err(e) => eprintln!("error: {e}"),
+            }
             Outcome::Continue(mode)
         }
         Resolved::ShowTransaction => {

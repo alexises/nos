@@ -108,6 +108,8 @@ pub struct ConfigDiff {
     pub spanning_tree: Vec<FieldDiff>,
     /// STP port profile changes.
     pub stp_port_profiles: Vec<SectionDiff>,
+    /// Field-level, like `lldp`: `Config.admin` is one singleton section (secret values are masked).
+    pub admin: Vec<FieldDiff>,
 }
 
 impl ConfigDiff {
@@ -135,6 +137,7 @@ impl ConfigDiff {
             && self.sbfd_reflector.is_empty()
             && self.spanning_tree.is_empty()
             && self.stp_port_profiles.is_empty()
+            && self.admin.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -253,6 +256,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            admin: if scopes.contains(&DiffScope::Admin) {
+                self.admin.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -306,6 +314,8 @@ pub enum DiffScope {
     SpanningTree,
     /// STP port profiles.
     StpPortProfiles,
+    /// The admin keystore section.
+    Admin,
 }
 
 /// The `FieldDiff` label `nos-watchdogd` keys on to decide whether a routing
@@ -370,7 +380,7 @@ mod tests {
             subsections: Vec::new(),
         };
         assert!(ConfigDiff::default().is_empty());
-        let setters: [Set; 22] = [
+        let setters: [Set; 23] = [
             |d, f, _| d.hostname = Some(f),
             |d, _, s| d.bgp_instances.push(s),
             |d, _, s| d.routing_tables.push(s),
@@ -393,6 +403,7 @@ mod tests {
             |d, f, _| d.sbfd_reflector.push(f),
             |d, f, _| d.spanning_tree.push(f),
             |d, _, s| d.stp_port_profiles.push(s),
+            |d, f, _| d.admin.push(f),
         ];
         for (i, set) in setters.iter().enumerate() {
             let mut d = ConfigDiff::default();

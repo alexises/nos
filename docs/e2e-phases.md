@@ -37,7 +37,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `svi` | Drivers | drivers | - | A `BroadcastDomain`'s own bridge is addressed and VRF-enslaved (SVI); deleting the domain removes the bridge. |
 | `routed-subinterface` | Drivers | drivers | - | A second, routed subinterface (`eth0.300`) gets a real VLAN device, VRF enslavement and address, then is removed. |
 | `source-address` | Drivers | drivers | - | `nos-bgpd` resolves a peer-group `source-address` from an interface name, and `loopback` with no table name, over IPC to `nos-interfaced`. |
-| `rest` | Drivers | drivers | - | `nos-restd` binds in the VRF and answers real mutual-TLS HTTP/2: login, PQ-only handshake, pooled IPC, config-tree transactions with ETag/If-Match, SSE logs, OpenAPI; unpinning stops it. |
+| `rest` | Drivers | drivers | - | `nos-restd` binds in the VRF and answers real mutual-TLS HTTP/2: login, PQ-only handshake, pooled IPC, config-tree transactions with ETag/If-Match, SSE logs, OpenAPI; an admin key set over REST never appears in REST responses or logs, survives a GET-then-PUT, is replaced by rotation and is stored in a 0600 file; unpinning stops it. |
 | `syslog` | Drivers | drivers | - | `logging syslog` over UDP, TCP and TLS (RFC 5425) from inside the VRF reaches a real syslog-ng with correct RFC 5424 fields, level filter, reconnect and TLS policy. |
 | `policy` | BGP | rpl | - | An RPL import policy on router-b rejects the redistributed prefix; reverting to `accept-all` lets it back. |
 | `redistribute-policy` | BGP | rpl | - | An RPL policy on router-a's `redistribute` rule filters the prefix before it enters its own Loc-RIB; reverting lets it back. |

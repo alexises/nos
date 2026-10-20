@@ -1328,13 +1328,25 @@ pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> S
 /// Render a full running-config snapshot as human-readable text: the
 /// generated `nos_proto::cli::render` hierarchy, only what is configured.
 pub fn render_config(config: &Config) -> String {
-    let doc = serde_json::to_value(config).unwrap_or_default();
+    let mut doc = serde_json::to_value(config).unwrap_or_default();
+    // The keystore is a section of its own: `show config admin` (#507).
+    doc["admin"] = serde_json::to_value(nos_proto::Admin::default()).unwrap_or_default();
     let text = render::indent(&render::render_root(&doc));
     if text.is_empty() {
         "nothing configured".to_string()
     } else {
         text
     }
+}
+
+/// `show config admin`: the keystore, secrets as `<hidden>`.
+pub fn render_admin_config(config: &Config) -> String {
+    let doc = serde_json::to_value(config).unwrap_or_default();
+    if config.admin.keys.is_empty() {
+        return "no admin keys configured".to_string();
+    }
+    render::render_at(&doc, &["admin".to_string()])
+        .map_or_else(String::new, |lines| render::indent(&lines))
 }
 
 /// Render a transaction's in-progress config, scoped to the current
@@ -1506,6 +1518,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         sbfd_reflector,
         spanning_tree,
         stp_port_profiles,
+        admin,
     } = diff;
     let mut lines = Vec::new();
 
@@ -1517,6 +1530,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         .chain(logging)
         .chain(sbfd_reflector)
         .chain(spanning_tree)
+        .chain(admin)
     {
         render_field_diff(&mut lines, field, "", color);
     }
@@ -2916,6 +2930,51 @@ mod tests {
         let out = render_config(&ospf_config());
         assert!(out.contains("user admin\n  password <hidden>"), "{out}");
         assert!(!out.contains("argon2id"), "{out}");
+    }
+
+    fn admin_config() -> Config {
+        config_from(&serde_json::json!({
+            "hostname": "r1",
+            "admin": {"keys": [{"label": "bgp-1", "secret": "needle-secret"}]}
+        }))
+    }
+
+    #[test]
+    fn show_config_leaves_the_keystore_out() {
+        let out = render_config(&admin_config());
+        assert_eq!(out, "hostname r1");
+        assert!(!out.contains("needle-secret"), "{out}");
+    }
+
+    #[test]
+    fn show_config_admin_lists_labels_with_hidden_secrets() {
+        let out = render_admin_config(&admin_config());
+        assert_eq!(out, "admin\n  key bgp-1\n    secret <hidden>");
+        assert!(!out.contains("needle-secret"), "{out}");
+        assert_eq!(
+            render_admin_config(&config_from(&serde_json::json!({"hostname": "r1"}))),
+            "no admin keys configured"
+        );
+    }
+
+    #[test]
+    fn a_transaction_shows_the_keystore_only_inside_admin() {
+        let snap = TransactionSnapshot {
+            name: "t".to_string(),
+            config: admin_config(),
+            dirty: true,
+            resumed: false,
+            generation: 1,
+        };
+        let root = render_transaction(&snap, &Path::root());
+        assert!(!root.contains("bgp-1"), "{root}");
+        let path = Path::from(vec!["admin".to_string()]);
+        let inside = render_transaction(&snap, &path);
+        assert!(
+            inside.contains("key bgp-1") && inside.contains("<hidden>"),
+            "{inside}"
+        );
+        assert!(!inside.contains("needle-secret"), "{inside}");
     }
 
     #[test]

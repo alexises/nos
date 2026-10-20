@@ -33,6 +33,7 @@ pub struct User {
     /// config daemon replaces it with a hash (keeping the old hash when the
     /// clear text still matches it, so re-setting the same password is not a
     /// change).
+    #[cfg_attr(feature = "openapi", schema(write_only))]
     #[garde(custom(|p: &String, _ctx: &Config| valid_password_hash(p)))]
     #[cli(topic = UserPassword, secret)]
     pub password: String,

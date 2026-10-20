@@ -220,7 +220,7 @@ The descriptions come from the router itself, so they always match the version y
 
 These work in both modes. Only `clear` acts on anything, and it never changes configuration. The REST equivalent of each is in [CLI ↔ API mapping](cli-api-mapping.md#operational-commands).
 
-- `show config`: the whole running config, and `show this` the object you are in. Both are written in the same words you type to set things, indented under their parent, so any line can be copied back after `set`. Only what is configured appears: a field left at its default is not shown, and an empty config prints `nothing configured`. Secrets (a user's password) show as `<hidden>`. The output is generated from the same schema as `edit`/`set`/`delete`, so a field you can set always shows.
+- `show config`: the whole running config, and `show this` the object you are in. Both are written in the same words you type to set things, indented under their parent, so any line can be copied back after `set`. Only what is configured appears: a field left at its default is not shown, and an empty config prints `nothing configured`. Secrets (a user's password) show as `<hidden>`. The admin keystore is left out of `show config`: `show config admin` prints it, with every secret as `<hidden>`. The output is generated from the same schema as `edit`/`set`/`delete`, so a field you can set always shows.
   ```
   ospf instance o1
     router-id 1.1.1.1
@@ -283,6 +283,8 @@ Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate:
 | Command | Behavior |
 |---------|----------|
 | `show config` | Sends `Request::Get` to `nos-configd`, prints the returned running config as an indented hierarchy in the `set` words, only what is configured (works in any mode) |
+| `show config admin` | Same fetch, prints only the admin keystore (`key <label>` / `secret <hidden>`), or `no admin keys configured` (works in any mode) |
+| `edit admin` / `set admin key <label> secret <value>` / `delete admin key <label>` | The keystore edits, through the generic grammar. A secret is write-only: `show this` inside the transaction prints `<hidden>`, and `diff` prints `<hidden>`/`<changed>`. At the transaction root `show this` omits the section like `show config` |
 | `show route <table>` | Resolves `<table>`'s `nos-ribd` instance via the watchdog broker, then `RibRequest::GetRoutes` — every prefix, every candidate route ordered best to worst (works in any mode) |
 | `show route <table> <address>` | Same resolution, then `RibRequest::Lookup { addr }` — a longest-prefix-match lookup, printing every candidate for the matched prefix ordered best to worst, or "no route matches" (works in any mode) |
 | `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk (operational mode only) |

@@ -36,6 +36,7 @@ pub fn save_to_disk(config: &Config, path: &Path) -> Result<(), ConfigError> {
 /// file must never be silently discarded in favor of a default, since that
 /// risks masking real data loss.
 pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
+    warn_if_readable_by_others(path);
     match std::fs::read(path) {
         Ok(bytes) => match serde_norway::from_slice(&bytes) {
             Ok(cfg) => {
@@ -52,6 +53,19 @@ pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
             Ok(Config::default())
         }
         Err(source) => Err(persistence_error(path, source)),
+    }
+}
+
+/// The file holds the admin keystore in clear text (daemons need the real
+/// values), so a mode wider than 0600 is worth a warning. Not refused: the
+/// e2e harness seeds the file.
+fn warn_if_readable_by_others(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            warn!(path = %path.display(), mode = format!("{mode:o}"), "config file is readable by group/other but holds secrets; chmod 600");
+        }
     }
 }
 
@@ -162,6 +176,26 @@ mod tests {
 
         let loaded = load_or_default(&path).unwrap();
         assert_eq!(loaded, sample_config());
+    }
+
+    #[test]
+    fn saved_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        save_to_disk(&sample_config(), &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_wide_file_still_loads() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        save_to_disk(&sample_config(), &path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(load_or_default(&path).unwrap(), sample_config());
     }
 
     #[test]

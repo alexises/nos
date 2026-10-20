@@ -71,6 +71,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set a local user's password.",
             "Given in clear text; nos-configd stores only its argon2id hash, and setting the same password again keeps the existing hash, so it is not a change.",
         ),
+        Topic::Admin => (
+            "The admin keystore: secrets other sections reference by label.",
+            "Holds labelled secrets (keys) once; any section that needs a key stores only the label. Not shown by `show config` unless asked (`show config admin`), and a secret's value is never printed, logged or returned by the REST API: it shows as <hidden>.",
+        ),
+        Topic::AdminKey => (
+            "Create or delete a labelled key.",
+            "A key is a label (1-64 characters: letters, digits, `_`, `-`) and a secret. `delete` removes it; a commit that leaves a section referencing a missing label is refused.",
+        ),
+        Topic::AdminKeySecret => (
+            "Set a key's secret.",
+            "1 to 80 bytes, stored in clear text in the daemon's config file (mode 0600) because the daemons that use it need the real value. Write-only: it can be replaced but never read back. `<hidden>` is the mask text and is refused as a new secret.",
+        ),
         Topic::Lldp => (
             "System-wide LLDP settings.",
             "The LLDP timers and management address every LLDP-enabled interface advertises with; per-interface transmit/receive and destination are set on the interface itself.",

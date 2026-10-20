@@ -72,6 +72,7 @@ fn put(d: &mut ConfigDiff, name: &str, mut fields: Vec<FieldDiff>, subs: Vec<Sec
         "sbfd_reflector" => d.sbfd_reflector = fields,
         "spanning_tree" => d.spanning_tree = fields,
         "stp_port_profiles" => d.stp_port_profiles = subs,
+        "admin" => d.admin = fields,
         _ => return false,
     }
     true
@@ -400,6 +401,27 @@ mod tests {
         let f = &d.users[0].fields[0];
         assert_eq!(
             (f.old.as_deref(), f.new.as_deref()),
+            (Some("<hidden>"), Some("<changed>"))
+        );
+    }
+
+    #[test]
+    fn an_admin_secret_is_never_shown() {
+        use crate::schema::{Admin, AdminKey};
+        let cfg = |sec: &str| Config {
+            admin: Admin {
+                keys: vec![AdminKey {
+                    label: "k".into(),
+                    secret: sec.into(),
+                }],
+            },
+            ..Default::default()
+        };
+        let d = diff_configs(&cfg("hunter2"), &cfg("hunter3"));
+        assert!(!format!("{d:?}").contains("hunter"));
+        assert_eq!(d.admin.len(), 1);
+        assert_eq!(
+            (d.admin[0].old.as_deref(), d.admin[0].new.as_deref()),
             (Some("<hidden>"), Some("<changed>"))
         );
     }

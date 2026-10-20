@@ -2,6 +2,7 @@ pub mod authz;
 pub mod docs;
 pub mod error;
 pub mod persistence;
+mod secrets;
 pub mod server;
 pub mod store;
 pub mod users;

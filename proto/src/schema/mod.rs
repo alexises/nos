@@ -1,3 +1,5 @@
+/// The admin keystore (`Admin`): labelled secrets other sections reference.
+pub mod admin;
 /// Named AS-path regex lists (`AsPathList`) that RPL scripts match against.
 pub mod as_path_list;
 /// BFD session parameter profiles (`BfdProfile`, RFC 5880).
@@ -51,6 +53,7 @@ pub mod switching_profile;
 /// Local login users (`User`) with argon2id password hashes.
 pub mod user;
 
+pub use admin::{Admin, AdminKey, SECRET_MAX_LEN};
 pub use as_path_list::AsPathList;
 pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdMode, BfdProfile, EchoMode};
 pub use bgp_instance::{
@@ -253,6 +256,16 @@ pub struct Config {
     #[garde(dive)]
     #[cli(topic = StpPortProfile, words = "stp-port-profile")]
     pub stp_port_profiles: Vec<StpPortProfile>,
+
+    /// The keystore: secrets under a label, referenced by label from the
+    /// sections that need a key. Not shown by `show config` unless asked
+    /// (`show config admin`); values never leave the daemons in clear
+    /// (logs, REST and `show` print `<hidden>`). `serde(default)` so on-disk
+    /// config saved before this field existed still loads.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = Admin)]
+    pub admin: Admin,
 }
 
 impl Config {
@@ -300,6 +313,7 @@ impl Default for Config {
             sbfd_reflector: SbfdReflector::default(),
             spanning_tree: SpanningTree::default(),
             stp_port_profiles: Vec::new(),
+            admin: Admin::default(),
         }
     }
 }
