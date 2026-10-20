@@ -1,6 +1,7 @@
 //! RFC 8210 RPKI-to-Router protocol: the PDU codec and the router side of
 //! the session (RFC 6810 version 0 as a fallback).
 
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -336,8 +337,13 @@ enum End {
 /// every cache has been tried it waits the retry interval and starts over.
 // ponytail: no preemption — a session on a less preferred cache is kept until
 // it drops, even when a more preferred one comes back.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "one concrete map, built by rpki::resolve_auths"
+)]
 pub async fn run(
     caches: Vec<RpkiCache>,
+    auths: HashMap<SocketAddr, ResolvedAuth>,
     vrf: Option<String>,
     status: SharedStatus,
     out: watch::Sender<Arc<VrpTable>>,
@@ -345,6 +351,7 @@ pub async fn run(
     let current = out.borrow().clone();
     let mut client = Client {
         caches,
+        auths,
         vrf,
         status,
         out,
@@ -358,6 +365,8 @@ pub async fn run(
 struct Client {
     /// Already in preference order, matching `status`.
     caches: Vec<RpkiCache>,
+    /// Resolved `RpkiCache.auth` per cache address (admin labels looked up).
+    auths: HashMap<SocketAddr, ResolvedAuth>,
     vrf: Option<String>,
     status: SharedStatus,
     out: watch::Sender<Arc<VrpTable>>,
@@ -408,10 +417,10 @@ impl Client {
     }
 
     async fn connect(&self, i: usize) -> io::Result<TcpStream> {
-        let auth = self.caches[i].auth.as_ref().map(ResolvedAuth::from);
+        let auth = self.auths.get(&self.addr(i));
         tokio::time::timeout(
             CONNECT_TIMEOUT,
-            tcp::connect(self.addr(i), None, self.vrf.as_deref(), auth.as_ref(), None),
+            tcp::connect(self.addr(i), None, self.vrf.as_deref(), auth, None),
         )
         .await
         .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")))
@@ -921,7 +930,13 @@ mod tests {
         ));
         let (tx, mut rx) = watch::channel(Arc::new(VrpTable::default()));
         let status = super::super::new_status(&[cache(addr, 0)]);
-        let client = tokio::spawn(run(vec![cache(addr, 0)], None, status.clone(), tx));
+        let client = tokio::spawn(run(
+            vec![cache(addr, 0)],
+            HashMap::new(),
+            None,
+            status.clone(),
+            tx,
+        ));
         let t = wait_len(&mut rx, 2).await;
         assert_eq!(
             t.validate("10.0.1.0/24".parse().unwrap(), Some(65001)),
@@ -990,7 +1005,13 @@ mod tests {
         });
         let (tx, mut rx) = watch::channel(Arc::new(VrpTable::default()));
         let status = super::super::new_status(&[cache(addr, 0)]);
-        let client = tokio::spawn(run(vec![cache(addr, 0)], None, status.clone(), tx));
+        let client = tokio::spawn(run(
+            vec![cache(addr, 0)],
+            HashMap::new(),
+            None,
+            status.clone(),
+            tx,
+        ));
         wait_len(&mut rx, 1).await;
         let _stream = server.await.unwrap();
         assert_eq!(status.lock().unwrap()[0].version, Some(0));
@@ -1028,7 +1049,7 @@ mod tests {
         assert_eq!(caches[0].port, dead_addr.port(), "preference order");
         let (tx, mut rx) = watch::channel(Arc::new(VrpTable::default()));
         let status = super::super::new_status(&caches);
-        let client = tokio::spawn(run(caches, None, status.clone(), tx));
+        let client = tokio::spawn(run(caches, HashMap::new(), None, status.clone(), tx));
         wait_len(&mut rx, 1).await;
         assert!(status.lock().unwrap()[1].active);
         // The cache goes silent (the stream is kept open, nothing more is

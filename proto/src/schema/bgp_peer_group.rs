@@ -478,9 +478,8 @@ pub struct BgpPeerGroup {
     pub max_hops: Option<u8>,
 
     /// `None` opens sessions with no transport authentication at all.
-    /// Secrets are stored clear-text, like every other field in this config
-    /// — see `BgpAuth`.
-    #[garde(custom(|a: &Option<BgpAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
+    /// Keys are admin-keystore labels, never inline secrets — see `BgpAuth`.
+    #[garde(custom(|a: &Option<BgpAuth>, ctx: &Config| valid_auth(a.as_ref(), ctx)))]
     #[cli(topic = BgpPeerGroupAuth, render = sugar::render_bgp_auth, sugar(word = "md5-password", with = sugar::md5_password, topic = BgpPeerGroupMd5Password), sugar(word = "ao-key", with = sugar::ao_key, topic = BgpPeerGroupAoKey))]
     pub auth: Option<BgpAuth>,
 
@@ -655,15 +654,15 @@ fn policy_reference_valid(name: Option<&String>, ctx: &Config) -> garde::Result 
 
 /// Transport authentication for a peer-group's sessions — mutually
 /// exclusive mechanisms, matching the kernel (a socket can carry
-/// `TCP_MD5SIG` or TCP-AO keys, never both at once). Stored clear-text, like
-/// every field in this config.
+/// `TCP_MD5SIG` or TCP-AO keys, never both at once). Keys are labels of
+/// `Config.admin` keystore entries; the secret itself never appears here.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAuth {
     /// RFC 2385 TCP MD5 signature — a single shared password.
     Md5 {
-        /// Password the TCP MD5 signature option is keyed with.
-        password: String,
+        /// Label of the admin key the TCP MD5 signature option is keyed with.
+        key_ref: String,
     },
     /// RFC 5925 TCP Authentication Option — one or more keys, supporting
     /// rotation via `send_id`/`recv_id` and the `is_current`/`is_rnext`
@@ -697,8 +696,8 @@ pub struct BgpAoKey {
     /// MAC algorithm of this key.
     pub algorithm: BgpAoAlgorithm,
     #[cli(topic = BgpPeerGroupAoKey)]
-    /// Master key, stored clear-text like every config value.
-    pub key: String,
+    /// Label of the admin key holding the master key.
+    pub key_ref: String,
     #[cli(topic = BgpPeerGroupAoKey)]
     /// Whether this key signs outgoing segments.
     pub is_current: bool,
@@ -727,15 +726,23 @@ pub enum BgpAoAlgorithm {
 /// socket options (`TCP_MD5SIG_MAXKEYLEN`/`TCP_AO_MAXKEYLEN`, both 80).
 const MAX_AUTH_KEY_LEN: usize = 80;
 
-pub(crate) fn valid_auth(auth: Option<&BgpAuth>) -> garde::Result {
+/// The referenced admin secret must exist and fit the kernel's key limit.
+fn valid_key_ref(label: &str, cfg: &Config, what: &str) -> garde::Result {
+    match cfg.key(label) {
+        None => Err(garde::Error::new(format!(
+            "{what} references unknown admin key '{label}'"
+        ))),
+        Some(s) if s.is_empty() || s.len() > MAX_AUTH_KEY_LEN => Err(garde::Error::new(format!(
+            "admin key '{label}' must be 1 to 80 bytes long to be used as an {what}"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
+pub(crate) fn valid_auth(auth: Option<&BgpAuth>, cfg: &Config) -> garde::Result {
     match auth {
         None => Ok(()),
-        Some(BgpAuth::Md5 { password }) => {
-            if password.is_empty() || password.len() > MAX_AUTH_KEY_LEN {
-                return Err(garde::Error::new("md5 password must be 1 to 80 bytes long"));
-            }
-            Ok(())
-        }
+        Some(BgpAuth::Md5 { key_ref }) => valid_key_ref(key_ref, cfg, "md5 password"),
         Some(BgpAuth::Ao { keys }) => {
             if keys.is_empty() {
                 return Err(garde::Error::new(
@@ -747,9 +754,7 @@ pub(crate) fn valid_auth(auth: Option<&BgpAuth>) -> garde::Result {
             let mut current_count = 0;
             let mut rnext_count = 0;
             for key in keys {
-                if key.key.is_empty() || key.key.len() > MAX_AUTH_KEY_LEN {
-                    return Err(garde::Error::new("ao key must be 1 to 80 bytes long"));
-                }
+                valid_key_ref(&key.key_ref, cfg, "ao key")?;
                 if seen_send_ids.contains(&key.send_id) {
                     return Err(garde::Error::new(
                         "ao key send-id must be unique within a peer-group",
@@ -935,9 +940,21 @@ mod tests {
         }
     }
 
+    /// Admin keystore holding the `secret` and `k` labels the auth tests reference.
+    fn keystore() -> crate::schema::Admin {
+        let key = |l: &str, s: &str| crate::schema::AdminKey {
+            label: l.to_string(),
+            secret: s.to_string(),
+        };
+        crate::schema::Admin {
+            keys: vec![key("secret", "s3cr3t"), key("k", "kk")],
+        }
+    }
+
     fn config_with(instances: Vec<BgpInstance>) -> Config {
         Config {
             bgp_instances: instances,
+            admin: keystore(),
             ..Default::default()
         }
     }
@@ -1155,7 +1172,7 @@ mod tests {
             send_id,
             recv_id: send_id,
             algorithm: BgpAoAlgorithm::HmacSha1_96,
-            key: "secret".to_string(),
+            key_ref: "secret".to_string(),
             is_current,
             is_rnext: false,
             exclude_options: false,
@@ -1166,30 +1183,54 @@ mod tests {
     fn md5_password_passes() {
         let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
         pg.auth = Some(BgpAuth::Md5 {
-            password: "secret".to_string(),
+            key_ref: "secret".to_string(),
         });
         let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
         cfg.validate_with(&cfg).unwrap();
     }
 
     #[test]
-    fn empty_md5_password_fails() {
+    fn md5_with_unknown_label_fails_naming_the_label() {
         let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
         pg.auth = Some(BgpAuth::Md5 {
-            password: String::new(),
+            key_ref: "nope".to_string(),
         });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn ao_with_unknown_label_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        let mut key = ao_key(1, true);
+        key.key_ref = "nope".to_string();
+        pg.auth = Some(BgpAuth::Ao { keys: vec![key] });
         let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]
-    fn oversized_md5_password_fails() {
+    fn deleting_a_referenced_admin_key_fails_but_an_unreferenced_one_passes() {
         let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
         pg.auth = Some(BgpAuth::Md5 {
-            password: "x".repeat(81),
+            key_ref: "secret".to_string(),
         });
-        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
-        assert!(cfg.validate_with(&cfg).is_err());
+        let mut cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        cfg.admin.keys.retain(|k| k.label != "k");
+        cfg.validate_with(&cfg).unwrap();
+        cfg.admin.keys.retain(|k| k.label != "secret");
+        let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn debug_of_auth_shows_the_label_only() {
+        let auth = BgpAuth::Md5 {
+            key_ref: "lbl".to_string(),
+        };
+        assert!(format!("{auth:?}").contains("lbl"));
+        assert!(!format!("{:?}", keystore()).contains("s3cr3t"));
     }
 
     #[test]
@@ -1248,16 +1289,6 @@ mod tests {
         pg.auth = Some(BgpAuth::Ao {
             keys: vec![ao_key(1, true), second],
         });
-        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
-        assert!(cfg.validate_with(&cfg).is_err());
-    }
-
-    #[test]
-    fn ao_with_oversized_key_fails() {
-        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
-        let mut key = ao_key(1, true);
-        key.key = "x".repeat(81);
-        pg.auth = Some(BgpAuth::Ao { keys: vec![key] });
         let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
@@ -1342,7 +1373,7 @@ mod tests {
             send_id,
             recv_id,
             algorithm: BgpAoAlgorithm::HmacSha1_96,
-            key: "k".to_string(),
+            key_ref: "k".to_string(),
             is_current,
             is_rnext,
             exclude_options: false,
@@ -1350,12 +1381,12 @@ mod tests {
     }
 
     fn ao_valid(keys: Vec<BgpAoKey>) -> bool {
-        valid_auth(Some(&BgpAuth::Ao { keys })).is_ok()
+        valid_auth(Some(&BgpAuth::Ao { keys }), &config_with(vec![])).is_ok()
     }
 
     #[test]
     fn ao_auth_rejects_duplicate_ids_and_bad_current_rnext_counts() {
-        assert!(valid_auth(None).is_ok());
+        assert!(valid_auth(None, &Config::default()).is_ok());
         assert!(ao_valid(vec![aokey(1, 1, true, false)]));
         assert!(ao_valid(vec![
             aokey(1, 1, true, true),
@@ -1389,10 +1420,22 @@ mod tests {
 
     #[test]
     fn md5_and_ao_key_length_boundaries() {
+        let with_secret = |n: usize| Config {
+            admin: crate::schema::Admin {
+                keys: vec![crate::schema::AdminKey {
+                    label: "l".to_string(),
+                    secret: "x".repeat(n),
+                }],
+            },
+            ..Default::default()
+        };
         let md5 = |n: usize| {
-            valid_auth(Some(&BgpAuth::Md5 {
-                password: "x".repeat(n),
-            }))
+            valid_auth(
+                Some(&BgpAuth::Md5 {
+                    key_ref: "l".to_string(),
+                }),
+                &with_secret(n),
+            )
             .is_ok()
         };
         assert!(!md5(0));
@@ -1400,10 +1443,19 @@ mod tests {
         assert!(md5(80));
         assert!(!md5(81));
         let mut k = aokey(1, 1, true, false);
-        k.key = "x".repeat(80);
-        assert!(ao_valid(vec![k.clone()]));
-        k.key = String::new();
-        assert!(!ao_valid(vec![k]));
+        k.key_ref = "l".to_string();
+        let ao = |n: usize| {
+            valid_auth(
+                Some(&BgpAuth::Ao {
+                    keys: vec![k.clone()],
+                }),
+                &with_secret(n),
+            )
+            .is_ok()
+        };
+        assert!(ao(80));
+        assert!(!ao(0));
+        assert!(!ao(81));
     }
 
     #[test]

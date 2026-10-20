@@ -193,8 +193,8 @@ pub enum BgpPeerGroupOp {
         instance: String,
         /// Name of the BGP peer group this op targets.
         name: String,
-        /// TCP MD5 password (RFC 2385), handed to the kernel.
-        password: String,
+        /// Label of the admin key holding the TCP MD5 password (RFC 2385).
+        key_ref: String,
     },
     /// Upserts one TCP-AO key by `send_id`. If `auth` isn't already `Ao`
     /// (unset, or `Md5`), starts a fresh key list with just this key.
@@ -816,10 +816,10 @@ impl BgpPeerGroupOp {
             BgpPeerGroupOp::SetMd5Auth {
                 instance,
                 name,
-                password,
+                key_ref,
             } => {
                 find_group_mut(config, instance, name)?.auth = Some(BgpAuth::Md5 {
-                    password: password.clone(),
+                    key_ref: key_ref.clone(),
                 });
                 Ok(())
             }
@@ -1662,7 +1662,7 @@ mod tests {
             send_id,
             recv_id: send_id,
             algorithm: BgpAoAlgorithm::HmacSha1_96,
-            key: "secret".to_string(),
+            key_ref: "secret".to_string(),
             is_current: false,
             is_rnext: false,
             exclude_options: false,
@@ -1675,14 +1675,14 @@ mod tests {
         BgpPeerGroupOp::SetMd5Auth {
             instance: "r1".to_string(),
             name: "pg1".to_string(),
-            password: "secret".to_string(),
+            key_ref: "secret".to_string(),
         }
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(
             cfg.bgp_instances[0].peer_groups[0].auth,
             Some(BgpAuth::Md5 {
-                password: "secret".to_string()
+                key_ref: "secret".to_string()
             })
         );
     }
@@ -1700,14 +1700,14 @@ mod tests {
         BgpPeerGroupOp::SetMd5Auth {
             instance: "r1".to_string(),
             name: "pg1".to_string(),
-            password: "secret".to_string(),
+            key_ref: "secret".to_string(),
         }
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(
             cfg.bgp_instances[0].peer_groups[0].auth,
             Some(BgpAuth::Md5 {
-                password: "secret".to_string()
+                key_ref: "secret".to_string()
             })
         );
     }
@@ -1741,7 +1741,7 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         let mut updated = ao_key(1);
-        updated.key = "new-secret".to_string();
+        updated.key_ref = "new-secret".to_string();
         BgpPeerGroupOp::SetAoKey {
             instance: "r1".to_string(),
             name: "pg1".to_string(),
@@ -1900,7 +1900,7 @@ mod tests {
         BgpPeerGroupOp::SetMd5Auth {
             instance: "r1".to_string(),
             name: "pg1".to_string(),
-            password: "secret".to_string(),
+            key_ref: "secret".to_string(),
         }
         .apply(&mut cfg)
         .unwrap();

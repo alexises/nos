@@ -425,18 +425,28 @@ Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are pa
 
 ### MD5 authentication (RFC 2385)
 
-`set md5-password <password>` signs every TCP segment of the peer-group's sessions with a shared password. Both sides must use the same password; with a wrong or missing one, the kernel drops the segments and the session never comes up. The password is 1 to 80 bytes.
+Authentication keys are not typed into the peer-group: they live in the admin keystore under a label, and the peer-group names the label. To authenticate a peer-group:
+
+1. Store the secret (1 to 80 bytes) under a label: `set admin key bgp-pg1 secret s3cr3t-md5`.
+2. Reference it: `set md5-password bgp-pg1` signs every TCP segment of the peer-group's sessions with that secret. Both sides must hold the same secret; with a wrong or missing one, the kernel drops the segments and the session never comes up.
 
 ```
-edge-1(t4/bgp-instance:r1/peer-group:pg1)> set md5-password s3cr3t-md5
+edge-1(t4)> set admin key bgp-pg1 secret s3cr3t-md5
+edge-1(t4/bgp-instance:r1/peer-group:pg1)> set md5-password bgp-pg1
 ```
 
 ```sh
-$C -X PUT -H 'Content-Type: application/json' -d '{"Md5":{"password":"s3cr3t-md5"}}' \
+$C -X PUT -H 'Content-Type: application/json' -d '{"label":"bgp-pg1","secret":"s3cr3t-md5"}' \
+  $B/v1/transactions/t4/admin/key/bgp-pg1
+$C -X PUT -H 'Content-Type: application/json' -d '{"Md5":{"key_ref":"bgp-pg1"}}' \
   $B/v1/transactions/t4/bgp-instance/r1/peer-group/pg1/auth
 ```
 
-`delete auth` removes authentication, whether MD5 or TCP-AO. Passwords and keys are stored in clear text and shown in clear by `show config`, like every other setting.
+- The secret is write-only: it reads `<hidden>` in `show config`, `diff`, `GET /v1/config` and the logs. `show config` displays the label.
+- The commit fails if the label does not exist, or if its secret is not 1 to 80 bytes. Deleting an admin key that a peer-group (or RPKI cache) still references fails the commit too, naming the label.
+- To rotate the secret, set the same label to a new value on both routers: `set admin key bgp-pg1 secret <new>`. The session is restarted and comes back with the new secret.
+- `delete auth` removes authentication, whether MD5 or TCP-AO.
+- Breaking change: a `config.yaml` saved with an inline `password` or `key` no longer loads. Move the secret to an admin key and reference its label (`key_ref`).
 
 ### TCP-AO (RFC 5925)
 
@@ -446,19 +456,20 @@ Each key has:
 
 - a send ID and a receive ID (0 to 255): the key IDs this router puts in outgoing segments and expects in incoming ones. The peer configures the same key with the two IDs swapped (or the same values, if you use the same ID in both directions);
 - an algorithm: `hmac-sha1` (HMAC-SHA-1-96) or `aes-cmac` (AES-128-CMAC-96);
-- the secret, 1 to 80 bytes.
+- the label of an admin key (`set admin key <label> secret <value>`) holding the secret, 1 to 80 bytes.
 
 Exactly one key must be marked `current`: the key a new connection starts signing with. At most one may be marked `rnext`: the key this router asks the peer to switch to. Send IDs must be unique, and so must receive IDs (the kernel refuses overlapping IDs).
 
 On an established session the peer decides which key signs: the kernel follows the peer's RNextKeyID (RFC 5925 §7.5.2), so `current` never forces a switch on a live session.
 
 ```
-edge-1(t5/bgp-instance:r1/peer-group:pg1)> set ao-key 1 1 hmac-sha1 first-key
+edge-1(t5)> set admin key ao-pg1-1 secret first-key
+edge-1(t5/bgp-instance:r1/peer-group:pg1)> set ao-key 1 1 hmac-sha1 ao-pg1-1
 edge-1(t5/bgp-instance:r1/peer-group:pg1)> set ao-key 1 current
 edge-1(t5/bgp-instance:r1/peer-group:pg1)> commit
 ```
 
-`set ao-key <send-id> <recv-id> <algorithm> <secret>` adds a key, or replaces the key with that send ID. `set ao-key <send-id> current` and `set ao-key <send-id> rnext` move the flags, and `delete ao-key <send-id>` removes one key.
+`set ao-key <send-id> <recv-id> <algorithm> <label>` adds a key, or replaces the key with that send ID. `set ao-key <send-id> current` and `set ao-key <send-id> rnext` move the flags, and `delete ao-key <send-id>` removes one key.
 
 Once the session is up, `show bgp brief` adds the key state read from the kernel: the key ID this router is sending with, the key ID this router asks the peer to send with, and the counts of good segments, bad segments and segments for an unknown key:
 
@@ -470,13 +481,13 @@ Once the session is up, `show bgp brief` adds the key state read from the kernel
 
 To roll over to a new key without dropping the session (RFC 5925 §7.5), on both routers:
 
-1. Add the new key and mark it `rnext`: `set ao-key 2 2 hmac-sha1 second-key`, `set ao-key 2 rnext`. Commit. Once both sides have done this, the live session switches to key 2 on its own.
+1. Add the new key and mark it `rnext`: `set admin key ao-pg1-2 secret second-key`, `set ao-key 2 2 hmac-sha1 ao-pg1-2`, `set ao-key 2 rnext`. Commit. Once both sides have done this, the live session switches to key 2 on its own.
 2. Make it current: `set ao-key 2 current`. Commit. This only changes what new connections start with.
 3. Remove the old key: `delete ao-key 1`. Commit.
 
 Each of these commits is applied to the running session and to the listener in place: the session stays up. These still reset it:
 
-- changing the secret, algorithm, receive ID or `exclude-options` of a key that stays;
+- changing the secret (the admin key's value), algorithm, receive ID or `exclude-options` of a key that stays;
 - switching between MD5 and TCP-AO, or adding or removing authentication altogether;
 - removing the key the peer still signs with (the kernel refuses; the session resets with Cease/Other Configuration Change and comes back with the new key list). Remove the old key only after the peer has moved to the new one.
 
@@ -486,7 +497,7 @@ Over REST, `auth` holds the whole key list:
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '{"Ao":{"keys":[
-    {"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"first-key","is_current":true,"is_rnext":false,"exclude_options":false}]}}' \
+    {"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key_ref":"ao-pg1-1","is_current":true,"is_rnext":false,"exclude_options":false}]}}' \
   $B/v1/transactions/t5/bgp-instance/r1/peer-group/pg1/auth
 ```
 
@@ -740,18 +751,19 @@ bgp instance r1:
 Without a key the RTR session is plain TCP. RFC 8210 §9 then requires the router and the cache to share a trusted, controlled network, and prefers TCP-AO over TLS or TCP-MD5 (MD5 is obsoleted by TCP-AO). Set the same key on the cache:
 
 ```
-set bgp instance r1 rpki-cache 192.0.2.50 md5-password s3cr3t
-set bgp instance r1 rpki-cache 192.0.2.50 ao-key 1 1 hmac-sha1 s3cr3t
+set admin key rpki-192-0-2-50 secret s3cr3t
+set bgp instance r1 rpki-cache 192.0.2.50 md5-password rpki-192-0-2-50
+set bgp instance r1 rpki-cache 192.0.2.50 ao-key 1 1 hmac-sha1 rpki-192-0-2-50
 delete bgp instance r1 rpki-cache 192.0.2.50 auth
 ```
 
 ```sh
-$C -X PUT -H 'Content-Type: application/json' -d '{"Md5":{"password":"s3cr3t"}}' \
+$C -X PUT -H 'Content-Type: application/json' -d '{"Md5":{"key_ref":"rpki-192-0-2-50"}}' \
   $B/v1/transactions/t9/bgp-instance/r1/rpki-cache/192.0.2.50/auth
 ```
 
-- The rules are those of a peer-group's `auth`: a key is 1 to 80 bytes, MD5 and TCP-AO are mutually exclusive, and TCP-AO needs exactly one current key. The `ao-key` sub-commands (`current`, `rnext`, `exclude-options`, `delete ao-key`) work the same.
-- Changing or removing the key restarts the session with that cache; the VRPs already held stay in use until the new session's first End of Data.
+- The rules are those of a peer-group's `auth`: a key is an admin key label whose secret is 1 to 80 bytes, MD5 and TCP-AO are mutually exclusive, and TCP-AO needs exactly one current key. The `ao-key` sub-commands (`current`, `rnext`, `exclude-options`, `delete ao-key`) work the same.
+- Changing the admin key's secret, or removing the reference, restarts the session with that cache; the VRPs already held stay in use until the new session's first End of Data.
 - A cache that does not hold the same key never answers: the router logs `rpki cache unreachable`, and `show bgp rpki` keeps it `Idle`.
 - What it protects: the integrity of the session between the router and the cache. On an untrusted path, an attacker who can forge the session can make a hijack look valid or a legitimate route invalid. It does not hide the VRPs (they are public data), and it does not vouch for where the cache got them.
 - The secret is stored in clear text, like a peer-group's, and shows in `show config` and the REST config.
@@ -944,12 +956,12 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | role | `… role provider\|route-server\|route-server-client\|customer\|peer` / `set role …`; `delete role` | `…/role`, `"Provider"`, `"RouteServer"`, `"RouteServerClient"`, `"Customer"`, `"Peer"` or `null` | default: none | eBGP peer-group outside the confederation; on a route-server-client group only route-server or route-server-client | Role of the peers, announced in the OPEN; see [BGP roles](#bgp-roles-rfc-9234) | `bgp role negotiated` in the logs |
 | strict-mode | `… strict-mode` / `set strict-mode`; `delete strict-mode` | `…/strict-mode`, boolean | default `false` | needs a role | Refuse a peer that sends no role | Role Mismatch NOTIFICATION in the logs |
 | max-hops | `… max-hops <n>` / `set max-hops <n>`; `delete max-hops` | `…/max-hops`, number or `null` | 1 to 254; default: off | 1 to 254 | GTSM: TTL 255 out, minimum TTL `256 - n` in | `show config` |
-| md5-password | `… md5-password <pw>` / `set md5-password <pw>`; `delete auth` | `…/auth`, `{"Md5":{"password":"…"}}` | 1 to 80 bytes; default: no authentication | 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp brief` (session up) |
-| ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <secret>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"…","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; secret 1 to 80 bytes | at least one key; send IDs and receive IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
+| md5-password | `… md5-password <label>` / `set md5-password <label>`; `delete auth` | `…/auth`, `{"Md5":{"key_ref":"<label>"}}` | admin key label; default: no authentication | the label exists and its secret is 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp brief` (session up) |
+| ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <label>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key_ref":"<label>","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; label of an admin key with a 1 to 80 byte secret | at least one key; send IDs and receive IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
 | ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key a new connection starts signing with; a live session follows the peer's choice | `show bgp brief` (`ao-current`) |
 | ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key this router asks the peer to switch to; applied to the live session in place | `show bgp brief` (`ao-rnext`) |
 | exclude-options | `… ao-key <send-id> exclude-options` / `set ao-key <send-id> exclude-options`; `delete ao-key <send-id> exclude-options` | `exclude_options` in the key | boolean; default `false` | the key must exist | Leaves TCP options out of the MAC; both sides must agree | `show bgp brief` (session up) |
-| rpki-cache auth | `set bgp instance <i> rpki-cache <addr> md5-password <pw>` or `… ao-key …`; `delete … auth` | `…/rpki-cache/<addr>/auth`, as a peer-group's `auth` | default: none (plain TCP) | as a peer-group's `auth` | TCP-MD5 or TCP-AO on the RTR session; see [Authenticating the cache session](#authenticating-the-cache-session-rfc-8210-9) | `show bgp rpki` (`auth yes`) |
+| rpki-cache auth | `set bgp instance <i> rpki-cache <addr> md5-password <label>` or `… ao-key …`; `delete … auth` | `…/rpki-cache/<addr>/auth`, as a peer-group's `auth` | default: none (plain TCP) | as a peer-group's `auth` | TCP-MD5 or TCP-AO on the RTR session; see [Authenticating the cache session](#authenticating-the-cache-session-rfc-8210-9) | `show bgp rpki` (`auth yes`) |
 | next-hop | `… next-hop self\|unchanged` / `set next-hop self\|unchanged`; `delete next-hop` | `…/next-hop`, `"SelfAddress"`, `"Unchanged"` or `null` | default: `self` for eBGP, `unchanged` for iBGP and route-server peer-groups | none | `NEXT_HOP` of advertised routes | `show config`; `show route` on the peer |
 | route-reflector-client | `… route-reflector-client` / `set route-reflector-client`; `delete route-reflector-client` | `…/route-reflector-client`, boolean | default `false`; required in a whole-object `PUT` | iBGP peer-group only; not with route-server-client | Reflects iBGP routes to and from these peers | `show config` |
 | route-server-client | `… route-server-client` / `set route-server-client`; `delete route-server-client` | `…/route-server-client`, boolean | default `false`; required in a whole-object `PUT` | eBGP peer-group only; not with route-reflector-client | Transparent AS path; ADD-PATH views | `show config` |

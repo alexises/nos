@@ -24,14 +24,14 @@ fn shutdown_value(verb: Verb, args: &[&str], _: &Value) -> Option<Value> {
     })
 }
 
-/// `md5-password <password>` (RFC 2385) — replaces any TCP-AO keys.
+/// `md5-password <admin-key-label>` (RFC 2385) — replaces any TCP-AO keys.
 pub fn md5_password(verb: Verb, args: &[&str], obj: &Value) -> Option<SugarOut> {
     md5_password_value(verb, args, obj).map(SugarOut::Value)
 }
 
 fn md5_password_value(verb: Verb, args: &[&str], _: &Value) -> Option<Value> {
     match (verb, args) {
-        (Verb::Set, [password]) => Some(json!({ "Md5": { "password": password } })),
+        (Verb::Set, [label]) => Some(json!({ "Md5": { "key_ref": label } })),
         _ => None,
     }
 }
@@ -105,7 +105,7 @@ fn ao_key_value(verb: Verb, args: &[&str], group: &Value) -> Option<Value> {
                 "send_id": send_id,
                 "recv_id": recv_id.parse::<u8>().ok()?,
                 "algorithm": enum_word(&BgpAoAlgorithm::kind(), algorithm)?,
-                "key": key,
+                "key_ref": key,
                 "is_current": false,
                 "is_rnext": false,
                 "exclude_options": false,
@@ -287,7 +287,7 @@ pub fn render_ospfv3_auth(auth: &Value) -> Vec<String> {
 /// `BgpPeerGroup.auth`.
 pub fn render_bgp_auth(auth: &Value) -> Vec<String> {
     if let Some(m) = auth.get("Md5") {
-        return vec![format!("md5-password {}", text(&m["password"]))];
+        return vec![format!("md5-password {}", text(&m["key_ref"]))];
     }
     let keys = auth["Ao"]["keys"].as_array().map_or(&[][..], Vec::as_slice);
     let alg =
@@ -299,7 +299,7 @@ pub fn render_bgp_auth(auth: &Value) -> Vec<String> {
             k["send_id"],
             k["recv_id"],
             alg(k),
-            text(&k["key"])
+            text(&k["key_ref"])
         ));
         if k["exclude_options"] == Value::Bool(true) {
             out.push(format!("ao-key {} exclude-options", k["send_id"]));

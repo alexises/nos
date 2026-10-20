@@ -25,10 +25,10 @@ Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-v
 
 ## Session authentication
 
-- Socket-level only: `fsm.rs` never sees it. MD5 or TCP-AO, mutually exclusive (one per socket); raw `setsockopt` lives in `nos-tcp-auth`, `nos-bgp` only calls its safe wrappers. `reconcile::resync` -> `session::ResolvedAuth`; any change restarts the peer (`diff_peers`) except what `session::ao_delta` expresses.
-- The listener is shared, so keys are installed on the listening socket scoped per peer address (`applied_auth`, `sync_listener_auth`; `spawn_listeners` primes them on every bind).
+- Socket-level only: `fsm.rs` never sees it. MD5 or TCP-AO, mutually exclusive (one per socket); raw `setsockopt` lives in `nos-tcp-auth`, `nos-bgp` only calls its safe wrappers. Keys are admin labels (#508): `ResolvedAuth::resolve(&BgpAuth, &Config)` (peers and `rpki::resolve_auths`), subscribed with `DiffScope::Admin`, so a rotation restarts the peer (`diff_peers`) except what `session::ao_delta` expresses.
+- The listener is shared: keys are installed on it per peer address (`applied_auth`, `sync_listener_auth`; `spawn_listeners` primes them).
 - `tcp::apply_auth(on_listener)` strips `set_current`/`set_rnext` for a socket in `LISTEN` (`TCP_AO_ADD_KEY` returns `EINVAL` otherwise); the active side keeps them.
-- `nos_tcp_auth::add_ao_key`/`delete_ao_key` set `ifindex = 0`, not `-1` (only meaningful with `TCP_AO_KEYF_IFINDEX`, never used); anything else is `EINVAL` and blocks every key install.
+- `nos_tcp_auth::add_ao_key`/`delete_ao_key` set `ifindex = 0`, not `-1` (`TCP_AO_KEYF_IFINDEX` is never used); else `EINVAL`.
 - Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; config `is_current` only seeds new connections. `ao_delta` returns `None` (restart) for MD5, a kept key whose RecvID/algorithm/secret/`exclude_options` changed, or an add reusing a removed RecvID. Otherwise an Established session gets `FsmCommand::UpdateAo`, `PeerSlot::auth()`/`set_auth()` seed new connections. Only rnext is pushed to a live socket (also on accept), never `set_current`; any error (expected `EBUSY`) resets.
 
 ## GTSM / `max-hops`

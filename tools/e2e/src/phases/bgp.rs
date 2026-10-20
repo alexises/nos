@@ -495,7 +495,45 @@ pub async fn auth(w: &mut World) -> anyhow::Result<()> {
 
     log("restoring the matching md5 password on router-a");
     a.provision(&["--md5-password", password]).await?;
-    reestablished(a, before_a).await
+    reestablished(a, before_a).await?;
+
+    log("the secret lives in the admin keystore only: not in the config view, not in any log (#508)");
+    for r in [a, b] {
+        no_leak(r, &[password, "wrong-password"]).await?;
+    }
+
+    log("rotating the secret under the same admin label re-establishes the session");
+    let rotated = "rotated-horse-battery-staple";
+    let (base_a, base_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    for r in [a, b] {
+        r.provision(&["--md5-password", rotated]).await?;
+    }
+    reestablished(a, base_a).await?;
+    reestablished(b, base_b).await?;
+    for r in [a, b] {
+        no_leak(r, &[rotated]).await?;
+    }
+    Ok(())
+}
+
+/// Fails if any of `secrets` shows in the running config as `GET /v1/config`
+/// serves it or in the log lines streamed from the daemons (#383, #508).
+async fn no_leak(r: &Router, secrets: &[&str]) -> anyhow::Result<()> {
+    // Let the log follower catch up with anything just emitted.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let config = r.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+    for secret in secrets {
+        if config.contains(secret) {
+            bail!("{}: secret '{secret}' appears in GET /v1/config", r.name());
+        }
+        if r.count(secret) > 0 {
+            bail!("{}: secret '{secret}' appears in the logs", r.name());
+        }
+    }
+    Ok(())
 }
 
 fn expect_body(body: &str, needle: &str) -> anyhow::Result<()> {
@@ -665,6 +703,34 @@ pub async fn ao(w: &mut World) -> anyhow::Result<()> {
     b.assert_quiet("bgp session established", est_b, 3).await?;
     for r in [a, b] {
         wait_summary(r, &["\"ao_current_key\":1"], 60).await?;
+    }
+
+    log("the secrets live in the admin keystore only: not in the config view, not in any log (#508)");
+    for r in [a, b] {
+        no_leak(r, &[secret, "second-secret"]).await?;
+    }
+
+    log("rotating key 1's secret under the same admin label: material changed, so a fresh session");
+    let rotated = "rotated-ao-secret";
+    let (est_a, est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    for r in [a, b] {
+        r.provision(&[
+            "--ao-send-id",
+            "1",
+            "--ao-key-secret",
+            rotated,
+            "--ao-current",
+            "--ao-exclude-options",
+        ])
+        .await?;
+    }
+    reestablished(a, est_a).await?;
+    reestablished(b, est_b).await?;
+    for r in [a, b] {
+        no_leak(r, &[rotated]).await?;
     }
     Ok(())
 }
