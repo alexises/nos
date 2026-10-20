@@ -3,9 +3,9 @@
 //! `rib.rs`.
 
 use super::{
-    build_advertisement, family_of, info, message, mpsc, warn, AddressFamily, Arc, BgpRib,
+    build_advertisement, family_of, info, message, warn, AddressFamily, Arc, BgpRib,
     CompiledPolicy, Duration, EvpnRoute, HashSet, Instant, IpAddr, IpNet, NextHopMode,
-    OutboundUpdate, PeerGr, PeerOutbox,
+    OutboundUpdate, OutboxTx, PeerGr, PeerOutbox,
 };
 
 impl BgpRib {
@@ -26,7 +26,7 @@ impl BgpRib {
         is_rs_client: bool,
         add_path_tx: HashSet<AddressFamily>,
         export_policy: Arc<CompiledPolicy>,
-        tx: mpsc::UnboundedSender<OutboundUpdate>,
+        tx: OutboxTx,
     ) {
         self.gr_peer_returned(peer);
         let remote_asn = self.peer_asns.get(&peer).copied().unwrap_or(0);
@@ -90,7 +90,7 @@ impl BgpRib {
                 source_is_rr_client,
                 self.cluster_id,
             ) {
-                let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+                outbox.tx.send(OutboundUpdate::Announce(adv));
                 advertised.insert(*prefix);
             }
         }
@@ -106,7 +106,7 @@ impl BgpRib {
             let outbox = &self.peer_outboxes[&peer];
             for family in AddressFamily::ALL {
                 if outbox.negotiated_afs.contains(&family) {
-                    let _ = outbox.tx.send(OutboundUpdate::EndOfRib(family));
+                    outbox.tx.send(OutboundUpdate::EndOfRib(family));
                 }
             }
         }
@@ -177,7 +177,7 @@ impl BgpRib {
         };
         let marker = |subtype| OutboundUpdate::RefreshMarker { family, subtype };
         if enhanced {
-            let _ = outbox.tx.send(marker(message::REFRESH_BORR));
+            outbox.tx.send(marker(message::REFRESH_BORR));
         }
         if outbox.add_path_tx.contains(&family) {
             // The same top N again, under the same ids (a path the export
@@ -213,12 +213,12 @@ impl BgpRib {
                     source_is_rr_client,
                     self.cluster_id,
                 ) {
-                    let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+                    outbox.tx.send(OutboundUpdate::Announce(adv));
                 }
             }
         }
         if enhanced {
-            let _ = self.peer_outboxes[&peer]
+            self.peer_outboxes[&peer]
                 .tx
                 .send(marker(message::REFRESH_EORR));
         }

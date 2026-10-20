@@ -424,7 +424,7 @@ fn peer_disconnected_withdraws_every_route_it_contributed() {
 fn peer_with_no_local_address_is_never_eligible_for_self_address() {
     let mut rib = new_rib(65000);
     let peer = addr("10.0.0.1");
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = test_channel();
     rib.peer_established(
         peer,
         false,

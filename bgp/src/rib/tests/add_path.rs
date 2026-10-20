@@ -293,9 +293,9 @@ fn add_path_peer(
     is_rs_client: bool,
     count: Option<usize>,
     policy: Arc<CompiledPolicy>,
-) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+) -> mpsc::Receiver<OutboundUpdate> {
     rib.set_peer_add_path_send_count(addr(peer), count);
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = test_channel();
     rib.peer_established(
         addr(peer),
         is_ibgp,
@@ -313,7 +313,7 @@ fn add_path_peer(
 }
 
 /// `(announce, path id, med)` of every unicast update, in order.
-fn path_events(rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>) -> Vec<(bool, u32, Option<u32>)> {
+fn path_events(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<(bool, u32, Option<u32>)> {
     recv_all(rx)
         .into_iter()
         .filter_map(|u| match u {
@@ -361,7 +361,7 @@ fn ap_withdraw(rib: &mut BgpRib, i: usize) {
     );
 }
 
-fn ap_sources(rib: &mut BgpRib) -> Vec<mpsc::UnboundedReceiver<OutboundUpdate>> {
+fn ap_sources(rib: &mut BgpRib) -> Vec<mpsc::Receiver<OutboundUpdate>> {
     AP_PEERS
         .iter()
         .map(|p| register_peer(rib, addr(p), false, addr("10.0.0.250")))
@@ -494,7 +494,7 @@ fn add_path_never_sends_a_peer_its_own_path_nor_ibgp_paths_to_a_non_client() {
     rib.handle_update(ibgp, true, v4("10.0.0.7"), &u, &nos_rpl::ACCEPT_ALL);
     ap_announce(&mut rib, 0, 10);
     ap_announce(&mut rib, 1, 30);
-    let nexthops = |rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>| -> Vec<IpAddr> {
+    let nexthops = |rx: &mut mpsc::Receiver<OutboundUpdate>| -> Vec<IpAddr> {
         let mut hops: Vec<IpAddr> = recv_all(rx)
             .into_iter()
             .filter_map(|u| match u {

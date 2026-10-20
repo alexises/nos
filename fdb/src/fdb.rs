@@ -1598,7 +1598,7 @@ async fn sleep_until_opt(at: Option<Instant>) {
     }
 }
 
-async fn recv_opt(rx: &mut Option<mpsc::UnboundedReceiver<()>>) -> Option<()> {
+async fn recv_opt(rx: &mut Option<mpsc::Receiver<()>>) -> Option<()> {
     match rx {
         Some(rx) => rx.recv().await,
         None => pending().await,
@@ -2044,7 +2044,7 @@ mod tests {
                 .push(format!("neigh- {} {ip}", format_mac(m)));
             Ok(())
         }
-        fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>> {
+        fn watch_neigh(&self) -> Option<mpsc::Receiver<()>> {
             None
         }
     }

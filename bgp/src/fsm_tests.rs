@@ -14,7 +14,7 @@ use nos_proto::{BgpAddPath, BgpMaximumPrefix, BgpPrefixLimit, BgpRole};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 
 use super::*;
@@ -604,7 +604,7 @@ struct Cls {
     rib: Arc<SharedRib>,
     slot: Arc<PeerSlot>,
     peer: PeerContext,
-    rx: UnboundedReceiver<OutboundUpdate>,
+    rx: Receiver<OutboundUpdate>,
     stale: HashMap<AddressFamily, Instant>,
 }
 
@@ -613,7 +613,7 @@ impl Cls {
     async fn new() -> Self {
         let rp = rpeer();
         let rib = new_rib();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = crate::rib::test_channel();
         rib.lock().await.peer_established(
             rp.remote_address,
             false,

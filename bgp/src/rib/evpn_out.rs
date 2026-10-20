@@ -289,7 +289,7 @@ impl BgpRib {
             let sent = self.evpn_adj_rib_out.entry(*peer).or_default();
             if sent.get(&adv.nlri) != Some(&adv) {
                 sent.insert(adv.nlri.clone(), adv.clone());
-                let _ = outbox.tx.send(OutboundUpdate::AnnounceEvpn(adv));
+                outbox.tx.send(OutboundUpdate::AnnounceEvpn(adv));
             }
         }
     }
@@ -304,7 +304,7 @@ impl BgpRib {
                 .get_mut(peer)
                 .is_some_and(|sent| sent.remove(nlri).is_some())
             {
-                let _ = outbox.tx.send(OutboundUpdate::WithdrawEvpn(nlri.clone()));
+                outbox.tx.send(OutboundUpdate::WithdrawEvpn(nlri.clone()));
             }
         }
     }
@@ -320,7 +320,7 @@ impl BgpRib {
         for r in self.evpn_local.values().flat_map(HashMap::values) {
             if let Some(adv) = advertise(outbox, self.local_asn, r) {
                 sent.insert(adv.nlri.clone(), adv.clone());
-                let _ = outbox.tx.send(OutboundUpdate::AnnounceEvpn(adv));
+                outbox.tx.send(OutboundUpdate::AnnounceEvpn(adv));
             }
         }
     }

@@ -1,6 +1,6 @@
 use super::*;
 
-fn agg_rib() -> (BgpRib, mpsc::UnboundedReceiver<OutboundUpdate>) {
+fn agg_rib() -> (BgpRib, mpsc::Receiver<OutboundUpdate>) {
     let mut rib = new_rib_with_identity(65000, v4("1.1.1.1"), v4("1.1.1.1"));
     rib.set_peer_asn(addr("10.0.0.1"), 65001);
     let _src = register_peer(&mut rib, addr("10.0.0.1"), false, addr("10.0.0.9"));

@@ -1048,12 +1048,12 @@ impl FdbDriver for LinuxFdbDriver {
         self.neigh(msg, true, 0, ENOENT).await
     }
 
-    fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>> {
+    fn watch_neigh(&self) -> Option<mpsc::Receiver<()>> {
         let (conn, _handle, mut messages) =
             rtnetlink::new_multicast_connection(&[MulticastGroup::Neigh, MulticastGroup::Link])
                 .ok()?;
         nos_log_client::spawn_critical("rtnetlink-connection", conn);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
             while let Some((msg, _)) = messages.next().await {
                 // Bridge FDB (MACs) and ARP/ND (IP neighbours) alike, and a
@@ -1070,7 +1070,7 @@ impl FdbDriver for LinuxFdbDriver {
                     ) => true,
                     _ => false,
                 };
-                if relevant && tx.send(()).is_err() {
+                if relevant && !super::wake(&tx) {
                     break;
                 }
             }

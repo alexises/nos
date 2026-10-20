@@ -219,6 +219,8 @@ pub enum CeaseSubcode {
     ConnectionRejected = 5,
     OtherConfigurationChange = 6,
     ConnectionCollisionResolution = 7,
+    /// RFC 4486 §4: an internal limit (a full outbox, #395) was hit.
+    OutOfResources = 8,
     /// RFC 8538 §3: the data is a whole inner NOTIFICATION `code(1)
     /// subcode(1) data…` — a reset that keeps nothing, whatever N says.
     HardReset = 9,

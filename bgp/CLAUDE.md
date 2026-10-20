@@ -38,6 +38,7 @@ Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-v
 ## BGP finite state machine
 
 - `fsm::step` is the pure transition core, unit-tested; `fsm::run` owns the framed socket and timers. `UPDATE`/`ROUTE_REFRESH` bypass `step` (short-circuited in `run`'s read branch, meaningful only once `Established`).
+- Send to a peer only via `OutboxTx::send` (bounded, coalescing, #395).
 - Every well-formed inbound message resets the hold timer (RFC 4271 §4.4), centrally in the read branch.
 - Hold/keepalive/connect-retry defaults and floors live in `nos_proto` because `nos-config` validates the same rules; the OPEN check order is in the internals page.
 - The `PeerSlot` command channel is polled only while `Established` (collision resolves before), so one task contends for it.

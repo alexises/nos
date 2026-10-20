@@ -34,7 +34,7 @@ use crate::message::{
     NotificationMessage, OpenMessage, OpenMessageSubcode, RouteRefreshMessage,
     UpdateMessageSubcode, WireError,
 };
-use crate::rib::{OutboundUpdate, SharedRib};
+use crate::rib::{OutboundUpdate, OutboxTx, SharedRib};
 use crate::session::{LocalIdentity, PeerKind};
 use crate::status::{PeerState, PeerStatus};
 
@@ -885,7 +885,7 @@ struct SessionCtx<'a> {
     kind: PeerKind,
     remote_is_ibgp: bool,
     local_addr: Option<IpAddr>,
-    outbox_tx: &'a mpsc::UnboundedSender<OutboundUpdate>,
+    outbox_tx: &'a OutboxTx,
     fd: RawFd,
 }
 
@@ -1020,6 +1020,33 @@ async fn send_outbound(
     {
         warn!(error = %e, "could not send update");
     }
+}
+
+/// Once the outbox queue is empty, has the RIB re-send what it dropped (#395).
+/// `Some` ends the session: a lost EVPN update cannot be coalesced.
+async fn resync_outbox(
+    cx: &SessionCtx<'_>,
+    writer: &mut SessionWriter,
+    state: &State,
+    rx: &mpsc::Receiver<OutboundUpdate>,
+) -> Option<FsmOutcome> {
+    if !cx.outbox_tx.pending() || !rx.is_empty() {
+        return None;
+    }
+    let stuck = cx
+        .bgp_rib
+        .lock()
+        .await
+        .drain_backlog(cx.peer.remote_address);
+    if !stuck {
+        return None;
+    }
+    warn!(peer = %cx.peer.remote_address, "bgp: EVPN update lost to a full outbox, ceasing");
+    let cmd = FsmCommand::Cease {
+        subcode: CeaseSubcode::OutOfResources,
+        data: Bytes::new(),
+    };
+    handle_command(cx, writer, state, cmd).await
 }
 
 /// Purges the families whose RFC 7313 stale deadline passed.
@@ -1364,6 +1391,7 @@ async fn run_actions(
     (notification_sent, registered)
 }
 
+#[allow(clippy::too_many_lines)] // the session loop is one select!; its arms already delegate to helpers
 pub async fn run(
     stream: TcpStream,
     role: collision::Role,
@@ -1385,7 +1413,8 @@ pub async fn run(
     // RFC 5065: `Internal` is the member AS, in a confederation.
     let kind = slot.peer.kind(local.asn);
     let remote_is_ibgp = kind == PeerKind::Internal;
-    let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<OutboundUpdate>();
+    let (outbox_tx, mut outbox_rx) =
+        crate::rib::outbox_channel(peer.remote_address, crate::rib::OUTBOX_CAPACITY);
     let mut mrai = crate::mrai::Mrai::new(peer.mrai);
     // RFC 7313 §4 stale-route deadlines, per family; die with the session.
     let mut stale_until: HashMap<AddressFamily, Instant> = HashMap::new();
@@ -1495,6 +1524,17 @@ pub async fn run(
                 }
                 Some(update) = outbox_rx.recv() => {
                     send_outbound(&mut writer, &mut mrai, update).await;
+                    if let Some(outcome) = resync_outbox(&cx, &mut writer, &state, &outbox_rx).await {
+                        break 'session outcome;
+                    }
+                    continue;
+                }
+                // Something was parked in the bounded outbox (#395); `Established`
+                // only, before that the RIB knows no outbox for this session.
+                () = outbox_tx.parked(), if matches!(state, State::Established(_)) => {
+                    if let Some(outcome) = resync_outbox(&cx, &mut writer, &state, &outbox_rx).await {
+                        break 'session outcome;
+                    }
                     continue;
                 }
                 () = sleep_until_opt(stale_until.values().min().copied()) => {
