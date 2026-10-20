@@ -5,14 +5,31 @@ pub mod community;
 pub mod rtr;
 pub mod vrp;
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use nos_proto::{RpkiCache, RpkiCacheStatus, RpkiSessionState};
+use nos_proto::{Config, RpkiCache, RpkiCacheStatus, RpkiSessionState};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 pub use vrp::{origin_as, Vrp, VrpTable};
+
+use crate::session::ResolvedAuth;
+
+/// Every cache's `auth`, labels looked up in the admin keystore, keyed by the
+/// cache's socket address. Part of what the client was started with, so a
+/// rotated secret restarts it.
+pub fn resolve_auths(caches: &[RpkiCache], cfg: &Config) -> HashMap<SocketAddr, ResolvedAuth> {
+    caches
+        .iter()
+        .filter_map(|c| {
+            let auth = ResolvedAuth::resolve(c.auth.as_ref()?, cfg)?;
+            Some((SocketAddr::new(c.address, c.port), auth))
+        })
+        .collect()
+}
 
 /// One configured cache's live state, in `rtr::run`'s preference order.
 #[derive(Debug, Clone)]
@@ -77,6 +94,7 @@ pub fn summaries(status: &SharedStatus) -> Vec<RpkiCacheStatus> {
 /// A running RTR client: what it was started with, and how to stop it.
 pub struct Client {
     pub caches: Vec<RpkiCache>,
+    pub auths: HashMap<SocketAddr, ResolvedAuth>,
     pub vrf: Option<String>,
     pub status: SharedStatus,
     pub task: JoinHandle<()>,
@@ -86,18 +104,30 @@ impl Client {
     /// Starts `rtr::run`, seeded with `current` so a restart (a config or
     /// VRF change) keeps validating with the last VRP set until the new
     /// session's first End of Data.
+    #[allow(
+        clippy::implicit_hasher,
+        reason = "one concrete map, built by resolve_auths"
+    )]
     pub fn spawn(
         caches: &[RpkiCache],
+        auths: HashMap<SocketAddr, ResolvedAuth>,
         vrf: Option<String>,
         current: Arc<VrpTable>,
     ) -> (Self, watch::Receiver<Arc<VrpTable>>) {
         let caches = sorted(caches.to_vec());
         let status = new_status(&caches);
         let (tx, rx) = watch::channel(current);
-        let task = tokio::spawn(rtr::run(caches.clone(), vrf.clone(), status.clone(), tx));
+        let task = tokio::spawn(rtr::run(
+            caches.clone(),
+            auths.clone(),
+            vrf.clone(),
+            status.clone(),
+            tx,
+        ));
         (
             Self {
                 caches,
+                auths,
                 vrf,
                 status,
                 task,

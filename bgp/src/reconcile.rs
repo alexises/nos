@@ -57,6 +57,7 @@ pub async fn run(
                 DiffScope::PrefixLists,
                 DiffScope::AsPathLists,
                 DiffScope::BfdProfiles,
+                DiffScope::Admin,
             ],
         )
         .await
@@ -117,6 +118,7 @@ fn resolve_peers(
     own: &nos_proto::BgpInstance,
     source_addrs: &HashMap<&str, Vec<IpAddr>>,
     policy_cache: &mut PolicyCache,
+    cfg: &nos_proto::Config,
 ) -> Vec<ResolvedPeer> {
     let mut peers: Vec<ResolvedPeer> = Vec::new();
     for peer in &own.peers {
@@ -149,7 +151,10 @@ fn resolve_peers(
             )),
             damping: group.damping,
             max_hops: group.max_hops,
-            auth: group.auth.as_ref().map(ResolvedAuth::from),
+            auth: group
+                .auth
+                .as_ref()
+                .and_then(|a| ResolvedAuth::resolve(a, cfg)),
             next_hop: group.next_hop,
             address_families: group.address_families.clone(),
             route_reflector_client: group.route_reflector_client,
@@ -252,7 +257,7 @@ async fn resync(
         }
     }
 
-    let peers = resolve_peers(own, &source_addrs, policy_cache);
+    let peers = resolve_peers(own, &source_addrs, policy_cache, &cfg);
 
     let local = LocalIdentity {
         asn: own.asn,
@@ -323,6 +328,7 @@ async fn resync(
             fdb_domains,
             evpn_tables,
             &own.rpki_caches,
+            crate::rpki::resolve_auths(&own.rpki_caches, &cfg),
         )
         .await;
     // After `reconcile`, which sets the local ASN/router-id the AGGREGATOR

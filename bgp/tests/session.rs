@@ -97,6 +97,7 @@ impl Router {
                 Vec::new(),
                 Vec::new(),
                 rpki_caches,
+                std::collections::HashMap::default(),
             )
             .await;
     }

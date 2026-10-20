@@ -2465,15 +2465,27 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
-    if let Some(password) = args.md5_password.clone() {
+    // BGP keys live in the admin keystore under labels derived from the
+    // object, so re-provisioning with a new secret rotates it in place (#508).
+    if let Some(secret) = args.md5_password.clone() {
+        let label = format!("md5-{}", args.peer_group);
+        ops.push(ConfigOp::Admin(AdminOp::SetKey {
+            label: label.clone(),
+            secret,
+        }));
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
-            password,
+            key_ref: label,
         }));
     }
 
     if let (Some(send_id), Some(secret)) = (args.ao_send_id, args.ao_key_secret.clone()) {
+        let label = format!("ao-{}-{send_id}", args.peer_group);
+        ops.push(ConfigOp::Admin(AdminOp::SetKey {
+            label: label.clone(),
+            secret,
+        }));
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
@@ -2481,7 +2493,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 send_id,
                 recv_id: args.ao_recv_id.unwrap_or(send_id),
                 algorithm: args.ao_algorithm.into(),
-                key: secret,
+                key_ref: label,
                 is_current: args.ao_current,
                 is_rnext: args.ao_rnext,
                 exclude_options: args.ao_exclude_options,
@@ -2585,17 +2597,24 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
     for (preference, cache) in args.rpki_cache.iter().enumerate() {
+        // Labels allow letters, digits, `_` and `-` only.
+        let label = format!("rpki-{}", cache.ip().to_string().replace(['.', ':'], "-"));
+        if let Some(secret) = args.rpki_cache_md5_password.clone() {
+            ops.push(ConfigOp::Admin(AdminOp::SetKey {
+                label: label.clone(),
+                secret,
+            }));
+        }
         ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetRpkiCache {
             name: args.bgp_instance.clone(),
             cache: nos_proto::RpkiCache {
                 address: cache.ip(),
                 port: cache.port(),
                 preference: u8::try_from(preference).unwrap_or(u8::MAX),
-                auth: args.rpki_cache_md5_password.as_ref().map(|password| {
-                    nos_proto::BgpAuth::Md5 {
-                        password: password.clone(),
-                    }
-                }),
+                auth: args
+                    .rpki_cache_md5_password
+                    .as_ref()
+                    .map(|_| nos_proto::BgpAuth::Md5 { key_ref: label }),
             },
         }));
     }
@@ -3875,6 +3894,62 @@ mod tests {
     }
 
     #[test]
+    fn bgp_auth_flags_emit_the_key_before_the_label_reference() {
+        let set = ops(&[
+            "--md5-password",
+            "pw",
+            "--ao-send-id",
+            "7",
+            "--ao-key-secret",
+            "aopw",
+            "--rpki-cache",
+            "192.0.2.5:3323",
+            "--rpki-cache-md5-password",
+            "cpw",
+        ])
+        .unwrap();
+        let at = |op: &ConfigOp| {
+            set.iter()
+                .position(|o| o == op)
+                .unwrap_or_else(|| panic!("{op:?}"))
+        };
+        let key = |label: &str, secret: &str| {
+            ConfigOp::Admin(AdminOp::SetKey {
+                label: label.into(),
+                secret: secret.into(),
+            })
+        };
+        let md5 = ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth {
+            instance: set_instance(&set),
+            name: "pg1".into(),
+            key_ref: "md5-pg1".into(),
+        });
+        assert!(at(&key("md5-pg1", "pw")) < at(&md5));
+        let ao_at = set
+            .iter()
+            .position(|o| matches!(o, ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey { key, .. }) if key.key_ref == "ao-pg1-7"))
+            .expect("SetAoKey");
+        assert!(at(&key("ao-pg1-7", "aopw")) < ao_at);
+        let cache_at = set
+            .iter()
+            .position(|o| matches!(o, ConfigOp::BgpInstance(BgpInstanceOp::SetRpkiCache { .. })))
+            .expect("SetRpkiCache");
+        assert!(at(&key("rpki-192-0-2-5", "cpw")) < cache_at);
+    }
+
+    /// The BGP instance name the default flags provision.
+    fn set_instance(set: &[ConfigOp]) -> String {
+        set.iter()
+            .find_map(|o| match o {
+                ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey { instance, .. }) => {
+                    Some(instance.clone())
+                }
+                _ => None,
+            })
+            .expect("SetAoKey")
+    }
+
+    #[test]
     fn no_enforce_first_as_flag_turns_the_check_off() {
         let ops = ops(&["--no-enforce-first-as"]).unwrap();
         has(
@@ -4112,7 +4187,7 @@ mod tests {
                     send_id: 1,
                     recv_id: 1,
                     algorithm: BgpAoAlgorithm::AesCmac96,
-                    key: "k".into(),
+                    key_ref: "ao-pg1-1".into(),
                     is_current: true,
                     is_rnext: true,
                     exclude_options: true,
@@ -5535,7 +5610,7 @@ mod tests {
         shows(&o, "SetConfederationIdentifier");
         assert_eq!(dump(&o).matches("AddConfederationPeer").count(), 2);
         shows(&o, "SetRpkiCache");
-        shows(&o, r#"auth: Some(Md5 { password: "cache-secret" })"#);
+        shows(&o, r#"auth: Some(Md5 { key_ref: "rpki-192-0-2-5" })"#);
         shows(&o, "SetAnnounceRpkiState");
         shows(&o, "as_set: true");
         shows(&o, "summary_only: true");

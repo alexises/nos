@@ -8,7 +8,7 @@ fn ao_group(keys: &Value) -> Value {
 }
 
 fn ao(send: u8, recv: u8, current: bool, rnext: bool, excl: bool) -> Value {
-    json!({ "send_id": send, "recv_id": recv, "algorithm": "HmacSha1_96", "key": "k",
+    json!({ "send_id": send, "recv_id": recv, "algorithm": "HmacSha1_96", "key_ref": "k",
             "is_current": current, "is_rnext": rnext, "exclude_options": excl })
 }
 
@@ -44,7 +44,7 @@ fn simple_and_md5_password_take_exactly_one_word_on_set() {
     );
     assert_eq!(
         md5_password_value(Set, &["pw"], &o),
-        Some(json!({ "Md5": { "password": "pw" } }))
+        Some(json!({ "Md5": { "key_ref": "pw" } }))
     );
     for f in [simple_password_value, md5_password_value] {
         assert_eq!(f(Set, &[], &o), None);
@@ -61,7 +61,7 @@ fn ao_key_set_builds_a_key_with_all_flags_off() {
     assert_eq!(
         out,
         json!({ "Ao": { "keys": [{
-            "send_id": 1, "recv_id": 2, "algorithm": "HmacSha1_96", "key": "secret",
+            "send_id": 1, "recv_id": 2, "algorithm": "HmacSha1_96", "key_ref": "secret",
             "is_current": false, "is_rnext": false, "exclude_options": false,
         }] } })
     );
@@ -93,7 +93,7 @@ fn ao_key_current_and_rnext_are_exclusive_flags() {
     let none = json!({ "auth": null });
     assert_eq!(ao_key_value(Set, &["1", "current"], &none), None);
     assert_eq!(ao_key_value(Set, &["1", "rnext"], &none), None);
-    let md5 = json!({ "auth": { "Md5": { "password": "p" } } });
+    let md5 = json!({ "auth": { "Md5": { "key_ref": "p" } } });
     assert_eq!(ao_key_value(Set, &["1", "current"], &md5), None);
 }
 
@@ -148,7 +148,7 @@ fn ao_key_delete_removes_only_that_key_or_returns_auth() {
     assert_eq!(keys_of(&out).len(), 1);
     assert_eq!(keys_of(&out)[0]["send_id"], 2);
     // No Ao: the auth (here Md5) is returned untouched, only for `<id>` alone.
-    let md5 = json!({ "auth": { "Md5": { "password": "p" } } });
+    let md5 = json!({ "auth": { "Md5": { "key_ref": "p" } } });
     assert_eq!(
         ao_key_value(Delete, &["1"], &md5),
         Some(md5["auth"].clone())
@@ -311,7 +311,7 @@ fn render_ospfv3_auth_round_trips() {
 #[test]
 fn render_bgp_auth_lines_and_round_trip() {
     assert_eq!(
-        render_bgp_auth(&json!({ "Md5": { "password": "pw" } })),
+        render_bgp_auth(&json!({ "Md5": { "key_ref": "pw" } })),
         ["md5-password pw"]
     );
     let keys = json!([ao(1, 2, true, false, true), ao(3, 4, false, true, false)]);
@@ -350,7 +350,7 @@ fn public_entry_points_wrap_the_value_in_sugar_out() {
     assert_eq!(v(shutdown(Set, &[], &none)), json!({ "message": null }));
     assert_eq!(
         v(md5_password(Set, &["p"], &none)),
-        json!({ "Md5": { "password": "p" } })
+        json!({ "Md5": { "key_ref": "p" } })
     );
     assert_eq!(
         v(simple_password(Set, &["p"], &none)),

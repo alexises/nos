@@ -435,11 +435,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              authentication.",
         ),
         Topic::BgpPeerGroupMd5Password => (
-            "Set a peer-group's BGP MD5 password.",
-            "Sets a single RFC 2385 TCP MD5 signature password on a peer-group's sessions, \
-             replacing any TCP-AO keys that were set — the two mechanisms are mutually \
-             exclusive, since the kernel accepts only one per socket. Stored clear-text, like \
-             every other field in this config.",
+            "Set a peer-group's BGP MD5 password, by admin key label.",
+            "`md5-password <label>` signs a peer-group's sessions (RFC 2385 TCP MD5) with the \
+             secret of the admin key `<label>` (`set admin key <label> secret <value>`, 1 to \
+             80 bytes), replacing any TCP-AO keys that were set — the two mechanisms are \
+             mutually exclusive, since the kernel accepts only one per socket. The commit \
+             fails if the label does not exist; the secret itself is never shown.",
         ),
         Topic::BgpPeerGroupAoKey => (
             "Set (or replace) one of a peer-group's TCP-AO keys.",
@@ -449,8 +450,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              auth wasn't already TCP-AO (unset, or an MD5 password), this starts a fresh key \
              list containing just this key. Exactly one key across the whole list must be \
              marked current, and at most one may be marked rnext, for the peer-group to \
-             validate at commit time; send-ids and recv-ids must each be unique — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
-             clear-text, like every other field in this config.",
+             validate at commit time; send-ids and recv-ids must each be unique — see set-bgp-peer-group-ao-current-key/rnext-key. \
+             `ao-key <send-id> <recv-id> <algorithm> <label>` takes the master key from the \
+             admin key `<label>` (1 to 80 bytes); the commit fails if it does not exist.",
                 " ",
                 "Remove one of a peer-group's TCP-AO keys by send-id.",
                 " ",
@@ -1392,16 +1394,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              of the VRPs.",
         ),
         Topic::BgpInstanceRpkiCacheMd5Password => (
-            "Set the RPKI cache's TCP MD5 password.",
-            "Sets a single RFC 2385 TCP MD5 signature password (1 to 80 bytes) on the RTR \
-             session, replacing any TCP-AO keys: the two are mutually exclusive. Stored \
-             clear-text, like every other field in this config.",
+            "Set the RPKI cache's TCP MD5 password, by admin key label.",
+            "`md5-password <label>` signs the RTR session (RFC 2385) with the secret (1 to 80 \
+             bytes) of the admin key `<label>`, replacing any TCP-AO keys: the two are \
+             mutually exclusive.",
         ),
         Topic::BgpInstanceRpkiCacheAoKey => (
             "Set (or replace) one of the RPKI cache's TCP-AO keys.",
             "Adds one RFC 5925 TCP-AO key to the RTR session, identified by its send-id; same \
-             key rules as a peer-group's `ao-key` (exactly one current key, unique ids). \
-             Stored clear-text, like every other field in this config.",
+             key rules as a peer-group's `ao-key` (exactly one current key, unique ids); the \
+             master key is the secret of the admin key `<label>`.",
         ),
         Topic::BgpInstanceAggregate => (
             "Originate an aggregate route covering more specific BGP routes.",

@@ -315,7 +315,7 @@ fn ao_key_exclude_options() {
         send_id,
         recv_id: send_id,
         algorithm: BgpAoAlgorithm::HmacSha1_96,
-        key: "k".into(),
+        key_ref: "k".into(),
         is_current: send_id == 1,
         is_rnext: false,
         exclude_options,

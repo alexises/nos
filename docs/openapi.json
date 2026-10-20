@@ -391,8 +391,8 @@
             "description": "Whether this key is advertised as the next one to switch to (`RNextKeyID`).",
             "type": "boolean"
           },
-          "key": {
-            "description": "Master key, stored clear-text like every config value.",
+          "key_ref": {
+            "description": "Label of the admin key holding the master key.",
             "type": "string"
           },
           "recv_id": {
@@ -412,14 +412,14 @@
           "send_id",
           "recv_id",
           "algorithm",
-          "key",
+          "key_ref",
           "is_current",
           "is_rnext"
         ],
         "type": "object"
       },
       "BgpAuth": {
-        "description": "Transport authentication for a peer-group's sessions — mutually\nexclusive mechanisms, matching the kernel (a socket can carry\n`TCP_MD5SIG` or TCP-AO keys, never both at once). Stored clear-text, like\nevery field in this config.",
+        "description": "Transport authentication for a peer-group's sessions — mutually\nexclusive mechanisms, matching the kernel (a socket can carry\n`TCP_MD5SIG` or TCP-AO keys, never both at once). Keys are labels of\n`Config.admin` keystore entries; the secret itself never appears here.",
         "oneOf": [
           {
             "description": "RFC 2385 TCP MD5 signature — a single shared password.",
@@ -427,13 +427,13 @@
               "Md5": {
                 "description": "RFC 2385 TCP MD5 signature — a single shared password.",
                 "properties": {
-                  "password": {
-                    "description": "Password the TCP MD5 signature option is keyed with.",
+                  "key_ref": {
+                    "description": "Label of the admin key the TCP MD5 signature option is keyed with.",
                     "type": "string"
                   }
                 },
                 "required": [
-                  "password"
+                  "key_ref"
                 ],
                 "type": "object"
               }
@@ -789,7 +789,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/BgpAuth",
-                "description": "`None` opens sessions with no transport authentication at all.\nSecrets are stored clear-text, like every other field in this config\n— see `BgpAuth`."
+                "description": "`None` opens sessions with no transport authentication at all.\nKeys are admin-keystore labels, never inline secrets — see `BgpAuth`."
               },
               {
                 "type": "null"
@@ -4176,7 +4176,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/BgpAuth",
-                "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Secrets are stored clear-text, like every field in this config.\nAppended last: postcard is positional."
+                "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Keys are admin-keystore labels, like `BgpPeerGroup.auth`.\nAppended last: postcard is positional."
               },
               {
                 "type": "null"
@@ -13665,7 +13665,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAuth",
-                  "description": "`None` opens sessions with no transport authentication at all.\nSecrets are stored clear-text, like every other field in this config\n— see `BgpAuth`."
+                  "description": "`None` opens sessions with no transport authentication at all.\nKeys are admin-keystore labels, never inline secrets — see `BgpAuth`."
                 }
               }
             },
@@ -13723,7 +13723,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BgpAuth",
-                "description": "`None` opens sessions with no transport authentication at all.\nSecrets are stored clear-text, like every other field in this config\n— see `BgpAuth`."
+                "description": "`None` opens sessions with no transport authentication at all.\nKeys are admin-keystore labels, never inline secrets — see `BgpAuth`."
               }
             }
           },
@@ -13735,7 +13735,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAuth",
-                  "description": "`None` opens sessions with no transport authentication at all.\nSecrets are stored clear-text, like every other field in this config\n— see `BgpAuth`."
+                  "description": "`None` opens sessions with no transport authentication at all.\nKeys are admin-keystore labels, never inline secrets — see `BgpAuth`."
                 }
               }
             },
@@ -20375,7 +20375,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAuth",
-                  "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Secrets are stored clear-text, like every field in this config.\nAppended last: postcard is positional."
+                  "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Keys are admin-keystore labels, like `BgpPeerGroup.auth`.\nAppended last: postcard is positional."
                 }
               }
             },
@@ -20433,7 +20433,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BgpAuth",
-                "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Secrets are stored clear-text, like every field in this config.\nAppended last: postcard is positional."
+                "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Keys are admin-keystore labels, like `BgpPeerGroup.auth`.\nAppended last: postcard is positional."
               }
             }
           },
@@ -20445,7 +20445,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAuth",
-                  "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Secrets are stored clear-text, like every field in this config.\nAppended last: postcard is positional."
+                  "description": "RTR session authentication (RFC 8210 §9): TCP-MD5 or TCP-AO toward the\ncache, same rules as `BgpPeerGroup.auth`. `None` is an unauthenticated\nsession. Keys are admin-keystore labels, like `BgpPeerGroup.auth`.\nAppended last: postcard is positional."
                 }
               }
             },

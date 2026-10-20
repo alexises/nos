@@ -8,7 +8,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use ipnet::IpNet;
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
-use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpShutdown, NextHopMode, RpkiCache};
+use nos_proto::{
+    AddressFamily, BgpAoAlgorithm, BgpAuth, BgpShutdown, Config, NextHopMode, RpkiCache,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -186,33 +188,58 @@ impl ResolvedPeer {
 /// level (never touched by `fsm.rs`, since authentication is verified by
 /// the kernel before a `TcpStream` even exists). Mirrors `BgpAuth`'s own
 /// mutual exclusion between MD5 and TCP-AO.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ResolvedAuth {
     Md5(String),
     Ao(Vec<nos_tcp_auth::AoKey>),
 }
 
-impl From<&BgpAuth> for ResolvedAuth {
-    fn from(auth: &BgpAuth) -> Self {
-        match auth {
-            BgpAuth::Md5 { password } => ResolvedAuth::Md5(password.clone()),
+// Holds raw secrets and rides inside logged/asserted peer structs: never print them (#383).
+impl std::fmt::Debug for ResolvedAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolvedAuth::Md5(_) => f.write_str("Md5(<hidden>)"),
+            ResolvedAuth::Ao(keys) => write!(f, "Ao({} keys, <hidden>)", keys.len()),
+        }
+    }
+}
+
+impl ResolvedAuth {
+    /// Looks every admin label of `auth` up in `cfg`. A dangling label cannot
+    /// pass commit validation, but a stale snapshot can still hold one: the
+    /// peer then gets no auth (its session fails loudly) and the label is
+    /// logged, never the secret.
+    pub fn resolve(auth: &BgpAuth, cfg: &Config) -> Option<Self> {
+        let key = |label: &str| {
+            let secret = cfg.key(label);
+            if secret.is_none() {
+                warn!(label = %label, "bgp auth references an unknown admin key");
+            }
+            secret
+        };
+        Some(match auth {
+            BgpAuth::Md5 { key_ref } => ResolvedAuth::Md5(key(key_ref)?.to_string()),
             BgpAuth::Ao { keys } => ResolvedAuth::Ao(
                 keys.iter()
-                    .map(|k| nos_tcp_auth::AoKey {
-                        send_id: k.send_id,
-                        recv_id: k.recv_id,
-                        algorithm: match k.algorithm {
-                            BgpAoAlgorithm::HmacSha1_96 => nos_tcp_auth::AoAlgorithm::HmacSha1_96,
-                            BgpAoAlgorithm::AesCmac96 => nos_tcp_auth::AoAlgorithm::AesCmac96,
-                        },
-                        key: k.key.clone().into_bytes(),
-                        set_current: k.is_current,
-                        set_rnext: k.is_rnext,
-                        exclude_options: k.exclude_options,
+                    .map(|k| {
+                        Some(nos_tcp_auth::AoKey {
+                            send_id: k.send_id,
+                            recv_id: k.recv_id,
+                            algorithm: match k.algorithm {
+                                BgpAoAlgorithm::HmacSha1_96 => {
+                                    nos_tcp_auth::AoAlgorithm::HmacSha1_96
+                                }
+                                BgpAoAlgorithm::AesCmac96 => nos_tcp_auth::AoAlgorithm::AesCmac96,
+                            },
+                            key: key(&k.key_ref)?.as_bytes().to_vec(),
+                            set_current: k.is_current,
+                            set_rnext: k.is_rnext,
+                            exclude_options: k.exclude_options,
+                        })
                     })
-                    .collect(),
+                    .collect::<Option<Vec<_>>>()?,
             ),
-        }
+        })
     }
 }
 
@@ -477,6 +504,7 @@ impl SessionManager {
         fdb_domains: Vec<String>,
         evpn_tables: Vec<String>,
         rpki_caches: &[RpkiCache],
+        rpki_auths: HashMap<SocketAddr, ResolvedAuth>,
     ) {
         // `send_replace`, not `send`: `send` leaves the value unchanged when
         // no receiver exists yet — true on the very first reconcile, before
@@ -499,16 +527,22 @@ impl SessionManager {
         }
         self.rebind_listeners(&vrf, &desired).await;
         self.reconcile_peers(desired).await;
-        self.reconcile_rpki(rpki_caches, &vrf).await;
+        self.reconcile_rpki(rpki_caches, rpki_auths, &vrf).await;
     }
 
     /// (Re)starts the RTR client when the cache list or the VRF changes. It
     /// runs only once the VRF is resolved, like the sessions; without caches
     /// the VRP set is emptied, so every route is `not_found` again.
-    async fn reconcile_rpki(self: &Arc<Self>, caches: &[RpkiCache], vrf: &VrfRequirement) {
+    async fn reconcile_rpki(
+        self: &Arc<Self>,
+        caches: &[RpkiCache],
+        auths: HashMap<SocketAddr, ResolvedAuth>,
+        vrf: &VrfRequirement,
+    ) {
         let want = match vrf {
             VrfRequirement::Resolved(name) if !caches.is_empty() => Some((
                 rpki::sorted(caches.to_vec()),
+                auths,
                 self.bind_vrf.then(|| name.clone()),
             )),
             _ => None,
@@ -516,7 +550,7 @@ impl SessionManager {
         let mut rpki = self.rpki.lock().await;
         let have = rpki
             .as_ref()
-            .map(|(c, _)| (c.caches.clone(), c.vrf.clone()));
+            .map(|(c, _)| (c.caches.clone(), c.auths.clone(), c.vrf.clone()));
         if want == have {
             return;
         }
@@ -528,9 +562,9 @@ impl SessionManager {
         if caches.is_empty() && !self.bgp_rib.lock().await.vrps().is_empty() {
             self.bgp_rib.lock().await.set_vrps(Arc::default());
         }
-        if let Some((caches, vrf)) = want {
+        if let Some((caches, auths, vrf)) = want {
             let current = self.bgp_rib.lock().await.vrps();
-            let (client, rx) = rpki::Client::spawn(&caches, vrf, current);
+            let (client, rx) = rpki::Client::spawn(&caches, auths, vrf, current);
             let applier = tokio::spawn(self.clone().apply_vrps(rx));
             info!(instance = %self.instance, caches = caches.len(), "rpki client started");
             *rpki = Some((client, applier));
@@ -1684,12 +1718,58 @@ mod tests {
     #[test]
     fn resolved_auth_from_bgp_auth_md5() {
         let auth = BgpAuth::Md5 {
-            password: "secret".to_string(),
+            key_ref: "lbl".to_string(),
         };
         assert_eq!(
-            ResolvedAuth::from(&auth),
-            ResolvedAuth::Md5("secret".to_string())
+            ResolvedAuth::resolve(&auth, &admin_cfg("secret")),
+            Some(ResolvedAuth::Md5("secret".to_string()))
         );
+    }
+
+    fn admin_cfg(secret: &str) -> Config {
+        Config {
+            admin: nos_proto::Admin {
+                keys: vec![nos_proto::AdminKey {
+                    label: "lbl".to_string(),
+                    secret: secret.to_string(),
+                }],
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolved_auth_dangling_label_is_none() {
+        let md5 = BgpAuth::Md5 {
+            key_ref: "gone".to_string(),
+        };
+        assert_eq!(ResolvedAuth::resolve(&md5, &admin_cfg("s")), None);
+        let ao = BgpAuth::Ao {
+            keys: vec![nos_proto::BgpAoKey {
+                send_id: 1,
+                recv_id: 1,
+                algorithm: BgpAoAlgorithm::HmacSha1_96,
+                key_ref: "gone".to_string(),
+                is_current: true,
+                is_rnext: false,
+                exclude_options: false,
+            }],
+        };
+        assert_eq!(ResolvedAuth::resolve(&ao, &admin_cfg("s")), None);
+    }
+
+    #[test]
+    fn rotated_secret_changes_the_resolved_auth_and_debug_hides_it() {
+        let auth = BgpAuth::Md5 {
+            key_ref: "lbl".to_string(),
+        };
+        let (old, new) = (
+            ResolvedAuth::resolve(&auth, &admin_cfg("one")),
+            ResolvedAuth::resolve(&auth, &admin_cfg("two")),
+        );
+        assert_ne!(old, new);
+        let shown = format!("{old:?} {new:?}");
+        assert!(!shown.contains("one") && !shown.contains("two"), "{shown}");
     }
 
     #[test]
@@ -1699,15 +1779,15 @@ mod tests {
                 send_id: 1,
                 recv_id: 2,
                 algorithm: BgpAoAlgorithm::AesCmac96,
-                key: "secret".to_string(),
+                key_ref: "lbl".to_string(),
                 is_current: true,
                 is_rnext: false,
                 exclude_options: true,
             }],
         };
         assert_eq!(
-            ResolvedAuth::from(&auth),
-            ResolvedAuth::Ao(vec![nos_tcp_auth::AoKey {
+            ResolvedAuth::resolve(&auth, &admin_cfg("secret")),
+            Some(ResolvedAuth::Ao(vec![nos_tcp_auth::AoKey {
                 send_id: 1,
                 recv_id: 2,
                 algorithm: nos_tcp_auth::AoAlgorithm::AesCmac96,
@@ -1715,7 +1795,7 @@ mod tests {
                 set_current: true,
                 set_rnext: false,
                 exclude_options: true,
-            }])
+            }]))
         );
     }
 
