@@ -97,7 +97,7 @@ impl FdbDriver for NoopFdbDriver {
     async fn del_neigh(&self, _: &str, _: Mac, _: IpAddr) -> Result<(), DriverError> {
         Ok(())
     }
-    fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>> {
+    fn watch_neigh(&self) -> Option<mpsc::Receiver<()>> {
         None
     }
 }

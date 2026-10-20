@@ -8,6 +8,7 @@ use std::net::Ipv4Addr;
 use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
 
 use super::*;
+use tokio::sync::mpsc;
 
 mod add_path;
 mod aggregate;
@@ -18,6 +19,7 @@ mod evpn_import;
 mod first_as;
 mod gr;
 mod next_hop;
+mod outbox;
 mod policy;
 mod propagation;
 
@@ -56,7 +58,7 @@ fn register_peer(
     peer: IpAddr,
     is_ibgp: bool,
     local_addr: IpAddr,
-) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+) -> mpsc::Receiver<OutboundUpdate> {
     register_peer_with_mode(rib, peer, is_ibgp, local_addr, None)
 }
 
@@ -66,8 +68,8 @@ fn register_peer_with_mode(
     is_ibgp: bool,
     local_addr: IpAddr,
     next_hop_mode: Option<NextHopMode>,
-) -> mpsc::UnboundedReceiver<OutboundUpdate> {
-    let (tx, rx) = mpsc::unbounded_channel();
+) -> mpsc::Receiver<OutboundUpdate> {
+    let (tx, rx) = test_channel();
     rib.peer_established(
         peer,
         is_ibgp,
@@ -93,8 +95,8 @@ fn register_mp_peer(
     is_ibgp: bool,
     local_addr: IpAddr,
     negotiated_afs: HashSet<AddressFamily>,
-) -> mpsc::UnboundedReceiver<OutboundUpdate> {
-    let (tx, rx) = mpsc::unbounded_channel();
+) -> mpsc::Receiver<OutboundUpdate> {
+    let (tx, rx) = test_channel();
     rib.peer_established(
         peer,
         is_ibgp,
@@ -123,8 +125,8 @@ fn register_peer_full(
     is_rr_client: bool,
     is_rs_client: bool,
     add_path_afs: HashSet<AddressFamily>,
-) -> mpsc::UnboundedReceiver<OutboundUpdate> {
-    let (tx, rx) = mpsc::unbounded_channel();
+) -> mpsc::Receiver<OutboundUpdate> {
+    let (tx, rx) = test_channel();
     rib.peer_established(
         peer,
         is_ibgp,
@@ -161,7 +163,7 @@ fn full_update(routes: Vec<(&str, &str)>) -> RedistributeUpdate {
     )
 }
 
-fn recv_all(rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>) -> Vec<OutboundUpdate> {
+fn recv_all(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<OutboundUpdate> {
     let mut out = Vec::new();
     while let Ok(update) = rx.try_recv() {
         out.push(update);
@@ -233,7 +235,7 @@ fn evpn_reach(nlris: Vec<EvpnNlri>, as_path: Vec<u32>) -> UpdateMessage {
     u
 }
 
-fn announced(rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>, p: &str) -> Option<AdvertisedRoute> {
+fn announced(rx: &mut mpsc::Receiver<OutboundUpdate>, p: &str) -> Option<AdvertisedRoute> {
     recv_all(rx).into_iter().find_map(|u| match u {
         OutboundUpdate::Announce(a) if a.prefix == prefix(p) => Some(a),
         _ => None,
@@ -324,7 +326,7 @@ fn gr(notification: bool, families: &[(AddressFamily, bool)]) -> PeerGr {
 
 /// A peer with GR (`gr`) and v4+v6+EVPN negotiated, holding 1.0.0.0/24,
 /// `2.0.0.0/24`, `2001:db8:1::/48` and one EVPN route; plus an observer.
-fn gr_rib(gr: Option<PeerGr>) -> (BgpRib, IpAddr, mpsc::UnboundedReceiver<OutboundUpdate>) {
+fn gr_rib(gr: Option<PeerGr>) -> (BgpRib, IpAddr, mpsc::Receiver<OutboundUpdate>) {
     let mut rib = new_rib(65000);
     let peer = addr("10.0.0.1");
     rib.set_peer_gr(peer, gr);
@@ -340,8 +342,8 @@ fn gr_rib(gr: Option<PeerGr>) -> (BgpRib, IpAddr, mpsc::UnboundedReceiver<Outbou
     (rib, peer, observer)
 }
 
-fn register_gr_peer(rib: &mut BgpRib, peer: IpAddr) -> mpsc::UnboundedReceiver<OutboundUpdate> {
-    let (tx, rx) = mpsc::unbounded_channel();
+fn register_gr_peer(rib: &mut BgpRib, peer: IpAddr) -> mpsc::Receiver<OutboundUpdate> {
+    let (tx, rx) = test_channel();
     let afs = HashSet::from([
         AddressFamily::Ipv4Unicast,
         AddressFamily::Ipv6Unicast,
@@ -363,7 +365,7 @@ fn register_gr_peer(rib: &mut BgpRib, peer: IpAddr) -> mpsc::UnboundedReceiver<O
     rx
 }
 
-fn withdrawn(rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>) -> Vec<String> {
+fn withdrawn(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<String> {
     let mut out: Vec<String> = recv_all(rx)
         .into_iter()
         .filter_map(|u| match u {
@@ -384,7 +386,7 @@ fn agg(p: &str, as_set: bool, summary_only: bool) -> nos_proto::BgpAggregate {
 }
 
 /// `(announced, withdrawn)` prefixes in `rx`, in order.
-fn sent(rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>) -> (Vec<IpNet>, Vec<IpNet>) {
+fn sent(rx: &mut mpsc::Receiver<OutboundUpdate>) -> (Vec<IpNet>, Vec<IpNet>) {
     let mut out = (Vec::new(), Vec::new());
     for u in recv_all(rx) {
         match u {

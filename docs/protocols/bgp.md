@@ -159,6 +159,8 @@ $C -X POST $B/v1/transactions/adv/commit
 
 Adding `policy <name>` to the redistribute command filters the static routes before they enter BGP; see [Routing policy: Where policies attach](routing-policy.md#where-policies-attach).
 
+A peer that reads slowly never makes `nos-bgpd` queue updates without limit: once its outbox is full, changes are coalesced per prefix and the current state is sent when it catches up (see [Per-peer outbox is bounded](bgp-internals.md#per-peer-outbox-is-bounded-395)).
+
 ## Timers
 
 Three timers are set per peer-group:

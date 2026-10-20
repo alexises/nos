@@ -132,7 +132,7 @@ fn export_policy_can_remove_community_for_one_peer() {
     let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
     let mut allowed_rx = register_peer(&mut rib, allowed, false, addr("10.0.0.253"));
 
-    let (tx, mut stripped_rx) = mpsc::unbounded_channel();
+    let (tx, mut stripped_rx) = test_channel();
     rib.peer_established(
         stripped,
         false,
@@ -166,7 +166,7 @@ fn export_policy_can_remove_community_for_one_peer() {
         &import_policy,
     );
 
-    let find_adv = |rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>| {
+    let find_adv = |rx: &mut mpsc::Receiver<OutboundUpdate>| {
         recv_all(rx)
             .into_iter()
             .find_map(|u| match u {
@@ -192,7 +192,7 @@ fn export_policy_can_remove_community_for_one_peer() {
 fn export_policy_can_add_community_to_a_redistributed_route() {
     let mut rib = new_rib(65001);
     let peer = addr("10.0.0.1");
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = test_channel();
     rib.peer_established(
         peer,
         false,
@@ -229,7 +229,7 @@ fn export_policy_can_add_community_to_a_redistributed_route() {
 fn export_policy_prepend_lands_behind_our_own_asn() {
     let mut rib = new_rib(65001);
     let peer = addr("10.0.0.1");
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = test_channel();
     rib.peer_established(
         peer,
         false,
@@ -298,7 +298,7 @@ fn import_policy_matches_peer_as_and_adds_to_local_pref() {
 fn export_policy_can_set_next_hop_and_origin() {
     let mut rib = new_rib(65001);
     let peer = addr("10.0.0.1");
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = test_channel();
     rib.peer_established(
         peer,
         false,
@@ -341,7 +341,7 @@ fn export_policy_reject_suppresses_advertisement_to_one_peer() {
     let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
     let mut allowed_rx = register_peer(&mut rib, allowed, false, addr("10.0.0.253"));
 
-    let (tx, mut blocked_rx) = mpsc::unbounded_channel();
+    let (tx, mut blocked_rx) = test_channel();
     rib.peer_established(
         blocked,
         false,
@@ -375,7 +375,7 @@ fn med_toward(dest_is_ibgp: bool, export: &str) -> Option<u32> {
     let source = addr("10.0.0.1");
     let dest = addr("10.0.0.2");
     let _src_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = test_channel();
     rib.peer_established(
         dest,
         dest_is_ibgp,
@@ -689,7 +689,7 @@ fn rpki_state_community_on_advertisement() {
     )
     .unwrap();
     rib.handle_update(src, false, v4("192.0.2.1"), &u, &tag_stale);
-    let ext = |rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>| {
+    let ext = |rx: &mut mpsc::Receiver<OutboundUpdate>| {
         recv_all(rx)
             .into_iter()
             .filter_map(|u| match u {

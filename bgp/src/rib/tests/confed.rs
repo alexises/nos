@@ -7,7 +7,7 @@ fn confed_rib() -> BgpRib {
     rib
 }
 
-fn register_confed_peer(rib: &mut BgpRib, peer: IpAddr) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+fn register_confed_peer(rib: &mut BgpRib, peer: IpAddr) -> mpsc::Receiver<OutboundUpdate> {
     rib.set_peer_confed(peer, true);
     register_peer(rib, peer, false, addr("10.0.0.254"))
 }
@@ -268,7 +268,7 @@ fn as_set_counts_as_one_hop() {
 #[test]
 fn rpl_prepend_on_a_confed_path_joins_the_sequence() {
     let mut rib = confed_rib();
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = test_channel();
     rib.peer_established(
         addr("10.0.0.4"),
         true,

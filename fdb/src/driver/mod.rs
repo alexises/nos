@@ -166,7 +166,14 @@ pub trait FdbDriver: Send + Sync {
     /// only signals "look again" — `local_macs`/`port_up` are the source of
     /// truth). `None`
     /// when the backend has no such feed; the caller then relies on its tick.
-    fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>>;
+    fn watch_neigh(&self) -> Option<mpsc::Receiver<()>>;
+}
+
+/// Signals a `watch_neigh` receiver. The signal carries no data, so a wake-up
+/// already pending absorbs this one (#395: a bounded channel, not an unbounded
+/// queue a slow consumer could grow). `false` once the receiver is gone.
+pub fn wake(tx: &mpsc::Sender<()>) -> bool {
+    !matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(())))
 }
 
 /// Whether an address belongs in a Type-2 route: link-local, loopback,
@@ -322,6 +329,16 @@ mod tests {
         ] {
             assert!(!is_advertisable_ip(ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    #[test]
+    fn wake_ups_collapse_into_one() {
+        let (tx, mut rx) = mpsc::channel(1);
+        assert!(wake(&tx) && wake(&tx));
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        assert!(!wake(&tx));
     }
 
     #[test]

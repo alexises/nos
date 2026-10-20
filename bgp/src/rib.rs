@@ -87,7 +87,6 @@ use ipnet::IpNet;
 use nos_proto::{AddressFamily, BgpDamping, NextHopMode, RedistributeUpdate};
 use nos_rpl::CompiledPolicy;
 use smallvec::SmallVec;
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::as_path::AsPath;
@@ -102,8 +101,12 @@ mod aggregate;
 mod decision;
 mod evpn_out;
 mod gr;
+mod outbox;
 mod shared;
 pub use evpn_out::{feeds as evpn_feeds, AdvertisedEvpn, EvpnSource};
+#[cfg(test)]
+pub use outbox::test_channel;
+pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
 pub use shared::{RibGuard, SharedRib};
 
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
@@ -409,7 +412,8 @@ pub struct AdvertisedRoute {
 #[allow(clippy::struct_excessive_bools)] // each bool is an independent, unrelated per-session flag
 #[allow(clippy::similar_names)] // is_rr_client (reflector) vs. is_rs_client (server) are deliberately parallel
 struct PeerOutbox {
-    tx: mpsc::UnboundedSender<OutboundUpdate>,
+    /// Send only through `OutboxTx::send` (bounded, coalescing, #395).
+    tx: OutboxTx,
     /// `Internal` (the member AS, in a confederation).
     is_ibgp: bool,
     /// RFC 5065 confederation-external: next hop, MED and `LOCAL_PREF`
@@ -1422,7 +1426,7 @@ impl BgpRib {
             match advertisement {
                 Some(adv) => {
                     let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                    let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+                    outbox.tx.send(OutboundUpdate::Announce(adv));
                     self.adj_rib_out.entry(peer).or_default().insert(prefix);
                 }
                 None => {
@@ -1430,7 +1434,7 @@ impl BgpRib {
                         && sent.remove(&prefix)
                     {
                         let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                        let _ = outbox.tx.send(OutboundUpdate::Withdraw(
+                        outbox.tx.send(OutboundUpdate::Withdraw(
                             prefix,
                             outbox.mp_bgp_negotiated,
                             None,
@@ -1566,14 +1570,14 @@ impl BgpRib {
                     *next - 1
                 }),
             };
-            let _ = tx.send(OutboundUpdate::Announce(AdvertisedRoute {
+            tx.send(OutboundUpdate::Announce(AdvertisedRoute {
                 path_id: Some(id),
                 ..adv
             }));
             sent.insert(key, (id, route.clone()));
         }
         for id in freed.into_iter().rev() {
-            let _ = tx.send(OutboundUpdate::Withdraw(prefix, mp, Some(id)));
+            tx.send(OutboundUpdate::Withdraw(prefix, mp, Some(id)));
         }
         if !sent.is_empty() {
             self.add_path_sent.insert((peer, prefix), sent);
