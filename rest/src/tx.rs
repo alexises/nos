@@ -131,7 +131,7 @@ fn if_match(headers: &HeaderMap) -> ApiResult<Option<u64>> {
 #[utoipa::path(post, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Open (or resume) a transaction", params(("tx" = String, Path, description = "transaction name"), ("base" = Option<String>, Query, description = "blank | current (default current)")), responses((status = 201, body = TransactionSnapshot, description = "created; `ETag` is the transaction's generation"), (status = 200, body = TransactionSnapshot, description = "resumed; `ETag` is the transaction's generation"), (status = 400, body = ErrorBody)))]
 pub async fn open(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor)): Extension<PeerUser>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
     uri: Uri,
     Query(q): Query<OpenQuery>,
 ) -> ApiResult<Response> {
@@ -258,7 +258,7 @@ pub async fn diff(State(d): State<Daemons>, uri: Uri) -> ApiResult<Json<ConfigDi
 #[utoipa::path(post, path = "/v1/transactions/{tx}/commit", tag = "transactions", summary = "Validate and commit", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; refused (412) unless it still matches")), responses((status = 200, body = CommitResult), (status = 422, body = ErrorBody, description = "validation failed; the transaction stays open"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation; the transaction stays open")))]
 pub async fn commit(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor)): Extension<PeerUser>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
     uri: Uri,
     headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {

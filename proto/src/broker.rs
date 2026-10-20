@@ -194,6 +194,10 @@ impl Role {
 /// unknown user and a wrong password so it reveals nothing about which exist.
 pub const INVALID_CREDENTIALS: &str = "invalid credentials";
 
+/// The `Denied` message for a REST certificate that was revoked or whose
+/// session hit its renewal cap: `nos-restd` answers 401.
+pub const SESSION_EXPIRED: &str = "session expired";
+
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -245,12 +249,26 @@ pub enum WatchdogRequest {
         csr_der: Vec<u8>,
     },
     /// `nos-restd` only: `RenewCert` for a REST client whose still-valid
-    /// certificate `nos-restd` has just verified. Refused if the user is gone.
+    /// certificate `nos-restd` has just verified. Refused if the user is gone,
+    /// the certificate was revoked (password change) or the session outlived
+    /// `--pki-rest-session-max`.
     RestRenew {
         /// Login name.
         user: String,
+        /// Hex serial of the certificate the client presented.
+        serial: String,
         /// DER-encoded certificate signing request.
         csr_der: Vec<u8>,
+    },
+    /// `nos-restd` only, on every authenticated REST request: is the
+    /// certificate with this serial, issued to `user`, still live? Answered
+    /// with `Ok` or `Denied` (the REST CA has no CRL; the watchdog keeps the
+    /// allowlist).
+    RestCertCheck {
+        /// Login name the certificate names.
+        user: String,
+        /// Hex serial of the presented certificate.
+        serial: String,
     },
 }
 
@@ -283,6 +301,11 @@ impl fmt::Debug for WatchdogRequest {
                 .debug_struct("RestRenew")
                 .field("user", user)
                 .finish_non_exhaustive(),
+            WatchdogRequest::RestCertCheck { user, serial } => f
+                .debug_struct("RestCertCheck")
+                .field("user", user)
+                .field("serial", serial)
+                .finish(),
         }
     }
 }
@@ -306,6 +329,8 @@ pub enum WatchdogEvent {
     /// Reply to `Login`/`RenewCert`: refused. Deliberately one opaque
     /// message for unknown user and wrong password alike.
     Denied(String),
+    /// Reply to `RestCertCheck`: the certificate is live.
+    Ok,
     /// Reply to `IssueRestServerCert`: the listener's certificate, the REST CA
     /// that signed it (the trust anchor for client certificates), and how long
     /// the certificate is valid.

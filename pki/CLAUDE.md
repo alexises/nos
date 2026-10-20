@@ -38,7 +38,7 @@ Post-quantum mutual TLS over Unix sockets for every NOS daemon connection, with 
 - Role-level authorization only (each server's `allowed(role, &request)`); `bgpd/r2` could still push into `rt1`'s RIB. Binding an instance to its table needs a config lookup.
 - No CA rotation, by design. The CA is regenerated on every watchdog start and lives 10 years (`CA_LIFETIME`), so it never expires during a run. A child can't outlive a watchdog restart: the watchdog is the container's PID 1 and each child's identity pipe goes to it alone, so a second trust anchor for "surviving" children would cover a case that can't happen.
 - `nos` and `nos-provision` never receive the CRL (they aren't children, and there is no pipe to them), so they would still trust a revoked *server* certificate. Exploiting that needs a socket under `/run/nos`; it is the servers that verify users. Returning the CRL in `WatchdogEvent::Issued` would close it.
-- The REST CA has no CRL: `nos-restd` refuses a deleted user on every request, and its listener certificate is re-issued when it restarts. A password change leaves a user's REST certificates valid until they expire.
+- The REST CA has no CRL: the watchdog allowlists live REST certificates by serial and `nos-restd` asks per request (`RestCertCheck`); password change or deletion drops them, `--pki-rest-session-max` caps renewals (internals page).
 - The watchdog learns of a password change from a users diff. A change committed while its subscription to `nos-configd` is down is missed (a deletion is not: the first diff after a reconnect is the full user list).
 - The user certificate `nos` holds is renewed at half its lifetime; if renewal keeps failing until it expires, commands fail and the shell must be restarted.
 

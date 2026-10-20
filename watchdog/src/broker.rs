@@ -1,11 +1,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
-use nos_proto::{IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
+use nos_proto::{
+    IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED,
+};
 use tokio::io::split;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -127,7 +129,8 @@ fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
         // (or, for a login, forwards the password it was given).
         WatchdogRequest::IssueRestServerCert { .. }
         | WatchdogRequest::RestLogin { .. }
-        | WatchdogRequest::RestRenew { .. } => role == Some(Role::Restd.as_str()),
+        | WatchdogRequest::RestRenew { .. }
+        | WatchdogRequest::RestCertCheck { .. } => role == Some(Role::Restd.as_str()),
     }
 }
 
@@ -171,15 +174,40 @@ async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) ->
         }
         // `allowed` has already required a `user` peer.
         WatchdogRequest::RenewCert { csr_der } => {
-            renew(ctx, peer.map_or("", |p| &p.name), &csr_der, Realm::Ipc).await
+            renew(
+                ctx,
+                peer.map_or("", |p| &p.name),
+                &csr_der,
+                Realm::Ipc,
+                Instant::now(),
+            )
+            .await
         }
         WatchdogRequest::RestLogin {
             user,
             password,
             csr_der,
         } => login(ctx, &user, password, &csr_der, Realm::Rest).await,
-        WatchdogRequest::RestRenew { user, csr_der } => {
-            renew(ctx, &user, &csr_der, Realm::Rest).await
+        WatchdogRequest::RestRenew {
+            user,
+            serial,
+            csr_der,
+        } => {
+            // The renewed certificate inherits the login time, so renewals
+            // cannot outlast `--pki-rest-session-max`.
+            if let Some(started) = ctx.pki.rest_session(&serial, &user) {
+                renew(ctx, &user, &csr_der, Realm::Rest, started).await
+            } else {
+                info!(user = ?user, "renewal refused, rest certificate revoked or past the session cap");
+                WatchdogEvent::Denied(SESSION_EXPIRED.to_string())
+            }
+        }
+        WatchdogRequest::RestCertCheck { user, serial } => {
+            if ctx.pki.rest_session(&serial, &user).is_some() {
+                WatchdogEvent::Ok
+            } else {
+                WatchdogEvent::Denied(SESSION_EXPIRED.to_string())
+            }
         }
         WatchdogRequest::IssueRestServerCert { addresses, csr_der } => {
             match ctx.pki.sign_rest_server(&csr_der, &addresses) {
@@ -263,7 +291,7 @@ async fn login(
             Err(e) => warn!(user = ?user, error = %e, "could not upgrade password hash"),
         }
     }
-    let event = issue(ctx, user, csr_der, realm);
+    let event = issue(ctx, user, csr_der, realm, Instant::now());
     if matches!(event, WatchdogEvent::Issued { .. }) {
         info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
     }
@@ -272,10 +300,16 @@ async fn login(
 
 /// A still-valid certificate is proof enough — but a user deleted since must
 /// not be able to keep renewing.
-async fn renew(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogEvent {
+async fn renew(
+    ctx: &Ctx,
+    user: &str,
+    csr_der: &[u8],
+    realm: Realm,
+    started: Instant,
+) -> WatchdogEvent {
     match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
         Ok(users) if users.iter().any(|u| u.name == user) => {
-            let event = issue(ctx, user, csr_der, realm);
+            let event = issue(ctx, user, csr_der, realm, started);
             if matches!(event, WatchdogEvent::Issued { .. }) {
                 info!(user = ?user, rest = matches!(realm, Realm::Rest), "user certificate renewed");
             }
@@ -292,10 +326,10 @@ async fn renew(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogE
     }
 }
 
-fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogEvent {
+fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm, started: Instant) -> WatchdogEvent {
     let signed = match realm {
         Realm::Ipc => ctx.pki.sign_user(csr_der, user),
-        Realm::Rest => ctx.pki.sign_rest_user(csr_der, user),
+        Realm::Rest => ctx.pki.sign_rest_user(csr_der, user, started),
     };
     match signed {
         Ok(cert_der) => WatchdogEvent::Issued {

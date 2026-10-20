@@ -5,7 +5,8 @@
 //! must also *still exist* in `Config.users` — fetched from `nos-configd` per
 //! request like every handler's config read — so a deleted user is locked out
 //! on the very next request rather than when their certificate expires.
-//! Fails closed: a request with no verified user is 401, and if `nos-configd`
+//! The watchdog is asked too whether that very certificate is still live
+//! (`RestCertCheck`): a password change revokes it. Fails closed: a request with no verified user is 401, and if `nos-configd`
 //! can't be reached it is refused (503), never let through.
 //!
 //! The one exception is `POST /v1/login`, which is how a client with no
@@ -19,6 +20,7 @@ use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use nos_proto::{WatchdogEvent, WatchdogRequest};
 use utoipa::openapi::security::SecurityScheme;
 
 use crate::error::ApiError;
@@ -27,9 +29,10 @@ use crate::ipc::Daemons;
 pub const LOGIN_PATH: &str = "/v1/login";
 
 /// The user named by the client certificate this request's connection
-/// presented; `None` if it presented none. Set per connection by the listener.
+/// presented, and that certificate's hex serial; `None`s if it presented none.
+/// Set per connection by the listener.
 #[derive(Clone, Debug)]
-pub struct PeerUser(pub Option<String>);
+pub struct PeerUser(pub Option<String>, pub Option<String>);
 
 /// Declares the mutual-TLS scheme in the `OpenAPI` document — the global
 /// `security` requirement is on `ApiDoc`.
@@ -57,9 +60,28 @@ pub async fn client_auth(State(daemons): State<Daemons>, req: Request, next: Nex
     if req.method() == Method::POST && req.uri().path() == LOGIN_PATH {
         return next.run(req).await;
     }
-    let Some(user) = req.extensions().get::<PeerUser>().and_then(|p| p.0.clone()) else {
+    let (Some(user), Some(serial)) = req
+        .extensions()
+        .get::<PeerUser>()
+        .map(|p| (p.0.clone(), p.1.clone()))
+        .unwrap_or_default()
+    else {
         return unauthorized();
     };
+    // The REST CA has no CRL: the watchdog knows which certificates are live
+    // (a password change or user removal drops them).
+    match daemons
+        .broker(WatchdogRequest::RestCertCheck {
+            user: user.clone(),
+            serial,
+        })
+        .await
+    {
+        Ok(WatchdogEvent::Ok) => {}
+        Ok(WatchdogEvent::Denied(_)) => return unauthorized(),
+        Ok(other) => return crate::ipc::unexpected("nos-watchdogd", &other).into_response(),
+        Err(e) => return e.into_response(),
+    }
     match daemons.running_config().await {
         Ok(config) if config.users.iter().any(|u| u.name == user) => {
             tracing::info!(user = ?user, method = %req.method(), path = %req.uri().path(), "rest request");

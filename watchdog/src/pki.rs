@@ -14,7 +14,12 @@
 //! That is also why there is no CA roll: a child cannot outlive its watchdog
 //! (the watchdog is PID 1, and the child's identity pipe goes to it alone).
 //!
-//! Revocation: the IPC CA keeps a CRL (RFC 5280 §5). A child's certificates
+//! Revocation: the REST CA has no CRL; instead `rest_sessions` is an allowlist
+//! of live REST certificates that `nos-restd` consults on every request
+//! (`rest_session`), emptied of a user's entries by the same triggers as the
+//! IPC CRL, and capping how long renewals can extend one login.
+//!
+//! The IPC CA keeps a CRL (RFC 5280 §5). A child's certificates
 //! are revoked when it exits, a user's when it is deleted or its password
 //! changes; every revocation re-signs the CRL, which `supervisor` pushes down
 //! every child's stdin and `revoke` applies to the watchdog's own identity.
@@ -24,8 +29,9 @@ use std::io;
 use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use nos_pki::{Bundle, Ca, Identity, KeyAlg, PeerId, Serial};
@@ -53,10 +59,25 @@ pub struct Pki {
     crl: watch::Sender<Vec<u8>>,
     /// Every IPC certificate issued to each user, so they can be revoked.
     users: Mutex<HashMap<String, Vec<Serial>>>,
+    /// Every live REST certificate (hex serial) and the login it belongs to.
+    rest_sessions: Mutex<HashMap<String, RestSession>>,
+    /// Seconds a REST login may be extended by renewals (`set_rest_session_max`).
+    rest_session_max: AtomicU64,
     /// Hashes the broker itself re-hashed at login (user → new hash): that
     /// `Modified` user diff is not a password change and revokes nothing.
     rehashed: Mutex<HashMap<String, String>>,
 }
+
+/// One REST certificate: whose, when the password login behind it happened
+/// (renewals inherit it), and its expiry for pruning.
+struct RestSession {
+    user: String,
+    started: Instant,
+    cert: Serial,
+}
+
+/// Default for `--pki-rest-session-max`: 7 days.
+pub const REST_SESSION_MAX: Duration = Duration::from_hours(168);
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -96,6 +117,8 @@ impl Pki {
             rotate_every,
             user_lifetime,
             users: Mutex::default(),
+            rest_sessions: Mutex::default(),
+            rest_session_max: AtomicU64::new(REST_SESSION_MAX.as_secs()),
             rehashed: Mutex::default(),
         }))
     }
@@ -146,8 +169,10 @@ impl Pki {
         info!(role = %role.as_str(), name = %name, serials = serials.len(), "certificates revoked");
     }
 
-    /// Revokes every IPC certificate issued to `user` so far.
+    /// Revokes every IPC certificate issued to `user` so far, and forgets its
+    /// REST ones (which `nos-restd` then refuses).
     pub fn revoke_user(&self, user: &str) {
+        lock(&self.rest_sessions).retain(|_, s| s.user != user);
         let serials = lock(&self.users).remove(user).unwrap_or_default();
         self.revoke(Role::User, user, serials);
     }
@@ -167,9 +192,8 @@ impl Pki {
     }
 
     /// Follows the `Users` section of the running config and revokes a user's
-    /// IPC certificates when the user is removed or its password changes.
-    /// REST certificates are left alone: `nos-restd` checks the user on every
-    /// request. Reconnects on a fixed 1s delay, like every config subscriber.
+    /// IPC and REST certificates when the user is removed or its password
+    /// changes. Reconnects on a fixed 1s delay, like every config subscriber.
     pub async fn follow_users(
         self: Arc<Self>,
         config_socket: PathBuf,
@@ -211,11 +235,10 @@ impl Pki {
     /// while we were away.
     async fn users_changed(&self, config_socket: &Path, users: &[SectionDiff], initial: bool) {
         if initial {
-            let gone: Vec<String> = lock(&self.users)
-                .keys()
-                .filter(|u| !users.iter().any(|s| &s.name == *u))
-                .cloned()
-                .collect();
+            let mut gone: Vec<String> = lock(&self.users).keys().cloned().collect();
+            gone.extend(lock(&self.rest_sessions).values().map(|s| s.user.clone()));
+            gone.retain(|u| !users.iter().any(|s| &s.name == u));
+            gone.dedup();
             for u in &gone {
                 self.revoke_user(u);
             }
@@ -248,10 +271,45 @@ impl Pki {
     }
 
     /// `sign_user`, from the REST CA: the certificate a REST client presents
-    /// to `nos-restd` (a different trust domain from IPC).
-    pub fn sign_rest_user(&self, csr_der: &[u8], user: &str) -> io::Result<Vec<u8>> {
-        self.rest_ca
-            .sign_csr(csr_der, &peer(Role::User, user), self.user_lifetime)
+    /// to `nos-restd` (a different trust domain from IPC). `started` is when
+    /// the password login behind it happened; the serial is allowlisted.
+    pub fn sign_rest_user(
+        &self,
+        csr_der: &[u8],
+        user: &str,
+        started: Instant,
+    ) -> io::Result<Vec<u8>> {
+        let cert = self
+            .rest_ca
+            .sign_csr(csr_der, &peer(Role::User, user), self.user_lifetime)?;
+        let serial = Serial::of(&cert)?;
+        let mut sessions = lock(&self.rest_sessions);
+        sessions.retain(|_, s| !s.cert.expired());
+        sessions.insert(
+            serial.to_string(),
+            RestSession {
+                user: user.to_string(),
+                started,
+                cert: serial,
+            },
+        );
+        Ok(cert)
+    }
+
+    /// Caps how long renewals may extend one password login.
+    pub fn set_rest_session_max(&self, max: Duration) {
+        self.rest_session_max
+            .store(max.as_secs(), Ordering::Relaxed);
+    }
+
+    /// The login time behind the REST certificate `serial` of `user`, if it is
+    /// still live: allowlisted, unexpired and within the session cap.
+    pub fn rest_session(&self, serial: &str, user: &str) -> Option<Instant> {
+        let max = Duration::from_secs(self.rest_session_max.load(Ordering::Relaxed));
+        lock(&self.rest_sessions)
+            .get(serial)
+            .filter(|s| s.user == user && !s.cert.expired() && s.started.elapsed() < max)
+            .map(|s| s.started)
     }
 
     /// The listener certificate for `nos-restd`, and the REST CA's own
@@ -383,6 +441,44 @@ mod tests {
         assert!(!issued(&pki, "alice"));
         assert!(issued(&pki, "bob"));
         assert!(crl.has_changed().unwrap());
+    }
+
+    #[test]
+    fn rest_sessions_follow_revocation_and_the_cap() {
+        let (_tmp, pki) = pki();
+        let sign = |user: &str| {
+            let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+            let cert = pki.sign_rest_user(&csr, user, Instant::now()).unwrap();
+            Serial::of(&cert).unwrap().to_string()
+        };
+        let (a, b) = (sign("alice"), sign("bob"));
+        assert!(pki.rest_session(&a, "alice").is_some());
+        assert!(pki.rest_session(&a, "bob").is_none(), "wrong user");
+        assert!(
+            pki.rest_session("nope", "alice").is_none(),
+            "unknown serial"
+        );
+
+        pki.revoke_user("alice");
+        assert!(pki.rest_session(&a, "alice").is_none());
+        assert!(pki.rest_session(&b, "bob").is_some());
+
+        pki.set_rest_session_max(Duration::ZERO);
+        assert!(pki.rest_session(&b, "bob").is_none(), "past the cap");
+    }
+
+    #[tokio::test]
+    async fn initial_diff_also_drops_rest_only_users_that_vanished() {
+        let (_tmp, pki) = pki();
+        let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+        let cert = pki.sign_rest_user(&csr, "alice", Instant::now()).unwrap();
+        let serial = Serial::of(&cert).unwrap().to_string();
+        let none = Path::new("/nonexistent");
+        pki.users_changed(none, &[diff("alice", DiffStatus::Added)], true)
+            .await;
+        assert!(pki.rest_session(&serial, "alice").is_some());
+        pki.users_changed(none, &[], true).await;
+        assert!(pki.rest_session(&serial, "alice").is_none());
     }
 
     #[test]

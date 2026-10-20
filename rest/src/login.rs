@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use axum::extract::State;
 use axum::{Extension, Json};
 use base64::Engine as _;
-use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
+use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -135,7 +135,9 @@ fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
             certificate: base64::engine::general_purpose::STANDARD.encode(cert_der),
             lifetime_secs,
         })),
-        WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS || m == "no such user" => {
+        WatchdogEvent::Denied(m)
+            if m == INVALID_CREDENTIALS || m == "no such user" || m == SESSION_EXPIRED =>
+        {
             Err(ApiError::Unauthorized(m))
         }
         WatchdogEvent::Denied(m) if m == "bad certificate request" => Err(ApiError::BadRequest(m)),
@@ -201,15 +203,21 @@ pub async fn login(
 )]
 pub async fn renew(
     State(d): State<Daemons>,
-    Extension(PeerUser(user)): Extension<PeerUser>,
+    Extension(PeerUser(user, serial)): Extension<PeerUser>,
     Json(body): Json<RenewRequest>,
 ) -> ApiResult<Json<Certificate>> {
     // The middleware only lets a request with a certificate this far.
-    let user = user.ok_or_else(|| ApiError::Unauthorized("authentication required".into()))?;
+    let (Some(user), Some(serial)) = (user, serial) else {
+        return Err(ApiError::Unauthorized("authentication required".into()));
+    };
     let csr_der = decode_csr(&body.csr)?;
     certificate(
-        d.broker(WatchdogRequest::RestRenew { user, csr_der })
-            .await?,
+        d.broker(WatchdogRequest::RestRenew {
+            user,
+            serial,
+            csr_der,
+        })
+        .await?,
     )
 }
 
@@ -278,7 +286,7 @@ mod tests {
 
     #[test]
     fn denials_map_to_distinct_statuses() {
-        for m in [INVALID_CREDENTIALS, "no such user"] {
+        for m in [INVALID_CREDENTIALS, "no such user", SESSION_EXPIRED] {
             assert!(
                 matches!(err(WatchdogEvent::Denied(m.into())), ApiError::Unauthorized(x) if x == m)
             );
