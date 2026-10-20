@@ -31,8 +31,9 @@ pub async fn version() -> Json<VersionInfo> {
 }
 
 #[utoipa::path(get, path = "/v1/config", tag = "show", summary = "Running config", responses((status = 200, body = Config)))]
-pub async fn config(State(d): State<Daemons>) -> ApiResult<Json<Config>> {
-    Ok(Json(d.running_config().await?))
+pub async fn config(State(d): State<Daemons>) -> ApiResult<Json<serde_json::Value>> {
+    // Secrets (admin keys, user password hashes) leave the daemons as `<hidden>`.
+    Ok(Json(d.running_config().await?.redacted()))
 }
 
 #[utoipa::path(get, path = "/v1/routes/{table}", tag = "show", summary = "Every route in a table, best to worst per prefix", params(("table" = String, Path, description = "routing table name")), responses((status = 200, body = Vec<PrefixRoutes>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]

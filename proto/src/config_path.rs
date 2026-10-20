@@ -41,6 +41,7 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "prefix",
     "to",
     "id",
+    "label",
 ];
 
 /// Why a config path could not be resolved.
@@ -300,6 +301,7 @@ mod tests {
             "switching_profiles": [{"name": "sw", "members": [{"broadcast_domain": "bd", "tag": {"Dot1q": 5}}]}],
             "prefix_lists": [{"name": "pl", "entries": [{"cidr": "10.0.0.0/8", "range": null}]}],
             "lldp": {"tx_hold": null},
+            "admin": {"keys": [{"label": "k1", "secret": "s"}]},
             "routing_tables": [{"name": "rt1", "redistribute": [{"from": "Static", "to": "Ospf"}]}],
         })
     }
@@ -340,6 +342,7 @@ mod tests {
                 "10.0.0.1/24",
             ],
             vec!["switching-profile", "sw", "member", "bd"],
+            vec!["admin", "key", "k1"],
             vec!["prefix-list", "pl", "entry", "10.0.0.0/8"],
             vec!["routing-table", "rt1", "redistribute", "ospf"],
             vec![

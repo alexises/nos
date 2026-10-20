@@ -8,7 +8,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 ## Login
 
-`main.rs::login` reads the watchdog's public `ca.crt` (`--pki-ca`, default `/run/nos/pki/ca.crt`), prompts `login:`/`password:` (no echo, `rpassword`), sends `WatchdogRequest::Login` with a fresh CSR (`watchdog_client::login`; 3 attempts, then exit 1). The certificate lives in memory only (`nos_pki::Identity::set_certificate`); `keep_certificate_fresh` renews it at half-life via `RenewCert`. It **fails closed**: no reachable watchdog, no shell. `nos-cli` never sees password hashes: `set user <name> password <clear>` edits the users, `show config` prints `<hidden>` (a `#[cli(secret)]` field) and `diff` `<hidden>`/`<changed>`. Flow: `docs/architecture/auth.md`.
+`main.rs::login` reads the watchdog's public `ca.crt` (`--pki-ca`, default `/run/nos/pki/ca.crt`), prompts `login:`/`password:` (no echo, `rpassword`), sends `WatchdogRequest::Login` with a fresh CSR (`watchdog_client::login`; 3 attempts, then exit 1). The certificate lives in memory only (`nos_pki::Identity::set_certificate`); `keep_certificate_fresh` renews it at half-life via `RenewCert`. It **fails closed**: no reachable watchdog, no shell. `nos-cli` never sees password hashes: `set user <name> password <clear>` edits the users, `show config` prints `<hidden>` (a `#[cli(secret)]` field) and `diff` `<hidden>`/`<changed>`; the `admin` keystore section is left out of `show config` and printed by `show config admin`. Flow: `docs/architecture/auth.md`.
 
 ## Modules
 

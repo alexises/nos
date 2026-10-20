@@ -219,6 +219,7 @@ async fn every_show_command_runs_against_its_daemon() {
         &[
             "help",
             "show config",
+            "show config admin",
             "show route rt1",
             "show route rt1 10.0.0.1",
             "show route gone",

@@ -1,3 +1,5 @@
+/// Edits to the admin keystore (`AdminOp`).
+pub mod admin;
 /// Edits to AS-path lists (`AsPathListOp`).
 pub mod as_path_list;
 /// Edits to BFD profiles (`BfdProfileOp`).
@@ -55,6 +57,7 @@ pub mod switching_profile;
 /// Edits to local users (`UserOp`).
 pub mod user;
 
+pub use admin::AdminOp;
 pub use as_path_list::AsPathListOp;
 pub use bfd_profile::BfdProfileOp;
 pub use bgp_instance::BgpInstanceOp;
@@ -160,9 +163,48 @@ pub enum ConfigOp {
     BfdProfile(BfdProfileOp),
     /// Delegates to a `StpPortProfileOp` edit.
     StpPortProfile(StpPortProfileOp),
+    /// Delegates to a `AdminOp` edit.
+    Admin(AdminOp),
 }
 
 impl ConfigOp {
+    /// The variant's name, for logs: unlike `{:?}` it never carries the
+    /// payload, so a secret in an op cannot reach `nos-logd` through it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ConfigOp::BgpInstance(..) => "BgpInstance",
+            ConfigOp::SetHostname(..) => "SetHostname",
+            ConfigOp::BgpPeerGroup(..) => "BgpPeerGroup",
+            ConfigOp::BgpPeer(..) => "BgpPeer",
+            ConfigOp::RoutingTable(..) => "RoutingTable",
+            ConfigOp::StaticRoutingInstance(..) => "StaticRoutingInstance",
+            ConfigOp::StaticRoute(..) => "StaticRoute",
+            ConfigOp::Interface(..) => "Interface",
+            ConfigOp::PolicyDefinition(..) => "PolicyDefinition",
+            ConfigOp::CommunityAlias(..) => "CommunityAlias",
+            ConfigOp::CommunityGroup(..) => "CommunityGroup",
+            ConfigOp::AsPathList(..) => "AsPathList",
+            ConfigOp::PrefixList(..) => "PrefixList",
+            ConfigOp::BroadcastDomain(..) => "BroadcastDomain",
+            ConfigOp::SwitchingProfile(..) => "SwitchingProfile",
+            ConfigOp::Subinterface(..) => "Subinterface",
+            ConfigOp::OspfInstance(..) => "OspfInstance",
+            ConfigOp::OspfArea(..) => "OspfArea",
+            ConfigOp::OspfProfile(..) => "OspfProfile",
+            ConfigOp::Ospfv3Instance(..) => "Ospfv3Instance",
+            ConfigOp::Ospfv3Area(..) => "Ospfv3Area",
+            ConfigOp::Ospfv3Profile(..) => "Ospfv3Profile",
+            ConfigOp::PortAggregate(..) => "PortAggregate",
+            ConfigOp::PortAggregateSubinterface(..) => "PortAggregateSubinterface",
+            ConfigOp::Lldp(..) => "Lldp",
+            ConfigOp::User(..) => "User",
+            ConfigOp::Logging(..) => "Logging",
+            ConfigOp::BfdProfile(..) => "BfdProfile",
+            ConfigOp::StpPortProfile(..) => "StpPortProfile",
+            ConfigOp::Admin(..) => "Admin",
+        }
+    }
+
     /// Applies the op to `config` in place. Never runs `garde` validation —
     /// validation happens only at commit time. Only reports structural
     /// errors (e.g. setting a field on a name that doesn't exist).
@@ -200,6 +242,7 @@ impl ConfigOp {
             ConfigOp::Logging(op) => op.apply(config),
             ConfigOp::BfdProfile(op) => op.apply(config),
             ConfigOp::StpPortProfile(op) => op.apply(config),
+            ConfigOp::Admin(op) => op.apply(config),
         }
     }
 }
@@ -267,6 +310,9 @@ pub enum OpError {
     /// No syslog server matches the given name.
     #[error("syslog server '{0}' not found")]
     SyslogServerNotFound(String),
+    /// No admin key matches the given label.
+    #[error("admin key '{0}' not found")]
+    AdminKeyNotFound(String),
     /// No user matches the given name.
     #[error("user '{0}' not found")]
     UserNotFound(String),
@@ -486,5 +532,15 @@ mod tests {
             .apply(&mut cfg)
             .unwrap();
         assert_eq!(cfg.hostname, "router1");
+    }
+
+    #[test]
+    fn kind_is_the_variant_name_without_payload() {
+        assert_eq!(ConfigOp::SetHostname("h".into()).kind(), "SetHostname");
+        let op = ConfigOp::Admin(AdminOp::SetKey {
+            label: "l".into(),
+            secret: "hunter2".into(),
+        });
+        assert_eq!(op.kind(), "Admin");
     }
 }

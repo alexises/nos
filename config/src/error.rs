@@ -12,6 +12,8 @@ pub enum ConfigError {
     SyslogTrustAnchor { server: String, reason: String },
     #[error("password hash upgrade refused: no such user, stale hash, or not a hash")]
     HashUpgradeRefused,
+    #[error("{0} was sent as the mask text '<hidden>' but has no earlier value to keep")]
+    MaskedSecret(String),
     #[error("no transaction named '{0}'")]
     TransactionNotFound(String),
     /// An `if_match` precondition (RFC 9110 §13.1.1) named a generation the

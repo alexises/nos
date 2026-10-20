@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info};
 
 use crate::error::ConfigError;
+use crate::secrets::{restore_masked, unmask_op};
 use crate::users::{hash_clear_passwords, normalize_names};
 
 const BROADCAST_CAPACITY: usize = 16;
@@ -143,7 +144,9 @@ impl ConfigStore {
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
-        debug!(transaction = %name, ?op, "applying op");
+        // The kind only: an op may carry a secret (and `?op` goes to `nos-logd`).
+        debug!(transaction = %name, op = op.kind(), "applying op");
+        let op = unmask_op(op, &[&txn.config, &*self.0.running.read().await])?;
         let users_before = txn.config.users.clone();
         op.apply(&mut txn.config)?;
         self.hash_users(&mut txn.config, &users_before).await;
@@ -177,7 +180,10 @@ impl ConfigStore {
             Some(json) => config_path::set(&mut doc, path, serde_json::from_str(json)?)?,
             None => config_path::remove(&mut doc, path)?,
         }
-        txn.config = serde_json::from_value(doc)?;
+        let mut new: Config = serde_json::from_value(doc)?;
+        // A GET-then-PUT round trip carries the REST mask where secrets were.
+        restore_masked(&mut new, &[&txn.config, &*self.0.running.read().await])?;
+        txn.config = new;
         self.hash_users(&mut txn.config, &users_before).await;
         txn.dirty = true;
         txn.generation += 1;
@@ -1082,5 +1088,65 @@ mod tests {
             Err(ConfigError::NoUsersLeft)
         ));
         assert_eq!(store.running_snapshot().await.users.len(), 1);
+    }
+
+    fn set_key_op(label: &str, secret: &str) -> ConfigOp {
+        ConfigOp::Admin(nos_proto::AdminOp::SetKey {
+            label: label.into(),
+            secret: secret.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn the_mask_keeps_a_stored_secret_through_ops_and_paths() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t", TransactionBase::Blank).await;
+        store.apply_op("t", set_key_op("k", "real")).await.unwrap();
+
+        // Op: the mask keeps the value in the transaction.
+        let snap = store
+            .apply_op("t", set_key_op("k", "<hidden>"))
+            .await
+            .unwrap();
+        assert_eq!(snap.config.key("k"), Some("real"));
+        // Op on a label that exists nowhere: refused, nothing changed.
+        assert!(store
+            .apply_op("t", set_key_op("new", "<hidden>"))
+            .await
+            .is_err());
+
+        // Path: a GET'd (redacted) whole config PUT back keeps the secret.
+        let redacted = serde_json::to_string(&snap.config.redacted()).unwrap();
+        let snap = store
+            .set_transaction_path("t", &[], Some(&redacted), None)
+            .await
+            .unwrap();
+        assert_eq!(snap.config.key("k"), Some("real"));
+        // Section path, new label with the mask: refused, transaction unchanged.
+        let body = r#"{"label":"n","secret":"<hidden>"}"#;
+        assert!(store
+            .set_transaction_path("t", &segs("admin/key/n"), Some(body), None)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .get_transaction("t")
+                .await
+                .unwrap()
+                .config
+                .admin
+                .keys
+                .len(),
+            1
+        );
+
+        // Once committed, a later transaction's mask resolves against running.
+        store.commit_transaction("t", None).await.unwrap();
+        store.open_transaction("u", TransactionBase::Blank).await;
+        let snap = store
+            .apply_op("u", set_key_op("k", "<hidden>"))
+            .await
+            .unwrap();
+        assert_eq!(snap.config.key("k"), Some("real"));
     }
 }

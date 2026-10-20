@@ -7,6 +7,8 @@ use nos_proto::TransactionBase;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     ShowConfig,
+    /// `show config admin` — the keystore section `show config` leaves out.
+    ShowConfigAdmin,
     /// `show this` — only meaningful in configuration mode.
     Show,
     /// `show route <table>` (whole table) or `show route <table> <address>`
@@ -190,6 +192,14 @@ mod tests {
     #[test]
     fn show_config_extra_whitespace() {
         assert_eq!(Command::parse("  show   config  "), Command::ShowConfig);
+    }
+
+    #[test]
+    fn show_config_admin() {
+        assert_eq!(
+            Command::parse("show config admin"),
+            Command::ShowConfigAdmin
+        );
     }
 
     #[test]

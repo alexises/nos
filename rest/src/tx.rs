@@ -61,11 +61,16 @@ fn snapshot(ev: Event) -> ApiResult<TransactionSnapshot> {
 
 /// The subsection of `snap`'s config at `path` (the whole config for an empty path).
 fn subsection(snap: &TransactionSnapshot, path: &[String]) -> ApiResult<Value> {
-    let doc = serde_json::to_value(&snap.config)
-        .map_err(|e| ApiError::BadGateway(format!("config is not JSON-representable: {e}")))?;
-    config_path::get(&doc, path)
+    config_path::get(&snap.config.redacted(), path)
         .cloned()
         .map_err(|e| ApiError::NotFound(e.to_string()))
+}
+
+/// The snapshot as JSON with its config redacted: secrets never leave as clear text.
+fn redacted_snapshot(snap: &TransactionSnapshot) -> Value {
+    let mut v = json!(snap);
+    v["config"] = snap.config.redacted();
+    v
 }
 
 #[derive(Deserialize)]
@@ -159,7 +164,12 @@ pub async fn open(
     } else {
         StatusCode::CREATED
     };
-    Ok((status, [etag(snap.generation)], Json(snap)).into_response())
+    Ok((
+        status,
+        [etag(snap.generation)],
+        Json(redacted_snapshot(&snap)),
+    )
+        .into_response())
 }
 
 /// `GET /v1/transactions/<tx>[/<path>]` — the transaction, or one subsection of it.
@@ -169,7 +179,7 @@ pub async fn get(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiR
     let (name, path) = split(&uri)?;
     let snap = snapshot(d.config(Request::GetTransaction { name }).await?)?;
     let value = if path.is_empty() {
-        json!(snap)
+        redacted_snapshot(&snap)
     } else {
         subsection(&snap, &path)?
     };
@@ -207,7 +217,7 @@ pub async fn put(
         .await?,
     )?;
     let value = if path.is_empty() {
-        json!(snap)
+        redacted_snapshot(&snap)
     } else {
         subsection(&snap, &path)?
     };
@@ -302,6 +312,38 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(name, HeaderValue::from_str(value).unwrap());
         h
+    }
+
+    fn snap_with_secret() -> TransactionSnapshot {
+        let mut config = nos_proto::Config::default();
+        config.admin.keys.push(nos_proto::AdminKey {
+            label: "k1".into(),
+            secret: "needle-secret".into(),
+        });
+        TransactionSnapshot {
+            name: "t".into(),
+            config,
+            dirty: true,
+            resumed: false,
+            generation: 4,
+        }
+    }
+
+    #[test]
+    fn snapshot_and_subsections_never_carry_a_secret() {
+        let snap = snap_with_secret();
+        let whole = redacted_snapshot(&snap);
+        assert_eq!(whole["generation"], 4);
+        assert_eq!(whole["config"]["admin"]["keys"][0]["secret"], "<hidden>");
+        assert!(!whole.to_string().contains("needle-secret"));
+        for path in [vec!["admin"], vec!["admin", "key", "k1"]] {
+            let path: Vec<String> = path.into_iter().map(String::from).collect();
+            let v = subsection(&snap, &path).unwrap();
+            assert!(!v.to_string().contains("needle-secret"), "{path:?}");
+        }
+        let v = subsection(&snap, &["admin".into(), "key".into(), "k1".into()]).unwrap();
+        assert_eq!(v["label"], "k1");
+        assert_eq!(v["secret"], "<hidden>");
     }
 
     #[test]

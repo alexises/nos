@@ -53,6 +53,12 @@ topics! {
     LldpManagementAddress,
     /// `LldpSettings.system_description`
     LldpSystemDescription,
+    /// `Config.admin`
+    Admin,
+    /// `Admin.keys`
+    AdminKey,
+    /// `AdminKey.secret`
+    AdminKeySecret,
     /// `Config.logging`
     Logging,
     /// `LoggingSettings.syslog`

@@ -79,6 +79,8 @@ pub enum Resolved {
     /// Navigate to a specific position with no edit — `up`.
     Navigate(Path),
     ShowRunningConfig,
+    /// `show config admin` — only the keystore, values `<hidden>`.
+    ShowAdminConfig,
     /// `show this` in configuration mode — fetch the transaction and render
     /// it at the current path.
     ShowTransaction,
@@ -230,6 +232,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::Empty => Resolved::Nothing,
         Command::Help => Resolved::Help,
         Command::ShowConfig => Resolved::ShowRunningConfig,
+        Command::ShowConfigAdmin => Resolved::ShowAdminConfig,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowFdb { domain } => Resolved::ShowFdb { domain },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
@@ -341,6 +344,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::Empty
         | Command::Help
         | Command::ShowConfig
+        | Command::ShowConfigAdmin
         | Command::ShowRoute { .. }
         | Command::ShowFdb { .. }
         | Command::ShowInterface { .. }

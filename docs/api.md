@@ -142,7 +142,7 @@ $ $C $B/v1/bgp/summary | jq .
 All are `GET`, and each returns the same data as the matching shell command, as JSON:
 
 - `/v1/version`: `{version, revision}` of the running build; `revision` is `unknown` unless built by `make docker-build`. No daemon is queried.
-- `/v1/config`: the running config. Users show only their name and password hash.
+- `/v1/config`: the running config. Secrets are masked: a user's `password` and every admin key `secret` read `<hidden>` here and in every transaction response (see [Secrets](#secrets-are-write-only)).
 - `/v1/routes/{table}`: every prefix with every candidate route, best first. `/v1/routes/{table}/{addr}` is the longest-prefix match for one address, or `404` if nothing covers it.
 - `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.
 - `/v1/port-aggregates[/{name}]` and `/v1/lacp[/{name}]`: bonds, their members and LACP state.
@@ -222,7 +222,7 @@ $ $C -X POST $B/v1/config/save -o /dev/null -w '%{http_code}\n'
 Every part of the configuration has a URL under `/v1/transactions/{tx}/`, built from the same names the shell uses:
 
 - **A section or field is its kebab-case name, in the singular.** `hostname`, `routing-table`, `bgp-instance`, `peer-group`, `static-routing-instance`, `lldp/tx-interval-secs`.
-- **A list is followed by the key of one element.** Most lists are keyed by `name`. The exceptions are OSPF areas (`area-id`), BGP peers (`remote-address`), static routes (`subnet`), subinterfaces (`tag`), addresses (`address`), switching-profile members (`broadcast-domain`), prefix-list entries (`cidr`) and crypto keys (`key-id`, `send-id`). Lists of plain values, such as an AS-path list's patterns, are keyed by the value itself.
+- **A list is followed by the key of one element.** Most lists are keyed by `name`. The exceptions are OSPF areas (`area-id`), BGP peers (`remote-address`), static routes (`subnet`), subinterfaces (`tag`), addresses (`address`), switching-profile members (`broadcast-domain`), prefix-list entries (`cidr`), crypto keys (`key-id`, `send-id`) and admin keys (`label`). Lists of plain values, such as an AS-path list's patterns, are keyed by the value itself.
 - **Encode `/` inside a key as `%2F`**, for example a prefix: `route/192.0.2.0%2F24`. The server splits the path before decoding, so the encoded slash stays part of the key.
 - **A `PUT` to a list element that does not exist appends it.** The key in the body must match the key in the URL.
 - **The body is the JSON form of that part of the config**, exactly as `GET` returns it: a string for `hostname`, an object for a routing table, and so on. Every schema is in the [OpenAPI document](#the-openapi-document).
@@ -237,6 +237,7 @@ Some paths on the example router, relative to `/v1/transactions/{tx}/`:
 - `static-routing-instance/s1/route/192.0.2.0%2F24` is `{"gateway":"10.50.0.3","subnet":"192.0.2.0/24"}`.
 - `ospf-instance/o1/area/0.0.0.0/profile/p1` is one OSPF interface profile.
 - `user/alice` is a user; a clear `password` sent in a `PUT` is hashed on the way in.
+- `admin/key/bgp-1` is a keystore entry; its `secret` reads `<hidden>`.
 
 A `DELETE` removes that part of the config, and a `GET` of a path that does not exist is `404`:
 
@@ -249,6 +250,14 @@ $ $C $B/v1/transactions/bad/no-such-section
 ```
 
 Like the shell's `set`/`delete`, none of this is validated until commit. The one check made immediately is that the edited config is still structurally valid JSON for the schema; a body with the wrong shape is refused with `400`.
+
+## Secrets are write-only
+
+- A `#[cli(secret)]` field (a user's `password`, an admin key's `secret`) is never returned: `GET /v1/config`, the transaction GET and the PUT reply all show it as `<hidden>`.
+- Set one by sending a real value: `PUT /v1/transactions/{tx}/admin/key/bgp-1` with `{"label":"bgp-1","secret":"s3cret"}`.
+- **GET-then-PUT is safe.** A `<hidden>` sent where an existing label or user already has a value keeps the stored value, so editing a GET'd document and PUTting it back does not destroy keys.
+- `<hidden>` on a label or user that holds nothing is refused with `400`, and `<hidden>` is never accepted as a real secret.
+- The values are stored in clear in `config.yaml` (mode 0600) because the daemons need them; `nos-configd` logs only the op's kind, never its payload.
 
 ## Concurrent edits: `ETag` and `If-Match`
 

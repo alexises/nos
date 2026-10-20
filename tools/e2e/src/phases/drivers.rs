@@ -2588,7 +2588,8 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     }
     log("router-a: log follow streamed a live entry over sse");
 
-    rest_users(a).await?;
+    rest_users(&w.dock, a).await?;
+    rest_secrets(&w.dock, a).await?;
     rest_destructive(w).await
 }
 
@@ -2828,7 +2829,7 @@ async fn classical_handshake(a: &Router) -> anyhow::Result<()> {
 /// A clear password set through the config tree is stored as a hash; setting
 /// the same one again changes nothing (no diff, identical hash); a different
 /// one replaces it and the old one stops working.
-async fn rest_users(a: &Router) -> anyhow::Result<()> {
+async fn rest_users(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<()> {
     let tx = format!("/v1/transactions/{REST_TX}");
     let user = format!("{tx}/user/{REST_USER}");
     let set = |password: &str| format!(r#"{{"name":"{REST_USER}","password":"{password}"}}"#);
@@ -2839,14 +2840,25 @@ async fn rest_users(a: &Router) -> anyhow::Result<()> {
             .await
             .map(|r| r.map_or_else(|status| status, |_| 200))
     };
+    // REST masks the hash (#507), so read it from the file `save` writes.
     let stored_hash = || async {
-        let config = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
-        let config: serde_json::Value = serde_json::from_str(&config)?;
-        config["users"]
-            .as_array()
-            .and_then(|users| users.iter().find(|u| u["name"] == REST_USER))
-            .and_then(|u| u["password"].as_str().map(str::to_string))
-            .with_context(|| format!("no user {REST_USER} in /v1/config"))
+        let masked = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+        if masked.contains("$argon2id$") {
+            bail!("router-a: GET /v1/config returned a password hash");
+        }
+        a.rest_expect(Method::POST, "/v1/config/save", None, 204)
+            .await?;
+        let (_, yaml) = dock.exec("router-a", &["cat", SAVED_CONFIG]).await?;
+        let lines: Vec<&str> = yaml.lines().map(str::trim).collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start_matches("- ") == format!("name: {REST_USER}"))
+            .with_context(|| format!("no user {REST_USER} in {SAVED_CONFIG}"))?;
+        lines[at..]
+            .iter()
+            .find_map(|l| l.strip_prefix("password:"))
+            .map(|h| h.trim().trim_matches(['\'', '"']).to_string())
+            .with_context(|| format!("no password for {REST_USER} in {SAVED_CONFIG}"))
     };
 
     a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
@@ -2921,6 +2933,130 @@ async fn rest_users(a: &Router) -> anyhow::Result<()> {
         bail!("router-a: a deleted user's certificate still works: {status}");
     }
     log("router-a: user password change and deletion verified over REST");
+    Ok(())
+}
+
+const SAVED_CONFIG: &str = "/var/lib/nos/config.yaml";
+/// Distinctive secrets: a log line or REST body holding one is a leak.
+const SECRET_ONE: &str = "e2e-admin-secret-7f3a91-one";
+const SECRET_TWO: &str = "e2e-admin-secret-7f3a91-two";
+
+/// The admin keystore (#507) against the real daemons: a secret set over REST
+/// never comes back (reply, transaction GET, `/v1/config`) and never reaches
+/// `nos-logd`; a GET-then-PUT round trip keeps the stored value (the mask is
+/// not the value); rotation replaces it; the saved file is owner-only.
+async fn rest_secrets(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<()> {
+    let tx = format!("/v1/transactions/{REST_TX}");
+    let key = format!("{tx}/admin/key/e2e-k1");
+    let no_leak = |what: &str, body: &str| -> anyhow::Result<()> {
+        if body.contains(SECRET_ONE) || body.contains(SECRET_TWO) {
+            bail!("router-a: {what} leaked an admin secret: {body}");
+        }
+        Ok(())
+    };
+    let saved = || async {
+        a.rest_expect(Method::POST, "/v1/config/save", None, 204)
+            .await?;
+        Ok::<_, anyhow::Error>(dock.exec("router-a", &["cat", SAVED_CONFIG]).await?.1)
+    };
+    let set = |secret: &str| format!(r#"{{"label":"e2e-k1","secret":"{secret}"}}"#);
+
+    let commits = a.count("config committed");
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    let put = a
+        .rest_expect(Method::PUT, &key, Some(&set(SECRET_ONE)), 200)
+        .await?;
+    no_leak("the PUT reply", &put)?;
+    let whole = a.rest_expect(Method::GET, &tx, None, 200).await?;
+    no_leak("GET of the transaction", &whole)?;
+    no_leak(
+        "GET of the key",
+        &a.rest_expect(Method::GET, &key, None, 200).await?,
+    )?;
+    if !whole.contains("<hidden>") {
+        bail!("router-a: the transaction does not show the masked secret: {whole}");
+    }
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    let running = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+    no_leak("GET /v1/config", &running)?;
+    if !running.contains("e2e-k1") {
+        bail!("router-a: the committed key label is missing from /v1/config");
+    }
+
+    // GET-then-PUT of the whole (masked) config keeps the stored secret.
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    let snapshot = a.rest_expect(Method::GET, &tx, None, 200).await?;
+    let snapshot: serde_json::Value = serde_json::from_str(&snapshot)?;
+    a.rest_expect(Method::PUT, &tx, Some(&snapshot["config"].to_string()), 200)
+        .await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    let file = saved().await?;
+    if !file.contains(SECRET_ONE) || file.contains("<hidden>") {
+        bail!(
+            "router-a: the mask round trip changed the stored secret:
+{file}"
+        );
+    }
+    // A mask for a label that holds nothing is refused, not stored.
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(
+        Method::PUT,
+        &format!("{tx}/admin/key/ghost"),
+        Some(r#"{"label":"ghost","secret":"<hidden>"}"#),
+        400,
+    )
+    .await?;
+    a.rest_expect(Method::DELETE, &tx, None, 204).await?;
+
+    // Rotation under the same label: the old value is gone, the new one stored.
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    no_leak(
+        "the rotation PUT",
+        &a.rest_expect(Method::PUT, &key, Some(&set(SECRET_TWO)), 200)
+            .await?,
+    )?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    let file = saved().await?;
+    if file.contains(SECRET_ONE) || !file.contains(SECRET_TWO) {
+        bail!(
+            "router-a: rotation did not replace the stored secret:
+{file}"
+        );
+    }
+    match dock
+        .exec("router-a", &["stat", "-c", "%a", SAVED_CONFIG])
+        .await?
+    {
+        (0, mode) if mode.trim() == "600" => {}
+        (code, mode) => bail!("router-a: {SAVED_CONFIG} mode is {mode:?} (exit {code}), want 600"),
+    }
+
+    // Clean up, then check nothing the daemons logged (the stream nos-logd
+    // collects) ever held a secret.
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(Method::DELETE, &key, None, 204).await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    a.wait_new("config committed", commits + 3, 30).await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let logs = a
+        .rest_expect(Method::GET, "/v1/logs?limit=20000", None, 200)
+        .await?;
+    no_leak("GET /v1/logs", &logs)?;
+    for secret in [SECRET_ONE, SECRET_TWO] {
+        if a.count(secret) != 0 {
+            bail!("router-a: a log line holds the admin secret {secret}");
+        }
+    }
+    log("router-a: admin secrets stay out of REST and logs; the mask round trip and rotation keep the stored value");
     Ok(())
 }
 

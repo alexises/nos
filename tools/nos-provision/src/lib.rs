@@ -18,7 +18,7 @@ use clap::Parser;
 
 use ipnet::{IpNet, Ipv4Net};
 use nos_proto::{
-    AddressFamily, BfdProfileOp, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp,
+    AddressFamily, AdminOp, BfdProfileOp, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp,
     BgpPeerOp, BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination,
     LldpOp, LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm,
     OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
@@ -1012,6 +1012,12 @@ pub struct Args {
     /// on apply. The first `=` separates the two, so a password may contain `=`.
     #[arg(long = "user", value_parser = parse_user)]
     pub users: Vec<(String, String)>,
+
+    /// One `<label>=<secret>` per repetition: creates the admin keystore key
+    /// or replaces its secret (`AdminOp::SetKey`). The first `=` separates
+    /// the two, like `--user`.
+    #[arg(long = "admin-key", value_parser = parse_user)]
+    pub admin_keys: Vec<(String, String)>,
 
     /// If set, sets the top-level hostname (`ConfigOp::SetHostname`) — what
     /// `nos-lldpd` advertises as its System Name.
@@ -3193,6 +3199,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
+    for (label, secret) in &args.admin_keys {
+        ops.push(ConfigOp::Admin(AdminOp::SetKey {
+            label: label.clone(),
+            secret: secret.clone(),
+        }));
+    }
+
     // (interface, transmit-or-receive, enabled) — each interface is ensured
     // first, since the toggle ops require it to already exist.
     let lldp_toggles = args
@@ -4085,6 +4098,8 @@ mod tests {
             "h",
             "--user",
             "e2e=a=b",
+            "--admin-key",
+            "k1=s=1",
         ])
         .unwrap();
         let pg = ConfigOp::BgpPeerGroup;
@@ -4185,6 +4200,13 @@ mod tests {
             &ConfigOp::User(UserOp::SetPassword {
                 name: "e2e".into(),
                 password: "a=b".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Admin(AdminOp::SetKey {
+                label: "k1".into(),
+                secret: "s=1".into(),
             }),
         );
         has(

@@ -9,7 +9,17 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260). Operator view: [docs
 
 
 
-A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925 TCP-AO with key rotation — see `docs/protocols/bgp-internals.md`'s "Session authentication" for the wire-level detail). Neither mechanism has a maintained Rust binding, so the raw `setsockopt(TCP_MD5SIG)`/`setsockopt(TCP_AO_*)` calls live in their own crate, `tcp-auth/` (`nos-tcp-auth`) — no NOS dependencies, like `nos-proto`, and the one crate in the workspace whose whole purpose is `unsafe` FFI (every other crate stays within the workspace's `unsafe_code = "warn"` default). Secrets are stored **clear-text** in config, like every other field — this system has no encryption-at-rest anywhere, and `nos-cli` renders them in the clear too.
+A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925 TCP-AO with key rotation — see `docs/protocols/bgp-internals.md`'s "Session authentication" for the wire-level detail). Neither mechanism has a maintained Rust binding, so the raw `setsockopt(TCP_MD5SIG)`/`setsockopt(TCP_AO_*)` calls live in their own crate, `tcp-auth/` (`nos-tcp-auth`) — no NOS dependencies, like `nos-proto`, and the one crate in the workspace whose whole purpose is `unsafe` FFI (every other crate stays within the workspace's `unsafe_code = "warn"` default). Secrets are stored **clear-text** in config, like every other field — this system has no encryption-at-rest anywhere. They are not shown, though: see "Secrets and the admin keystore" below.
+
+## Secrets and the admin keystore (#383, #507)
+
+- `Config.admin` is a keystore of `label -> secret`; sections that need a key will reference the label (BGP MD5/TCP-AO, OSPF and BFD still hold theirs inline until #508-#510). It is the one place daemons read a secret from, via `Config::key`.
+- Masking happens at the presentation edges only, never in the stored `Config` (daemons read the real value over IPC):
+  - **Logs:** `ConfigStore::apply_op` logs `ConfigOp::kind()`, not `?op`; `AdminKey`, `Admin`, `AdminOp` and `UserOp` also have a `Debug` that prints `<hidden>`.
+  - **REST:** `Config::redacted()` backs `GET /v1/config` and every transaction response.
+  - **Shell and diff:** `#[cli(secret)]` fields render `<hidden>` (`<changed>` in a diff); `show config` omits the `admin` section.
+- **Mask round trip:** `nos-configd` (`config/src/secrets.rs`) swaps a `<hidden>` in an op or a path write for the stored value (transaction first, then running), and refuses it on a label or user with no earlier value. Done there, not in `nos-restd`, so every client is covered.
+- **At rest:** `config.yaml` is written by an atomic temp-file rename, so it is 0600; `nos-configd` warns at load when a file is group/other readable (it does not refuse: the e2e harness seeds the file). Encryption at rest is not done.
 
 ## Audit identity (#400)
 
