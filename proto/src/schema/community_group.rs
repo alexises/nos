@@ -20,10 +20,11 @@ use nos_proto_derive::Cli;
 pub struct CommunityGroup {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.community_groups, |g| &g.name))
     )]
     #[cli(key)]
-    /// Group name, 1 to 64 characters, unique among groups.
+    /// Group name, 1 to 64 characters (letters, digits, `_`, `-`), unique among groups.
     pub name: String,
 
     #[garde(custom(|m: &Vec<String>, ctx: &Config| valid_members(m, ctx)))]

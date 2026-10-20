@@ -14,7 +14,7 @@
         "description": "A named set of AS-path regexes, referenced by bare name from an RPL\nscript's `this.bgp.as_path in NAME`. Each pattern is matched against the\npath rendered as space-separated ASNs, with `_` as the Cisco-style\nboundary (see `nos_rpl::AsPathRegexes`); the list matches if ANY pattern\ndoes.",
         "properties": {
           "name": {
-            "description": "List name, 1 to 64 characters, unique among AS-path lists.",
+            "description": "List name, 1 to 64 characters (letters, digits, `_`, `-`), unique among AS-path lists.",
             "type": "string"
           },
           "patterns": {
@@ -143,7 +143,7 @@
             "description": "`sbfd`: Seamless BFD initiator (RFC 7880/7881): probes a reflector\nthat keeps no per-session state. Excludes `echo-mode`, `padded-pdu-size`\nand `auth` (not built for S-BFD yet)."
           },
           "name": {
-            "description": "Profile name, 1 to 64 characters, unique among BFD profiles; the key sessions reference.",
+            "description": "Profile name, 1 to 64 characters (letters, digits, `_`, `-`), unique among BFD profiles; the key sessions reference.",
             "type": "string"
           },
           "padded_pdu_size": {
@@ -576,7 +576,7 @@
             ]
           },
           "name": {
-            "description": "Instance name, 1 to 64 characters, unique among BGP instances.",
+            "description": "Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among BGP instances.",
             "type": "string"
           },
           "peer_groups": {
@@ -871,7 +871,7 @@
             ]
           },
           "name": {
-            "description": "Group name, 1 to 64 characters, unique within the instance.",
+            "description": "Group name, 1 to 64 characters (letters, digits, `_`, `-`), unique within the instance.",
             "type": "string"
           },
           "next_hop": {
@@ -1055,7 +1055,7 @@
             ]
           },
           "name": {
-            "description": "Domain name, 1 to 64 characters, unique among broadcast domains.",
+            "description": "Domain name, 1 to 64 characters (letters, digits, `_`, `-`), unique among broadcast domains.",
             "type": "string"
           },
           "neigh_suppress": {
@@ -1238,7 +1238,7 @@
         "description": "A named community value (standard/extended/large — inferred from\n`value`'s own colon-literal shape, same as an inline literal in a\nscript), referenced by bare name from an RPL policy script's\n`.contains(..)`/`.add(..)`/`.remove(..)` — see root `CLAUDE.md`'s RPL\nsection.",
         "properties": {
           "name": {
-            "description": "Alias name, 1 to 64 characters, unique among aliases.",
+            "description": "Alias name, 1 to 64 characters (letters, digits, `_`, `-`), unique among aliases.",
             "type": "string"
           },
           "value": {
@@ -1263,7 +1263,7 @@
             "type": "array"
           },
           "name": {
-            "description": "Group name, 1 to 64 characters, unique among groups.",
+            "description": "Group name, 1 to 64 characters (letters, digits, `_`, `-`), unique among groups.",
             "type": "string"
           }
         },
@@ -3055,7 +3055,7 @@
             ]
           },
           "name": {
-            "description": "Instance name, 1 to 64 characters, unique among `OSPFv2` instances.",
+            "description": "Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among `OSPFv2` instances.",
             "type": "string"
           },
           "prefix_suppression": {
@@ -3305,7 +3305,7 @@
             ]
           },
           "name": {
-            "description": "Instance name, 1 to 64 characters, unique among `OSPFv3` instances.",
+            "description": "Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among `OSPFv3` instances.",
             "type": "string"
           },
           "redistribute_policy": {
@@ -3519,7 +3519,7 @@
             ]
           },
           "name": {
-            "description": "Bond name, 1 to 64 characters, unique among interfaces and aggregates.",
+            "description": "Bond name, 1 to 64 characters (letters, digits, `_`, `-`), unique among interfaces and aggregates.",
             "type": "string"
           },
           "redundancy_mode": {
@@ -3690,7 +3690,7 @@
             "type": "array"
           },
           "name": {
-            "description": "List name, 1 to 64 characters, unique among prefix lists.",
+            "description": "List name, 1 to 64 characters (letters, digits, `_`, `-`), unique among prefix lists.",
             "type": "string"
           }
         },
@@ -4451,7 +4451,7 @@
         "description": "A named container of static routes. Carries no reference to any routing\ntable — only `RoutingTable.static_routing_instance` names it, never the\nother way around.",
         "properties": {
           "name": {
-            "description": "Instance name, 1 to 64 characters, unique among static routing instances.",
+            "description": "Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among static routing instances.",
             "type": "string"
           },
           "routes": {
@@ -4961,7 +4961,7 @@
             "type": "array"
           },
           "name": {
-            "description": "Profile name, 1 to 64 characters, unique among port profiles.",
+            "description": "Profile name, 1 to 64 characters (letters, digits, `_`, `-`), unique among port profiles.",
             "type": "string"
           },
           "priority": {
@@ -5262,7 +5262,7 @@
             "type": "array"
           },
           "name": {
-            "description": "Profile name, 1 to 64 characters, unique among switching profiles.",
+            "description": "Profile name, 1 to 64 characters (letters, digits, `_`, `-`), unique among switching profiles.",
             "type": "string"
           }
         },
@@ -5472,7 +5472,7 @@
         "description": "A local user who may log in to `nos-cli` and call the REST API (HTTP\nBasic). Every user is a full administrator — there are no roles.",
         "properties": {
           "name": {
-            "description": "Login name, 1 to 64 characters, unique among users.",
+            "description": "Login name, 1 to 64 characters (letters, digits, `_`, `-`), unique among users.",
             "type": "string"
           },
           "password": {

@@ -26,7 +26,7 @@ pub struct User {
         custom(|n: &String, ctx: &Config| valid_username(n).and_then(|()| unique_in(n, &ctx.users, |u| &u.name)))
     )]
     #[cli(key)]
-    /// Login name, 1 to 64 characters, unique among users.
+    /// Login name, 1 to 64 characters (letters, digits, `_`, `-`), unique among users.
     pub name: String,
 
     /// An argon2id hash at rest. Setting a clear-text value is allowed — the

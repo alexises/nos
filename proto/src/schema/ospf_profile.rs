@@ -178,6 +178,7 @@ pub(crate) fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
 pub struct OspfProfile {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_name(n, ctx))
     )]
     #[cli(key)]

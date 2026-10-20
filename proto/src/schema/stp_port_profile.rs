@@ -81,11 +81,12 @@ impl Default for StpPortMstInstance {
 pub struct StpPortProfile {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.stp_port_profiles, |p| &p.name)),
         custom(|n, ctx: &Config| valid_protections(n, ctx))
     )]
     #[cli(key)]
-    /// Profile name, 1 to 64 characters, unique among port profiles.
+    /// Profile name, 1 to 64 characters (letters, digits, `_`, `-`), unique among port profiles.
     pub name: String,
 
     #[serde(default)]

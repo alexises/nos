@@ -15,10 +15,11 @@ use nos_proto_derive::Cli;
 pub struct StaticRoutingInstance {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.static_routing_instances, |i| &i.name))
     )]
     #[cli(key)]
-    /// Instance name, 1 to 64 characters, unique among static routing instances.
+    /// Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among static routing instances.
     pub name: String,
 
     #[garde(dive, custom(|routes, _ctx: &Config| unique_subnets(routes)))]

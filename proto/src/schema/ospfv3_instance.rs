@@ -21,10 +21,11 @@ use nos_proto_derive::Cli;
 pub struct Ospfv3Instance {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.ospfv3_instances, |i| &i.name))
     )]
     #[cli(key)]
-    /// Instance name, 1 to 64 characters, unique among `OSPFv3` instances.
+    /// Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among `OSPFv3` instances.
     pub name: String,
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.

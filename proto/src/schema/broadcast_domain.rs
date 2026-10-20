@@ -25,10 +25,11 @@ use nos_proto_derive::Cli;
 pub struct BroadcastDomain {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.broadcast_domains, |d| &d.name))
     )]
     #[cli(key)]
-    /// Domain name, 1 to 64 characters, unique among broadcast domains.
+    /// Domain name, 1 to 64 characters (letters, digits, `_`, `-`), unique among broadcast domains.
     pub name: String,
 
     #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]

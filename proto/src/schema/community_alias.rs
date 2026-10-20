@@ -17,10 +17,11 @@ use nos_proto_derive::Cli;
 pub struct CommunityAlias {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n, ctx: &Config| unique_in(n, &ctx.community_aliases, |a| &a.name))
     )]
     #[cli(key)]
-    /// Alias name, 1 to 64 characters, unique among aliases.
+    /// Alias name, 1 to 64 characters (letters, digits, `_`, `-`), unique among aliases.
     pub name: String,
 
     #[garde(custom(|v: &String, _ctx: &Config| valid_community_value(v)))]

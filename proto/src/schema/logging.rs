@@ -34,6 +34,7 @@ pub struct LoggingSettings {
 pub struct SyslogServer {
     #[garde(
         length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
         custom(|n: &String, ctx: &Config| unique_in(n, &ctx.logging.syslog, |s| &s.name))
     )]
     #[cli(key)]
