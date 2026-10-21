@@ -1934,6 +1934,26 @@ mod tests {
         assert_eq!(p.prefixes.len(), 1);
     }
 
+    /// #382: no body length may panic, for any LSA type (the decoder reads
+    /// attacker-controlled bytes); an `Err` is fine.
+    #[test]
+    fn short_bodies_never_panic() {
+        let types = (0..=0x2fu16)
+            .chain([
+                0x2001, 0x2002, 0x2003, 0x2004, 0x4005, 0x0008, 0x2009, 0x000B,
+            ])
+            .chain([LSA_TYPE_E_ROUTER, LSA_TYPE_E_NETWORK, LSA_TYPE_E_LINK])
+            .chain([LSA_TYPE_E_INTRA_AREA_PREFIX, LSA_TYPE_E_INTER_AREA_PREFIX])
+            .chain([LSA_TYPE_E_INTER_AREA_ROUTER, LSA_TYPE_E_AS_EXTERNAL]);
+        for ty in types {
+            for fill in [0x00u8, 0xff, 0x01] {
+                for n in 0..=80 {
+                    let _ = decode_body(ty, &vec![fill; n]);
+                }
+            }
+        }
+    }
+
     #[test]
     fn link_lsa_fixed_part_is_24_bytes() {
         // priority/options (4) + link-local address (16) + prefix count (4).
