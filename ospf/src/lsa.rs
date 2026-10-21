@@ -676,6 +676,20 @@ pub fn is_newer(a: &LsaHeader, b: &LsaHeader) -> Ordering {
 mod tests {
     use super::*;
 
+    /// #382: no body length may panic, for any LSA type; an `Err` is fine.
+    #[test]
+    fn short_bodies_never_panic() {
+        let mut header = router_lsa().header;
+        for ty in 0..=16u8 {
+            header.lsa_type = ty;
+            for fill in [0x00u8, 0xff, 0x01] {
+                for n in 0..=80 {
+                    let _ = decode_body(&header, &vec![fill; n]);
+                }
+            }
+        }
+    }
+
     fn router_lsa() -> Lsa {
         Lsa {
             header: LsaHeader {
