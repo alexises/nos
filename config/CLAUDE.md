@@ -6,7 +6,7 @@ Owns the running configuration and exposes it to all component processes via a U
 
 - **Config store**: named, server-held transactions (each an independent in-progress `Config`) plus the running config, with atomic commit and garde-based validation.
 - **IPC server**: accepts connections from component processes, handles `Get`, `Subscribe`/`SubscribeDiff`/`Unsubscribe`, `Save`, and the transaction lifecycle requests (`OpenTransaction`, `ApplyOp`, `GetTransaction`, `CommitTransaction`, `DiscardTransaction`, `DiffTransaction`).
-- **Change propagation**: broadcasts each commit's new config *and* the diff that produced it to all subscribed connections — `Subscribe` connections get the full config, `SubscribeDiff` connections get just the diff, scoped to the sections they asked for.
+- **Change propagation**: broadcasts each commit's new and previous config to all subscribers; `Subscribe` gets the full config, `SubscribeDiff` the diff, scoped. Every reply is `Config::for_role(caller.role)` (#384: users/keys per role, `docs/architecture/ipc-security.md`).
 - **Persistence**: loads the running config from disk at startup and writes it back out on `Save`.
 
 ## What lives here vs nos-proto
@@ -19,7 +19,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 | Type | File | Role |
 |------|------|------|
 | `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Config>` + `transactions: Mutex<HashMap<String, Transaction>>` + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
-| `CommitUpdate` | `store.rs` | Internal (never sent over the wire directly) — one commit's `{ config: Config, diff: ConfigDiff }`, broadcast together so `Subscribe` and `SubscribeDiff` connections can each take the half they need |
+| `CommitUpdate` | `store.rs` | Internal — one commit's `{ config, prev }`; each connection projects both per role (and diffs them for `SubscribeDiff`) |
 | `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft` (a commit may not remove every user), `TransactionNotFound`, `PreconditionFailed` (an `if_match` named a stale generation — message prefixed `precondition failed`, which `nos-restd` maps to 412), `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
 | `server::start()` | `server.rs` | Binds a TLS `nos_pki::Listener` on a Unix socket (`ListenAddr::Unix` only — the TCP listener was removed, since it would bypass mTLS), spawns per-connection tasks (handshake inside the task) each holding a cloned `ConfigStore` and the peer's role/name from its certificate |
 | `authz::allowed()` | `authz.rs` | Pure per-request allow-list: config reads (`Get`/`Subscribe*`/`Describe`) for every authenticated daemon and `User`; edits/`Save` for `User`/`Restd` only. No wildcard arm — a new `Request` variant won't compile until classified. A refused request gets `Event::Error("permission denied")` and the connection is closed |
@@ -33,7 +33,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 `server::start()` binds a `UnixListener` and spawns an accept loop, each connection sharing a cloned `ConfigStore`. Per-connection:
 - `Request::Get` → send `Event::Config(current_running)` once.
 - `Request::Subscribe` → send the current full snapshot, then spawn a forwarder task that bridges `broadcast::Receiver<Arc<CommitUpdate>>` → `mpsc::Sender<Event>`, building `Event::Config(update.config.clone())` per commit. The select loop drains the `mpsc::Receiver` and forwards whatever `Event` it built to the client.
-- `Request::SubscribeDiff { scopes }` → send `store.initial_diff().await.scoped(&scopes)` as the first `Event::Diff`, then spawn a forwarder that builds `Event::Diff(update.diff.scoped(&scopes))` per commit and skips sending it when `ConfigDiff::is_empty()` — a scoped subscriber is never woken for a commit outside its scopes.
+- `Request::SubscribeDiff { scopes }` → send `store.initial_diff(role).await.scoped(&scopes)` first, then a forwarder sending the per-role diff `prev`→`config`, skipped when `ConfigDiff::is_empty()` — a scoped subscriber is never woken for a commit outside its scopes.
 - `Request::Unsubscribe` → abort whichever forwarder task (`Subscribe` or `SubscribeDiff`) is active.
 - `Request::Save` → serializes the running config as YAML and atomically writes it to the daemon's `--config-file` path; replies `Event::Saved` on success, `Event::Error` if no `--config-file` was configured or the write fails.
 - `Request::OpenTransaction`/`ApplyOp`/`GetTransaction`/`CommitTransaction`/`DiscardTransaction`/`DiffTransaction` → thin calls into the matching `ConfigStore` method (see `dispatch_request` in `server.rs`), replying `Event::Transaction`/`Event::Committed { warnings }` (advice from `warnings::commit_warnings`, #501)/`Event::Discarded`/`Event::Diff`/`Event::Error`.
