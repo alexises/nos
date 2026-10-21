@@ -42,7 +42,9 @@ services:
       - /tmp
     # Do NOT set `security_opt: [no-new-privileges:true]`: the kernel then
     # ignores file capabilities on exec, so every setcap binary (ribd,
-    # interfaced, bgpd, ...) loses its capabilities.
+    # interfaced, bgpd, ...) loses its capabilities, nos-watchdogd's
+    # cap_setuid/cap_setgid included. `kernel.yama.ptrace_scope=2` is a host
+    # sysctl (not settable here); see docs/architecture/ipc-security.md.
     volumes:
       - nos-run:/run/nos
       - nos-data:/var/lib/nos
@@ -50,6 +52,9 @@ services:
   cli:
     <<: *nos-image
     entrypoint: ["nos"]
+    # The image defaults to `nos-wd` (the watchdog's uid); the shell is a
+    # `nos` client of the 0660 sockets.
+    user: nos
     depends_on:
       - watchdog
     volumes:

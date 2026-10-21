@@ -196,7 +196,9 @@ impl Dock {
                 // instead of just its own container.
                 memory: Some(2 << 30),
                 memory_swap: Some(2 << 30),
-                // Mirrors docker-compose.yml: read-only rootfs, writable /tmp.
+                // Mirrors docker-compose.yml: read-only rootfs, writable /tmp;
+                // no `no-new-privileges` (it ignores file capabilities, the
+                // watchdog's cap_setuid/cap_setgid included).
                 readonly_rootfs: Some(true),
                 tmpfs: Some(HashMap::from([("/tmp".to_string(), String::new())])),
                 network_mode: Some(network.to_string()),
@@ -368,7 +370,21 @@ impl Dock {
     }
 
     /// Runs `cmd` inside a running container; `(exit code, stdout+stderr)`.
+    /// A NOS router (`router-*`) is exec'd as `nos`, like its daemons: the
+    /// image's default user is the watchdog's `nos-wd` (#512), which can
+    /// neither `kill` them nor read their files. Other containers keep their own.
     pub async fn exec(&self, container: &str, cmd: &[&str]) -> anyhow::Result<(i64, String)> {
+        let user = container.starts_with("router-").then_some("nos");
+        self.exec_as(container, user, cmd).await
+    }
+
+    /// `exec` as `user` (the container's default when `None`).
+    pub async fn exec_as(
+        &self,
+        container: &str,
+        user: Option<&str>,
+        cmd: &[&str],
+    ) -> anyhow::Result<(i64, String)> {
         use bollard::exec::StartExecResults;
         use bollard::models::ExecConfig;
         let created = self
@@ -377,6 +393,7 @@ impl Dock {
                 container,
                 ExecConfig {
                     cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
+                    user: user.map(String::from),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     ..Default::default()

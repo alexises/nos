@@ -57,6 +57,8 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
     a.wait(&identity("nos-bgpd starting", "instance=.* ", "bgpd", ".*"))
         .await?;
 
+    check_uids(w).await?;
+
     // Every IPC handshake is hybrid ML-KEM key exchange with ML-DSA-65
     // certificates — and none, on any daemon, negotiated anything else.
     a.wait("ipc tls handshake ok side=server kx=X25519MLKEM768 peer_key=ML-DSA-65")
@@ -88,6 +90,28 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
 
     revoke_user(w).await?;
     revoke_restarted_daemon(w).await
+}
+
+/// The watchdog (the CA) runs on its own uid and starts every child as `nos`
+/// (#512): the `starting` lines carry the ids, and `/proc` agrees.
+async fn check_uids(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    a.wait("starting process=nos-configd program=/usr/local/bin/nos-configd uid=991 gid=991")
+        .await?;
+    // `/proc/<pid>/status` is world-readable; the runtime image has no `ps`.
+    let uid_of = |comm: &'static str| async move {
+        let script = format!(
+            "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = {comm} ] && \
+             awk '/^Uid:/ {{print $2}}' $p/status && break; done"
+        );
+        let (_, out) = w.dock.exec("router-a", &["sh", "-c", &script]).await?;
+        anyhow::Ok(out.trim().to_string())
+    };
+    let (wd, configd) = (uid_of("nos-watchdogd").await?, uid_of("nos-configd").await?);
+    if wd != "990" || configd != "991" {
+        bail!("expected watchdog uid 990 and nos-configd uid 991, got {wd:?} and {configd:?}");
+    }
+    Ok(())
 }
 
 /// A throwaway user for the revocation checks (router-a only).

@@ -216,6 +216,16 @@ struct Args {
     #[arg(long, default_value = DEFAULT_PKI_DIR)]
     pki_dir: PathBuf,
 
+    /// Uid/gid every supervised child runs as (set before exec, so file
+    /// capabilities still apply). The image passes `nos`'s ids; unset (tests,
+    /// non-container runs) children inherit the watchdog's.
+    #[arg(long, requires = "child_gid")]
+    child_uid: Option<u32>,
+
+    /// See `--child-uid`.
+    #[arg(long, requires = "child_uid")]
+    child_gid: Option<u32>,
+
     /// Seconds a daemon's IPC certificate is valid for.
     #[arg(long, default_value_t = 24 * 3600)]
     pki_leaf_lifetime: u64,
@@ -298,11 +308,10 @@ async fn main() -> anyhow::Result<()> {
         .chain(std::iter::once(args.listen_socket.display().to_string()))
         .chain(args.logd_flags)
         .collect();
-    let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin, logd_args).with_identity(
-        pki.clone(),
-        Role::Logd,
-        "",
-    );
+    let child_ids = args.child_uid.zip(args.child_gid);
+    let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin, logd_args)
+        .with_identity(pki.clone(), Role::Logd, "")
+        .with_uid(child_ids);
     tasks.push(tokio::spawn(supervise_one(
         logd_spec,
         policy,
@@ -314,7 +323,8 @@ async fn main() -> anyhow::Result<()> {
         .chain(args.configd_flags)
         .collect();
     let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin, configd_args)
-        .with_identity(pki.clone(), Role::Configd, "");
+        .with_identity(pki.clone(), Role::Configd, "")
+        .with_uid(child_ids);
     tasks.push(tokio::spawn(supervise_one(
         configd_spec,
         policy,
@@ -328,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
         pki: &pki,
         policy,
         shutdown_rx: &shutdown_rx,
+        child_ids,
         watchdog_socket: &args.listen_socket,
         log_socket: &args.log_socket,
     };
@@ -412,6 +423,7 @@ struct FixedSupervision<'a> {
     pki: &'a Arc<Pki>,
     policy: BackoffPolicy,
     shutdown_rx: &'a watch::Receiver<bool>,
+    child_ids: Option<(u32, u32)>,
     watchdog_socket: &'a Path,
     log_socket: &'a Path,
 }
@@ -426,7 +438,9 @@ impl FixedSupervision<'_> {
         flags: Vec<String>,
     ) -> tokio::task::JoinHandle<()> {
         let args = fixed_args(listen, self.watchdog_socket, self.log_socket, flags);
-        let spec = ProcessSpec::new(name, bin, args).with_identity(self.pki.clone(), role, "");
+        let spec = ProcessSpec::new(name, bin, args)
+            .with_identity(self.pki.clone(), role, "")
+            .with_uid(self.child_ids);
         tokio::spawn(supervise_one(spec, self.policy, self.shutdown_rx.clone()))
     }
 }
@@ -482,6 +496,7 @@ fn managed_families(
         run_dir: args.run_dir.clone(),
         policy,
         registry: registry.clone(),
+        child_ids: args.child_uid.zip(args.child_gid),
     };
     let ep = |kind, socket_prefix| {
         Some(Endpoint {
@@ -613,6 +628,10 @@ mod tests {
             (86_400, 28_800, 28_800)
         );
         assert_eq!(a.pki_rest_session_max, 604_800);
+        assert_eq!((a.child_uid, a.child_gid), (None, None));
+        let a = Args::try_parse_from(["x", "--child-uid", "991", "--child-gid", "992"]).unwrap();
+        assert_eq!((a.child_uid, a.child_gid), (Some(991), Some(992)));
+        assert!(Args::try_parse_from(["x", "--child-uid", "991"]).is_err());
         assert!(a.logd_flags.is_empty() && a.restd_flags.is_empty());
     }
 

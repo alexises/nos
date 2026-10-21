@@ -32,3 +32,5 @@ Interfaces are supervised differently: unlike `nos-bgpd`/`nos-ribd`, `nos-interf
 
 - A daemon never survives a panic (#419): `nos_log_client::install_panic_hook()` (called right after the tracing subscriber in every daemon `main`) logs `panic at <file:line>: <msg>`, waits ~200 ms for the forwarder, then aborts in every profile; the release profile is also `panic = "abort"`. The watchdog's crash backoff restarts it.
 - The rtnetlink connection futures in the `fdb`/`interface`/`rib` Linux drivers are spawned with `nos_log_client::spawn_critical`: if one ever finishes (netlink socket died) the daemon logs and exits 1 rather than carrying on with a dead kernel handle.
+
+**User ids** (#512): `nos-watchdogd` runs as `nos-wd`; `supervise_one` starts each child with `ProcessSpec.uid` (`--child-uid`/`--child-gid`, `nos`'s ids in the image) and logs `uid=`/`gid=` in its `starting` line. The ids switch before exec, so the children's file capabilities are unaffected. See "uid model" in [IPC security](ipc-security.md).
