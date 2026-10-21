@@ -19,7 +19,7 @@ use crate::consts::{E2E_PASSWORD, E2E_USER};
 #[derive(Clone)]
 pub struct Identity {
     pub cert: Vec<u8>,
-    pub key: Vec<u8>,
+    pub key: nos_pki::Zeroizing<Vec<u8>>,
     lifetime: Duration,
 }
 

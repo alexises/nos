@@ -34,6 +34,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 use tracing::{debug, info, warn};
 use x509_parser::prelude::FromDer;
+use zeroize::Zeroizing;
 
 use crate::ca::{err, Bundle, SERVER_NAME};
 use crate::policy::{key_alg_name, Policy};
@@ -315,10 +316,8 @@ fn certify(b: &Bundle) -> io::Result<Current> {
 /// A leaf certificate and its PKCS#8 key as rustls wants them, checked to
 /// belong together.
 pub(crate) fn certified_key(cert_der: &[u8], key_der: &[u8]) -> io::Result<Arc<CertifiedKey>> {
-    let key = any_supported_type(&PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-        key_der.to_vec(),
-    )))
-    .map_err(err)?;
+    let key = any_supported_type(&PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)))
+        .map_err(err)?;
     let key = CertifiedKey::new(vec![CertificateDer::from(cert_der.to_vec())], key);
     key.keys_match().map_err(err)?;
     Ok(Arc::new(key))
@@ -392,7 +391,11 @@ impl Identity {
     /// Installs a certificate the CA issued for a key *this process* generated
     /// (`generate_csr` → `Ca::sign_csr`, e.g. after a login). The trust anchor
     /// stays the one this identity already holds.
-    pub fn set_certificate(&self, cert_der: Vec<u8>, key_der: Vec<u8>) -> io::Result<()> {
+    pub fn set_certificate(
+        &self,
+        cert_der: Vec<u8>,
+        key_der: Zeroizing<Vec<u8>>,
+    ) -> io::Result<()> {
         self.update(&Bundle {
             ca: self.0.shared.ca.clone(),
             cert: cert_der,

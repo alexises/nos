@@ -287,7 +287,7 @@ fn bundle_frames_round_trip_and_reject_garbage() {
         .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
         .unwrap();
     let mut wire = b.encode();
-    wire.extend(b.encode());
+    wire.extend(b.encode().iter().copied());
     let mut r = wire.as_slice();
     assert_eq!(Bundle::read_from(&mut r).unwrap(), Some(b.clone()));
     assert_eq!(Bundle::read_from(&mut r).unwrap(), Some(b));
@@ -393,7 +393,7 @@ async fn classical_key_exchange_is_refused() {
         .with_root_certificates(roots)
         .with_client_auth_cert(
             vec![CertificateDer::from(b.cert)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(b.key)),
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(b.key.to_vec())),
         )
         .unwrap();
     let sock = tokio::net::UnixStream::connect(&path).await.unwrap();
@@ -475,7 +475,7 @@ mod rest {
     fn user_cert(ca: &Ca, name: &str) -> (Vec<u8>, Vec<u8>) {
         let (csr, key) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
         let cert = ca.sign_csr(&csr, &PeerId::new("user", name), HOUR).unwrap();
-        (cert, key)
+        (cert, key.to_vec())
     }
 
     /// Connects with `cfg`; returns what the client saw (`h2`, kx group) or

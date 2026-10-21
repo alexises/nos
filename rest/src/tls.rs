@@ -20,7 +20,7 @@ const RETRY: Duration = Duration::from_secs(10);
 
 struct Issued {
     cert: Vec<u8>,
-    key: Vec<u8>,
+    key: nos_pki::Zeroizing<Vec<u8>>,
     ca: Vec<u8>,
     lifetime: Duration,
 }
