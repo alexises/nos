@@ -21,3 +21,5 @@ pub use identity::{
 };
 pub use peer::PeerId;
 pub use policy::Policy;
+/// Private-key buffers are `Zeroizing`: wiped on drop (see `docs/architecture/ipc-security.md`).
+pub use zeroize::Zeroizing;

@@ -23,3 +23,4 @@ arc-swap     = { workspace = true }
 time         = { workspace = true }
 tracing      = { workspace = true }
 sha2         = { workspace = true }
+zeroize      = { workspace = true }

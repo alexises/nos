@@ -26,7 +26,6 @@ Post-quantum mutual TLS over Unix sockets for every NOS daemon connection, with 
 - **Revocation (RFC 5280 §5 CRL, IPC CA only)**: `Ca::revoke` re-signs the CRL; `Identity::set_crl` enforces it on **new** handshakes only (logs `ipc crl updated entries=<n>`); the watchdog revokes a spawn's leaves when the process exits and a user's IPC certificates on deletion or password change (`watchdog/src/pki.rs`, logs `certificates revoked role=… name=… serials=…`). Rotation revokes nothing. Mechanics in the internals page.
 - **REST (`rest.rs`)** — the only place other crates get rustls from: `RestServer` (client certificate *optional* at TLS, since `POST /v1/login` needs none; the caller refuses everything else to an anonymous peer), hot-swappable server certificate (`Ca::sign_server_csr`, IP SANs from the caller, never the CSR), `client_config(rest_ca_pem, identity)`.
 - **Process-wide identity**: `Identity::from_stdin` (daemons) or `install` (`nos`, `nos-provision`) sets the identity every outbound `nos_pki::connect(path, role, name)`/`connect_role(path, role)` uses (`connect_role` checks the role, not the name); servers take an explicit `&Identity`.
-- **Socket mode**: `listen_with`, the only `UnixListener::bind`, chmods to `0600` after bind (#403).
 - **`Listener::accept`** returns an `Incoming` without handshaking; callers handshake in their per-connection task (5s timeout).
 
 ## Testing
@@ -35,6 +34,7 @@ Post-quantum mutual TLS over Unix sockets for every NOS daemon connection, with 
 
 ## Known ceilings
 
+- Private keys are `Zeroizing` (see "Key hygiene" in ipc-security.md).
 - Role-level authorization only (each server's `allowed(role, &request)`); `bgpd/r2` could still push into `rt1`'s RIB. Binding an instance to its table needs a config lookup.
 - No CA rotation, by design. The CA is regenerated on every watchdog start and lives 10 years (`CA_LIFETIME`), so it never expires during a run. A child can't outlive a watchdog restart: the watchdog is the container's PID 1 and each child's identity pipe goes to it alone, so a second trust anchor for "surviving" children would cover a case that can't happen.
 - `nos` and `nos-provision` never receive the CRL (they aren't children, and there is no pipe to them), so they would still trust a revoked *server* certificate. Exploiting that needs a socket under `/run/nos`; it is the servers that verify users. Returning the CRL in `WatchdogEvent::Issued` would close it.

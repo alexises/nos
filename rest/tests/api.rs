@@ -1702,7 +1702,7 @@ mod over_tls {
         let cert = ca
             .sign_csr(&csr, &PeerId::new("user", name), Duration::from_secs(3600))
             .unwrap();
-        (cert, key)
+        (cert, key.to_vec())
     }
 
     impl Tls {

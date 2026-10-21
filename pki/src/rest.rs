@@ -169,7 +169,7 @@ pub fn client_config(
         Some((cert, key)) => builder
             .with_client_auth_cert(
                 vec![CertificateDer::from(cert.to_vec())],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())),
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())), // ponytail: rustls needs an owned key; this copy is not zeroized (test/e2e client only)
             )
             .map_err(err)?,
         None => builder.with_no_client_auth(),

@@ -7,6 +7,8 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationListParams, DistinguishedName,
     DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
@@ -205,7 +207,7 @@ impl Ca {
         Ok(Bundle {
             ca: self.cert_der().to_vec(),
             cert: cert.der().to_vec(),
-            key: key.serialize_der(),
+            key: Zeroizing::new(key.serialize_der()),
             crl: Vec::new(),
         })
     }
@@ -312,19 +314,19 @@ fn leaf_params(
 /// A `(key, cert)` pair generated on the client, to be certified by the CA
 /// (`Ca::sign_csr`). Returns `(csr_der, pkcs8_key_der)`; the key never leaves
 /// the caller.
-pub fn generate_csr() -> io::Result<(Vec<u8>, Vec<u8>)> {
+pub fn generate_csr() -> io::Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     generate_csr_for(KeyAlg::MlDsa65)
 }
 
 /// `generate_csr` for a key of the given algorithm — a REST client's key must
 /// match its CA (`KeyAlg::EcdsaP256`).
-pub fn generate_csr_for(alg: KeyAlg) -> io::Result<(Vec<u8>, Vec<u8>)> {
+pub fn generate_csr_for(alg: KeyAlg) -> io::Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     let key = alg.generate()?;
     let csr = CertificateParams::new(Vec::<String>::new())
         .map_err(err)?
         .serialize_request(&key)
         .map_err(err)?;
-    Ok((csr.der().to_vec(), key.serialize_der()))
+    Ok((csr.der().to_vec(), Zeroizing::new(key.serialize_der())))
 }
 
 /// Everything an identity is made of, as DER: the CA's certificate (trust
@@ -337,7 +339,7 @@ pub struct Bundle {
     /// This peer's leaf certificate, DER.
     pub cert: Vec<u8>,
     /// The leaf's PKCS#8 private key, DER.
-    pub key: Vec<u8>,
+    pub key: Zeroizing<Vec<u8>>,
     /// The CA's current CRL, DER; empty keeps the CRL the identity already holds.
     pub crl: Vec<u8>,
 }
@@ -362,10 +364,10 @@ impl Bundle {
     /// One frame: `u32le total_len`, then `ca`, `cert`, `key`, `crl`, each as
     /// `u32le len` + bytes. The watchdog writes one per child spawn, one per
     /// rotation and one per CRL change down the child's stdin.
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         let parts = [&self.ca, &self.cert, &self.key, &self.crl];
         let body: usize = parts.iter().map(|p| 4 + p.len()).sum();
-        let mut out = Vec::with_capacity(4 + body);
+        let mut out = Zeroizing::new(Vec::with_capacity(4 + body));
         out.extend_from_slice(&len_u32(body));
         for p in parts {
             out.extend_from_slice(&len_u32(p.len()));
@@ -386,10 +388,10 @@ impl Bundle {
         if total > MAX_FRAME {
             return Err(err("identity frame too large"));
         }
-        let mut body = vec![0u8; total];
+        let mut body = Zeroizing::new(vec![0u8; total]);
         r.read_exact(&mut body)?;
         let mut rest = body.as_slice();
-        let mut part = || -> io::Result<Vec<u8>> {
+        let mut part = || -> io::Result<&[u8]> {
             let (n, tail) = rest
                 .split_first_chunk::<4>()
                 .ok_or_else(|| err("short frame"))?;
@@ -399,13 +401,13 @@ impl Bundle {
             }
             let (p, tail) = tail.split_at(n);
             rest = tail;
-            Ok(p.to_vec())
+            Ok(p)
         };
         Ok(Some(Self {
-            ca: part()?,
-            cert: part()?,
-            key: part()?,
-            crl: part()?,
+            ca: part()?.to_vec(),
+            cert: part()?.to_vec(),
+            key: Zeroizing::new(part()?.to_vec()),
+            crl: part()?.to_vec(),
         }))
     }
 }
