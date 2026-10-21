@@ -59,7 +59,7 @@ struct Args {
     /// Directory for this daemon's persisted state: the RFC 7474 boot count
     /// (`<instance>.boot`), which must survive restarts, and the RFC 3623
     /// graceful-restart marker (`<instance>.gr`, consumed at start).
-    #[arg(long, default_value = "/var/lib/nos/ospf")]
+    #[arg(long, default_value = "/var/lib/nos/ospfd")]
     state_dir: PathBuf,
 }
 

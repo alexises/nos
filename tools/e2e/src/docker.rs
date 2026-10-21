@@ -198,7 +198,7 @@ impl Dock {
                 memory_swap: Some(2 << 30),
                 // Mirrors docker-compose.yml: read-only rootfs, writable /tmp;
                 // no `no-new-privileges` (it ignores file capabilities, the
-                // watchdog's cap_setuid/cap_setgid included).
+                // watchdog's cap_setuid/cap_setgid/cap_chown included).
                 readonly_rootfs: Some(true),
                 tmpfs: Some(HashMap::from([("/tmp".to_string(), String::new())])),
                 network_mode: Some(network.to_string()),
@@ -370,12 +370,23 @@ impl Dock {
     }
 
     /// Runs `cmd` inside a running container; `(exit code, stdout+stderr)`.
-    /// A NOS router (`router-*`) is exec'd as `nos`, like its daemons: the
-    /// image's default user is the watchdog's `nos-wd` (#512), which can
-    /// neither `kill` them nor read their files. Other containers keep their own.
+    /// A NOS router (`router-*`) is exec'd as `nos`, the shared client user
+    /// (group `nos` reaches the sockets): the image's default user is the
+    /// watchdog's `nos-wd` (#512), and each daemon has its own uid (#513), so
+    /// `nos` can neither `kill` them nor read their state (`exec_root` does).
+    /// Other containers keep their own.
     pub async fn exec(&self, container: &str, cmd: &[&str]) -> anyhow::Result<(i64, String)> {
-        let user = container.starts_with("router-").then_some("nos");
+        // router-f (FRR) and router-g (ExaBGP) are third-party images with no `nos` user.
+        let user = (container.starts_with("router-")
+            && !matches!(container, "router-f" | "router-g"))
+        .then_some("nos");
         self.exec_as(container, user, cmd).await
+    }
+
+    /// `exec` as root (it holds `CAP_KILL`/`DAC_OVERRIDE` in Docker's default
+    /// set): to signal or read files of any daemon uid.
+    pub async fn exec_root(&self, container: &str, cmd: &[&str]) -> anyhow::Result<(i64, String)> {
+        self.exec_as(container, Some("root"), cmd).await
     }
 
     /// `exec` as `user` (the container's default when `None`).
@@ -430,7 +441,7 @@ impl Dock {
             "for p in /proc/[0-9]*; do [ -r \"$p/comm\" ] || continue; \
              if [ \"$(cat \"$p/comm\" 2>/dev/null)\" = \"{comm}\" ]; then kill {signal} \"${{p#/proc/}}\"; fi; done"
         );
-        self.exec(container, &["sh", "-c", &script]).await?;
+        self.exec_root(container, &["sh", "-c", &script]).await?;
         Ok(())
     }
 

@@ -35,7 +35,7 @@ Three copies of the configuration matter:
 
 ```
    edit (set / delete / PUT)        commit                 save
- ───────────────────────────► transaction ──────► running config ──────► /var/lib/nos/config.yaml
+ ───────────────────────────► transaction ──────► running config ──────► /var/lib/nos/configd/config.yaml
 ```
 
 The **running config** is what the router is doing right now. The only way to change it is to commit a transaction.

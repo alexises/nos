@@ -207,7 +207,7 @@ $ $C -X POST $B/v1/transactions/doc1/commit
 
 The diff lists every section. Each changed object carries a `status` (`Added`, `Removed`, `Modified`), its changed `fields` (each with `label`, `old`, `new`) and its changed `subsections`. This is the same diff the shell's `diff` command renders. Section headers and field labels are the CLI words (`bgp instance r1`, `route-reflector-client`), and every config field is diffed, so a commit that changes one field alone still produces an entry.
 
-Committed changes are live, but not yet saved to disk: a restart loses them. To persist the running config to `/var/lib/nos/config.yaml`, the same as the shell's `save`:
+Committed changes are live, but not yet saved to disk: a restart loses them. To persist the running config to `/var/lib/nos/configd/config.yaml`, the same as the shell's `save`:
 
 ```sh
 $ $C -X POST $B/v1/config/save -o /dev/null -w '%{http_code}\n'

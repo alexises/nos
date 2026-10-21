@@ -17,7 +17,7 @@ use tracing::{info, warn};
 /// registry (see `nos_rib::driver::table_registry`) — never read by any
 /// other process; `nos-interfaced` learns the VRF name over IPC instead
 /// (`RibRequest::GetVrfName`).
-const DEFAULT_TABLE_REGISTRY_PATH: &str = "/var/lib/nos/linux-driver/table-ids.yaml";
+const DEFAULT_TABLE_REGISTRY_PATH: &str = "/var/lib/nos/ribd/table-ids.yaml";
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum DriverKind {

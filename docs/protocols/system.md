@@ -130,7 +130,7 @@ Every part of the router logs to one place, which keeps the most recent 10,000 e
 
 ```
 edge-1> show log
-2026-09-28T18:51:42.627Z  INFO nos-configd nos_config::persistence: loaded config from disk (path=/var/lib/nos/config.yaml)
+2026-09-28T18:51:42.627Z  INFO nos-configd nos_config::persistence: loaded config from disk (path=/var/lib/nos/configd/config.yaml)
 …
 edge-1> show log nos-bgpd[r1]
 edge-1> show log --follow
@@ -212,7 +212,7 @@ Check it with `docker logs` on the router (`syslog connected server=c1`; for TLS
 
 ## Saving the configuration
 
-`commit` makes a configuration live; it does not save it. `save`, in operational mode, writes the running configuration to `/var/lib/nos/config.yaml`, which the router loads when it starts:
+`commit` makes a configuration live; it does not save it. `save`, in operational mode, writes the running configuration to `/var/lib/nos/configd/config.yaml`, which the router loads when it starts:
 
 ```
 edge-1> save

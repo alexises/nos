@@ -24,17 +24,35 @@ RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin 
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
-# Fixed numeric ids (the ENTRYPOINT's --child-uid/--child-gid name `nos`'s):
-# `nos-wd` runs the watchdog (both CAs in memory), everything it spawns runs as
-# `nos`; both have primary group `nos`, which owns the 0660 IPC sockets.
+# Fixed numeric ids (the ENTRYPOINT's --child-gid names group `nos`):
+# `nos-wd` runs the watchdog (both CAs in memory); each daemon role runs as its
+# own `nos-<role>` (uids 10001+ in `Role` order, the table in
+# watchdog/src/uids.rs - a unit test checks these lines against it); `nos` is
+# the shared client user (CLI, nos-provision, nos-e2e execs). All share primary
+# group `nos`, which owns the 0660 IPC sockets.
 # /run/nos is 1770 `nos-wd:nos`: children create sockets there but cannot
-# unlink the watchdog's. An existing `nos-run` volume keeps its old owner.
+# unlink each other's. /var/lib/nos is `nos-wd:nos` 0755 and the watchdog makes
+# `/var/lib/nos/<role>` (0700, `nos-<role>`) at startup, also on a volume an
+# older image left behind (needs cap_chown below).
 RUN groupadd --system --gid 991 nos \
     && useradd --system --uid 991 --gid nos --no-create-home --home-dir /nonexistent nos \
     && useradd --system --uid 990 --gid nos --no-create-home --home-dir /nonexistent nos-wd \
+    && useradd --system --uid 10001 --gid nos --no-create-home --home-dir /nonexistent nos-configd \
+    && useradd --system --uid 10002 --gid nos --no-create-home --home-dir /nonexistent nos-logd \
+    && useradd --system --uid 10003 --gid nos --no-create-home --home-dir /nonexistent nos-bgpd \
+    && useradd --system --uid 10004 --gid nos --no-create-home --home-dir /nonexistent nos-ribd \
+    && useradd --system --uid 10005 --gid nos --no-create-home --home-dir /nonexistent nos-ospfd \
+    && useradd --system --uid 10006 --gid nos --no-create-home --home-dir /nonexistent nos-ospfv3d \
+    && useradd --system --uid 10007 --gid nos --no-create-home --home-dir /nonexistent nos-interfaced \
+    && useradd --system --uid 10008 --gid nos --no-create-home --home-dir /nonexistent nos-lacpd \
+    && useradd --system --uid 10009 --gid nos --no-create-home --home-dir /nonexistent nos-lldpd \
+    && useradd --system --uid 10010 --gid nos --no-create-home --home-dir /nonexistent nos-fdbd \
+    && useradd --system --uid 10011 --gid nos --no-create-home --home-dir /nonexistent nos-restd \
+    && useradd --system --uid 10012 --gid nos --no-create-home --home-dir /nonexistent nos-bfdd \
+    && useradd --system --uid 10013 --gid nos --no-create-home --home-dir /nonexistent nos-stpd \
     && mkdir -p /run/nos /var/lib/nos \
     && chown nos-wd:nos /run/nos && chmod 1770 /run/nos \
-    && chown nos:nos /var/lib/nos
+    && chown nos-wd:nos /var/lib/nos
 
 COPY --from=builder /app/target/release/nos-configd    /usr/local/bin/nos-configd
 COPY --from=builder /app/target/release/nos-bgpd       /usr/local/bin/nos-bgpd
@@ -83,8 +101,9 @@ COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-st
 # nos-restd needs CAP_NET_RAW for SO_BINDTODEVICE, to bind its HTTP listener
 # inside its routing table's VRF (see rest/CLAUDE.md).
 # nos-watchdogd runs as `nos-wd` and needs CAP_SETUID/CAP_SETGID to start every
-# child as `nos`; the children's own file capabilities above are computed at
-# their exec, so they are unaffected.
+# child as its role's user, and CAP_CHOWN to create their state directories; the
+# children's own file capabilities above are computed at their exec, so they
+# are unaffected.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libcap2-bin \
@@ -100,7 +119,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-fdbd \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-restd \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-rtr-stub \
-    && setcap 'cap_setuid,cap_setgid=ep' /usr/local/bin/nos-watchdogd \
+    && setcap 'cap_setuid,cap_setgid,cap_chown=ep' /usr/local/bin/nos-watchdogd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
@@ -116,4 +135,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The `cli` compose service and `nos-e2e`'s execs run as `nos` (group `nos`
 # reaches the 0660 sockets).
 USER nos-wd
-ENTRYPOINT ["nos-watchdogd", "--child-uid", "991", "--child-gid", "991"]
+ENTRYPOINT ["nos-watchdogd", "--child-gid", "991"]
