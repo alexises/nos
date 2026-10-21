@@ -1605,6 +1605,21 @@ fn virtual_link_spec(flag: &str, spec: &str) -> anyhow::Result<(Ipv4Addr, Ipv4Ad
     Ok((area_id, router_id))
 }
 
+/// Label of the admin key holding `--bfd-auth`'s secret (#510): derived from
+/// the profile, so re-provisioning a new secret rotates it in place.
+fn bfd_key_label() -> String {
+    format!("bfd-{BFD_PROFILE}")
+}
+
+/// `--bfd-auth` as the profile stores it: the flag's secret swapped for the
+/// label of the key `build_ops` creates.
+fn labelled_bfd_auth(a: &nos_proto::schema::BfdAuth) -> nos_proto::schema::BfdAuth {
+    nos_proto::schema::BfdAuth {
+        key: bfd_key_label(),
+        ..a.clone()
+    }
+}
+
 /// `--bfd-auth <method>:<key-id>:<secret>`.
 fn parse_bfd_auth(s: &str) -> Result<nos_proto::schema::BfdAuth, String> {
     use nos_proto::schema::{BfdAuth, BfdAuthMethod as M};
@@ -1841,7 +1856,7 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             ],
             args.bfd_auth
                 .as_ref()
-                .map(|a| serde_json::to_string(a).expect("BfdAuth serializes")),
+                .map(|a| serde_json::to_string(&labelled_bfd_auth(a)).expect("BfdAuth serializes")),
         ));
     }
     v.extend(sbfd_static_paths(args));
@@ -2165,7 +2180,7 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             .iter_mut()
             .filter(|p| p.name == BFD_PROFILE)
         {
-            p.auth.clone_from(&args.bfd_auth);
+            p.auth = args.bfd_auth.as_ref().map(labelled_bfd_auth);
         }
     }
     if !args.sbfd_static_route.is_empty() {
@@ -3215,6 +3230,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::User(UserOp::SetPassword {
             name: name.clone(),
             password: password.clone(),
+        }));
+    }
+
+    // ponytail: `--no-bfd-auth` leaves the key in the keystore (unreferenced).
+    if let Some(a) = &args.bfd_auth {
+        ops.push(ConfigOp::Admin(AdminOp::SetKey {
+            label: bfd_key_label(),
+            secret: a.key.clone(),
         }));
     }
 
@@ -5087,8 +5110,19 @@ mod tests {
         assert_eq!(path, ["bfd-profile", "fast", "auth"]);
         assert_eq!(
             value.as_deref(),
-            Some(r#"{"key_id":1,"method":"KeyedMd5","key":"k"}"#)
+            Some(r#"{"key_id":1,"method":"KeyedMd5","key":"bfd-fast"}"#)
         );
+        // The secret itself goes to the keystore, under that label.
+        let ops = build_ops(&args).unwrap();
+        assert!(ops.contains(&ConfigOp::Admin(AdminOp::SetKey {
+            label: "bfd-fast".into(),
+            secret: "k".into(),
+        })));
+        let mut cfg = nos_proto::Config::default();
+        for op in &ops {
+            op.apply(&mut cfg).unwrap();
+        }
+        assert_eq!(cfg.key("bfd-fast"), Some("k"));
     }
 
     #[test]

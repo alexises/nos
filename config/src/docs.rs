@@ -1593,7 +1593,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::BfdProfileAuth => (
             "Set BFD authentication.",
-            "Key id, method (simple-password, keyed-md5, meticulous-md5, keyed-sha1, meticulous-sha1) and key. Key length limits follow RFC 5880: 1 to 16 bytes for a password or an MD5 key, 1 to 20 for a SHA1 key. The key is stored in clear text. Unset means no authentication.",
+            "Key id, method (simple-password, keyed-md5, meticulous-md5, keyed-sha1, meticulous-sha1) and the label of an admin key holding the secret (`set admin key <label> secret <value>`). Secret length limits follow RFC 5880: 1 to 16 bytes for a password or an MD5 key, 1 to 20 for a SHA1 key. Unset means no authentication.",
         ),
         Topic::BfdProfileEchoMode => (
             "Set the BFD Echo function mode.",

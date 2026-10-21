@@ -6,14 +6,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nos_proto::schema::{BfdAuthMethod, BfdProfile, EchoMode};
+
 use nos_proto::{BfdDiag, BfdSessionKind, BfdState, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::auth::{AuthError, AuthState};
+use crate::auth::{AuthError, AuthKey, AuthState};
 use crate::fsm::{self, Event};
 use crate::packet::Packet;
 use crate::timers::{Remote, Timers, SLOW_US};
+
+/// A profile and its resolved auth key: what a session task is told (#510).
+pub type Cmd = (BfdProfile, Option<AuthKey>);
 
 /// Where a session's packets leave: one connected UDP socket for real, a
 /// recorder in tests.
@@ -129,14 +133,14 @@ pub struct Core {
 const MS: u32 = 1000;
 
 impl Core {
-    pub fn new(profile: BfdProfile, local_disc: u32, now: Instant) -> Self {
+    pub fn new(profile: BfdProfile, key: Option<AuthKey>, local_disc: u32, now: Instant) -> Self {
         let timers = Timers::new(
             profile.min_tx_interval * MS,
             profile.min_rx_interval * MS,
             profile.detect_multiplier,
             now,
         );
-        let auth = AuthState::new(profile.auth.clone(), rand_u32(), now);
+        let auth = AuthState::new(key, rand_u32(), now);
         let mut core = Core {
             profile,
             state: BfdState::Down,
@@ -342,13 +346,22 @@ impl Core {
     /// `Err` packet must be dropped: it neither refreshes the detection timer
     /// nor moves the state.
     pub fn authenticate(&mut self, now: Instant, p: &Packet) -> Result<(), AuthError> {
-        let r = self
-            .auth
-            .check(now, p.detect_mult, p.auth.as_ref(), self.detection_time());
+        let r = if self.unkeyed() {
+            Err(AuthError::NoKey)
+        } else {
+            self.auth
+                .check(now, p.detect_mult, p.auth.as_ref(), self.detection_time())
+        };
         if r.is_err() {
             self.auth_failures += 1;
         }
         r
+    }
+
+    /// The profile asks for authentication but its admin key could not be
+    /// resolved (#510): fail closed, neither accept nor send anything.
+    pub fn unkeyed(&self) -> bool {
+        self.profile.auth.is_some() && self.auth.cfg().is_none()
     }
 
     /// The wire bytes of an outgoing packet, signed when auth is configured.
@@ -490,6 +503,7 @@ impl Core {
     pub fn update_profile(
         &mut self,
         profile: BfdProfile,
+        key: Option<AuthKey>,
         now: Instant,
         rand_pct: u32,
     ) -> Option<Packet> {
@@ -497,7 +511,7 @@ impl Core {
         let was_down = profile.shutdown != self.profile.shutdown;
         self.timers.set_detect_mult(profile.detect_multiplier);
         let hold = self.detection_time().unwrap_or(Duration::from_secs(3));
-        self.auth.set(profile.auth.clone(), now, hold);
+        self.auth.set(key, now, hold);
         let shutdown = profile.shutdown;
         self.profile = profile;
         let moved = was_down
@@ -562,7 +576,7 @@ pub async fn run(
     tx: Arc<dyn Tx>,
     mut echo: Option<EchoPath>,
     mut pkts: mpsc::Receiver<Packet>,
-    mut cmds: mpsc::Receiver<BfdProfile>,
+    mut cmds: mpsc::Receiver<Cmd>,
     status: watch::Sender<Status>,
 ) {
     core.set_echo_path(echo.is_some());
@@ -587,7 +601,7 @@ pub async fn run(
                 None => break,
             },
             c = cmds.recv() => match c {
-                Some(c) => core.update_profile(c, now(), jitter_pct()),
+                Some((c, key)) => core.update_profile(c, key, now(), jitter_pct()),
                 None => break,
             },
             () = tokio::time::sleep_until(deadline) => core.on_timer(now(), jitter_pct()),
@@ -604,7 +618,7 @@ pub async fn run(
                 None
             }
         };
-        if let Some(p) = out {
+        if let Some(p) = out.filter(|_| !core.unkeyed()) {
             if let Err(e) = tx.send(&core.wire(now(), &p)) {
                 if e.raw_os_error() == Some(libc::EMSGSIZE) {
                     // RFC 9764: the padded packet does not fit the path; the
@@ -669,6 +683,16 @@ pub(crate) fn log_transition(key: &SessionKey, s: &Status) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test keystore: the secret of a label is the label text itself.
+    fn rk(p: &BfdProfile) -> Option<AuthKey> {
+        p.auth.as_ref().map(|a| AuthKey::new(a, &a.key))
+    }
+
+    fn core(p: BfdProfile, disc: u32, now: Instant) -> Core {
+        let k = rk(&p);
+        Core::new(p, k, disc, now)
+    }
     use std::time::Duration;
 
     fn profile(tx: u32, rx: u32) -> BfdProfile {
@@ -693,8 +717,8 @@ mod tests {
         fn new(pa: BfdProfile, pb: BfdProfile) -> Self {
             let now = Instant::now();
             Pair {
-                a: Core::new(pa, 1, now),
-                b: Core::new(pb, 2, now),
+                a: core(pa, 1, now),
+                b: core(pb, 2, now),
                 now,
                 echo_ok: true,
             }
@@ -798,7 +822,7 @@ mod tests {
         let mut p = Pair::new(profile(100, 100), profile(100, 100));
         p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
         let pkt =
-            p.a.update_profile(profile(50, 50), p.now, 100)
+            p.a.update_profile(profile(50, 50), rk(&profile(50, 50)), p.now, 100)
                 .expect("poll starts at once");
         assert!(pkt.poll);
         assert_eq!(pkt.desired_min_tx, 50_000);
@@ -826,7 +850,7 @@ mod tests {
             key: "k".into(),
         });
         // Unauthenticated: 1500 bytes, the 24 real ones first.
-        let mut c = Core::new(padded(1500, None), 1, now);
+        let mut c = core(padded(1500, None), 1, now);
         let p = c.on_timer(now, 100).expect("first packet");
         let w = c.wire(now, &p);
         assert_eq!(w.len(), 1500);
@@ -834,13 +858,13 @@ mod tests {
         assert_eq!(crate::packet::decode(&w).unwrap().my_discriminator, 1);
         assert_eq!(c.status().tx_pdu_bytes, 1500);
         // Below the minimum (here 24 + the 28-byte SHA1 section): raised, not truncated.
-        let mut c = Core::new(padded(24, sha1.clone()), 1, now);
+        let mut c = core(padded(24, sha1.clone()), 1, now);
         let p = c.on_timer(now, 100).expect("first packet");
         assert_eq!(c.wire(now, &p).len(), 52);
         // Authenticated and padded: the digest covers `length` bytes only.
         let (mut a, mut b) = (
-            Core::new(padded(300, sha1.clone()), 1, now),
-            Core::new(padded(24, sha1), 2, now),
+            core(padded(300, sha1.clone()), 1, now),
+            core(padded(24, sha1), 2, now),
         );
         let p = a.on_timer(now, 100).expect("first packet");
         let w = a.wire(now, &p);
@@ -849,7 +873,7 @@ mod tests {
         let d = crate::packet::decode(&w).unwrap();
         assert!(b.authenticate(now, &d).is_ok());
         // Nothing to pad by default.
-        let mut c = Core::new(profile(100, 100), 1, now);
+        let mut c = core(profile(100, 100), 1, now);
         let p = c.on_timer(now, 100).expect("first packet");
         assert_eq!(c.wire(now, &p).len(), 24);
         assert_eq!(c.status().tx_pdu_bytes, 0);
@@ -937,7 +961,8 @@ mod tests {
         let mut p = echo_pair(echoing(100, 100, 50), echoing(100, 100, 50));
         p.run_until(|p| p.a.echo.is_some() && p.b.echo.is_some());
         p.run_until(|p| !p.a.timers.poll() && !p.b.timers.poll());
-        let pkt = p.a.update_profile(profile(100, 100), p.now, 100);
+        let pkt =
+            p.a.update_profile(profile(100, 100), rk(&profile(100, 100)), p.now, 100);
         assert!(p.a.echo.is_none());
         let pkt = pkt.expect("a Poll restores the control rate");
         assert!(pkt.poll && pkt.required_min_echo_rx == 0);
@@ -980,7 +1005,7 @@ mod tests {
     fn unaffiliated_goes_up_on_looped_packets_then_down_with_diag_2() {
         let t0 = Instant::now();
         let mut now = t0;
-        let mut c = Core::new(unaffiliated(50), 7, t0);
+        let mut c = core(unaffiliated(50), 7, t0);
         c.set_echo_path(true);
         let sent = run_unaffiliated(&mut c, &mut now, 8, true);
         assert_eq!(c.state, BfdState::Up, "Down -> Init -> Up on its own state");
@@ -1023,7 +1048,7 @@ mod tests {
     #[test]
     fn unaffiliated_detects_within_interval_times_multiplier() {
         let mut now = Instant::now();
-        let mut c = Core::new(unaffiliated(50), 7, now);
+        let mut c = core(unaffiliated(50), 7, now);
         c.set_echo_path(true);
         run_unaffiliated(&mut c, &mut now, 8, true);
         assert_eq!(c.state, BfdState::Up);
@@ -1038,8 +1063,8 @@ mod tests {
     #[test]
     fn unaffiliated_ignores_control_and_needs_a_path() {
         let now = Instant::now();
-        let mut c = Core::new(unaffiliated(50), 7, now);
-        let theirs = Core::new(profile(100, 100), 9, now).packet(false);
+        let mut c = core(unaffiliated(50), 7, now);
+        let theirs = core(profile(100, 100), 9, now).packet(false);
         assert!(c.on_packet(now, &theirs, 100).is_none());
         assert_eq!(c.remote_disc, 0, "a peer's Control packet teaches nothing");
         // No transport: nothing is sent, nothing spins.
@@ -1064,6 +1089,20 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_whose_key_is_missing_is_unkeyed_and_rejects_everything() {
+        let now = Instant::now();
+        let prof = authed("gone", 1);
+        let mut c = Core::new(prof.clone(), None, 1, now);
+        assert!(c.unkeyed());
+        let pkt = core(profile(100, 100), 2, now).packet(false);
+        assert_eq!(c.authenticate(now, &pkt), Err(AuthError::NoKey));
+        assert_eq!(c.status().auth_failures, 1);
+        // The key shows up with an edit: keyed again.
+        c.update_profile(prof.clone(), rk(&prof), now, 100);
+        assert!(!c.unkeyed());
+    }
+
+    #[test]
     fn matching_keys_reach_up_and_a_key_change_does_not_flap() {
         let mut p = Pair::new(authed("a", 1), authed("a", 1));
         p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
@@ -1071,8 +1110,10 @@ mod tests {
         assert_eq!(p.a.status().auth_key_id, Some(1));
         // Both ends switch at once (new id and secret); the old key covers
         // whatever crosses on the wire meanwhile.
-        let pa = p.a.update_profile(authed("b", 2), p.now, 100);
-        let pb = p.b.update_profile(authed("b", 2), p.now, 100);
+        let pa =
+            p.a.update_profile(authed("b", 2), rk(&authed("b", 2)), p.now, 100);
+        let pb =
+            p.b.update_profile(authed("b", 2), rk(&authed("b", 2)), p.now, 100);
         for (from_a, pkt) in [(true, pa), (false, pb)] {
             if let Some(pkt) = pkt {
                 Pair::deliver(p.now, from_a, &mut p.a, &mut p.b, pkt);
@@ -1112,7 +1153,9 @@ mod tests {
         p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
         let mut down = profile(100, 100);
         down.shutdown = true;
-        let pkt = p.a.update_profile(down, p.now, 100).unwrap();
+        let pkt =
+            p.a.update_profile(down.clone(), rk(&down), p.now, 100)
+                .unwrap();
         assert_eq!(pkt.state, BfdState::AdminDown);
         assert_eq!(p.a.diag, BfdDiag::AdministrativelyDown);
         Pair::deliver(p.now, true, &mut p.a, &mut p.b, pkt);
@@ -1120,7 +1163,7 @@ mod tests {
         assert_eq!(p.b.diag, BfdDiag::NeighborSignaledSessionDown);
         // AdminDown ignores the peer; removal brings it back to Down.
         assert!(p.a.on_packet(p.now, &p.b.packet(false), 100).is_none());
-        p.a.update_profile(profile(100, 100), p.now, 100);
+        p.a.update_profile(profile(100, 100), rk(&profile(100, 100)), p.now, 100);
         assert_eq!(p.a.state, BfdState::Down);
         p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
     }
@@ -1129,16 +1172,16 @@ mod tests {
     fn started_in_shutdown_and_passive() {
         let mut sd = profile(100, 100);
         sd.shutdown = true;
-        let c = Core::new(sd, 7, Instant::now());
+        let c = core(sd, 7, Instant::now());
         assert_eq!(c.state, BfdState::AdminDown);
 
         let mut passive = profile(100, 100);
         passive.passive = true;
         let now = Instant::now();
-        let mut c = Core::new(passive, 7, now);
+        let mut c = core(passive, 7, now);
         assert!(c.on_timer(now, 100).is_none(), "passive stays silent");
         // Learning the remote discriminator ends the silence.
-        let first = Core::new(profile(100, 100), 9, now).packet(false);
+        let first = core(profile(100, 100), 9, now).packet(false);
         let reply = c.on_packet(now, &first, 100).expect("state moved");
         assert_eq!(reply.your_discriminator, 9);
     }
@@ -1146,8 +1189,8 @@ mod tests {
     #[test]
     fn foreign_discriminator_is_dropped() {
         let now = Instant::now();
-        let mut c = Core::new(profile(100, 100), 7, now);
-        let mut p = Core::new(profile(100, 100), 9, now).packet(false);
+        let mut c = core(profile(100, 100), 7, now);
+        let mut p = core(profile(100, 100), 9, now).packet(false);
         p.your_discriminator = 8;
         assert!(c.on_packet(now, &p, 100).is_none());
         assert_eq!(c.remote_disc, 0);
@@ -1156,8 +1199,8 @@ mod tests {
     #[test]
     fn remote_min_rx_zero_silences_us() {
         let now = Instant::now();
-        let mut c = Core::new(profile(100, 100), 7, now);
-        let mut p = Core::new(profile(100, 100), 9, now).packet(false);
+        let mut c = core(profile(100, 100), 7, now);
+        let mut p = core(profile(100, 100), 9, now).packet(false);
         p.required_min_rx = 0;
         c.on_packet(now, &p, 100);
         assert!(c.on_timer(now + Duration::from_secs(5), 100).is_none());

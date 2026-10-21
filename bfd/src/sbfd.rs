@@ -366,7 +366,7 @@ pub async fn run(
     mut core: Initiator,
     mut path: SbfdPath,
     mut min_ttl: u8,
-    mut cmds: mpsc::Receiver<BfdProfile>,
+    mut cmds: mpsc::Receiver<session::Cmd>,
     status: watch::Sender<Status>,
 ) {
     let mut last = core.status();
@@ -385,7 +385,8 @@ pub async fn run(
                 None => break,
             },
             c = cmds.recv() => match c {
-                Some(c) => {
+                // S-BFD carries no auth (`sbfd_compatible`): the key is dropped.
+                Some((c, _)) => {
                     min_ttl = c.minimum_ttl;
                     core.update(&c, remote_discriminator(key.peer, &c), now());
                     None

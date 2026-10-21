@@ -280,9 +280,9 @@ mod tests {
         let cfg = BfdAuth {
             key_id: 4,
             method: BfdAuthMethod::KeyedSha1,
-            key: "k".into(),
+            key: "label".into(),
         };
-        let w = auth::sign(&pkt().encode(), &cfg, 77);
+        let w = auth::sign(&pkt().encode(), &auth::AuthKey::new(&cfg, "k"), 77);
         let p = decode(&w).unwrap();
         let s = p.auth.as_ref().unwrap();
         assert_eq!((s.kind, s.key_id, s.seq), (4, 4, 77));

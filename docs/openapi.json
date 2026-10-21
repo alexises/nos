@@ -67,7 +67,7 @@
         "description": "RFC 5880 §4.2/§4.3 authentication section: the method picks the\n`AuthType`, `key_id` is the wire Auth Key ID.",
         "properties": {
           "key": {
-            "description": "Shared secret, stored clear-text like every config value.",
+            "description": "Label of the admin key holding the shared secret.",
             "type": "string"
           },
           "key_id": {
@@ -129,7 +129,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/BfdAuth",
-                "description": "`None` is RFC 5880 `AuthType` 0: no authentication. Secrets are\nstored clear-text, like `BgpAuth`."
+                "description": "`None` is RFC 5880 `AuthType` 0: no authentication. The key is a\nlabel of the admin keystore, never an inline secret."
               },
               {
                 "type": "null"
@@ -8603,7 +8603,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BfdAuth",
-                  "description": "`None` is RFC 5880 `AuthType` 0: no authentication. Secrets are\nstored clear-text, like `BgpAuth`."
+                  "description": "`None` is RFC 5880 `AuthType` 0: no authentication. The key is a\nlabel of the admin keystore, never an inline secret."
                 }
               }
             },
@@ -8652,7 +8652,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BfdAuth",
-                "description": "`None` is RFC 5880 `AuthType` 0: no authentication. Secrets are\nstored clear-text, like `BgpAuth`."
+                "description": "`None` is RFC 5880 `AuthType` 0: no authentication. The key is a\nlabel of the admin keystore, never an inline secret."
               }
             }
           },
@@ -8664,7 +8664,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BfdAuth",
-                  "description": "`None` is RFC 5880 `AuthType` 0: no authentication. Secrets are\nstored clear-text, like `BgpAuth`."
+                  "description": "`None` is RFC 5880 `AuthType` 0: no authentication. The key is a\nlabel of the admin keystore, never an inline secret."
                 }
               }
             },
@@ -8718,7 +8718,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Shared secret, stored clear-text like every config value.",
+                  "description": "Label of the admin key holding the shared secret.",
                   "type": "string"
                 }
               }
@@ -8767,7 +8767,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Shared secret, stored clear-text like every config value.",
+                "description": "Label of the admin key holding the shared secret.",
                 "type": "string"
               }
             }
@@ -8779,7 +8779,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Shared secret, stored clear-text like every config value.",
+                  "description": "Label of the admin key holding the shared secret.",
                   "type": "string"
                 }
               }
