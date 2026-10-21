@@ -515,12 +515,14 @@ impl Identity {
             std::fs::remove_file(path)?;
         }
         let inner = UnixListener::bind(path)?;
-        // The socket is created with the process umask; restrict it to the
-        // daemon's uid before any accept. A socket we cannot restrict must
-        // not serve. ponytail: a brief bind-to-chmod window at umask mode
-        // (no safe umask API); /run/nos is owner-only, upgrade to a umask
-        // guard if sockets ever live elsewhere.
-        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        // The socket is created with the process umask; set it to 0660 (group
+        // `nos`, which every NOS uid has as primary group: the watchdog runs
+        // on another uid than its children and must `connect()`) before any
+        // accept. A socket we cannot set must not serve; mTLS is the gate.
+        // ponytail: a brief bind-to-chmod window at umask mode (no safe umask
+        // API); /run/nos is 1770 so only `nos-wd:nos` reach it, upgrade to a
+        // umask guard if sockets ever live elsewhere.
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o660))?;
         Ok(Listener {
             inner,
             identity: self.0.clone(),

@@ -167,16 +167,16 @@ async fn anonymous_clients_only_reach_the_optional_auth_socket() {
 }
 
 #[tokio::test]
-async fn ipc_sockets_are_owner_only() {
+async fn ipc_sockets_are_group_readable_for_the_nos_group() {
     use std::os::unix::fs::PermissionsExt;
     let mode = |p: &PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     let (_g, path) = sock("perm.sock");
     let id = TestPki::new().identity("ribd", "rt1");
     let _l = id.listen(&path).unwrap();
-    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&path), 0o660);
     // Re-binding over a stale file, and the optional-client-auth variant.
     let _l2 = id.listen_optional_client_auth(&path).unwrap();
-    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&path), 0o660);
 }
 
 #[test]

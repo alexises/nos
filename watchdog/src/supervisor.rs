@@ -30,6 +30,9 @@ pub struct ProcessSpec {
     /// (and rotations after it). `None` only for tests that supervise
     /// `/bin/true`; every real daemon has one.
     pub identity: Option<SpawnIdentity>,
+    /// `Some((uid, gid))`: the child runs as that user (set before exec, so
+    /// its file capabilities still apply). `None`: it inherits ours.
+    pub uid: Option<(u32, u32)>,
 }
 
 /// Which certificate a child is issued: `nos://<role>/<name>`.
@@ -53,7 +56,14 @@ impl ProcessSpec {
             program: program.into(),
             args,
             identity: None,
+            uid: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_uid(mut self, uid: Option<(u32, u32)>) -> Self {
+        self.uid = uid;
+        self
     }
 
     #[must_use]
@@ -135,12 +145,21 @@ pub async fn supervise_one(
     let mut consecutive_crashes: u32 = 0;
 
     while !*shutdown.borrow() {
-        info!(process = %spec.name, program = %spec.program.display(), "starting");
+        info!(
+            process = %spec.name,
+            program = %spec.program.display(),
+            uid = spec.uid.map(|i| i.0),
+            gid = spec.uid.map(|i| i.1),
+            "starting"
+        );
         let start = Instant::now();
 
         let mut command = Command::new(&spec.program);
         command.args(&spec.args);
         command.env_clear().envs(allowed_env(std::env::vars_os()));
+        if let Some((uid, gid)) = spec.uid {
+            command.uid(uid).gid(gid);
+        }
         if spec.identity.is_some() {
             command.stdin(Stdio::piped());
         }
@@ -342,6 +361,29 @@ mod backoff_tests {
             assert!(d > p.base);
             d = p.grow(d);
         }
+    }
+
+    #[test]
+    fn with_uid_sets_the_child_user_and_defaults_to_none() {
+        let s = ProcessSpec::new("x", "/bin/true", vec![]);
+        assert_eq!(s.uid, None);
+        assert_eq!(s.with_uid(Some((991, 992))).uid, Some((991, 992)));
+    }
+
+    /// A child spawned with our own uid/gid still runs (an unprivileged
+    /// `setuid` to oneself is allowed), and the `starting` path takes it.
+    #[tokio::test]
+    async fn a_child_spawns_with_an_explicit_uid() {
+        use std::os::unix::fs::MetadataExt;
+        let me = std::fs::metadata("/proc/self").unwrap();
+        let ids = (me.uid(), me.gid());
+        let spec = ProcessSpec::new("t", "/bin/sleep", vec!["30".into()]).with_uid(Some(ids));
+        let (tx, rx) = watch::channel(false);
+        let task = tokio::spawn(supervise_one(spec, BackoffPolicy::default(), rx));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!task.is_finished(), "the child must be running");
+        tx.send(true).unwrap();
+        task.await.unwrap();
     }
 
     #[test]

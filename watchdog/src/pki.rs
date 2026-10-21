@@ -102,6 +102,8 @@ impl Pki {
         let ca = Ca::new(KeyAlg::MlDsa65)?;
         let rest_ca = Ca::new(KeyAlg::EcdsaP256)?;
         std::fs::create_dir_all(dir)?;
+        // Public certs and the CRL only: any uid may read them (`nos` clients).
+        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
         publish(dir, "ca.crt", &ca.cert_pem())?;
         publish(dir, "rest-ca.crt", &rest_ca.cert_pem())?;
 
