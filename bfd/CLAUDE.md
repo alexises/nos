@@ -27,7 +27,7 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 ## Rules that bite
 
 - `decode` never panics: use `get`/`try_into`, never index untrusted bytes.
-- Auth (#289): `Core::authenticate` before `on_packet`, `Core::sign` on every send; a failed packet must not reach the FSM or timers. A profile edit keeps the old key valid for 4 detection times. S-BFD reflector auth is a follow-up.
+- Auth (#289): `Core::authenticate` before `on_packet`, `Core::sign` on every send; a failed packet must not reach the FSM or timers. A profile edit keeps the old key valid for 4 detection times. Keys (#510): `BfdAuth.key` is an admin label resolved only in `nos-bfdd` (`Manager::resolve`/`set_keys`, `AuthKey` hides the secret); unresolved = fail closed (`Core::unkeyed`), never unauthenticated. S-BFD reflector auth is a follow-up.
 - `timers` and `Core` take `now` and the jitter percentage as arguments; only `session::run` reads the clock.
 - Discriminators come from the manager's counter (random start), never 0.
 - `BfdRequest`/`BfdEvent` variants are appended, never reordered (postcard). A new `BfdRequest` must be classified in `authz::allowed`.
@@ -37,7 +37,7 @@ Wire types are in `nos-proto::bfd`; `ServiceRef::Bfd` / `Role::Bfdd` in `broker`
 - S-BFD (#294, RFC 7880/7881): `mode sbfd` makes a session an `Initiator` with no `Demux` slot; its own connected socket (source port other than 7784) receives the reflection, TTL checked in `sbfd::run`. The reflector (`Reflector`, UDP 7784 per VRF, only while a discriminator is configured) answers from the probed address via `IP_PKTINFO`, drops D=0, A bit, source port 7784, martians, non-`allow-from` and over-rate packets, and counts each. Authentication is not built for S-BFD (follow-up after #289); the reflector discards A-bit packets.
 - Unsolicited (#295, RFC 9468): `Subinterface.bfd_unsolicited` becomes a `Rule` (`Manager::set_unsolicited`, fed by the config resync); `Demux::route_on` calls a hook for a single-hop Your Discriminator 0 packet no session claims, `Manager::unsolicited_rx` creates a client-less passive session (`Entry.unsolicited`, key interface = the kernel device, source must be in the subinterface subnet, TTL 255, cap 256). `sweep_loop` deletes one not Up for 60 s; a client registering the peer adopts it. Log anchors `bfd unsolicited session created|aged out peer=`, `removed: no longer configured`.
 - Desired Min TX is floored at 1 s while not Up by `Timers` itself; reaching Up needs no `change`.
-- The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` follows only `Interfaces`/`PortAggregates`/`BfdProfiles` diffs (micro-BFD) and `SbfdReflector`/`RoutingTables` (the reflector).
+- The profile travels in `Register`; a re-`Register` with a changed profile runs Poll/Final (no flap), `shutdown` goes AdminDown. `nos-bfdd` follows only `Interfaces`/`PortAggregates`/`BfdProfiles`/`Admin` diffs (micro-BFD, auth keys) and `SbfdReflector`/`RoutingTables` (the reflector).
 - A client's connection drop releases its sessions; the last client drops the session. Request-side EOF ends the connection (`ponytail:` in `server.rs`).
 - A TX socket must bind an explicit source address (`socket::local_for`): bound to a VRF with a wildcard source the kernel sends from 0.0.0.0.
 - RX: UDP 3784 per (table, family) bound to the VRF; TTL must be exactly 255. Demux is by Your Discriminator, else (table, source address): no interface in the key (`ponytail:` in `manager.rs`).

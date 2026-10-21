@@ -1,6 +1,7 @@
 //! RFC 5880 §4.2-4.4 / §6.7 authentication: the wire section, the digests and
 //! the per-session sequence state. Pure: the clock comes in as an argument.
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use md5::Md5;
@@ -18,6 +19,35 @@ const OLD_KEY_DETECTIONS: u32 = 4;
 /// §6.7.3: `AuthSeqKnown` is cleared after this many detection times of silence.
 const SILENCE_DETECTIONS: u32 = 2;
 
+/// A profile's `BfdAuth` with its admin-key label resolved to the secret
+/// (#510). Runtime only: never serialized, `Debug` hides the secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthKey {
+    pub key_id: u8,
+    pub method: BfdAuthMethod,
+    secret: Vec<u8>,
+}
+
+impl AuthKey {
+    pub fn new(a: &BfdAuth, secret: &str) -> Self {
+        AuthKey {
+            key_id: a.key_id,
+            method: a.method,
+            secret: secret.as_bytes().to_vec(),
+        }
+    }
+}
+
+impl fmt::Debug for AuthKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthKey")
+            .field("key_id", &self.key_id)
+            .field("method", &self.method)
+            .field("secret", &"<hidden>")
+            .finish()
+    }
+}
+
 /// An authentication section as received: `data` is the password or the
 /// digest, `raw` the whole packet (the digest is over it).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +63,8 @@ pub struct AuthSection {
 /// Why a received packet failed §6.7.2 (it is dropped, not counted as heard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum AuthError {
+    #[error("authentication configured but its admin key is not available")]
+    NoKey,
     #[error("authentication bit set but no authentication configured")]
     Unexpected,
     #[error("authentication configured but the authentication bit is clear")]
@@ -114,9 +146,9 @@ fn digest(kind: u8, secret: &[u8], pkt: &[u8]) -> Vec<u8> {
 }
 
 /// Appends the authentication section for `cfg` to the 24-byte `hdr`.
-pub fn sign(hdr: &[u8], cfg: &BfdAuth, seq: u32) -> Vec<u8> {
+pub fn sign(hdr: &[u8], cfg: &AuthKey, seq: u32) -> Vec<u8> {
     let kind = wire_type(cfg.method);
-    let key = cfg.key.as_bytes();
+    let key = &cfg.secret[..];
     let mut b = hdr.to_vec();
     b[1] |= FLAG_AUTH;
     if kind == 1 {
@@ -155,9 +187,9 @@ fn seq_ok(kind: u8, rcv: u32, seq: u32, mult: u8) -> bool {
 /// One session's authentication state.
 #[derive(Debug)]
 pub struct AuthState {
-    cfg: Option<BfdAuth>,
+    cfg: Option<AuthKey>,
     /// The key before the last change and until when it is still accepted.
-    old: Option<(BfdAuth, Instant)>,
+    old: Option<(AuthKey, Instant)>,
     rcv_seq: u32,
     seq_known: bool,
     last_ok: Option<Instant>,
@@ -166,7 +198,7 @@ pub struct AuthState {
 }
 
 impl AuthState {
-    pub fn new(cfg: Option<BfdAuth>, xmit_seq: u32, now: Instant) -> Self {
+    pub fn new(cfg: Option<AuthKey>, xmit_seq: u32, now: Instant) -> Self {
         AuthState {
             cfg,
             old: None,
@@ -178,18 +210,18 @@ impl AuthState {
         }
     }
 
-    pub fn cfg(&self) -> Option<&BfdAuth> {
+    pub fn cfg(&self) -> Option<&AuthKey> {
         self.cfg.as_ref()
     }
 
     /// A profile edit: the new key signs from now on, the old one is still
     /// accepted for 4 detection times so a peer applying the change a little
     /// later keeps the session Up. A method change opens a new sequence space.
-    pub fn set(&mut self, cfg: Option<BfdAuth>, now: Instant, detect: Duration) {
+    pub fn set(&mut self, cfg: Option<AuthKey>, now: Instant, detect: Duration) {
         if cfg == self.cfg {
             return;
         }
-        let method = |c: &Option<BfdAuth>| c.as_ref().map(|a| a.method);
+        let method = |c: &Option<AuthKey>| c.as_ref().map(|a| a.method);
         if method(&cfg) != method(&self.cfg) {
             self.seq_known = false;
         }
@@ -225,8 +257,8 @@ impl AuthState {
             return Err(AuthError::Missing);
         };
         let old = self.old.as_ref().filter(|(_, until)| *until > now);
-        let keys: Vec<&BfdAuth> = std::iter::once(cfg).chain(old.map(|(k, _)| k)).collect();
-        let keys: Vec<&BfdAuth> = {
+        let keys: Vec<&AuthKey> = std::iter::once(cfg).chain(old.map(|(k, _)| k)).collect();
+        let keys: Vec<&AuthKey> = {
             let typed: Vec<_> = keys
                 .into_iter()
                 .filter(|k| wire_type(k.method) == s.kind)
@@ -241,9 +273,9 @@ impl AuthState {
         }
         let genuine = keys.iter().any(|k| {
             let want = if s.kind == 1 {
-                k.key.as_bytes().to_vec()
+                k.secret.clone()
             } else {
-                digest(s.kind, k.key.as_bytes(), &s.raw)
+                digest(s.kind, &k.secret, &s.raw)
             };
             ct_eq(&want, &s.data)
         });
@@ -317,12 +349,15 @@ mod tests {
         h
     }
 
-    fn cfg(method: BfdAuthMethod, id: u8, key: &str) -> BfdAuth {
-        BfdAuth {
-            key_id: id,
-            method,
-            key: key.into(),
-        }
+    fn cfg(method: BfdAuthMethod, id: u8, key: &str) -> AuthKey {
+        AuthKey::new(
+            &BfdAuth {
+                key_id: id,
+                method,
+                key: "label".into(),
+            },
+            key,
+        )
     }
 
     use BfdAuthMethod::*;
@@ -377,6 +412,13 @@ mod tests {
 
     fn rx(st: &mut AuthState, now: Instant, w: &[u8]) -> Result<(), AuthError> {
         st.check(now, 3, parse(w).as_ref(), Some(Duration::from_secs(1)))
+    }
+
+    #[test]
+    fn auth_key_debug_hides_the_secret() {
+        let k = cfg(KeyedMd5, 3, "hunter2");
+        let d = format!("{k:?}");
+        assert!(!d.contains("hunter2") && d.contains("hidden"), "{d}");
     }
 
     #[test]

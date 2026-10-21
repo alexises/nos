@@ -3,9 +3,13 @@
 use reqwest::Method;
 
 use super::bfd::{bfd_route, session_is};
+use super::bgp::no_leak;
 use crate::consts::*;
 use crate::router::{log, strings, Router, A, B};
 use crate::world::World;
+
+/// The secret every step starts from: distinctive, so a leak is greppable.
+const MARKER: &str = "s3cr3t-bfd-marker";
 
 /// Profile flags: `meticulous-sha1`-style `method`, key id and secret, with
 /// 5 s intervals (15 s detection) so two sequential REST edits fit in one
@@ -42,7 +46,7 @@ async fn shows_auth(w: &World, method: &str, key_id: u8) -> anyhow::Result<()> {
             "{}: expected {method} key {key_id}: {body}",
             r.name()
         );
-        for secret in ["s3cret", "wrong", "n3w"] {
+        for secret in [MARKER, "wrong", "n3w"] {
             anyhow::ensure!(
                 !body.contains(secret),
                 "{}: leaks the key: {body}",
@@ -65,10 +69,10 @@ async fn shows_auth(w: &World, method: &str, key_id: u8) -> anyhow::Result<()> {
 pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
     fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
-    fa.extend(auth("meticulous-sha1", 1, "s3cret"));
+    fa.extend(auth("meticulous-sha1", 1, MARKER));
     let mut fb = B.base_flags();
     fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
-    fb.extend(auth("meticulous-sha1", 1, "s3cret"));
+    fb.extend(auth("meticulous-sha1", 1, MARKER));
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(fb), &[]).await?;
     let (a, b) = (w.a()?, w.b()?);
@@ -96,9 +100,25 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     );
 
     log("the secret restored: Up again");
-    a.provision(&auth("meticulous-sha1", 1, "s3cret")).await?;
+    a.provision(&auth("meticulous-sha1", 1, MARKER)).await?;
     a.wait_new(&up_a, n_up, 30).await?;
     session_is(a, IP_B, "Up", None, 10).await?;
+
+    log("the secret lives in the admin keystore only: not in the config view, not in any log (#510)");
+    for r in [a, b] {
+        no_leak(r, &[MARKER]).await?;
+    }
+
+    log("rotating the secret under the same admin label on both: no flap");
+    let rotated = "r0tated-bfd-marker";
+    let (n_down_a, n_down_b) = (a.count(&down_a), b.count(&down_b));
+    both(a, b, &auth("meticulous-sha1", 1, rotated)).await?;
+    a.assert_quiet(&down_a, n_down_a, 20).await?;
+    b.assert_quiet(&down_b, n_down_b, 0).await?;
+    session_is(a, IP_B, "Up", None, 10).await?;
+    for r in [a, b] {
+        no_leak(r, &[MARKER, rotated]).await?;
+    }
 
     log("live key change on both (id 2, new secret), then the method (keyed-md5, id 3): no flap");
     let (n_down_a, n_down_b) = (a.count(&down_a), b.count(&down_b));

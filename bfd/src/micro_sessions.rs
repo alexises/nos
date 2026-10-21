@@ -225,6 +225,8 @@ pub async fn run(
         // The S-BFD reflector (#294) rides on the same resync.
         DiffScope::SbfdReflector,
         DiffScope::RoutingTables,
+        // Profile auth keys are admin-keystore labels (#510).
+        DiffScope::Admin,
     ];
     while !*shutdown.borrow() {
         match nos_daemon::config::subscribe_diff(&config_socket, scopes.clone()).await {
@@ -268,6 +270,14 @@ pub async fn run(
 async fn resync(config_socket: &Path, micro: &mut Micro, reflector: &ReflectorNet) {
     match nos_daemon::config::fetch_config(config_socket).await {
         Ok(cfg) => {
+            // Keys first: sessions started below resolve their labels at once.
+            micro.mgr.set_keys(
+                cfg.admin
+                    .keys
+                    .iter()
+                    .map(|k| (k.label.clone(), k.secret.clone()))
+                    .collect(),
+            );
             let wanted = wanted(&cfg);
             debug!(sessions = wanted.len(), "reconciling micro-bfd sessions");
             micro.apply(wanted).await;

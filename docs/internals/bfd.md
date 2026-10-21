@@ -30,6 +30,9 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - Replay window: keyed accepts `[RcvAuthSeq, RcvAuthSeq + 3 x DetectMult]`, meticulous `(RcvAuthSeq, ...]`, wrap-aware; unknown (`AuthSeqKnown` false) accepts any, and silence of 2 detection times forgets it.
 - `XmitAuthSeq` starts random; meticulous bumps it per packet, keyed once per detection time.
 - A profile edit goes through `AuthState::set`: the new key signs at once, the previous one stays acceptable for 4 detection times; a method change resets `AuthSeqKnown`.
+- Keys (#510): `BfdAuth.key` is an admin-keystore label. `nos-bfdd` is the only resolver (clients send the profile with the label; no secret on the BFD IPC): `Manager.keys` is filled by `micro_sessions::resync` from `Config.admin` (subscribed to `DiffScope::Admin`), `Manager::resolve` turns a profile into an `AuthKey` (runtime type, `Debug` hides the secret) that `Core::new`/`update_profile` take next to the profile.
+- `Manager::set_keys` re-sends the stored profile with its new key to every authenticating session, so a rotation under the same label goes through `AuthState::set` (old key accepted for 4 detection times, no flap).
+- A label that does not resolve (config race) fails closed: `bfd auth key not found label=...` is logged, `Core::unkeyed` makes every received packet fail (`AuthError::NoKey`) and nothing is sent until the key arrives; it never falls back to no authentication.
 - `session::run` logs `bfd auth failed` (rate limited to one per 10 s per session); `Status` and `BfdSessionView` carry `auth_method`, `auth_key_id`, `auth_failures`.
 - Unit tests check digests against an independent re-implementation of the RFC recipe in `auth.rs` tests. `ponytail:` no FRR positive proof: FRR `bfdd` has no §6.7 support, so `nos-e2e`'s `bfd-auth` only proves the negative case against it.
 - #294 (S-BFD) will add reflector authentication on top of this module.

@@ -84,10 +84,10 @@ pub struct BfdProfile {
     #[cli(topic = BfdProfileShutdown, words = "shutdown enable", alias = "shutdown")]
     pub shutdown: bool,
 
-    /// `None` is RFC 5880 `AuthType` 0: no authentication. Secrets are
-    /// stored clear-text, like `BgpAuth`.
+    /// `None` is RFC 5880 `AuthType` 0: no authentication. The key is a
+    /// label of the admin keystore, never an inline secret.
     #[serde(default)]
-    #[garde(custom(|a: &Option<BfdAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
+    #[garde(custom(|a: &Option<BfdAuth>, ctx: &Config| valid_auth(a.as_ref(), ctx)))]
     #[cli(topic = BfdProfileAuth)]
     pub auth: Option<BfdAuth>,
 
@@ -230,7 +230,7 @@ pub struct BfdAuth {
     /// Mechanism, which fixes the `AuthType` on the wire.
     pub method: BfdAuthMethod,
     #[cli(topic = BfdProfileAuth)]
-    /// Shared secret, stored clear-text like every config value.
+    /// Label of the admin key holding the shared secret.
     pub key: String,
 }
 
@@ -256,7 +256,7 @@ pub enum BfdAuthMethod {
     MeticulousSha1,
 }
 
-fn valid_auth(auth: Option<&BfdAuth>) -> garde::Result {
+fn valid_auth(auth: Option<&BfdAuth>, cfg: &Config) -> garde::Result {
     let Some(a) = auth else { return Ok(()) };
     // RFC 5880 §4.2 (password 1..16 bytes), §4.3 (MD5 key 1..16, SHA1 1..20).
     let max = match a.method {
@@ -265,9 +265,16 @@ fn valid_auth(auth: Option<&BfdAuth>) -> garde::Result {
         }
         BfdAuthMethod::KeyedSha1 | BfdAuthMethod::MeticulousSha1 => 20,
     };
-    if a.key.is_empty() || a.key.len() > max {
+    let Some(secret) = cfg.key(&a.key) else {
         return Err(garde::Error::new(format!(
-            "bfd auth key must be 1 to {max} bytes long for this method"
+            "bfd auth references unknown admin key '{}'",
+            a.key
+        )));
+    };
+    if secret.is_empty() || secret.len() > max {
+        return Err(garde::Error::new(format!(
+            "admin key '{}' must be 1 to {max} bytes long to be used as a bfd auth key for this method",
+            a.key
         )));
     }
     Ok(())
@@ -285,9 +292,20 @@ mod tests {
         }
     }
 
+    /// Keystore holding the `k` label (3 bytes) the auth tests reference.
+    fn keystore(secret: &str) -> crate::schema::Admin {
+        crate::schema::Admin {
+            keys: vec![crate::schema::AdminKey {
+                label: "k".into(),
+                secret: secret.into(),
+            }],
+        }
+    }
+
     fn ok(p: BfdProfile) -> bool {
         let c = Config {
             bfd_profiles: vec![p],
+            admin: keystore("kkk"),
             ..Default::default()
         };
         c.validate_with(&c).is_ok()
@@ -363,7 +381,12 @@ mod tests {
         ));
         assert!(!with(&|p| p.echo_mode = EchoMode::Affiliated));
         assert!(!with(&|p| p.padded_pdu_size = Some(100)));
-        assert!(!with(&|p| p.auth = Some(BfdAuth::default())));
+        assert!(!with(&|p| {
+            p.auth = Some(BfdAuth {
+                key: "k".into(),
+                ..Default::default()
+            });
+        }));
         // The same fields are fine on an async profile.
         let mut p = profile("a");
         p.padded_pdu_size = Some(100);
@@ -377,9 +400,14 @@ mod tests {
             p.auth = Some(BfdAuth {
                 key_id: 1,
                 method,
-                key: "k".repeat(len),
+                key: "k".into(),
             });
-            ok(p)
+            let c = Config {
+                bfd_profiles: vec![p],
+                admin: keystore(&"x".repeat(len)),
+                ..Default::default()
+            };
+            c.validate_with(&c).is_ok()
         };
         assert!(with(BfdAuthMethod::SimplePassword, 16));
         assert!(!with(BfdAuthMethod::SimplePassword, 17));
@@ -387,6 +415,57 @@ mod tests {
         assert!(!with(BfdAuthMethod::MeticulousMd5, 17));
         assert!(with(BfdAuthMethod::KeyedSha1, 20));
         assert!(!with(BfdAuthMethod::MeticulousSha1, 21));
+    }
+
+    #[test]
+    fn auth_label_must_exist_and_a_referenced_key_cannot_be_deleted() {
+        let mut p = profile("a");
+        p.auth = Some(BfdAuth {
+            key: "nope".into(),
+            ..Default::default()
+        });
+        let c = Config {
+            bfd_profiles: vec![p.clone()],
+            admin: keystore("kkk"),
+            ..Default::default()
+        };
+        let err = c.validate_with(&c).unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+        p.auth.as_mut().unwrap().key = "k".into();
+        let mut c = Config {
+            bfd_profiles: vec![p],
+            admin: keystore("kkk"),
+            ..Default::default()
+        };
+        c.validate_with(&c).unwrap();
+        c.admin.keys.clear();
+        assert!(c.validate_with(&c).is_err());
+    }
+
+    #[test]
+    fn debug_of_a_profile_never_shows_a_secret() {
+        let c = Config {
+            admin: keystore("s3cr3t"),
+            bfd_profiles: vec![BfdProfile {
+                auth: Some(BfdAuth {
+                    key: "k".into(),
+                    ..Default::default()
+                }),
+                ..profile("a")
+            }],
+            ..Default::default()
+        };
+        assert!(!format!("{c:?}").contains("s3cr3t"));
+    }
+
+    #[test]
+    fn an_inline_key_from_an_old_config_is_just_an_unknown_label() {
+        // Hard break (#510): the old inline secret now reads as a label.
+        let a: BfdAuth =
+            serde_json::from_str(r#"{"key_id":1,"method":"KeyedMd5","key":"hunter2"}"#).unwrap();
+        let mut p = profile("a");
+        p.auth = Some(a);
+        assert!(!ok(p));
     }
 
     /// Errors reported on a `bfd` field when `v` is validated against `cfg`.

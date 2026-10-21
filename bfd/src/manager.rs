@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::auth::AuthKey;
 use crate::micro;
 use crate::packet::{self, Packet};
 use crate::reflector::Reflector;
@@ -226,7 +227,7 @@ struct Entry {
     idle_since: Option<Instant>,
     profile: BfdProfile,
     disc: u32,
-    cmd: mpsc::Sender<BfdProfile>,
+    cmd: mpsc::Sender<session::Cmd>,
     status: watch::Receiver<Status>,
     task: JoinHandle<()>,
 }
@@ -241,6 +242,9 @@ pub struct Manager {
     /// The subinterfaces that answer unsolicited BFD (`set_unsolicited`).
     rules: Mutex<Vec<unsolicited::Rule>>,
     last_cap_warn: Mutex<Option<Instant>>,
+    /// The admin keystore (`Config.admin`), label to secret (#510). Locked
+    /// after `sessions`, never before.
+    keys: Mutex<HashMap<String, String>>,
 }
 
 impl Manager {
@@ -255,6 +259,7 @@ impl Manager {
             reflector: Arc::default(),
             rules: Mutex::default(),
             last_cap_warn: Mutex::default(),
+            keys: Mutex::default(),
         });
         let weak = Arc::downgrade(&m);
         m.demux.0.lock().unwrap().unsolicited = Some(Arc::new(move |table, src, ttl, p| {
@@ -262,6 +267,33 @@ impl Manager {
                 .is_some_and(|m| m.unsolicited_rx(table, src, ttl, p))
         }));
         m
+    }
+
+    /// `profile`'s auth key from the keystore. `None` for no auth, and for a
+    /// label that is not there: the session then stays down (fail closed).
+    fn resolve(&self, profile: &BfdProfile) -> Option<AuthKey> {
+        let a = profile.auth.as_ref()?;
+        let secret = self.keys.lock().unwrap().get(&a.key).cloned();
+        if secret.is_none() {
+            warn!(label = %a.key, "bfd auth key not found");
+        }
+        secret.map(|s| AuthKey::new(a, &s))
+    }
+
+    /// Replaces the admin keystore. Every running session that authenticates
+    /// is handed its key again: the old one stays accepted for a few
+    /// detection times, so a rotation under the same label does not flap.
+    pub fn set_keys(&self, keys: HashMap<String, String>) {
+        let sessions = self.sessions.lock().unwrap();
+        if *self.keys.lock().unwrap() == keys {
+            return;
+        }
+        *self.keys.lock().unwrap() = keys;
+        for e in sessions.values().filter(|e| e.profile.auth.is_some()) {
+            let _ = e
+                .cmd
+                .try_send((e.profile.clone(), self.resolve(&e.profile)));
+        }
     }
 
     /// The S-BFD reflector's state: the socket side feeds it, `GetReflector`
@@ -341,13 +373,14 @@ impl Manager {
             if e.profile != *profile {
                 e.profile = profile.clone();
                 self.demux.set_min_ttl(e.disc, key, profile.minimum_ttl);
-                let _ = e.cmd.try_send(profile.clone());
+                let _ = e.cmd.try_send((profile.clone(), self.resolve(profile)));
             }
             return e.status.clone();
         }
         let disc = self.alloc_disc(sessions);
         let core = Core::new(
             profile.clone(),
+            self.resolve(profile),
             disc,
             tokio::time::Instant::now().into_std(),
         );
@@ -575,7 +608,9 @@ impl Manager {
                     if e.profile != r.profile {
                         e.profile = r.profile.clone();
                         self.demux.set_min_ttl(e.disc, &key, r.profile.minimum_ttl);
-                        let _ = e.cmd.try_send(r.profile.clone());
+                        let _ = e
+                            .cmd
+                            .try_send((r.profile.clone(), self.resolve(&r.profile)));
                     }
                 }
             }
@@ -761,6 +796,53 @@ pub(crate) mod tests {
         assert_eq!(m.sessions(None).len(), 0);
         assert!(demux.0.lock().unwrap().by_disc.is_empty());
         assert!(demux.0.lock().unwrap().by_peer.is_empty());
+    }
+
+    async fn until(mut f: impl FnMut() -> bool) -> bool {
+        for _ in 0..100 {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_auth_label_fails_closed_until_the_key_arrives() {
+        use nos_proto::schema::{BfdAuth, BfdAuthMethod};
+        let (m, sent, _) = mgr(false);
+        let profile = BfdProfile {
+            auth: Some(BfdAuth {
+                key_id: 1,
+                method: BfdAuthMethod::KeyedMd5,
+                key: "lbl".into(),
+            }),
+            ..BfdProfile::default()
+        };
+        let rx = m.register(m.new_client(), &key("192.0.2.1"), &profile);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(sent.0.lock().unwrap().is_empty(), "nothing is sent unkeyed");
+        assert_eq!(rx.borrow().auth_method, None);
+        // The keystore arrives: the session picks the key up and signs.
+        m.set_keys(HashMap::from([("lbl".to_string(), "s1".to_string())]));
+        assert!(until(|| !sent.0.lock().unwrap().is_empty()).await);
+        assert_eq!(rx.borrow().auth_method, Some(BfdAuthMethod::KeyedMd5));
+        let first = sent.0.lock().unwrap()[0].clone();
+        assert_ne!(first[1] & crate::auth::FLAG_AUTH, 0, "A bit set");
+        // A rotation under the same label re-signs with the new secret.
+        let n = sent.0.lock().unwrap().len();
+        m.set_keys(HashMap::from([("lbl".to_string(), "s2".to_string())]));
+        assert!(until(|| sent.0.lock().unwrap().len() > n + 1).await);
+        let last = sent.0.lock().unwrap().last().unwrap().clone();
+        let accepts = |secret: &str| {
+            let now = Instant::now();
+            let k = crate::auth::AuthKey::new(profile.auth.as_ref().unwrap(), secret);
+            let mut st = crate::auth::AuthState::new(Some(k), 0, now);
+            st.check(now, 3, crate::auth::parse(&last).as_ref(), None)
+                .is_ok()
+        };
+        assert!(accepts("s2") && !accepts("s1"));
     }
 
     #[tokio::test]

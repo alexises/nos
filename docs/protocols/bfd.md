@@ -71,11 +71,14 @@ set ospfv3 instance o1 area 0.0.0.0 profile p1 bfd fast
 RFC 5880 section 6.7: every packet of a session carries a password or a digest, and packets that fail are dropped.
 
 ```
+set admin key bfd-fast secret s3cret
 edit bfd-profile fast
-set auth key-id 1 method meticulous-sha1 key s3cret
+set auth key-id 1 method meticulous-sha1 key bfd-fast
 ```
 
-- Set the same `auth` on both ends. `delete auth` turns it off.
+- The `key` is the label of an admin key, never the secret: the secret is stored once under `admin key` and never shown, logged or returned by REST. Commit fails if the label does not exist, if the secret length does not fit the method, or if you delete an admin key a profile still uses.
+- Set the same `auth` (same secret) on both ends. `delete auth` turns it off.
+- Rotate a secret by setting the admin key again under the same label (`set admin key bfd-fast secret <new>`) on both ends: the session keeps running, the old secret stays accepted for 4 detection times.
 - Methods: `simple-password` (clear text on the wire), `keyed-md5`, `keyed-sha1`, and the `meticulous-` variants, which sign every packet with a fresh sequence number (strongest replay protection, a little more work per packet). Prefer `meticulous-sha1`.
 - Key length: 1 to 16 bytes (`simple-password`, MD5), 1 to 20 bytes (SHA1); `key-id` is 0 to 255 and must match on both ends.
 - A packet is dropped, and does not refresh the detection timer, when:
@@ -244,11 +247,11 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
 | `passive` | `set passive enable` | bool | off | |
 | `minimum_ttl` | `set minimum-ttl <n>` | integer | 254 | |
 | `shutdown` | `set shutdown enable` | bool | off | |
-| `auth` | `set auth key-id <n> method <m> key <k>` | key id, method, key | none | key length per method, below |
+| `auth` | `set auth key-id <n> method <m> key <label>` | key id, method, admin key label | none | the label must exist; secret length per method, below |
 | `mode` | `set mode async\|sbfd` | enum | `async` | `sbfd` excludes `echo-mode`, `padded-pdu-size` and `auth` |
 | `sbfd_remote_discriminator` | `set sbfd-remote-discriminator <ipv4>` | IPv4 address | the peer's IPv4 address | not 0.0.0.0 |
 
 - Methods: `simple-password`, `keyed-md5`, `meticulous-md5`, `keyed-sha1`, `meticulous-sha1`.
-- Key length (RFC 5880 sections 4.2 and 4.3): 1 to 16 bytes for `simple-password` and the MD5 methods, 1 to 20 bytes for the SHA1 methods.
+- Secret length (RFC 5880 sections 4.2 and 4.3): 1 to 16 bytes for `simple-password` and the MD5 methods, 1 to 20 bytes for the SHA1 methods.
 - Keys are stored in clear text, like BGP and OSPF keys.
 - The interval ceiling keeps the later millisecond-to-microsecond conversion inside the RFC's 32-bit field.
