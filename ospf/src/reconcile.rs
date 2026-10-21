@@ -9,7 +9,7 @@ use ipnet::Ipv4Net;
 use nos_proto::{DiffScope, Event, NetworkType, OspfAuth, OspfCryptoAlgorithm, ServiceRef};
 use nos_rpl::CompiledPolicy;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::interface_client;
 use crate::link::{AreaSettings, LinkAuthConfig, LinkConfig, LinkManager, VirtualLinkConfig};
@@ -91,7 +91,12 @@ pub async fn run(
     let mut state = State::default();
     let mut link_open = true;
     while !*shutdown.borrow() {
-        match config::subscribe_diff(&ctx.config_socket, vec![DiffScope::OspfInstances]).await {
+        match config::subscribe_diff(
+            &ctx.config_socket,
+            vec![DiffScope::OspfInstances, DiffScope::Admin],
+        )
+        .await
+        {
             Ok(mut reader) => {
                 info!(instance = %ctx.instance, "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
@@ -451,7 +456,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         own.max_metric_on_shutdown,
         own.max_metric_administrative,
     );
-    links.set_virtual_links(virtual_links(&own.areas)).await;
+    links
+        .set_virtual_links(virtual_links(&own.areas, &cfg))
+        .await;
     links.set_area_settings(area_settings(&own.areas)).await;
 
     let env = Env {
@@ -495,7 +502,19 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                 .dead_interval
                 .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
             let priority = profile.priority.unwrap_or(nos_proto::PRIORITY_DEFAULT);
-            let auth = resolve_auth(profile.auth.as_ref(), profile.extended_sequence_numbers);
+            // Fail closed: a dangling label (commit validation prevents it)
+            // must never start the link unauthenticated.
+            let auth = match resolve_auth(
+                profile.auth.as_ref(),
+                profile.extended_sequence_numbers,
+                &cfg,
+            ) {
+                Ok(a) => a,
+                Err(label) => {
+                    error!(instance = %instance, profile = %profile.name, label = %label, "ospf profile references an unknown admin key, not starting its links");
+                    continue;
+                }
+            };
             let pc = ProfileCtx {
                 area,
                 profile,
@@ -649,18 +668,22 @@ fn note_fallback(
 
 /// Every area's RFC 2328 §15 virtual links (the area is the transit area),
 /// with the Appendix C.3 defaults for unset timers.
-fn virtual_links(areas: &[nos_proto::OspfArea]) -> Vec<VirtualLinkConfig> {
+fn virtual_links(areas: &[nos_proto::OspfArea], cfg: &nos_proto::Config) -> Vec<VirtualLinkConfig> {
     areas
         .iter()
         .flat_map(|a| {
-            a.virtual_links.iter().map(|v| VirtualLinkConfig {
+            a.virtual_links.iter().filter_map(|v| {
+                Some(VirtualLinkConfig {
                 transit_area: a.area_id,
                 endpoint: v.router_id,
                 hello_interval: v
                     .hello_interval
                     .unwrap_or(nos_proto::HELLO_INTERVAL_DEFAULT),
                 dead_interval: v.dead_interval.unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT),
-                auth: resolve_auth(v.auth.as_ref(), false),
+                auth: resolve_auth(v.auth.as_ref(), false, cfg)
+                    .map_err(|label| error!(label = %label, endpoint = %v.router_id, "ospf virtual link references an unknown admin key, not starting it"))
+                    .ok()?,
+                })
             })
         })
         .collect()
@@ -1054,35 +1077,40 @@ fn subinterface_kernel_interface(interface: &str, tag: u16) -> String {
 }
 
 /// Translates `OspfProfile.auth` into `link::LinkAuthConfig` — pure, no I/O,
-/// since `auth` is already fully present in the fetched `Config`.
+/// resolving each admin-key label against the fetched `Config`; `Err(label)`
+/// is a dangling label, which the caller treats as "do not start the link".
+/// Commit validation already guarantees every label exists.
 /// `current_key_id` is safe to pull from whichever key has `is_current` set
 /// without a fallback: `OspfProfile`'s own commit-time validation
 /// (`schema::ospf_profile::valid_auth`) already guarantees exactly one does
 /// whenever `auth` is `Crypto`.
-fn resolve_auth(auth: Option<&OspfAuth>, extended: bool) -> LinkAuthConfig {
-    match auth {
+fn resolve_auth(
+    auth: Option<&OspfAuth>,
+    extended: bool,
+    cfg: &nos_proto::Config,
+) -> Result<LinkAuthConfig, String> {
+    let secret = |label: &str| {
+        cfg.key(label)
+            .map(|s| s.as_bytes().to_vec())
+            .ok_or_else(|| label.to_string())
+    };
+    Ok(match auth {
         None => LinkAuthConfig::None,
-        Some(OspfAuth::Simple { password }) => LinkAuthConfig::Simple {
-            password: password.clone().into_bytes(),
+        Some(OspfAuth::Simple { key }) => LinkAuthConfig::Simple {
+            password: secret(key)?,
         },
         Some(OspfAuth::Crypto { keys }) => {
             let current_key_id = keys.iter().find(|k| k.is_current).map_or(0, |k| k.key_id);
             LinkAuthConfig::Crypto {
                 keys: keys
                     .iter()
-                    .map(|k| {
-                        (
-                            k.key_id,
-                            resolve_algorithm(k.algorithm),
-                            k.key.clone().into_bytes(),
-                        )
-                    })
-                    .collect(),
+                    .map(|k| Ok((k.key_id, resolve_algorithm(k.algorithm), secret(&k.key)?)))
+                    .collect::<Result<_, String>>()?,
                 current_key_id,
                 extended,
             }
         }
-    }
+    })
 }
 
 fn resolve_algorithm(algorithm: OspfCryptoAlgorithm) -> packet::CryptoAlgorithm {

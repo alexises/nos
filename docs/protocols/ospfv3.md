@@ -116,12 +116,13 @@ $C -X POST $B/v1/transactions/v3lo/commit
 
 ### Authenticate a link (RFC 7166)
 
-OSPFv3 authenticates with an authentication trailer appended to each packet. The commands are the same as OSPFv2's crypto keys, with two differences: only the HMAC-SHA algorithms are accepted (no `md5`, and no simple password), and the key ID is the RFC 7166 security association ID, from 0 to 65535. Rolling to a new key works the same way as in OSPFv2: add it, make it current, delete the old one.
+OSPFv3 authenticates with an authentication trailer appended to each packet. The commands are the same as OSPFv2's crypto keys, with two differences: only the HMAC-SHA algorithms are accepted (no `md5`, and no simple password), and the key ID is the RFC 7166 security association ID, from 0 to 65535. As in OSPFv2, the key names the label of an admin key (`set admin key <label> secret <value>`) rather than holding the secret, and setting the same label to a new value on both routers restarts the link with the new secret. Rolling to a new key works the same way as in OSPFv2: add it, make it current, delete the old one.
 
 ```
 configure v3auth
+set admin key ospfv3-p6-key300 secret v3-secret
 edit ospfv3 instance v3 area 0.0.0.0 profile p6
-set crypto-key 300 hmac-sha256 v3-secret
+set crypto-key 300 hmac-sha256 ospfv3-p6-key300
 set crypto-key 300 current
 commit
 ```
@@ -131,7 +132,7 @@ Over REST, `auth` is the list of keys itself, without the `Crypto` wrapper OSPFv
 ```sh
 $C -X POST $B/v1/transactions/v3auth
 $C -X PUT -H 'Content-Type: application/json' \
-  -d '[{"key_id":300,"algorithm":"HmacSha256","key":"v3-secret","is_current":true}]' \
+  -d '[{"key_id":300,"algorithm":"HmacSha256","key":"ospfv3-p6-key300","is_current":true}]' \
   $B/v1/transactions/v3auth/ospfv3-instance/v3/area/0.0.0.0/profile/p6/auth
 $C -X POST $B/v1/transactions/v3auth/commit
 ```
@@ -285,7 +286,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per target | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |
 | hello interval, dead interval, cost, priority, MTU, network type | `set ospfv3 instance <name> area <area-id> profile <p> <field> <value>`; relative forms as in OSPF | `…/profile/<p>/hello-interval`, `dead-interval`, `cost`, `priority`, `mtu`, `mtu-ignore`, `network-type` | as in OSPF | as in OSPF | as in OSPF | `show ospfv3 neigh` |
-| crypto key | `set ospfv3 instance <name> area <area-id> profile <p> crypto-key <id> <algorithm> <key>`; relative `set crypto-key …` / `delete crypto-key <id>` *(relative only)* | `…/profile/<p>/auth`, `[{"key_id":300,"algorithm":"HmacSha256","key":"…","is_current":true}]` | ID 0 to 65535; `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512`; key 1 to 80 bytes; unset by default | at least one key, IDs unique, exactly one current, no `md5` | RFC 7166 authentication trailer | `show this` in the profile |
+| crypto key | `set ospfv3 instance <name> area <area-id> profile <p> crypto-key <id> <algorithm> <label>`; relative `set crypto-key …` / `delete crypto-key <id>` *(relative only)* | `…/profile/<p>/auth`, `[{"key_id":300,"algorithm":"HmacSha256","key":"<label>","is_current":true}]` | ID 0 to 65535; `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512`; label of an admin key whose secret is 1 to 80 bytes; unset by default | labels must exist, at least one key, IDs unique, exactly one current, no `md5` | RFC 7166 authentication trailer | `show this` in the profile |
 | current key | `set … profile <p> crypto-key <id> current`; relative `set crypto-key <id> current` | `is_current` of each key | | the key must exist | signs sent packets; all keys verify | `show this` in the profile |
 | instance ID | `set ospfv3 instance <name> area <area-id> profile <p> instance-id <n>`; relative `set instance-id <n>` / `delete instance-id` | `…/profile/<p>/instance-id` | 0 to 31; unset means 0 | 0 to 31 | sent in every packet; packets with another instance ID are dropped | `show this` in the profile |
 | no authentication | relative `delete auth` *(relative only)* | `DELETE …/profile/<p>/auth` | default | | | |

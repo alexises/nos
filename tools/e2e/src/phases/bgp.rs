@@ -521,7 +521,7 @@ pub async fn auth(w: &mut World) -> anyhow::Result<()> {
 
 /// Fails if any of `secrets` shows in the running config as `GET /v1/config`
 /// serves it or in the log lines streamed from the daemons (#383, #508).
-async fn no_leak(r: &Router, secrets: &[&str]) -> anyhow::Result<()> {
+pub(super) async fn no_leak(r: &Router, secrets: &[&str]) -> anyhow::Result<()> {
     // Let the log follower catch up with anything just emitted.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let config = r.rest_expect(Method::GET, "/v1/config", None, 200).await?;

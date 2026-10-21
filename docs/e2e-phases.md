@@ -84,7 +84,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `ospf-host-router` | OSPFv2 | ospf-suite | `ospf-lfa` | RFC 8770 host-router bit honoured network-wide; router-a drops its LFA via router-c. |
 | `ospf-prefix-suppression` | OSPFv2 | ospf-suite | `ospf-lfa` | RFC 6860: the p2p subnet candidate disappears on router-c, the loopback is still reached over the /32 Network-LSA bridge. |
 | `abr` | OSPFv2 | ospf-suite | `ospf-spf` | A loopback in a second area makes router-b an ABR originating a Type-3; router-a installs the route, premature aging flushes it. |
-| `ospf-auth` | OSPFv2 | ospf-suite | `ospf` | RFC 5709 HMAC-SHA-256 crypto key: matching stays Full, mismatched fails digest verification; RFC 7474 extended sequence numbers and replay. |
+| `ospf-auth` | OSPFv2 | ospf-suite | `ospf` | RFC 5709 HMAC-SHA-256 crypto key: matching stays Full, mismatched fails digest verification; RFC 7474 extended sequence numbers and replay; the secrets never show in `GET /v1/config` or the logs, and rotating one under the same admin label on both routers re-forms Full (#509). |
 | `ospf-mtu-mismatch` | OSPFv2 | ospf-suite | `ospf` | `mtu 1400` on router-a only rejects router-b's DBD and never reaches Full; `mtu-ignore` reaches Full. |
 | `ospf-bfd` | OSPFv2 | ospf-suite | `ospf` | OSPF over BFD (#288, RFC 5882 §4.1): `bfd fast` (100 ms x 3) on the shared profile resets nothing; dropping UDP 3784 on router-a (`tc`) kills the neighbor in under a second and the route is withdrawn or re-added with one next hop (router-c may keep another path) (dead interval 40 s); lifting it restores Full and the route; a local BFD `shutdown` kills nothing. |
 | `ospf-graceful-restart` | OSPFv2 | ospf-suite | `ospf` | RFC 3623: Grace-LSA, helper mode keeps adjacency, LSAs and loopback route across a `nos-ospfd` SIGTERM; RFC 6987 on-startup skipped after graceful restart. |
@@ -100,7 +100,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `ospfv3-asbr` | OSPFv3 | ospf-suite | `ospfv3` | IPv4 and IPv6 statics redistributed into `ospf` and `ospfv3` at once: both LSAs and kernel routes, removal flushes only its own; OSPFv3 acks are delayed. |
 | `ospfv3-abr` | OSPFv3 | ospf-suite | `ospfv3` | An IPv6 loopback in a second area makes an ABR with an Inter-Area-Prefix-LSA; route installed, flushed on removal. |
 | `ospfv3-graceful-restart` | OSPFv3 | ospf-suite | `ospfv3` | RFC 5187: Grace-LSA, helper keeps adjacency and loopback route across a `nos-ospfv3d` SIGTERM. |
-| `ospfv3-auth` | OSPFv3 | ospf-suite | `ospfv3` | RFC 7166 HMAC-SHA-256 trailer (SA ID 300): matching stays Full, mismatched logs a digest failure and blocks Full. |
+| `ospfv3-auth` | OSPFv3 | ospf-suite | `ospfv3` | RFC 7166 HMAC-SHA-256 trailer (SA ID 300): matching stays Full, mismatched logs a digest failure and blocks Full; the secrets never show in `GET /v1/config` or the logs, and rotating one under the same admin label re-forms Full (#509). |
 | `ospfv3-mtu-mismatch` | OSPFv3 | ospf-suite | `ospfv3` | OSPFv3 DBD MTU mismatch rejected; `mtu-ignore` reaches Full. |
 | `ospfv3-instance-id` | OSPFv3 | ospf-suite | `ospfv3` | RFC 5340 §A.3.1: an Instance ID mismatch drops packets and blocks Full. |
 | `ospfv3-bfd` | OSPFv3 | ospf-suite | `ospfv3` | The same over OSPFv3: sessions between link-local addresses scoped by `eth0.0`, UDP 3784 dropped with an `ipv6` filter. |

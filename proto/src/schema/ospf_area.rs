@@ -171,7 +171,7 @@ pub struct OspfAreaRange {
 
 /// `area_type`/`stub_default_cost`/`ranges` checks, run from the owning
 /// instance's `areas` validator since they need sibling fields.
-pub(crate) fn valid_area_settings(area: &OspfArea) -> garde::Result {
+pub(crate) fn valid_area_settings(area: &OspfArea, cfg: &Config) -> garde::Result {
     if area.area_type.is_stub() && area.area_id.is_unspecified() {
         return Err(garde::Error::new(
             "the backbone (0.0.0.0) can't be a stub area or an nssa",
@@ -206,7 +206,7 @@ pub(crate) fn valid_area_settings(area: &OspfArea) -> garde::Result {
                 "virtual link router ids must be unique within an area",
             ));
         }
-        ospf_profile::valid_auth(v.auth.as_ref())?;
+        ospf_profile::valid_auth(v.auth.as_ref(), cfg)?;
         // No extended sequence numbers here, so only a classic one-octet key id.
         if let Some(OspfAuth::Crypto { keys }) = &v.auth
             && keys.iter().any(|k| k.key_id > 255)
@@ -370,10 +370,11 @@ mod tests {
         keys.virtual_links[0].auth = Some(OspfAuth::Crypto { keys: Vec::new() });
         assert!(!validates(keys));
         let mut pw = a.clone();
-        pw.virtual_links[0].auth = Some(OspfAuth::Simple {
-            password: "123456789".into(),
-        });
+        pw.virtual_links[0].auth = Some(OspfAuth::Simple { key: "pw9".into() });
         assert!(!validates(pw));
+        let mut unknown = a.clone();
+        unknown.virtual_links[0].auth = Some(OspfAuth::Simple { key: "nope".into() });
+        assert!(!validates(unknown));
         let mut ok = a;
         ok.virtual_links[0].auth = Some(OspfAuth::Crypto {
             keys: vec![OspfCryptoKey {
@@ -419,7 +420,18 @@ mod tests {
     fn config_with(instances: Vec<OspfInstance>) -> Config {
         Config {
             ospf_instances: instances,
+            admin: keystore(),
             ..Default::default()
+        }
+    }
+
+    fn keystore() -> crate::schema::Admin {
+        let key = |l: &str, s: &str| crate::schema::AdminKey {
+            label: l.to_string(),
+            secret: s.to_string(),
+        };
+        crate::schema::Admin {
+            keys: vec![key("k", "kk"), key("pw9", "123456789")],
         }
     }
 

@@ -3598,12 +3598,19 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     hello_interval,
                 }));
             }
-            if let Some(password) = args.ospf_simple_password.clone() {
+            // OSPF keys live in the admin keystore under labels derived from
+            // the profile, so re-provisioning a new secret rotates in place (#509).
+            if let Some(secret) = args.ospf_simple_password.clone() {
+                let label = format!("ospf-{name}-simple");
+                ops.push(ConfigOp::Admin(AdminOp::SetKey {
+                    label: label.clone(),
+                    secret,
+                }));
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth {
                     instance: instance.clone(),
                     area_id,
                     name: name.clone(),
-                    password,
+                    key: label,
                 }));
             }
             if let Some(enabled) = args.ospf_extended_seq {
@@ -3617,7 +3624,8 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 ));
             }
             if let Some(spec) = args.ospf_crypto_key.clone() {
-                let key = parse_ospf_crypto_key(&spec)?;
+                let (set_key, key) = labelled_crypto_key("ospf", &name, &spec)?;
+                ops.push(set_key);
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetCryptoKey {
                     instance,
                     area_id,
@@ -3754,10 +3762,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 }));
             }
             if let Some(spec) = args.ospfv3_crypto_key.clone() {
-                let key = parse_ospf_crypto_key(&spec)?;
+                let (set_key, key) = labelled_crypto_key("ospfv3", &name, &spec)?;
                 if key.algorithm == OspfCryptoAlgorithm::Md5 {
                     bail!("--ospfv3-crypto-key: RFC 7166 has no md5, use an hmac-sha algorithm");
                 }
+                ops.push(set_key);
                 ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetCryptoKey {
                     instance,
                     area_id,
@@ -3848,6 +3857,20 @@ fn parse_ospf_crypto_key(spec: &str) -> anyhow::Result<OspfCryptoKey> {
         key: key.to_string(),
         is_current: true,
     })
+}
+
+/// Splits a parsed `--ospf{,v3}-crypto-key` into the `AdminOp::SetKey` that
+/// stores its secret (label `<proto>-<profile>-key<id>`) and the key
+/// carrying that label.
+fn labelled_crypto_key(
+    proto: &str,
+    profile: &str,
+    spec: &str,
+) -> anyhow::Result<(ConfigOp, OspfCryptoKey)> {
+    let mut key = parse_ospf_crypto_key(spec)?;
+    let label = format!("{proto}-{profile}-key{}", key.key_id);
+    let secret = std::mem::replace(&mut key.key, label.clone());
+    Ok((ConfigOp::Admin(AdminOp::SetKey { label, secret }), key))
 }
 
 #[cfg(test)]
@@ -3947,6 +3970,55 @@ mod tests {
                 _ => None,
             })
             .expect("SetAoKey")
+    }
+
+    #[test]
+    fn ospf_auth_flags_emit_the_key_before_the_label_reference() {
+        let set = ops(&[
+            "--ospf-instance",
+            "o1",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p1",
+            "--ospf-simple-password",
+            "pw",
+        ])
+        .unwrap();
+        let key = ConfigOp::Admin(AdminOp::SetKey {
+            label: "ospf-p1-simple".into(),
+            secret: "pw".into(),
+        });
+        let at = set.iter().position(|o| *o == key).expect("SetKey");
+        let auth = set
+            .iter()
+            .position(|o| matches!(o, ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth { key, .. }) if key == "ospf-p1-simple"))
+            .expect("SetSimpleAuth");
+        assert!(at < auth);
+        let set = ops(&[
+            "--ospf-instance",
+            "o1",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p1",
+            "--ospf-crypto-key",
+            "7:hmac-sha256:sek",
+        ])
+        .unwrap();
+        let at = set
+            .iter()
+            .position(|o| matches!(o, ConfigOp::Admin(AdminOp::SetKey { label, secret }) if label == "ospf-p1-key7" && secret == "sek"))
+            .expect("SetKey");
+        let auth = set
+            .iter()
+            .position(|o| matches!(o, ConfigOp::OspfProfile(OspfProfileOp::SetCryptoKey { key, .. }) if key.key == "ospf-p1-key7"))
+            .expect("SetCryptoKey");
+        assert!(at < auth);
     }
 
     #[test]
@@ -4588,9 +4660,16 @@ mod tests {
                 key: OspfCryptoKey {
                     key_id: 300,
                     algorithm: OspfCryptoAlgorithm::HmacSha512,
-                    key: "k".into(),
+                    key: "ospfv3-p6-key300".into(),
                     is_current: true,
                 },
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Admin(AdminOp::SetKey {
+                label: "ospfv3-p6-key300".into(),
+                secret: "k".into(),
             }),
         );
         has(

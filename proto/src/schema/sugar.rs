@@ -36,14 +36,14 @@ fn md5_password_value(verb: Verb, args: &[&str], _: &Value) -> Option<Value> {
     }
 }
 
-/// `simple-password <password>` (RFC 2328 Appendix D type 1).
+/// `simple-password <admin-key-label>` (RFC 2328 Appendix D type 1).
 pub fn simple_password(verb: Verb, args: &[&str], obj: &Value) -> Option<SugarOut> {
     simple_password_value(verb, args, obj).map(SugarOut::Value)
 }
 
 fn simple_password_value(verb: Verb, args: &[&str], _: &Value) -> Option<Value> {
     match (verb, args) {
-        (Verb::Set, [password]) => Some(json!({ "Simple": { "password": password } })),
+        (Verb::Set, [label]) => Some(json!({ "Simple": { "key": label } })),
         _ => None,
     }
 }
@@ -273,7 +273,7 @@ fn crypto_key_lines(keys: &Value) -> Vec<String> {
 /// `OspfProfile.auth`.
 pub fn render_ospf_auth(auth: &Value) -> Vec<String> {
     match (auth.get("Simple"), auth.get("Crypto")) {
-        (Some(s), _) => vec![format!("simple-password {}", text(&s["password"]))],
+        (Some(s), _) => vec![format!("simple-password {}", text(&s["key"]))],
         (_, Some(c)) => crypto_key_lines(&c["keys"]),
         _ => Vec::new(),
     }
