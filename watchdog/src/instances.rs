@@ -74,7 +74,7 @@ pub struct Managed {
     pub registry: EndpointRegistry,
     pub pki: Arc<Pki>,
     /// `--child-uid`/`--child-gid`, applied to every spawned instance.
-    pub child_ids: Option<(u32, u32)>,
+    pub child_gid: Option<u32>,
 }
 
 struct InstanceHandle {
@@ -259,7 +259,7 @@ async fn spawn_instance(instances: &mut HashMap<String, InstanceHandle>, name: &
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let spec = ProcessSpec::new(format!("{}[{name}]", m.daemon), m.bin.clone(), args)
         .with_identity(m.pki.clone(), m.role, name)
-        .with_uid(m.child_ids);
+        .with_role_uid(m.child_gid);
     info!(name = %name, "spawning {} for new {}", m.daemon, m.noun);
     let task = tokio::spawn(supervise_one(spec, m.policy, shutdown_rx));
     instances.insert(name.to_string(), InstanceHandle { shutdown_tx, task });
@@ -324,7 +324,7 @@ mod tests {
                 Duration::from_secs(60),
             )
             .unwrap(),
-            child_ids: None,
+            child_gid: None,
         }
     }
 

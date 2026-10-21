@@ -591,7 +591,7 @@ start_nos_dut() {
     ${rust_log:+-e "RUST_LOG=$rust_log"} \
     -v "${DUT}-run:/run/nos" \
     -v "${DUT}-data:/var/lib/nos" \
-    "$NOS_IMAGE" ${PROFILE_MEMORY:+--bgpd-arg --profile-memory-out=/var/lib/nos/dhat-heap.json} >/dev/null
+    "$NOS_IMAGE" ${PROFILE_MEMORY:+--bgpd-arg --profile-memory-out=/var/lib/nos/bgpd/dhat-heap.json} >/dev/null
 
   log "waiting for the nos DUT's nos-configd socket"
   local ready=1
@@ -1105,7 +1105,7 @@ cmd_run() {
     local profile_out="$WORKDIR/dhat-heap-$kind-$count.json"
     log "$kind: stopping DUT to flush the dhat heap-profile report"
     docker stop "$DUT" >/dev/null 2>&1 || true
-    if docker cp "$DUT:/var/lib/nos/dhat-heap.json" "$profile_out" >/dev/null 2>&1; then
+    if docker cp "$DUT:/var/lib/nos/bgpd/dhat-heap.json" "$profile_out" >/dev/null 2>&1; then
       log "$kind: wrote heap-profile report to $profile_out"
     else
       log "$kind: WARNING: could not extract dhat-heap.json -- was \$NOS_IMAGE built with CARGO_FEATURES=nos-bgp/dhat-heap?"

@@ -149,7 +149,7 @@ In the transaction, `show this` shows your current object or the whole transacti
 
 `commit` validates the transaction and applies it. If it succeeds, you are back in operational mode. If it fails, the errors are printed and you stay in the transaction. `discard` (or `abort`) deletes the transaction without touching the running config.
 
-Back in operational mode, `save` writes the running config to `/var/lib/nos/config.yaml` so it survives a restart.
+Back in operational mode, `save` writes the running config to `/var/lib/nos/configd/config.yaml` so it survives a restart.
 
 A failed commit leaves everything as it was, so you can fix the problem and commit again:
 
@@ -260,7 +260,7 @@ lab-1> show interface
 interface eth0: address [none], routing-table unset, switching-profile unset, mtu 1500
   subinterface 0: address [10.50.0.2/24], routing-table rt1
 lab-1> show log nos-configd
-2026-09-28T18:51:42.627Z  INFO nos-configd nos_config::persistence: loaded config from disk (path=/var/lib/nos/config.yaml)
+2026-09-28T18:51:42.627Z  INFO nos-configd nos_config::persistence: loaded config from disk (path=/var/lib/nos/configd/config.yaml)
 2026-09-28T18:51:42.704Z  INFO nos-configd nos_config::server: config IPC server listening (listen=unix:/run/nos/config.sock)
 …
 ```

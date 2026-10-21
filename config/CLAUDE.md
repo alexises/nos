@@ -47,7 +47,7 @@ By convention (not yet enforced by code), the socket lives at `/run/nos/config.s
 
 ## Config file convention
 
-By convention (not yet enforced elsewhere), the persisted config file lives at `/var/lib/nos/config.yaml`, overridable via `--config-file`. A missing file at startup falls back silently to `Config::default()`; a malformed file at startup is a fatal error — it is never silently discarded in favor of a default.
+By convention (not yet enforced elsewhere), the persisted config file lives at `/var/lib/nos/configd/config.yaml`, overridable via `--config-file`. A missing file at startup falls back silently to `Config::default()`; a malformed file at startup is a fatal error — it is never silently discarded in favor of a default.
 
 ## ConfigStore rules
 

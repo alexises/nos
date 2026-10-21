@@ -92,11 +92,13 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
     revoke_restarted_daemon(w).await
 }
 
-/// The watchdog (the CA) runs on its own uid and starts every child as `nos`
-/// (#512): the `starting` lines carry the ids, and `/proc` agrees.
+/// The watchdog (the CA) runs on its own uid and every role on its own
+/// (#512, #513): the `starting` lines carry the ids, `/proc` agrees, and a
+/// daemon cannot unlink another's 0660 `group nos` socket in the sticky
+/// `/run/nos`.
 async fn check_uids(w: &World) -> anyhow::Result<()> {
     let a = w.a()?;
-    a.wait("starting process=nos-configd program=/usr/local/bin/nos-configd uid=991 gid=991")
+    a.wait("starting process=nos-configd program=/usr/local/bin/nos-configd uid=10001 gid=991")
         .await?;
     // `/proc/<pid>/status` is world-readable; the runtime image has no `ps`.
     let uid_of = |comm: &'static str| async move {
@@ -107,9 +109,33 @@ async fn check_uids(w: &World) -> anyhow::Result<()> {
         let (_, out) = w.dock.exec("router-a", &["sh", "-c", &script]).await?;
         anyhow::Ok(out.trim().to_string())
     };
-    let (wd, configd) = (uid_of("nos-watchdogd").await?, uid_of("nos-configd").await?);
-    if wd != "990" || configd != "991" {
-        bail!("expected watchdog uid 990 and nos-configd uid 991, got {wd:?} and {configd:?}");
+    let want = [
+        ("nos-watchdogd", "990"),
+        ("nos-configd", "10001"),
+        ("nos-logd", "10002"),
+        ("nos-bgpd", "10003"),
+        ("nos-ribd", "10004"),
+    ];
+    for (comm, uid) in want {
+        let got = uid_of(comm).await?;
+        if got != uid {
+            bail!("expected {comm} uid {uid}, got {got:?}");
+        }
+    }
+    // nos-bgpd (10003) cannot remove nos-logd's socket: /run/nos is sticky.
+    let (code, out) = w
+        .dock
+        .exec_as("router-a", Some("10003"), &["rm", "/run/nos/log.sock"])
+        .await?;
+    if code == 0 {
+        bail!("nos-bgpd's uid unlinked nos-logd's socket: {out}");
+    }
+    let (code, out) = w
+        .dock
+        .exec("router-a", &["stat", "-c", "%a %U %G", "/run/nos/log.sock"])
+        .await?;
+    if code != 0 || out.trim() != "660 nos-logd nos" {
+        bail!("log.sock should be 660 nos-logd nos after the refused rm, got {code}: {out:?}");
     }
     Ok(())
 }

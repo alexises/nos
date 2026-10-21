@@ -13,7 +13,7 @@ use tracing::info;
 /// `nos-data` volume) so recent history survives a `nos-logd` restart. Never
 /// read by any other process; other daemons and `nos-cli` only ever see
 /// entries over IPC.
-const DEFAULT_LOG_STORE_PATH: &str = "/var/lib/nos/log/entries.jsonl";
+const DEFAULT_LOG_STORE_PATH: &str = "/var/lib/nos/logd/entries.jsonl";
 
 #[derive(Parser)]
 #[command(name = "nos-logd", about = "NOS log collection daemon")]

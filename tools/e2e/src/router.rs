@@ -158,7 +158,7 @@ impl Router {
     }
 
     /// Starts `id`'s container from a *seeded* config — `seed_flags` plus the
-    /// `rest-api` pin, written to `/var/lib/nos/config.yaml` before boot,
+    /// `rest-api` pin, written to `/var/lib/nos/configd/config.yaml` before boot,
     /// because REST only exists once the config pins it — and waits until the
     /// API answers. `watchdog_args` go straight to `nos-watchdogd`.
     pub async fn start(
@@ -195,7 +195,7 @@ impl Router {
             network: NET,
             ip: id.ip,
             cmd,
-            seed: Some(("config.yaml", yaml.into_bytes())),
+            seed: Some(("configd/config.yaml", yaml.into_bytes())),
         })
         .await?;
 

@@ -21,7 +21,7 @@ struct Args {
     /// Path to the persisted config file. Loaded at startup — falling back
     /// to an empty default config if it does not exist — and written to
     /// when a client sends the `save` command.
-    #[arg(long, default_value = "/var/lib/nos/config.yaml")]
+    #[arg(long, default_value = "/var/lib/nos/configd/config.yaml")]
     config_file: PathBuf,
 
     /// Unix socket to forward this process's log events to. Passed directly
@@ -93,7 +93,7 @@ mod tests {
         let args = Args::try_parse_from(["nos-configd"]).unwrap();
         assert_eq!(
             args.config_file,
-            std::path::PathBuf::from("/var/lib/nos/config.yaml")
+            std::path::PathBuf::from("/var/lib/nos/configd/config.yaml")
         );
     }
 }

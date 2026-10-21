@@ -2504,10 +2504,10 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     // Persisted only once saved: the real nos-configd writes its real
     // --config-file. Any later phase that restarts nos-configd boots from this
     // file (with the undo below still unsaved) rather than from the seed.
-    let saved_path = "/var/lib/nos/config.yaml";
+    let saved_path = "/var/lib/nos/configd/config.yaml";
     a.rest_expect(Method::POST, "/v1/config/save", None, 204)
         .await?;
-    match w.dock.exec("router-a", &["cat", saved_path]).await? {
+    match w.dock.exec_root("router-a", &["cat", saved_path]).await? {
         (0, saved) if saved.contains("rest-pl") && saved.contains("rest-host") => {}
         (code, saved) => bail!("router-a: {saved_path} after save (exit {code}):\n{saved}"),
     }
@@ -2848,7 +2848,7 @@ async fn rest_users(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<()
         }
         a.rest_expect(Method::POST, "/v1/config/save", None, 204)
             .await?;
-        let (_, yaml) = dock.exec("router-a", &["cat", SAVED_CONFIG]).await?;
+        let (_, yaml) = dock.exec_root("router-a", &["cat", SAVED_CONFIG]).await?;
         let lines: Vec<&str> = yaml.lines().map(str::trim).collect();
         let at = lines
             .iter()
@@ -2936,7 +2936,7 @@ async fn rest_users(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<()
     Ok(())
 }
 
-const SAVED_CONFIG: &str = "/var/lib/nos/config.yaml";
+const SAVED_CONFIG: &str = "/var/lib/nos/configd/config.yaml";
 /// Distinctive secrets: a log line or REST body holding one is a leak.
 const SECRET_ONE: &str = "e2e-admin-secret-7f3a91-one";
 const SECRET_TWO: &str = "e2e-admin-secret-7f3a91-two";
@@ -2957,7 +2957,7 @@ async fn rest_secrets(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<
     let saved = || async {
         a.rest_expect(Method::POST, "/v1/config/save", None, 204)
             .await?;
-        Ok::<_, anyhow::Error>(dock.exec("router-a", &["cat", SAVED_CONFIG]).await?.1)
+        Ok::<_, anyhow::Error>(dock.exec_root("router-a", &["cat", SAVED_CONFIG]).await?.1)
     };
     let set = |secret: &str| format!(r#"{{"label":"e2e-k1","secret":"{secret}"}}"#);
 
@@ -3031,7 +3031,7 @@ async fn rest_secrets(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<
         );
     }
     match dock
-        .exec("router-a", &["stat", "-c", "%a", SAVED_CONFIG])
+        .exec_root("router-a", &["stat", "-c", "%a", SAVED_CONFIG])
         .await?
     {
         (0, mode) if mode.trim() == "600" => {}

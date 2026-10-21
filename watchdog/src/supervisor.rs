@@ -60,9 +60,16 @@ impl ProcessSpec {
         }
     }
 
+    /// With `Some(gid)`, runs the child as its role's own uid (`uids::role_uid`)
+    /// and group `gid`. Call after `with_identity`: the role is the key, so the
+    /// uid cannot disagree with the certificate. `None`: inherit ours.
     #[must_use]
-    pub fn with_uid(mut self, uid: Option<(u32, u32)>) -> Self {
-        self.uid = uid;
+    pub fn with_role_uid(mut self, gid: Option<u32>) -> Self {
+        let uid = self
+            .identity
+            .as_ref()
+            .and_then(|i| crate::uids::role_uid(i.role));
+        self.uid = uid.zip(gid);
         self
     }
 
@@ -364,10 +371,22 @@ mod backoff_tests {
     }
 
     #[test]
-    fn with_uid_sets_the_child_user_and_defaults_to_none() {
+    fn with_role_uid_maps_the_role_and_defaults_to_none() {
+        let pki = Pki::start(
+            tempfile::tempdir().unwrap().path(),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        )
+        .unwrap();
         let s = ProcessSpec::new("x", "/bin/true", vec![]);
         assert_eq!(s.uid, None);
-        assert_eq!(s.with_uid(Some((991, 992))).uid, Some((991, 992)));
+        let s = s.with_identity(pki, Role::Bgpd, "r1");
+        assert_eq!(s.clone().with_role_uid(None).uid, None);
+        assert_eq!(s.with_role_uid(Some(992)).uid, Some((10003, 992)));
+        // No identity, no role, no uid.
+        let bare = ProcessSpec::new("x", "/bin/true", vec![]);
+        assert_eq!(bare.with_role_uid(Some(992)).uid, None);
     }
 
     /// A child spawned with our own uid/gid still runs (an unprivileged
@@ -377,7 +396,8 @@ mod backoff_tests {
         use std::os::unix::fs::MetadataExt;
         let me = std::fs::metadata("/proc/self").unwrap();
         let ids = (me.uid(), me.gid());
-        let spec = ProcessSpec::new("t", "/bin/sleep", vec!["30".into()]).with_uid(Some(ids));
+        let mut spec = ProcessSpec::new("t", "/bin/sleep", vec!["30".into()]);
+        spec.uid = Some(ids);
         let (tx, rx) = watch::channel(false);
         let task = tokio::spawn(supervise_one(spec, BackoffPolicy::default(), rx));
         tokio::time::sleep(Duration::from_millis(300)).await;

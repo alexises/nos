@@ -216,15 +216,18 @@ struct Args {
     #[arg(long, default_value = DEFAULT_PKI_DIR)]
     pki_dir: PathBuf,
 
-    /// Uid/gid every supervised child runs as (set before exec, so file
-    /// capabilities still apply). The image passes `nos`'s ids; unset (tests,
-    /// non-container runs) children inherit the watchdog's.
-    #[arg(long, requires = "child_gid")]
-    child_uid: Option<u32>,
-
-    /// See `--child-uid`.
-    #[arg(long, requires = "child_uid")]
+    /// Group every supervised child runs in, and the switch for per-role uids:
+    /// each child gets its role's own uid (`uids::role_uid`, set before exec,
+    /// so file capabilities still apply) and its `--state-dir/<role>` is
+    /// created. The image passes `nos`'s gid; unset (tests, non-container
+    /// runs) children inherit the watchdog's ids.
+    #[arg(long)]
     child_gid: Option<u32>,
+
+    /// Parent of the per-role state directories (`<dir>/<role>`, `0700`
+    /// `nos-<role>`), created at startup when `--child-gid` is set.
+    #[arg(long, default_value = "/var/lib/nos")]
+    state_dir: PathBuf,
 
     /// Seconds a daemon's IPC certificate is valid for.
     #[arg(long, default_value_t = 24 * 3600)]
@@ -308,10 +311,16 @@ async fn main() -> anyhow::Result<()> {
         .chain(std::iter::once(args.listen_socket.display().to_string()))
         .chain(args.logd_flags)
         .collect();
-    let child_ids = args.child_uid.zip(args.child_gid);
+    let child_gid = args.child_gid;
+    if let Some(gid) = child_gid {
+        // `/proc/self` is owned by our effective ids (std has no `geteuid`).
+        use std::os::unix::fs::MetadataExt;
+        let me = std::fs::metadata("/proc/self").context("reading our own ids")?;
+        nos_watchdog::uids::ensure_state_dirs(&args.state_dir, (me.uid(), me.gid()), gid)?;
+    }
     let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin, logd_args)
         .with_identity(pki.clone(), Role::Logd, "")
-        .with_uid(child_ids);
+        .with_role_uid(child_gid);
     tasks.push(tokio::spawn(supervise_one(
         logd_spec,
         policy,
@@ -324,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin, configd_args)
         .with_identity(pki.clone(), Role::Configd, "")
-        .with_uid(child_ids);
+        .with_role_uid(child_gid);
     tasks.push(tokio::spawn(supervise_one(
         configd_spec,
         policy,
@@ -338,7 +347,7 @@ async fn main() -> anyhow::Result<()> {
         pki: &pki,
         policy,
         shutdown_rx: &shutdown_rx,
-        child_ids,
+        child_gid,
         watchdog_socket: &args.listen_socket,
         log_socket: &args.log_socket,
     };
@@ -423,7 +432,7 @@ struct FixedSupervision<'a> {
     pki: &'a Arc<Pki>,
     policy: BackoffPolicy,
     shutdown_rx: &'a watch::Receiver<bool>,
-    child_ids: Option<(u32, u32)>,
+    child_gid: Option<u32>,
     watchdog_socket: &'a Path,
     log_socket: &'a Path,
 }
@@ -440,7 +449,7 @@ impl FixedSupervision<'_> {
         let args = fixed_args(listen, self.watchdog_socket, self.log_socket, flags);
         let spec = ProcessSpec::new(name, bin, args)
             .with_identity(self.pki.clone(), role, "")
-            .with_uid(self.child_ids);
+            .with_role_uid(self.child_gid);
         tokio::spawn(supervise_one(spec, self.policy, self.shutdown_rx.clone()))
     }
 }
@@ -496,7 +505,7 @@ fn managed_families(
         run_dir: args.run_dir.clone(),
         policy,
         registry: registry.clone(),
-        child_ids: args.child_uid.zip(args.child_gid),
+        child_gid: args.child_gid,
     };
     let ep = |kind, socket_prefix| {
         Some(Endpoint {
@@ -628,10 +637,10 @@ mod tests {
             (86_400, 28_800, 28_800)
         );
         assert_eq!(a.pki_rest_session_max, 604_800);
-        assert_eq!((a.child_uid, a.child_gid), (None, None));
-        let a = Args::try_parse_from(["x", "--child-uid", "991", "--child-gid", "992"]).unwrap();
-        assert_eq!((a.child_uid, a.child_gid), (Some(991), Some(992)));
-        assert!(Args::try_parse_from(["x", "--child-uid", "991"]).is_err());
+        assert_eq!(a.child_gid, None);
+        assert_eq!(a.state_dir, PathBuf::from("/var/lib/nos"));
+        let a = Args::try_parse_from(["x", "--child-gid", "992"]).unwrap();
+        assert_eq!(a.child_gid, Some(992));
         assert!(a.logd_flags.is_empty() && a.restd_flags.is_empty());
     }
 

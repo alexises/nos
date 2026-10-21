@@ -58,10 +58,10 @@ struct Args {
 
     /// Path to this driver's own private persisted broadcast-domain-name ->
     /// bridge-id map (`--driver linux` only) — mirrors `nos-ribd`'s
-    /// `--table-registry-path`, living in the same `linux-driver/`
+    /// `--table-registry-path`, living in the same `interfaced/`
     /// directory since every daemon here runs inside one watchdog
     /// container/shared `nos-data` volume.
-    #[arg(long, default_value = "/var/lib/nos/linux-driver/bridge-ids.yaml")]
+    #[arg(long, default_value = "/var/lib/nos/interfaced/bridge-ids.yaml")]
     bridge_registry_path: PathBuf,
 
     /// Path to this driver's own private persisted port-aggregate-name ->
@@ -69,7 +69,7 @@ struct Args {
     /// `--bridge-registry-path`.
     #[arg(
         long,
-        default_value = "/var/lib/nos/linux-driver/port-aggregate-ids.yaml"
+        default_value = "/var/lib/nos/interfaced/port-aggregate-ids.yaml"
     )]
     port_aggregate_registry_path: PathBuf,
 
