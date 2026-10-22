@@ -821,6 +821,8 @@ mod tests {
         };
         let mut iface = interface("eth0");
         iface.subinterfaces = vec![nos_proto::Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag: 0,
             addresses: vec![iface_addr.clone()],
             routing_table: Some("rt1".to_string()),
@@ -841,6 +843,8 @@ mod tests {
     async fn build_from_config_maps_tagged_subinterface_untouched() {
         let mut iface = interface("eth0");
         iface.subinterfaces = vec![nos_proto::Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag: 300,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),

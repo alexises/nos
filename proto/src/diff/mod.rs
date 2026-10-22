@@ -108,6 +108,8 @@ pub struct ConfigDiff {
     pub spanning_tree: Vec<FieldDiff>,
     /// STP port profile changes.
     pub stp_port_profiles: Vec<SectionDiff>,
+    /// Access list changes, including a rule reorder.
+    pub acls: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.admin` is one singleton section (secret values are masked).
     pub admin: Vec<FieldDiff>,
 }
@@ -137,6 +139,7 @@ impl ConfigDiff {
             && self.sbfd_reflector.is_empty()
             && self.spanning_tree.is_empty()
             && self.stp_port_profiles.is_empty()
+            && self.acls.is_empty()
             && self.admin.is_empty()
     }
 
@@ -256,6 +259,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            acls: if scopes.contains(&DiffScope::Acls) {
+                self.acls.clone()
+            } else {
+                Vec::new()
+            },
             admin: if scopes.contains(&DiffScope::Admin) {
                 self.admin.clone()
             } else {
@@ -314,6 +322,8 @@ pub enum DiffScope {
     SpanningTree,
     /// STP port profiles.
     StpPortProfiles,
+    /// Access lists.
+    Acls,
     /// The admin keystore section.
     Admin,
 }
@@ -380,7 +390,7 @@ mod tests {
             subsections: Vec::new(),
         };
         assert!(ConfigDiff::default().is_empty());
-        let setters: [Set; 23] = [
+        let setters: [Set; 24] = [
             |d, f, _| d.hostname = Some(f),
             |d, _, s| d.bgp_instances.push(s),
             |d, _, s| d.routing_tables.push(s),
@@ -403,6 +413,7 @@ mod tests {
             |d, f, _| d.sbfd_reflector.push(f),
             |d, f, _| d.spanning_tree.push(f),
             |d, _, s| d.stp_port_profiles.push(s),
+            |d, _, s| d.acls.push(s),
             |d, f, _| d.admin.push(f),
         ];
         for (i, set) in setters.iter().enumerate() {
@@ -458,6 +469,36 @@ mod tests {
             only_profiles.spanning_tree.is_empty() && !only_profiles.stp_port_profiles.is_empty()
         );
         assert!(diff.scoped(&[DiffScope::Hostname]).is_empty());
+    }
+
+    #[test]
+    fn acl_changes_reach_only_the_acls_scope() {
+        use crate::schema::{Acl, AclRule};
+        let rule = |n: &str| AclRule {
+            name: n.into(),
+            ..Default::default()
+        };
+        let acl = |rules: Vec<AclRule>| Config {
+            acls: vec![Acl {
+                name: "EDGE".into(),
+                rules,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let base = acl(vec![rule("a"), rule("b")]);
+        let mut changed = acl(vec![rule("a"), rule("b")]);
+        changed.acls[0].rules[1].log = true;
+        let reordered = acl(vec![rule("b"), rule("a")]);
+        for candidate in [Config::default(), changed, reordered] {
+            let diff = diff_configs(&base, &candidate);
+            assert_eq!(diff.acls.len(), 1);
+            assert_eq!(diff.scoped(&[DiffScope::Acls]).acls.len(), 1);
+            assert!(diff.scoped(&[DiffScope::Hostname]).is_empty());
+        }
+        let added = diff_configs(&Config::default(), &base);
+        assert_eq!(added.acls.len(), 1);
+        assert!(diff_configs(&base, &base).is_empty());
     }
 
     #[test]

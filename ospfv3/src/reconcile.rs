@@ -1078,6 +1078,8 @@ mod tests {
     fn finds_subinterface_attachment() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
@@ -1131,6 +1133,8 @@ mod tests {
     fn subinterface_attach_points_finds_routing_table() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
@@ -1298,6 +1302,8 @@ mod tests {
             label: None,
         };
         let sub = |tag, addresses| Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag,
             addresses,
             routing_table: Some("rt1".into()),

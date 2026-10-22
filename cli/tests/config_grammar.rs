@@ -554,3 +554,63 @@ fn spanning_tree_and_port_profile() {
     assert!(p.bpdu_guard);
     assert_eq!(p.mst_instances[0].cost, Some(100));
 }
+
+/// #540: an ACL is built, ordered and attached through the same grammar, and
+/// `show config` prints it back in the order it evaluates.
+#[test]
+fn acl_rules_order_and_attach() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let run = |line: &str, doc: &mut Value| {
+        let edit = config_grammar::parse(line, &[], doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set_at(doc, &path, value, edit.position.as_ref()).unwrap();
+        }
+    };
+    run("set acl EDGE default-action permit", &mut doc);
+    run("set acl EDGE rule r0 action deny", &mut doc);
+    run("set acl EDGE rule r0 protocol 89", &mut doc);
+    run("set acl EDGE rule r1 action permit", &mut doc);
+    run("set acl EDGE rule r1 protocol tcp", &mut doc);
+    run("set acl EDGE rule r1 destination-port 179", &mut doc);
+    run("set acl EDGE rule r1 source-port 1024-65535", &mut doc);
+    run("set acl EDGE rule r2 before r0", &mut doc);
+    run("set acl EDGE rule r2 protocol icmp", &mut doc);
+    run("set acl EDGE rule r2 icmp-type 8", &mut doc);
+    run("set interface eth0 acl in EDGE", &mut doc);
+    run("set interface eth0 acl out EDGE", &mut doc);
+    let cfg: Config = serde_json::from_value(doc.clone()).unwrap();
+    let acl = &cfg.acls[0];
+    assert_eq!(acl.default_action, AclAction::Permit);
+    let names: Vec<_> = acl.rules.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["r2", "r0", "r1"]);
+    assert_eq!(acl.rules[1].protocol, Some(AclProtocol::Number(89)));
+    assert_eq!(acl.rules[2].protocol, Some(AclProtocol::Tcp));
+    let port = |start, end| Some(PortRange { start, end });
+    assert_eq!(acl.rules[2].destination_port, port(179, 179));
+    assert_eq!(acl.rules[2].source_port, port(1024, 65535));
+    let eth0 = cfg.interfaces.iter().find(|i| i.name == "eth0").unwrap();
+    assert_eq!(eth0.acl_in.as_deref(), Some("EDGE"));
+    assert_eq!(eth0.acl_out.as_deref(), Some("EDGE"));
+
+    let shown = nos_proto::cli::render::render_root(&doc)
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pos = |n: &str| {
+        shown
+            .find(&format!("rule {n}"))
+            .unwrap_or_else(|| panic!("{n}"))
+    };
+    assert!(pos("r2") < pos("r0") && pos("r0") < pos("r1"), "{shown}");
+    assert!(shown.contains("protocol 89") && shown.contains("destination-port 179"));
+
+    // The reference slots complete like every other one (`bfd`,
+    // `stp-port-profile`): the words, not the referenced names.
+    let words: Vec<&str> = "set interface eth0 acl".split_whitespace().collect();
+    let offered: Vec<String> = config_grammar::complete(&words, &[], &doc)
+        .into_iter()
+        .map(|c| c.word)
+        .collect();
+    assert!(offered.contains(&"in".to_string()) && offered.contains(&"out".to_string()));
+}

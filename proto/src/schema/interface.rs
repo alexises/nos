@@ -100,6 +100,19 @@ pub struct Subinterface {
     #[garde(custom(|p: &Option<String>, ctx: &Config| bfd_reference_valid(p.as_ref(), ctx)))]
     #[cli(topic = InterfaceBfdUnsolicited, words = "bfd-unsolicited")]
     pub bfd_unsolicited: Option<String>,
+
+    /// Names an `Acl` filtering IP packets arriving on this subinterface. Inert until
+    /// `nos-acld`; the placement rules are `acl::valid_acl_references`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceAclIn, words = "acl in")]
+    pub acl_in: Option<String>,
+
+    /// Names an `Acl` filtering IP packets leaving this subinterface.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceAclOut, words = "acl out")]
+    pub acl_out: Option<String>,
 }
 
 fn valid_subinterface_tag(tag: u16) -> garde::Result {
@@ -244,6 +257,19 @@ pub struct Interface {
     #[garde(custom(|p: &Option<String>, ctx: &Config| stp_port_profile_reference_valid(p.as_ref(), ctx)))]
     #[cli(topic = InterfaceStpPortProfile, words = "stp-port-profile")]
     pub stp_port_profile: Option<String>,
+
+    /// Names an `Acl` filtering IP packets arriving on this link. Inert until
+    /// `nos-acld`; the placement rules are `acl::valid_acl_references`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceAclIn, words = "acl in")]
+    pub acl_in: Option<String>,
+
+    /// Names an `Acl` filtering IP packets leaving this link.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceAclOut, words = "acl out")]
+    pub acl_out: Option<String>,
 
     /// The LACP Actor Port Priority `nos-lacpd` advertises for this link
     /// (802.1AX); `None` = 32768. Lower is higher priority. Only meaningful
@@ -514,6 +540,8 @@ mod tests {
 
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
+            acl_in: None,
+            acl_out: None,
             ospfv3_profile: None,
             name: name.to_string(),
             addresses: addresses
@@ -544,6 +572,8 @@ mod tests {
     fn physical_with_l3(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         let mut iface = interface(name, &[], None);
         iface.subinterfaces = vec![Subinterface {
+            acl_in: None,
+            acl_out: None,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 0,
@@ -718,6 +748,8 @@ mod tests {
     fn duplicate_address_different_label_still_conflicts() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            acl_in: None,
+            acl_out: None,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 0,
@@ -742,6 +774,8 @@ mod tests {
     fn loopback_with_subinterfaces_fails() {
         let mut iface = interface("loopback-rt1", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            acl_in: None,
+            acl_out: None,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 100,
@@ -773,6 +807,8 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                acl_in: None,
+                acl_out: None,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 100,
@@ -781,6 +817,8 @@ mod tests {
                 ospf_profile: None,
             },
             Subinterface {
+                acl_in: None,
+                acl_out: None,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 100,
@@ -797,6 +835,8 @@ mod tests {
     fn subinterface_tag_4095_fails() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            acl_in: None,
+            acl_out: None,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 4095,
@@ -813,6 +853,8 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                acl_in: None,
+                acl_out: None,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 0,
@@ -821,6 +863,8 @@ mod tests {
                 ospf_profile: None,
             },
             Subinterface {
+                acl_in: None,
+                acl_out: None,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 4094,
@@ -1020,6 +1064,8 @@ mod tests {
 
     fn aggregate(name: &str) -> crate::schema::PortAggregate {
         crate::schema::PortAggregate {
+            acl_in: None,
+            acl_out: None,
             name: name.to_string(),
             mode: crate::schema::PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),

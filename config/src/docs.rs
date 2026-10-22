@@ -1735,6 +1735,66 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the port priority in the instance.",
             "A multiple of 16 from 0 to 240, default 128.",
         ),
+        Topic::Acl => (
+            "Create or delete an access list.",
+            "A named, ordered list of rules. The first rule that matches a packet decides; a packet no rule matches gets `default-action` (`deny` unless set). `edit` creates it; `delete` removes it, and the commit is refused while an interface or port aggregate still attaches it. Attach it with `acl in <name>` / `acl out <name>` on an interface, a subinterface or a port aggregate. Nothing reads it yet, so attaching one has no effect on traffic.",
+        ),
+        Topic::AclDefaultAction => (
+            "Set what happens when no rule matches.",
+            "`permit` or `deny`, default `deny`. Only IPv4 and IPv6 packets are filtered: ARP, LACP, LLDP and STP always pass.",
+        ),
+        Topic::AclRule => (
+            "Add or edit a rule.",
+            "Rules are evaluated in order. `set rule <name> ...` appends a new rule; add `first`, `last`, `before <rule>` or `after <rule>` to place it, and `move rule <name> before <rule>` to reorder. A field left unset matches anything. Port, flag and ICMP matches never match non-first IP fragments.",
+        ),
+        Topic::AclRuleAction => (
+            "Set what the rule does.",
+            "`permit` or `deny`.",
+        ),
+        Topic::AclRuleProtocol => (
+            "Match an IP protocol.",
+            "`tcp`, `udp`, `icmp`, `icmpv6`, or a protocol number 0 to 255 (`89` is OSPF). Needed by the port, `established` and ICMP matches.",
+        ),
+        Topic::AclRuleSource => (
+            "Match the source prefix.",
+            "An IPv4 or IPv6 prefix. A rule with a prefix only matches that address family; `source` and `destination` must agree.",
+        ),
+        Topic::AclRuleDestination => (
+            "Match the destination prefix.",
+            "An IPv4 or IPv6 prefix, in the same family as `source`.",
+        ),
+        Topic::AclRuleSourcePort => (
+            "Match the TCP/UDP source port.",
+            "A port (`80`) or an inclusive range (`1024-65535`), 1 to 65535. Needs `protocol tcp` or `udp`.",
+        ),
+        Topic::AclRuleDestinationPort => (
+            "Match the TCP/UDP destination port.",
+            "A port (`179`) or an inclusive range (`1024-65535`), 1 to 65535. Needs `protocol tcp` or `udp`.",
+        ),
+        Topic::AclRuleEstablished => (
+            "Match TCP segments of an existing connection.",
+            "Matches TCP packets with ACK or RST set. It is stateless, with no connection tracking. Needs `protocol tcp`. `delete established` turns it off.",
+        ),
+        Topic::AclRuleIcmpType => (
+            "Match the ICMP message type.",
+            "0 to 255. Needs `protocol icmp` or `icmpv6`.",
+        ),
+        Topic::AclRuleIcmpCode => (
+            "Match the ICMP message code.",
+            "0 to 255. Needs `icmp-type` and `protocol icmp` or `icmpv6`.",
+        ),
+        Topic::AclRuleLog => (
+            "Log the packets the rule matches.",
+            "Declared only: no log is produced yet. `delete log` turns it off.",
+        ),
+        Topic::InterfaceAclIn => (
+            "Filter the IP packets received on this link.",
+            "The name of an `acl`. The commit is refused when it does not exist, and on a loopback, a port aggregate member (attach it to the aggregate) or a switching-profile port. The ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first, and `icmpv6` on IPv6 (the default deny drops Neighbor Discovery). A physical interface sees untagged frames only; attach to the subinterface for tagged traffic.",
+        ),
+        Topic::InterfaceAclOut => (
+            "Filter the IP packets sent on this link.",
+            "The name of an `acl`, with the same placement rules and caveats as `acl in`.",
+        ),
         Topic::InterfaceStpPortProfile => (
             "Attach a spanning-tree port profile.",
             "The name of a `stp-port-profile`. The commit is refused when it does not exist, and on an interface that is a member of a port aggregate (the spanning-tree port is the aggregate). Only an interface with a switching profile is a spanning-tree port; on another one the setting is kept but unused.",

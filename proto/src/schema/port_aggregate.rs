@@ -207,6 +207,19 @@ pub struct PortAggregate {
     #[cli(topic = PortAggregateStpPortProfile, words = "stp-port-profile")]
     pub stp_port_profile: Option<String>,
 
+    /// Names an `Acl` filtering IP packets arriving on this bond. Inert until
+    /// `nos-acld`; the placement rules are `acl::valid_acl_references`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceAclIn, words = "acl in")]
+    pub acl_in: Option<String>,
+
+    /// Names an `Acl` filtering IP packets leaving this bond.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceAclOut, words = "acl out")]
+    pub acl_out: Option<String>,
+
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
@@ -235,6 +248,8 @@ fn default_min_links() -> u16 {
 impl Default for PortAggregate {
     fn default() -> Self {
         Self {
+            acl_in: None,
+            acl_out: None,
             name: String::new(),
             mode: PortAggregateMode::default(),
             lacp_rate: LacpRate::default(),
@@ -393,6 +408,8 @@ mod tests {
 
     fn aggregate(name: &str) -> PortAggregate {
         PortAggregate {
+            acl_in: None,
+            acl_out: None,
             name: name.to_string(),
             mode: PortAggregateMode::Xor, // arbitrary — mode has no bearing on the validators tested here
             lacp_rate: LacpRate::default(),
@@ -549,6 +566,8 @@ mod tests {
     fn valid_subinterface_with_routing_table_passes() {
         let mut agg = aggregate("bond1");
         agg.subinterfaces = vec![crate::schema::Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag: 0,
             addresses: vec![InterfaceAddress {
                 address: "10.0.0.1/24".parse().unwrap(),
@@ -579,6 +598,8 @@ mod tests {
         a.bfd_peer = peer.map(|p| p.parse().unwrap());
         if let Some(addr) = addr {
             a.subinterfaces = vec![crate::schema::Subinterface {
+                acl_in: None,
+                acl_out: None,
                 tag: 0,
                 addresses: vec![InterfaceAddress {
                     address: addr.parse().unwrap(),

@@ -247,6 +247,8 @@ fn ensure_subinterface_mut<'a>(
     let agg = find_aggregate_mut(config, port_aggregate)?;
     if !agg.subinterfaces.iter().any(|s| s.tag == tag) {
         agg.subinterfaces.push(Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag,
             addresses: Vec::new(),
             routing_table: None,
@@ -265,6 +267,8 @@ mod tests {
 
     fn aggregate(name: &str, subinterfaces: Vec<Subinterface>) -> PortAggregate {
         PortAggregate {
+            acl_in: None,
+            acl_out: None,
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),
@@ -402,6 +406,8 @@ mod tests {
     #[test]
     fn set_and_clear_touch_only_the_tagged_subinterface() {
         let sub = |tag| Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag,
             addresses: Vec::new(),
             routing_table: None,
@@ -473,6 +479,8 @@ mod tests {
             port_aggregates: vec![aggregate(
                 "bond1",
                 vec![Subinterface {
+                    acl_in: None,
+                    acl_out: None,
                     tag: 100,
                     addresses: Vec::new(),
                     routing_table: None,

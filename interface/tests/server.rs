@@ -38,6 +38,8 @@ async fn sample_interfaces() -> Interfaces {
                 lldp_receive: false,
                 lldp_destination: nos_proto::LldpDestination::default(),
                 subinterfaces: vec![nos_proto::Subinterface {
+                    acl_in: None,
+                    acl_out: None,
                     ospfv3_profile: None,
                     bfd_unsolicited: None,
                     tag: 0,

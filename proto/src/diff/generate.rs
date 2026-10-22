@@ -72,6 +72,7 @@ fn put(d: &mut ConfigDiff, name: &str, mut fields: Vec<FieldDiff>, subs: Vec<Sec
         "sbfd_reflector" => d.sbfd_reflector = fields,
         "spanning_tree" => d.spanning_tree = fields,
         "stp_port_profiles" => d.stp_port_profiles = subs,
+        "acls" => d.acls = subs,
         "admin" => d.admin = fields,
         _ => return false,
     }
