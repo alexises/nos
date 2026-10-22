@@ -20,6 +20,12 @@ pub enum ConfigError {
     /// transaction has moved past. `nos-restd` keys on the message prefix.
     #[error("precondition failed: transaction generation is {actual}, not {expected}")]
     PreconditionFailed { expected: u64, actual: u64 },
+    #[error("invalid transaction name: use 1-64 characters of letters, digits, '.', '_' or '-'")]
+    InvalidTransactionName,
+    #[error("too many transactions: {0} are open; commit or discard one first")]
+    TooManyTransactions(usize),
+    #[error("too many clear-text passwords in one edit (at most {0})")]
+    TooManyClearPasswords(usize),
     #[error("edit failed: {0}")]
     Op(#[from] nos_proto::OpError),
     #[error("config path: {0}")]

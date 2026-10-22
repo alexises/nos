@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use garde::Validate as _;
 use nos_proto::{
@@ -12,9 +13,16 @@ use tracing::{debug, info};
 
 use crate::error::ConfigError;
 use crate::secrets::{restore_masked, unmask_op};
-use crate::users::{hash_clear_passwords, normalize_names};
+use crate::users::{hash_clear_passwords, is_clear, normalize_names};
 
 const BROADCAST_CAPACITY: usize = 16;
+/// Most open transactions at once; a new name past this is refused (#388).
+pub const MAX_TRANSACTIONS: usize = 32;
+pub const MAX_TX_NAME: usize = 64;
+/// A transaction untouched this long is dropped when the next one is opened.
+const TX_IDLE_TTL: Duration = Duration::from_hours(4);
+/// Clear-text passwords one edit may carry: each costs an argon2id hash.
+pub const MAX_CLEAR_PASSWORDS_PER_EDIT: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Transaction {
@@ -22,6 +30,8 @@ struct Transaction {
     dirty: bool,
     /// See `TransactionSnapshot::generation`.
     generation: u64,
+    /// Last open/edit/read; drives the idle sweep in `open_transaction`.
+    last_used: Instant,
 }
 
 impl Transaction {
@@ -62,6 +72,7 @@ struct Inner {
     transactions: Mutex<HashMap<String, Transaction>>,
     tx: broadcast::Sender<Arc<CommitUpdate>>,
     config_path: Option<PathBuf>,
+    idle_ttl: Duration,
 }
 
 /// A cheap, cloneable handle to the daemon's config state: the running
@@ -87,6 +98,7 @@ impl ConfigStore {
             transactions: Mutex::new(HashMap::new()),
             tx,
             config_path,
+            idle_ttl: TX_IDLE_TTL,
         }))
     }
 
@@ -112,12 +124,31 @@ impl ConfigStore {
 
     /// Opens a named transaction: creates it from `base` if it doesn't
     /// already exist, or resumes its current in-progress config unchanged
-    /// (ignoring `base`) if it does.
-    pub async fn open_transaction(&self, name: &str, base: TransactionBase) -> TransactionSnapshot {
+    /// (ignoring `base`) if it does. Creating is bounded: name charset and
+    /// length, `MAX_TRANSACTIONS` open at once (idle ones are swept first).
+    pub async fn open_transaction(
+        &self,
+        name: &str,
+        base: TransactionBase,
+    ) -> Result<TransactionSnapshot, ConfigError> {
         let mut txs = self.0.transactions.lock().await;
-        if let Some(existing) = txs.get(name) {
+        let ttl = self.0.idle_ttl;
+        txs.retain(|_, t| t.last_used.elapsed() <= ttl);
+        if let Some(existing) = txs.get_mut(name) {
+            existing.last_used = Instant::now();
             debug!(transaction = %name, resumed = true, "opened transaction");
-            return existing.snapshot(name, true);
+            return Ok(existing.snapshot(name, true));
+        }
+        if name.is_empty()
+            || name.len() > MAX_TX_NAME
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return Err(ConfigError::InvalidTransactionName);
+        }
+        if txs.len() >= MAX_TRANSACTIONS {
+            return Err(ConfigError::TooManyTransactions(MAX_TRANSACTIONS));
         }
         let config = match base {
             TransactionBase::Blank => Config::default(),
@@ -127,11 +158,12 @@ impl ConfigStore {
             config,
             dirty: false,
             generation: 0,
+            last_used: Instant::now(),
         };
         let snap = txn.snapshot(name, false);
         txs.insert(name.to_string(), txn);
         debug!(transaction = %name, ?base, resumed = false, "opened transaction");
-        snap
+        Ok(snap)
     }
 
     /// Applies one edit to a named transaction's in-progress config. Never
@@ -141,28 +173,21 @@ impl ConfigStore {
         name: &str,
         op: ConfigOp,
     ) -> Result<TransactionSnapshot, ConfigError> {
-        let mut txs = self.0.transactions.lock().await;
-        let txn = txs
-            .get_mut(name)
-            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        let (mut config, generation) = self.checkout(name, None).await?;
         // The kind only: an op may carry a secret (and `?op` goes to `nos-logd`).
         debug!(transaction = %name, op = op.kind(), "applying op");
-        let op = unmask_op(op, &[&txn.config, &*self.0.running.read().await])?;
-        let users_before = txn.config.users.clone();
-        op.apply(&mut txn.config)?;
-        self.hash_users(&mut txn.config, &users_before).await;
-        txn.dirty = true;
-        txn.generation += 1;
-        Ok(txn.snapshot(name, true))
+        let op = unmask_op(op, &[&config, &*self.0.running.read().await])?;
+        let users_before = config.users.clone();
+        op.apply(&mut config)?;
+        self.finish_edit(name, config, users_before, generation)
+            .await
     }
 
     /// Sets or removes the subsection of a named transaction's in-progress
-    /// config addressed by `path` (see `nos_proto::config_path`). Atomic under
-    /// the transactions lock, and all-or-nothing: the edit is applied to a
-    /// JSON copy which must still deserialize as a `Config` before it
-    /// replaces the transaction's config. Never runs `garde` validation.
-    /// `if_match` (checked under the same lock, so this is a real
-    /// compare-and-set) refuses the edit once the generation has moved on.
+    /// config addressed by `path` (see `nos_proto::config_path`). Atomic: the
+    /// edit lands on a copy that replaces the transaction's config only if
+    /// nothing else edited it meanwhile. Never runs `garde` validation.
+    /// `if_match` refuses the edit once the generation has moved on.
     pub async fn set_transaction_path(
         &self,
         name: &str,
@@ -170,43 +195,87 @@ impl ConfigStore {
         value: Option<&str>,
         if_match: Option<u64>,
     ) -> Result<TransactionSnapshot, ConfigError> {
-        let mut txs = self.0.transactions.lock().await;
-        let txn = txs
-            .get_mut(name)
-            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
-        txn.check(if_match)?;
-        let users_before = txn.config.users.clone();
-        let mut doc = serde_json::to_value(&txn.config)?;
+        let (config, generation) = self.checkout(name, if_match).await?;
+        let users_before = config.users.clone();
+        let mut doc = serde_json::to_value(&config)?;
         match value {
             Some(json) => config_path::set(&mut doc, path, serde_json::from_str(json)?)?,
             None => config_path::remove(&mut doc, path)?,
         }
         let mut new: Config = serde_json::from_value(doc)?;
         // A GET-then-PUT round trip carries the REST mask where secrets were.
-        restore_masked(&mut new, &[&txn.config, &*self.0.running.read().await])?;
-        txn.config = new;
-        self.hash_users(&mut txn.config, &users_before).await;
+        restore_masked(&mut new, &[&config, &*self.0.running.read().await])?;
+        let config = new;
+        let snap = self
+            .finish_edit(name, config, users_before, generation)
+            .await?;
+        debug!(transaction = %name, path = %path.join("/"), remove = value.is_none(), "set transaction path");
+        Ok(snap)
+    }
+
+    /// Copies a transaction's config out under the lock (checking `if_match`),
+    /// so the edit and the argon2 hashing run with no lock held.
+    async fn checkout(
+        &self,
+        name: &str,
+        if_match: Option<u64>,
+    ) -> Result<(Config, u64), ConfigError> {
+        let mut txs = self.0.transactions.lock().await;
+        let txn = txs
+            .get_mut(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        txn.check(if_match)?;
+        txn.last_used = Instant::now();
+        Ok((txn.config.clone(), txn.generation))
+    }
+
+    /// PRECIS-normalizes every user name, hashes any clear-text password (on
+    /// the blocking pool, reusing a matching hash from the transaction's
+    /// previous users or the running config), then stores `config` unless the
+    /// transaction moved past `generation` meanwhile (a retryable
+    /// `PreconditionFailed`, like a stale `if_match`).
+    async fn finish_edit(
+        &self,
+        name: &str,
+        mut config: Config,
+        users_before: Vec<nos_proto::User>,
+        generation: u64,
+    ) -> Result<TransactionSnapshot, ConfigError> {
+        normalize_names(&mut config.users);
+        let clear = config.users.iter().filter(|u| is_clear(u)).count();
+        if clear > MAX_CLEAR_PASSWORDS_PER_EDIT {
+            return Err(ConfigError::TooManyClearPasswords(
+                MAX_CLEAR_PASSWORDS_PER_EDIT,
+            ));
+        }
+        if clear > 0 {
+            let running = self.0.running.read().await.users.clone();
+            let mut users = std::mem::take(&mut config.users);
+            config.users = tokio::task::spawn_blocking(move || {
+                hash_clear_passwords(&mut users, &[&users_before, &running]);
+                users
+            })
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        let mut txs = self.0.transactions.lock().await;
+        let txn = txs
+            .get_mut(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        txn.check(Some(generation))?;
+        txn.config = config;
         txn.dirty = true;
         txn.generation += 1;
-        debug!(transaction = %name, path = %path.join("/"), remove = value.is_none(), "set transaction path");
+        txn.last_used = Instant::now();
         Ok(txn.snapshot(name, true))
     }
 
-    /// PRECIS-normalizes every user name, then hashes any clear-text password
-    /// `config` now holds, reusing a matching hash from the transaction's
-    /// previous users or the running config. Caller holds the `transactions`
-    /// lock (lock order: transactions, running).
-    async fn hash_users(&self, config: &mut Config, users_before: &[nos_proto::User]) {
-        normalize_names(&mut config.users);
-        let running = self.0.running.read().await;
-        hash_clear_passwords(&mut config.users, &[users_before, &running.users]);
-    }
-
     pub async fn get_transaction(&self, name: &str) -> Result<TransactionSnapshot, ConfigError> {
-        let txs = self.0.transactions.lock().await;
+        let mut txs = self.0.transactions.lock().await;
         let txn = txs
-            .get(name)
+            .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        txn.last_used = Instant::now();
         Ok(txn.snapshot(name, true))
     }
 
@@ -420,7 +489,10 @@ mod tests {
     #[tokio::test]
     async fn set_transaction_path_sets_subsection_and_marks_dirty() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t", TransactionBase::Blank).await;
+        store
+            .open_transaction("t", TransactionBase::Blank)
+            .await
+            .unwrap();
         let body = serde_json::to_string(&instance("r1", 65000)).unwrap();
         let snap = store
             .set_transaction_path("t", &segs("bgp-instance/r1"), Some(&body), None)
@@ -449,7 +521,10 @@ mod tests {
     #[tokio::test]
     async fn set_transaction_path_whole_config_and_failures_leave_it_untouched() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t", TransactionBase::Blank).await;
+        store
+            .open_transaction("t", TransactionBase::Blank)
+            .await
+            .unwrap();
         let whole = Config {
             hostname: "whole".to_string(),
             bgp_instances: vec![instance("r1", 1)],
@@ -517,7 +592,10 @@ mod tests {
             },
             None,
         );
-        let snap = store.open_transaction("t1", TransactionBase::Blank).await;
+        let snap = store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         assert_eq!(snap.config.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
         assert!(!snap.dirty);
         assert!(!snap.resumed);
@@ -532,7 +610,10 @@ mod tests {
             },
             None,
         );
-        let snap = store.open_transaction("t1", TransactionBase::Current).await;
+        let snap = store
+            .open_transaction("t1", TransactionBase::Current)
+            .await
+            .unwrap();
         assert_eq!(snap.config.bgp_instances.len(), 1);
         assert!(!snap.resumed);
     }
@@ -540,10 +621,16 @@ mod tests {
     #[tokio::test]
     async fn reopen_resumes_existing_transaction_and_ignores_base() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store.apply_op("t1", ensure_op("r1")).await.unwrap();
 
-        let snap = store.open_transaction("t1", TransactionBase::Current).await;
+        let snap = store
+            .open_transaction("t1", TransactionBase::Current)
+            .await
+            .unwrap();
         assert!(snap.resumed);
         assert!(snap.dirty);
         assert_eq!(snap.config.bgp_instances.len(), 1);
@@ -553,7 +640,10 @@ mod tests {
     #[tokio::test]
     async fn apply_op_updates_transaction_leaves_running_unchanged() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         let snap = store.apply_op("t1", ensure_op("r1")).await.unwrap();
         assert_eq!(snap.config.bgp_instances.len(), 1);
         assert_eq!(
@@ -575,7 +665,10 @@ mod tests {
     #[tokio::test]
     async fn commit_valid_transaction_updates_running_and_removes_transaction() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store.apply_op("t1", ensure_op("r1")).await.unwrap();
         store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
 
@@ -593,7 +686,10 @@ mod tests {
     #[tokio::test]
     async fn commit_invalid_transaction_leaves_running_unchanged_and_keeps_transaction_alive() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         // ASN 0 is invalid, and Ensure leaves asn at the placeholder 0.
         store.apply_op("t1", ensure_op("bad")).await.unwrap();
 
@@ -626,7 +722,10 @@ mod tests {
             },
             None,
         );
-        store.open_transaction("t1", TransactionBase::Current).await;
+        store
+            .open_transaction("t1", TransactionBase::Current)
+            .await
+            .unwrap();
         store.apply_op("t1", set_asn_op("r1", 65001)).await.unwrap();
 
         let diff = store.diff_transaction("t1").await.unwrap();
@@ -646,7 +745,10 @@ mod tests {
     #[tokio::test]
     async fn discard_removes_transaction_without_touching_running() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store.apply_op("t1", ensure_op("r1")).await.unwrap();
 
         store.discard_transaction("t1", None).await.unwrap();
@@ -668,6 +770,7 @@ mod tests {
             store
                 .open_transaction("t", TransactionBase::Blank)
                 .await
+                .unwrap()
                 .generation,
             0
         );
@@ -738,7 +841,10 @@ mod tests {
     async fn commit_refuses_a_malformed_syslog_trust_anchor() {
         use nos_proto::{LoggingOp, SyslogTransport};
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         let name = || "c1".to_string();
         for op in [
             LoggingOp::EnsureSyslog { name: name() },
@@ -783,6 +889,7 @@ mod tests {
                 config: bad_config,
                 dirty: true,
                 generation: 0,
+                last_used: Instant::now(),
             },
         );
 
@@ -796,7 +903,10 @@ mod tests {
     #[tokio::test]
     async fn routing_table_with_both_associations_round_trips_through_commit() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store.apply_op("t1", ensure_op("r1")).await.unwrap();
         store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
         store
@@ -841,7 +951,10 @@ mod tests {
     #[tokio::test]
     async fn commit_fails_when_routing_table_references_missing_bgp_instance() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store
             .apply_op("t1", ensure_routing_table_op("rt1"))
             .await
@@ -864,7 +977,10 @@ mod tests {
     #[tokio::test]
     async fn commit_fails_when_two_routing_tables_claim_same_bgp_instance() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store.apply_op("t1", ensure_op("r1")).await.unwrap();
         store
             .apply_op("t1", ensure_routing_table_op("rt1"))
@@ -893,7 +1009,10 @@ mod tests {
     #[tokio::test]
     async fn commit_fails_when_two_routing_tables_claim_same_static_routing_instance() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store
             .apply_op("t1", ensure_static_routing_instance_op("sri1"))
             .await
@@ -931,7 +1050,10 @@ mod tests {
     #[tokio::test]
     async fn static_routing_instance_with_route_round_trips_through_commit() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
         store
             .apply_op("t1", ensure_static_routing_instance_op("sri1"))
             .await
@@ -963,7 +1085,10 @@ mod tests {
     }
 
     async fn commit_password(store: &ConfigStore, tx: &str, name: &str, password: &str) {
-        store.open_transaction(tx, TransactionBase::Current).await;
+        store
+            .open_transaction(tx, TransactionBase::Current)
+            .await
+            .unwrap();
         store
             .apply_op(tx, set_password_op(name, password))
             .await
@@ -979,7 +1104,10 @@ mod tests {
         assert!(nos_password::verify("hunter2", &hash));
 
         // Same clear password again: hash untouched, so the transaction diff is empty.
-        store.open_transaction("t2", TransactionBase::Current).await;
+        store
+            .open_transaction("t2", TransactionBase::Current)
+            .await
+            .unwrap();
         let snap = store
             .apply_op("t2", set_password_op("alice", "hunter2"))
             .await
@@ -989,7 +1117,10 @@ mod tests {
         store.discard_transaction("t2", None).await.unwrap();
 
         // A different password does change it, and shows up as a (hidden) diff.
-        store.open_transaction("t3", TransactionBase::Current).await;
+        store
+            .open_transaction("t3", TransactionBase::Current)
+            .await
+            .unwrap();
         store
             .apply_op("t3", set_password_op("alice", "other"))
             .await
@@ -1034,7 +1165,10 @@ mod tests {
     async fn reverting_to_the_running_password_inside_a_transaction_is_no_diff() {
         let store = ConfigStore::new(Config::default(), None);
         commit_password(&store, "t1", "alice", "one").await;
-        store.open_transaction("t2", TransactionBase::Current).await;
+        store
+            .open_transaction("t2", TransactionBase::Current)
+            .await
+            .unwrap();
         store
             .apply_op("t2", set_password_op("alice", "two"))
             .await
@@ -1049,7 +1183,10 @@ mod tests {
     #[tokio::test]
     async fn clear_password_set_through_a_path_put_is_hashed() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t", TransactionBase::Blank).await;
+        store
+            .open_transaction("t", TransactionBase::Blank)
+            .await
+            .unwrap();
         let snap = store
             .set_transaction_path(
                 "t",
@@ -1075,7 +1212,10 @@ mod tests {
     async fn commit_that_removes_every_user_is_refused() {
         let store = ConfigStore::new(Config::default(), None);
         commit_password(&store, "t1", "alice", "pw").await;
-        store.open_transaction("t2", TransactionBase::Current).await;
+        store
+            .open_transaction("t2", TransactionBase::Current)
+            .await
+            .unwrap();
         store
             .apply_op(
                 "t2",
@@ -1102,7 +1242,10 @@ mod tests {
     #[tokio::test]
     async fn the_mask_keeps_a_stored_secret_through_ops_and_paths() {
         let store = ConfigStore::new(Config::default(), None);
-        store.open_transaction("t", TransactionBase::Blank).await;
+        store
+            .open_transaction("t", TransactionBase::Blank)
+            .await
+            .unwrap();
         store.apply_op("t", set_key_op("k", "real")).await.unwrap();
 
         // Op: the mask keeps the value in the transaction.
@@ -1144,11 +1287,151 @@ mod tests {
 
         // Once committed, a later transaction's mask resolves against running.
         store.commit_transaction("t", None).await.unwrap();
-        store.open_transaction("u", TransactionBase::Blank).await;
+        store
+            .open_transaction("u", TransactionBase::Blank)
+            .await
+            .unwrap();
         let snap = store
             .apply_op("u", set_key_op("k", "<hidden>"))
             .await
             .unwrap();
         assert_eq!(snap.config.key("k"), Some("real"));
+    }
+
+    fn user_json(n: usize) -> String {
+        let users: Vec<_> = (0..n)
+            .map(|i| serde_json::json!({"name": format!("u{i}"), "password": "pw"}))
+            .collect();
+        serde_json::to_string(&users).unwrap()
+    }
+
+    #[tokio::test]
+    async fn transaction_count_is_capped_and_a_slot_frees_on_discard() {
+        let store = ConfigStore::new(Config::default(), None);
+        for i in 0..MAX_TRANSACTIONS {
+            store
+                .open_transaction(&format!("t{i}"), TransactionBase::Blank)
+                .await
+                .unwrap();
+        }
+        let err = store
+            .open_transaction("extra", TransactionBase::Blank)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::TooManyTransactions(_)));
+        // Resuming at the cap still works.
+        assert!(
+            store
+                .open_transaction("t0", TransactionBase::Blank)
+                .await
+                .unwrap()
+                .resumed
+        );
+        store.discard_transaction("t1", None).await.unwrap();
+        store
+            .open_transaction("extra", TransactionBase::Blank)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_names_are_bounded() {
+        let store = ConfigStore::new(Config::default(), None);
+        for bad in ["", "a/b", "sp ace", &"x".repeat(MAX_TX_NAME + 1)] {
+            let err = store
+                .open_transaction(bad, TransactionBase::Blank)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ConfigError::InvalidTransactionName), "{bad}");
+        }
+        store
+            .open_transaction(&"x".repeat(MAX_TX_NAME), TransactionBase::Blank)
+            .await
+            .unwrap();
+        store
+            .open_transaction("cli.1_a-b", TransactionBase::Blank)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_transactions_are_swept_on_open() {
+        let mut store = ConfigStore::new(Config::default(), None);
+        Arc::get_mut(&mut store.0).unwrap().idle_ttl = Duration::from_millis(30);
+        store
+            .open_transaction("old", TransactionBase::Blank)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        store
+            .open_transaction("new", TransactionBase::Blank)
+            .await
+            .unwrap();
+        assert!(store.get_transaction("old").await.is_err());
+        assert!(store.get_transaction("new").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn too_many_clear_passwords_in_one_edit_is_refused_unhashed() {
+        let store = ConfigStore::new(Config::default(), None);
+        store
+            .open_transaction("t", TransactionBase::Blank)
+            .await
+            .unwrap();
+        let body = user_json(50);
+        let started = Instant::now();
+        let err = store
+            .set_transaction_path("t", &segs("users"), Some(&body), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::TooManyClearPasswords(_)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let ok = user_json(MAX_CLEAR_PASSWORDS_PER_EDIT);
+        let snap = store
+            .set_transaction_path("t", &segs("users"), Some(&ok), None)
+            .await
+            .unwrap();
+        assert!(snap.config.users.iter().all(|u| !is_clear(u)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn hashing_does_not_block_other_transactions() {
+        let store = ConfigStore::new(Config::default(), None);
+        for t in ["a", "b"] {
+            store
+                .open_transaction(t, TransactionBase::Blank)
+                .await
+                .unwrap();
+        }
+        let body = user_json(MAX_CLEAR_PASSWORDS_PER_EDIT);
+        let s2 = store.clone();
+        let hashing = tokio::spawn(async move {
+            s2.set_transaction_path("a", &segs("users"), Some(&body), None)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let started = Instant::now();
+        store.get_transaction("b").await.unwrap();
+        store.running_snapshot().await;
+        let quick = started.elapsed();
+        hashing.await.unwrap();
+        assert!(quick < Duration::from_millis(50), "{quick:?}");
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_lost_the_race_is_refused() {
+        let store = ConfigStore::new(Config::default(), None);
+        store
+            .open_transaction("t", TransactionBase::Blank)
+            .await
+            .unwrap();
+        let (config, generation) = store.checkout("t", None).await.unwrap();
+        store.apply_op("t", ensure_op("x")).await.unwrap();
+        let err = store
+            .finish_edit("t", config, Vec::new(), generation)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::PreconditionFailed { .. }));
     }
 }

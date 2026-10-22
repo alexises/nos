@@ -53,5 +53,6 @@ By convention (not yet enforced elsewhere), the persisted config file lives at `
 
 - Lock ordering: always lock `transactions` before `running`.
 - Every `Transaction` carries `generation: u64` (0 at open, +1 per successful `apply_op`/`set_transaction_path`), in every `TransactionSnapshot`. `if_match: Option<u64>` on `set_transaction_path`/`commit_transaction`/`discard_transaction` is an RFC 9110 §13.1.1 compare-and-set under the `transactions` lock; a mismatch is `ConfigError::PreconditionFailed`, nothing changed. Only `nos-restd` sends one.
+- Bounded (#388): 32 open transactions, names `[A-Za-z0-9._-]{1,64}`, 4h idle sweep, 4 clear passwords per edit; hashing runs on `spawn_blocking` with no lock held.
 
 Details: [internals](../docs/internals/config.md) (the `ConfigStore` method list).

@@ -335,7 +335,7 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 - `405 Method Not Allowed`: the path exists, but not with this method. The `Allow` header lists what does.
 - `412 Precondition Failed`: `If-Match` did not match the transaction's generation.
 - `422 Unprocessable Entity`: validation refused the commit. The transaction stays open.
-- `429 Too Many Requests`: too many failed logins for this user. See `Retry-After`.
+- `429 Too Many Requests`: too many failed logins for this user, or 32 transactions already open. See `Retry-After`.
 - `502 Bad Gateway`: the router answered with something unexpected.
 - `503 Service Unavailable`: a service the request needs is not running, or users cannot be checked right now.
 

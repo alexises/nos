@@ -10,7 +10,7 @@ use tracing::warn;
 pub const DEFAULT_USER: &str = "admin";
 pub const DEFAULT_PASSWORD: &str = "admin";
 
-fn is_clear(u: &User) -> bool {
+pub(crate) fn is_clear(u: &User) -> bool {
     !u.password.starts_with(PASSWORD_HASH_PREFIX)
 }
 
@@ -35,8 +35,7 @@ pub(crate) fn normalize_names(users: &mut [User]) {
 /// new one — this is what keeps "set the same password again" from showing up
 /// as a diff.
 ///
-/// ponytail: hashes synchronously under the store's lock (tens of ms per
-/// password); move to `spawn_blocking` if user edits ever get frequent.
+/// Blocking (tens of ms per password): the store runs it on `spawn_blocking`.
 pub(crate) fn hash_clear_passwords(users: &mut [User], known: &[&[User]]) {
     for u in users.iter_mut().filter(|u| is_clear(u)) {
         let same = known

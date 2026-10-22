@@ -115,7 +115,13 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
         },
         Request::OpenTransaction { name, base, actor } => {
             debug!(transaction = %name, actor = ?effective_actor(caller, actor), "transaction open");
-            Event::Transaction(store.open_transaction(&name, base).await)
+            match store.open_transaction(&name, base).await {
+                Ok(snap) => Event::Transaction(snap),
+                Err(e) => {
+                    debug!(transaction = %name, error = %e, "open transaction failed");
+                    Event::Error(e.to_string())
+                }
+            }
         }
         Request::ApplyOp { name, op, actor } => match store.apply_op(&name, op).await {
             Ok(snap) => {

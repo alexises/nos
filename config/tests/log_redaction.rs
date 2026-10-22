@@ -33,7 +33,10 @@ async fn applying_a_secret_op_logs_only_its_kind() {
     .unwrap();
 
     let store = ConfigStore::new(Config::default(), None);
-    store.open_transaction("t", TransactionBase::Blank).await;
+    store
+        .open_transaction("t", TransactionBase::Blank)
+        .await
+        .unwrap();
     store
         .apply_op(
             "t",
