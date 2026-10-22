@@ -37,6 +37,11 @@ impl ApiError {
             ApiError::NotFound(msg)
         } else if msg.starts_with("validation failed") {
             ApiError::Unprocessable(msg)
+        } else if msg.starts_with("too many transactions") {
+            ApiError::TooManyRequests {
+                detail: msg,
+                retry_after_secs: 60,
+            }
         } else if msg.starts_with("precondition failed") {
             ApiError::PreconditionFailed(msg)
         } else {
@@ -203,6 +208,12 @@ mod tests {
         let st = r.status().as_u16();
         let b = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
         (st, String::from_utf8(b.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn transaction_cap_is_429() {
+        let e = ApiError::from_config("too many transactions: 32 are open".into());
+        assert!(matches!(e, ApiError::TooManyRequests { .. }));
     }
 
     #[tokio::test]

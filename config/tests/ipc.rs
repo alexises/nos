@@ -110,7 +110,10 @@ async fn get_returns_current_config() {
     let path = tmp.path().join("config.sock");
 
     let store = ConfigStore::new(Config::default(), None);
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store.apply_op("t1", ensure_op("default")).await.unwrap();
     store
         .apply_op("t1", set_asn_op("default", 65000))
@@ -156,7 +159,10 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
 
     // Commit a change directly through the store (in-process, as a future
     // daemon-internal caller would).
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store.apply_op("t1", ensure_op("vrf-a")).await.unwrap();
     store
         .apply_op("t1", set_asn_op("vrf-a", 65001))
@@ -193,7 +199,10 @@ async fn unsubscribe_stops_updates() {
     writer.send(Request::Unsubscribe).await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await; // let server process Unsubscribe
 
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store.apply_op("t1", ensure_op("vrf-b")).await.unwrap();
     store
         .apply_op("t1", set_asn_op("vrf-b", 65002))
@@ -235,7 +244,10 @@ async fn subscribe_survives_client_dropping_its_write_half() {
         // `writer` dropped here — the connection's write-to-server half closes.
     };
 
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store.apply_op("t1", ensure_op("vrf-c")).await.unwrap();
     store
         .apply_op("t1", set_asn_op("vrf-c", 65003))
@@ -280,7 +292,10 @@ async fn subscribe_diff_survives_client_dropping_its_write_half() {
         // `writer` dropped here — the connection's write-to-server half closes.
     };
 
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store.apply_op("t1", ensure_op("vrf-d")).await.unwrap();
     store
         .apply_op("t1", set_asn_op("vrf-d", 65004))
@@ -309,7 +324,10 @@ async fn subscribe_diff_reports_pre_existing_instance_as_added_then_incremental_
     let path = tmp.path().join("config.sock");
 
     let store = ConfigStore::new(Config::default(), None);
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store.apply_op("t1", ensure_op("r1")).await.unwrap();
     store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
     store.commit_transaction("t1", None).await.unwrap();
@@ -340,7 +358,10 @@ async fn subscribe_diff_reports_pre_existing_instance_as_added_then_incremental_
     }
 
     // Add a second instance and remove the first in one commit.
-    store.open_transaction("t2", TransactionBase::Current).await;
+    store
+        .open_transaction("t2", TransactionBase::Current)
+        .await
+        .unwrap();
     store.apply_op("t2", ensure_op("r2")).await.unwrap();
     store.apply_op("t2", set_asn_op("r2", 65001)).await.unwrap();
     store
@@ -399,7 +420,10 @@ async fn subscribe_diff_skips_commits_outside_requested_scope() {
     assert!(matches!(event, Event::Diff(d) if d.is_empty()));
 
     // A hostname-only commit is out of scope and must never be forwarded.
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store
         .apply_op("t1", ConfigOp::SetHostname("router-b".to_string()))
         .await
@@ -421,7 +445,10 @@ async fn save_persists_running_config_to_disk() {
     let config_path = tmp.path().join("config.yaml");
 
     let store = ConfigStore::new(Config::default(), Some(config_path.clone()));
-    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
     store.apply_op("t1", ensure_op("default")).await.unwrap();
     store
         .apply_op("t1", set_asn_op("default", 65000))
@@ -1439,7 +1466,10 @@ async fn diffs_are_projected_per_role_too() {
         subs.push((role, reader, writer));
     }
 
-    store.open_transaction("t", TransactionBase::Current).await;
+    store
+        .open_transaction("t", TransactionBase::Current)
+        .await
+        .unwrap();
     for op in [
         ConfigOp::SetHostname("renamed".into()),
         ConfigOp::Admin(nos_proto::AdminOp::SetKey {
