@@ -122,6 +122,10 @@ pub enum Request {
         value: Option<String>,
         /// Only act if the transaction is at this revision.
         if_match: Option<u64>,
+        /// Where to insert (or move) the list element `path` names; `None`
+        /// replaces in place / appends. Postcard wire change (#539): every
+        /// consumer must pass it.
+        position: Option<crate::config_path::ListPosition>,
     },
 }
 

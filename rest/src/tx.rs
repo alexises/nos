@@ -14,7 +14,7 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
-use nos_proto::config_path;
+use nos_proto::config_path::{self, ListPosition};
 use nos_proto::{Config, ConfigDiff, Event, Request, TransactionBase, TransactionSnapshot};
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
@@ -50,6 +50,47 @@ fn split(uri: &Uri) -> ApiResult<(String, Vec<String>)> {
         .next()
         .ok_or_else(|| ApiError::BadRequest("missing transaction name".to_string()))??;
     Ok((tx, segs.collect::<ApiResult<_>>()?))
+}
+
+/// The list position a PUT asks for: at most one of `?first`, `?last`,
+/// `?before=<k>`, `?after=<k>` (values percent-decoded).
+fn position(uri: &Uri) -> ApiResult<Option<ListPosition>> {
+    let mut found = None;
+    for pair in uri
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|p| !p.is_empty())
+    {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let anchor = || {
+            let v = percent_decode_str(&v.replace('+', " "))
+                .decode_utf8()
+                .map_err(|_| ApiError::BadRequest(format!("'{k}' is not UTF-8")))?
+                .into_owned();
+            if v.is_empty() {
+                return Err(ApiError::BadRequest(format!("'{k}' needs a list key")));
+            }
+            Ok(v)
+        };
+        let p = match (k, v) {
+            ("first", "") => ListPosition::First,
+            ("last", "") => ListPosition::Last,
+            ("before", _) => ListPosition::Before(anchor()?),
+            ("after", _) => ListPosition::After(anchor()?),
+            _ => {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown query parameter '{k}': use first, last, before=<key> or after=<key>"
+                )))
+            }
+        };
+        if found.replace(p).is_some() {
+            return Err(ApiError::BadRequest(
+                "give at most one of first, last, before, after".to_string(),
+            ));
+        }
+    }
+    Ok(found)
 }
 
 fn snapshot(ev: Event) -> ApiResult<TransactionSnapshot> {
@@ -205,6 +246,7 @@ pub async fn put(
 ) -> ApiResult<Response> {
     let (name, path) = split(&uri)?;
     let if_match = if_match(&headers)?;
+    let position = position(&uri)?;
     let value = String::from_utf8(body.to_vec())
         .map_err(|_| ApiError::BadRequest("body is not UTF-8".to_string()))?;
     let snap = snapshot(
@@ -213,6 +255,7 @@ pub async fn put(
             path: path.clone(),
             value: Some(value),
             if_match,
+            position,
         })
         .await?,
     )?;
@@ -246,6 +289,7 @@ pub async fn delete(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> A
                 path,
                 value: None,
                 if_match,
+                position: None,
             })
             .await?,
         )?;

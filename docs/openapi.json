@@ -7478,6 +7478,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7588,6 +7589,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7709,6 +7711,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7824,6 +7868,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7936,6 +7981,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8057,6 +8103,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8174,6 +8262,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8304,6 +8393,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8412,6 +8543,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8533,6 +8665,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8647,6 +8821,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8763,6 +8938,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8881,6 +9057,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9001,6 +9178,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9119,6 +9297,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9241,6 +9420,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9361,6 +9541,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9479,6 +9660,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9601,6 +9783,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9723,6 +9906,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9843,6 +10027,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9964,6 +10149,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10090,6 +10276,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10209,6 +10396,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10331,6 +10519,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10441,6 +10630,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10562,6 +10752,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10679,6 +10911,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10809,6 +11042,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10932,6 +11207,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11057,6 +11333,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11175,6 +11452,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11298,6 +11576,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11420,6 +11699,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11541,6 +11821,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11672,6 +11953,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11808,6 +12090,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11926,6 +12250,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12042,6 +12367,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12163,6 +12489,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12294,6 +12621,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12425,6 +12753,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12556,6 +12885,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12685,6 +13015,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12810,6 +13141,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -12940,6 +13272,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13063,6 +13437,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13193,6 +13568,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13331,6 +13707,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13470,6 +13847,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13593,6 +14012,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13718,6 +14138,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13846,6 +14267,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13982,6 +14404,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14117,6 +14540,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14244,6 +14668,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14375,6 +14800,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14506,6 +14932,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14637,6 +15064,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14769,6 +15197,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14903,6 +15332,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15037,6 +15467,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15173,6 +15604,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15311,6 +15743,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15447,6 +15880,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15582,6 +16016,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15709,6 +16144,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15838,6 +16274,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15963,6 +16400,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16093,6 +16531,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16228,6 +16667,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16353,6 +16793,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16480,6 +16921,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16611,6 +17053,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16740,6 +17183,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16865,6 +17309,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -16992,6 +17437,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17123,6 +17569,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17252,6 +17699,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17377,6 +17825,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17504,6 +17953,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17635,6 +18085,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17764,6 +18215,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17894,6 +18346,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18029,6 +18482,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18156,6 +18610,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18285,6 +18740,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18410,6 +18866,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18540,6 +18997,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18675,6 +19133,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18800,6 +19259,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -18928,6 +19388,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19059,6 +19520,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19184,6 +19646,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19308,6 +19771,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19431,6 +19936,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19556,6 +20062,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19684,6 +20191,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19809,6 +20317,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19931,6 +20440,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20050,6 +20560,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20175,6 +20686,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20305,6 +20817,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20428,6 +20982,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20555,6 +21110,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20686,6 +21242,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20800,6 +21357,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -20921,6 +21479,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21038,6 +21638,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21168,6 +21769,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21294,6 +21937,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21419,6 +22063,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21544,6 +22189,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21669,6 +22315,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21796,6 +22443,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21922,6 +22570,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22041,6 +22690,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22166,6 +22816,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22291,6 +22942,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22416,6 +23068,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22546,6 +23199,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22663,6 +23358,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22793,6 +23489,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -22910,6 +23648,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23037,6 +23776,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23168,6 +23908,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23299,6 +24040,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23430,6 +24172,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23561,6 +24304,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23692,6 +24436,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23818,6 +24563,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24002,6 +24748,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24123,6 +24870,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24237,6 +25026,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24347,6 +25137,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24468,6 +25259,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24585,6 +25418,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24715,6 +25549,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24862,6 +25738,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -24972,6 +25849,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25093,6 +25971,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25210,6 +26130,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25340,6 +26261,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25466,6 +26429,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25588,6 +26552,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25709,6 +26674,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25835,6 +26801,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -25951,6 +26918,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26067,6 +27035,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26188,6 +27157,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26317,6 +27287,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26442,6 +27413,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26567,6 +27539,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26692,6 +27665,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26817,6 +27791,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -26942,6 +27917,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27072,6 +28048,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27198,6 +28216,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27337,6 +28356,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27472,6 +28533,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27606,6 +28668,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27740,6 +28803,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27874,6 +28938,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28008,6 +29073,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28133,6 +29199,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28246,6 +29313,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28356,6 +29424,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28477,6 +29546,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28585,6 +29696,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28703,6 +29815,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28825,6 +29938,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -28942,6 +30056,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29052,6 +30167,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29173,6 +30289,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29287,6 +30445,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29403,6 +30562,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29519,6 +30679,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29640,6 +30801,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29769,6 +30931,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29891,6 +31054,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30007,6 +31171,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30126,6 +31291,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30251,6 +31417,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30376,6 +31543,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30498,6 +31666,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30608,6 +31777,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30729,6 +31899,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30846,6 +32058,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -30976,6 +32189,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31099,6 +32354,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31224,6 +32480,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31349,6 +32606,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31477,6 +32735,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31616,6 +32875,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31748,6 +33049,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31885,6 +33187,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32030,6 +33333,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32179,6 +33483,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32323,6 +33628,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32462,6 +33768,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32611,6 +33918,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32755,6 +34063,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32889,6 +34198,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33028,6 +34338,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33166,6 +34477,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33305,6 +34617,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33437,6 +34791,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33567,6 +34922,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33705,6 +35061,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33844,6 +35201,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -33976,6 +35375,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -34115,6 +35515,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -34264,6 +35665,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -34395,6 +35797,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -34521,6 +35924,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -34637,6 +36041,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -34758,6 +36163,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -34889,6 +36295,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35015,6 +36422,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35136,6 +36544,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35267,6 +36676,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35396,6 +36806,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35518,6 +36929,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35634,6 +37046,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35753,6 +37166,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35869,6 +37283,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -35990,6 +37405,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -36107,6 +37564,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -36237,6 +37695,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -36363,6 +37863,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -36502,6 +38003,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -36640,6 +38183,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -36794,6 +38338,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -36935,6 +38521,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -37078,6 +38665,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -37221,6 +38809,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -37358,6 +38947,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -37503,6 +39093,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -37652,6 +39243,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -37801,6 +39393,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -37950,6 +39543,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -38099,6 +39693,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -38243,6 +39838,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -38377,6 +39973,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -38516,6 +40113,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -38642,6 +40240,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -38763,6 +40362,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -38892,6 +40492,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39014,6 +40615,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39133,6 +40735,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39249,6 +40852,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39370,6 +40974,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39484,6 +41130,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39594,6 +41241,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39715,6 +41363,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39832,6 +41522,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -39957,6 +41648,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40079,6 +41771,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40198,6 +41891,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40320,6 +42014,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40439,6 +42134,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40566,6 +42262,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40694,6 +42391,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40814,6 +42512,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -40935,6 +42634,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41061,6 +42761,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41180,6 +42881,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41305,6 +43007,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41435,6 +43138,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41561,6 +43306,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41700,6 +43446,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41835,6 +43623,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -41969,6 +43758,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42103,6 +43893,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42237,6 +44028,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42371,6 +44163,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42496,6 +44289,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42612,6 +44406,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42733,6 +44528,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42850,6 +44687,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -42980,6 +44818,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43119,6 +44999,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43282,6 +45163,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43386,6 +45309,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43507,6 +45431,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43624,6 +45590,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43746,6 +45713,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43865,6 +45833,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -43992,6 +45961,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44121,6 +46091,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44246,6 +46217,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44376,6 +46348,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44493,6 +46507,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44623,6 +46638,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44737,6 +46794,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44856,6 +46914,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -44981,6 +47040,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -45106,6 +47166,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -45236,6 +47297,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -45359,6 +47462,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -45489,6 +47593,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -45629,6 +47734,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -45767,6 +47873,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -45889,6 +47996,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46005,6 +48113,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46123,6 +48232,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46246,6 +48356,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46359,6 +48470,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46469,6 +48581,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46590,6 +48703,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46698,6 +48853,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46819,6 +48975,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46924,6 +49122,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47031,6 +49230,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47140,6 +49340,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47253,6 +49454,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47366,6 +49568,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47479,6 +49682,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47590,6 +49794,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47700,6 +49905,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47821,6 +50027,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -47937,6 +50185,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48050,6 +50299,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48161,6 +50411,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48268,6 +50519,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48377,6 +50629,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48490,6 +50743,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48604,6 +50858,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48725,6 +50980,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48842,6 +51139,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -48972,6 +51270,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49098,6 +51438,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49229,6 +51570,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49339,6 +51681,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49460,6 +51803,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49574,6 +51959,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49690,6 +52076,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49811,6 +52198,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -49942,6 +52330,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50068,6 +52457,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50184,6 +52574,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50300,6 +52691,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50419,6 +52811,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50549,6 +52942,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50677,6 +53112,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50814,6 +53250,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -50936,6 +53373,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51056,6 +53494,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51172,6 +53611,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51282,6 +53722,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51403,6 +53844,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51520,6 +54003,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51650,6 +54134,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51778,6 +54304,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -51918,6 +54445,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -52053,6 +54581,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -52163,6 +54692,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
@@ -52284,6 +54814,48 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -52399,6 +54971,7 @@
       ],
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {

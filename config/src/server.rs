@@ -179,9 +179,10 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
             path,
             value,
             if_match,
+            position,
         } => {
             match store
-                .set_transaction_path(&name, &path, value.as_deref(), if_match)
+                .set_transaction_path(&name, &path, value.as_deref(), if_match, position)
                 .await
             {
                 Ok(snap) => Event::Transaction(snap),

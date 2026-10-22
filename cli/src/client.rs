@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
+use nos_proto::config_path::ListPosition;
 use nos_proto::{
     CommandDoc, Config, ConfigDiff, ConfigOp, Event, IpcCodec, Request, Role, Topic,
     TransactionBase, TransactionSnapshot,
@@ -141,6 +142,7 @@ pub async fn set_transaction_path(
     name: &str,
     path: Vec<String>,
     value: Option<String>,
+    position: Option<ListPosition>,
 ) -> Result<TransactionSnapshot, ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;
     writer
@@ -149,6 +151,7 @@ pub async fn set_transaction_path(
             path,
             value,
             if_match: None,
+            position,
         })
         .await?;
     expect_transaction(reader.next().await)

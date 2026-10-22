@@ -43,14 +43,19 @@ fn fake_configd(path: &Path) {
                 Err(e) => Event::Error(e.to_string()),
             },
             Request::SetTransactionPath {
-                name, path, value, ..
+                name,
+                path,
+                value,
+                position,
+                ..
             } => {
                 let mut doc = serde_json::to_value(&*cfg).unwrap();
                 let done = match value {
-                    Some(v) => nos_proto::config_path::set(
+                    Some(v) => nos_proto::config_path::set_at(
                         &mut doc,
                         &path,
                         serde_json::from_str(&v).unwrap(),
+                        position.as_ref(),
                     ),
                     None => nos_proto::config_path::remove(&mut doc, &path),
                 };
@@ -367,6 +372,37 @@ async fn configuration_session_edits_commits_and_leaves() {
     )
     .await;
     assert_eq!(mode, Mode::Operational);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_with_a_position_and_move_reorder_a_list() {
+    let lab = lab();
+    let (mode, _) = run(
+        &lab,
+        Mode::Operational,
+        &[
+            "configure tpos",
+            "set bgp instance b1 peer-group a",
+            "set bgp instance b1 peer-group b",
+            "set bgp instance b1 peer-group c",
+            "move bgp instance b1 peer-group c first",
+            "set bgp instance b1 peer-group a after b",
+            "move bgp instance b1 peer-group nope last",
+            "set bgp instance b1 peer-group b before zz",
+        ],
+        leave_open,
+    )
+    .await;
+    assert!(matches!(mode, Mode::Configuration { .. }));
+    let snap = nos_cli::client::get_transaction(&lab.config, "tpos")
+        .await
+        .unwrap();
+    let names: Vec<_> = snap.config.bgp_instances[0]
+        .peer_groups
+        .iter()
+        .map(|g| g.name.as_str())
+        .collect();
+    assert_eq!(names, ["c", "b", "a"]);
 }
 
 #[test]

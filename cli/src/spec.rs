@@ -132,7 +132,19 @@ pub const CONFIG_VERBS: &[(&str, Doc)] = &[
             detail: "`set <path> <field> <value>`: the path is relative to the current \
                      position, else from the top; any missing object on the way is created \
                      with default values. A switch (e.g. `route-reflector-client`) takes no \
-                     value. Press ? after a word to see what fits next.",
+                     value. Inside a list entry, `set <entry> first|last|before <key>|after \
+                     <key>` places it in the list (without one, a new entry is appended and \
+                     an existing one keeps its place). Press ? after a word to see what fits \
+                     next.",
+        },
+    ),
+    (
+        "move",
+        Doc::Local {
+            summary: "Move a list entry to another place in its list.",
+            detail: "`move <path> first|last|before <key>|after <key>`: re-orders an existing \
+                     entry of an ordered list (e.g. an ACL's rules) without changing it. The \
+                     path is relative to the current position, else from the top.",
         },
     ),
     (

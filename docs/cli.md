@@ -107,6 +107,8 @@ Three verbs change configuration:
 - `set <object> <field> <value>` sets a field, or adds an element to a list such as an address or a route. An object on the way that does not exist yet is created with its defaults, like `edit` would.
 - `delete <object> [<field>]` removes an object, a list element or a field. A removed field goes back to its default.
 
+A fourth verb, `move`, re-orders a list element (see [Ordering list elements](#ordering-list-elements-first-last-before-after-move)).
+
 Every `set`/`delete` command has two spellings:
 
 - the **absolute** form names the whole path from the top of the tree, and works from anywhere in configuration mode:
@@ -121,6 +123,19 @@ Tokens must match exactly. There are no abbreviations and no case folding: `sh c
 Every object and field also accepts its REST API spelling, so `set bgp-instance r1 asn 65001` is the same command as `set bgp instance r1 asn 65001`. `help`, `?` and Tab always show the shell spelling. The prompt shows your position in the REST spelling: `edge-1(doc3/bgp-instance:r1/peer-group:pg1)>`.
 
 Interfaces have one naming rule of their own: `<interface>.<tag>` names a VLAN subinterface, for example `edit interface eth0.100`. A plain `eth0` in an address or routing-table command means its untagged subinterface, `eth0.0`. Interface-level settings such as `mtu` and `switching-profile` apply to `eth0` itself.
+
+## Ordering list elements: `first`, `last`, `before`, `after`, `move`
+
+Most lists are unordered, but where order matters (the first match wins) you place an element yourself:
+
+- **Insert at a place:** end a `set` on a list element with a position word. `set bgp instance r1 peer-group pg3 first` creates `pg3` at the top of the list; `set ... peer-group pg3 after pg1` puts it right after `pg1`.
+- **Move an existing element:** `move bgp instance r1 peer-group pg3 before pg1`. The element is not changed, only its place. `set` with a position on an existing element does the same.
+- **Position words:** `first`, `last`, `before <key>`, `after <key>`. The key names a sibling in the same list; an unknown sibling is an error and nothing changes.
+- **Relative forms work:** inside `edit bgp instance r1`, `move peer-group pg3 first`. Inside the element itself, `set first` moves it.
+- **No position word:** a new element is appended, and `set` on an existing element keeps its place.
+- **Tab and `?`** offer the position words once you are on an element, and the sibling keys after `before`/`after`.
+- **A position is not a field.** `edit`, `delete`, and `set` on a plain field take no position word; a line like `set hostname first` just sets the hostname to `first`.
+- **Order shows in `diff`:** a reorder is reported as `<list> order` with the old and new key order, so it is committed and reaches daemons like any other change. Only lists nested inside an element report it.
 
 ## Navigating: `edit`, `up`, `top`
 
@@ -285,6 +300,7 @@ Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate:
 | `show config` | Sends `Request::Get` to `nos-configd`, prints the returned running config as an indented hierarchy in the `set` words, only what is configured (works in any mode) |
 | `show config admin` | Same fetch, prints only the admin keystore (`key <label>` / `secret <hidden>`), or `no admin keys configured` (works in any mode) |
 | `edit admin` / `set admin key <label> secret <value>` / `delete admin key <label>` | The keystore edits, through the generic grammar. A secret is write-only: `show this` inside the transaction prints `<hidden>`, and `diff` prints `<hidden>`/`<changed>`. At the transaction root `show this` omits the section like `show config` |
+| `set <list element> first\|last\|before <key>\|after <key>` / `move <list element> first\|last\|before <key>\|after <key>` | Inserts or moves a list element: one `SetTransactionPath` write of the element with `position` set (`move` re-sends the element as it is). Handled in `config_grammar.rs` (`Walk::positioned`, `parse_move`) |
 | `show route <table>` | Resolves `<table>`'s `nos-ribd` instance via the watchdog broker, then `RibRequest::GetRoutes` — every prefix, every candidate route ordered best to worst (works in any mode) |
 | `show route <table> <address>` | Same resolution, then `RibRequest::Lookup { addr }` — a longest-prefix-match lookup, printing every candidate for the matched prefix ordered best to worst, or "no route matches" (works in any mode) |
 | `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk (operational mode only) |

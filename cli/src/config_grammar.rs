@@ -18,6 +18,7 @@
 //!   `#[default]`), or — given a value — only if it holds that value.
 
 use nos_proto::cli::{self, Field, Kind, Node, Payload, SugarOut, Verb};
+use nos_proto::config_path::ListPosition;
 use serde_json::{Map, Value};
 
 /// What one config line does.
@@ -27,6 +28,28 @@ pub struct ConfigEdit {
     pub writes: Vec<(Vec<String>, Value)>,
     /// `edit`: the position to navigate to, as REST segments.
     pub navigate: Option<Vec<String>>,
+    /// `set ... first|last|before <k>|after <k>` / `move`: where the one
+    /// write's list element goes (#539).
+    pub position: Option<ListPosition>,
+}
+
+/// `first | last | before <k> | after <k>`, exactly (nothing after).
+fn position(words: &[&str]) -> Option<ListPosition> {
+    Some(match words {
+        ["first"] => ListPosition::First,
+        ["last"] => ListPosition::Last,
+        ["before", k] => ListPosition::Before((*k).to_string()),
+        ["after", k] => ListPosition::After((*k).to_string()),
+        _ => return None,
+    })
+}
+
+/// `words` without its trailing position words, and that position.
+fn split_position<'a>(words: &'a [&'a str]) -> Option<(&'a [&'a str], ListPosition)> {
+    [1, 2].into_iter().find_map(|n| {
+        let i = words.len().checked_sub(n)?;
+        Some((&words[..i], position(&words[i..])?))
+    })
 }
 
 /// Parses one `edit`/`set`/`delete` line, at `context` (the current `edit`
@@ -39,11 +62,35 @@ pub fn parse(line: &str, context: &[String], config: &Value) -> Option<ConfigEdi
         "edit" => None,
         "set" => Some(Verb::Set),
         "delete" => Some(Verb::Delete),
+        "move" => return parse_move(rest, context, config),
         _ => return None,
     };
     let from = |ctx: &[String]| {
         let mut walk = Walk::at(config, ctx)?;
         walk.run(verb, rest)
+    };
+    from(context).or_else(|| (!context.is_empty()).then(|| from(&[])).flatten())
+}
+
+/// `move <path-to-element> first|last|before <k>|after <k>`: re-sends the
+/// existing element at its new place, so only the order changes.
+fn parse_move(rest: &[&str], context: &[String], config: &Value) -> Option<ConfigEdit> {
+    let (head, position) = split_position(rest)?;
+    let from = |ctx: &[String]| {
+        let mut walk = Walk::at(config, ctx)?;
+        walk.no_create = true;
+        let path = walk.run(None, head)?.navigate?;
+        // The target must be a list element: its parent is an array.
+        let parent = path.split_last()?.1;
+        nos_proto::config_path::get(config, parent)
+            .ok()?
+            .as_array()?;
+        let element = nos_proto::config_path::get(config, &path).ok()?.clone();
+        Some(ConfigEdit {
+            writes: vec![(path, element)],
+            navigate: None,
+            position: Some(position.clone()),
+        })
     };
     from(context).or_else(|| (!context.is_empty()).then(|| from(&[])).flatten())
 }
@@ -62,6 +109,8 @@ struct Walk {
     /// How deep the context was: a `delete` that walks no further deletes
     /// the context object itself, and navigates to its parent.
     context_len: usize,
+    /// `move`: walk into existing elements only.
+    no_create: bool,
 }
 
 fn segment(f: &Field) -> String {
@@ -270,6 +319,7 @@ impl Walk {
             ptr: String::new(),
             created: None,
             context_len: 0,
+            no_create: false,
         };
         let mut segs = context.iter();
         while let Some(seg) = segs.next() {
@@ -344,6 +394,33 @@ impl Walk {
         Some(ConfigEdit {
             writes: vec![(path, self.doc.pointer(ptr)?.clone())],
             navigate,
+            position: None,
+        })
+    }
+
+    /// The pointer of the list the current object is an element of.
+    fn element_list(&self) -> Option<&str> {
+        let (list, idx) = self.ptr.rsplit_once('/')?;
+        idx.parse::<usize>().ok()?;
+        Some(list)
+    }
+
+    /// `set <element> first|last|before <k>|after <k>`: the walk is on a list
+    /// element and `words` is a position, not a field of it.
+    fn positioned(&self, words: &[&str]) -> Option<ConfigEdit> {
+        let position = position(words)?;
+        let list_ptr = self.element_list()?;
+        if lookup(self.node.fields, words, true).is_some() {
+            return None;
+        }
+        // A list created on this line can only be the element's own.
+        if self.created.as_ref().is_some_and(|(_, p)| p != list_ptr) {
+            return None;
+        }
+        Some(ConfigEdit {
+            writes: vec![(self.path.clone(), self.doc.pointer(&self.ptr)?.clone())],
+            navigate: None,
+            position: Some(position),
         })
     }
 
@@ -351,6 +428,11 @@ impl Walk {
         loop {
             if words.is_empty() {
                 return self.finish(verb);
+            }
+            if verb == Some(Verb::Set)
+                && let Some(edit) = self.positioned(words)
+            {
+                return Some(edit);
             }
             let (mut hit, mut n) = lookup(self.node.fields, words, true)?;
             if let (Hit::Sugar(f, s), Some(v)) = (&hit, verb) {
@@ -380,7 +462,7 @@ impl Walk {
                 if let Some(exp) = expanded {
                     return self.rewritten(f, &exp, after, verb);
                 }
-                self.enter(f, word, verb != Some(Verb::Delete))?;
+                self.enter(f, word, verb != Some(Verb::Delete) && !self.no_create)?;
                 words = after;
                 continue;
             }
@@ -432,7 +514,7 @@ impl Walk {
         let mut line: Vec<&str> = exp.iter().map(String::as_str).collect();
         line.extend_from_slice(after);
         let mut alt = self.clone_walk();
-        alt.enter(f, line[0], verb != Some(Verb::Delete))?;
+        alt.enter(f, line[0], verb != Some(Verb::Delete) && !self.no_create)?;
         alt.run(verb, &line[1..])
     }
 
@@ -444,6 +526,7 @@ impl Walk {
             ptr: self.ptr.clone(),
             created: self.created.clone(),
             context_len: self.context_len,
+            no_create: self.no_create,
         }
     }
 
@@ -469,6 +552,7 @@ impl Walk {
                     None => Some(ConfigEdit {
                         writes: Vec::new(),
                         navigate,
+                        position: None,
                     }),
                 }
             }
@@ -483,6 +567,7 @@ impl Walk {
                 Some(ConfigEdit {
                     writes: vec![(list_path, self.doc.pointer(&list_ptr)?.clone())],
                     navigate: (self.path.len() == self.context_len).then_some(parent),
+                    position: None,
                 })
             }
             // `set` naming only an object: creating it is the edit.
@@ -597,10 +682,58 @@ fn value_candidates(kind: &Kind) -> Vec<Candidate> {
     }
 }
 
+/// Whether Tab offers `first/last/before/after` inside a list element: with
+/// `set`, or alone for `move`.
+#[derive(Clone, Copy, PartialEq)]
+enum Positions {
+    No,
+    With,
+    Only,
+}
+
 impl Walk {
-    fn candidates(mut self, mut words: &[&str]) -> Vec<Candidate> {
+    /// `first last before after`, then (after `before`/`after`) the siblings'
+    /// keys.
+    fn position_candidates(&self, words: &[&str]) -> Vec<Candidate> {
+        let word = |w: &str| Candidate {
+            word: w.to_string(),
+            topic: None,
+            usage: w.to_string(),
+        };
+        match words {
+            [] => ["first", "last", "before", "after"].map(word).into(),
+            ["before" | "after"] => {
+                let (Some(list_ptr), Some(key)) =
+                    (self.element_list(), self.node.fields.iter().find(|f| f.key))
+                else {
+                    return Vec::new();
+                };
+                let own = self.ptr.rsplit('/').next().and_then(|i| i.parse().ok());
+                let list = self.doc.pointer(list_ptr).and_then(Value::as_array);
+                list.into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter(|(i, _)| Some(*i) != own)
+                    .map(|(_, e)| {
+                        let k = &e[key.name];
+                        word(&k.as_str().map_or_else(|| k.to_string(), str::to_string))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn candidates(mut self, mut words: &[&str], positions: Positions) -> Vec<Candidate> {
         loop {
             let mut out = field_candidates(self.node.fields, words);
+            if positions != Positions::No && self.element_list().is_some() {
+                let own = self.position_candidates(words);
+                if positions == Positions::Only {
+                    out.clear();
+                }
+                out.extend(own);
+            }
             let Some((hit, n)) = lookup(self.node.fields, words, true) else {
                 return out;
             };
@@ -647,6 +780,11 @@ pub fn complete(words: &[&str], context: &[String], config: &Value) -> Vec<Candi
     let Some(rest) = words.get(1..) else {
         return Vec::new();
     };
+    let positions = match words[0] {
+        "set" => Positions::With,
+        "move" => Positions::Only,
+        _ => Positions::No,
+    };
     let mut out: Vec<Candidate> = Vec::new();
     let starts: &[&[String]] = if context.is_empty() {
         &[&[]]
@@ -655,7 +793,7 @@ pub fn complete(words: &[&str], context: &[String], config: &Value) -> Vec<Candi
     };
     for start in starts {
         if let Some(walk) = Walk::at(config, start) {
-            for c in walk.candidates(rest) {
+            for c in walk.candidates(rest, positions) {
                 if !out.iter().any(|o| o.word == c.word) {
                     out.push(c);
                 }
@@ -748,6 +886,7 @@ mod tests {
                 Value::from(65000),
             )],
             navigate: None,
+            position: None,
         });
         let d = doc();
         assert_eq!(
@@ -1146,5 +1285,127 @@ mod tests {
             assert!(words_of(&["name"]).is_empty());
             assert!(words_of(&["derived"]).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod position_tests {
+    use nos_proto::schema::{BgpInstance, BgpPeerGroup};
+    use nos_proto::Config;
+
+    use super::*;
+
+    fn doc() -> Value {
+        let group = |n: &str| BgpPeerGroup {
+            name: n.into(),
+            ..Default::default()
+        };
+        let c = Config {
+            bgp_instances: vec![BgpInstance {
+                name: "r1".into(),
+                peer_groups: vec![group("a"), group("b"), group("c")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        serde_json::to_value(c).unwrap()
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(ToString::to_string).collect()
+    }
+
+    fn pos(line: &str, ctx: &[&str]) -> Option<(Vec<String>, ListPosition)> {
+        let e = parse(line, &strs(ctx), &doc())?;
+        assert_eq!(e.writes.len(), 1);
+        Some((e.writes[0].0.clone(), e.position?))
+    }
+
+    const PG: &[&str] = &["bgp-instance", "r1", "peer-group", "b"];
+
+    #[test]
+    fn set_takes_a_trailing_position_for_a_list_element() {
+        for (words, want) in [
+            ("first", ListPosition::First),
+            ("last", ListPosition::Last),
+            ("before a", ListPosition::Before("a".into())),
+            ("after c", ListPosition::After("c".into())),
+        ] {
+            let line = format!("set bgp instance r1 peer-group b {words}");
+            assert_eq!(pos(&line, &[]), Some((strs(PG), want.clone())), "{line}");
+        }
+        // Relative to an `edit` position, and for a new element.
+        assert_eq!(
+            pos("set peer-group n first", &["bgp-instance", "r1"]),
+            Some((
+                strs(&["bgp-instance", "r1", "peer-group", "n"]),
+                ListPosition::First
+            ))
+        );
+        // Inside the element itself.
+        assert_eq!(pos("set first", PG), Some((strs(PG), ListPosition::First)));
+    }
+
+    #[test]
+    fn a_position_must_end_the_line_and_name_an_element() {
+        for line in [
+            "set bgp instance r1 peer-group b first extra",
+            "set bgp instance r1 peer-group b before",
+            "set lldp first",
+            "set first",
+            "set bgp instance new peer-group x first",
+            "edit bgp instance r1 peer-group b first",
+        ] {
+            assert!(pos(line, &[]).is_none(), "{line}");
+        }
+    }
+
+    #[test]
+    fn move_reorders_an_existing_element_only() {
+        let want = Some((strs(PG), ListPosition::After("c".into())));
+        assert_eq!(pos("move bgp instance r1 peer-group b after c", &[]), want);
+        assert_eq!(
+            pos("move peer-group b after c", &["bgp-instance", "r1"]),
+            want
+        );
+        let e = parse("move bgp instance r1 peer-group b last", &[], &doc()).unwrap();
+        assert_eq!(e.writes[0].1["name"], "b");
+        for line in [
+            "move bgp instance r1 peer-group zz first",
+            "move lldp first",
+            "move bgp instance r1 peer-group b",
+            "move first",
+        ] {
+            assert!(parse(line, &[], &doc()).is_none(), "{line}");
+        }
+    }
+
+    fn words(line: &[&str], ctx: &[&str]) -> Vec<String> {
+        complete(line, &strs(ctx), &doc())
+            .into_iter()
+            .map(|c| c.word)
+            .collect()
+    }
+
+    #[test]
+    fn tab_offers_positions_and_sibling_keys() {
+        let w = words(&["set", "bgp", "instance", "r1", "peer-group", "b"], &[]);
+        for p in ["first", "last", "before", "after"] {
+            assert!(w.contains(&p.to_string()), "{p} in {w:?}");
+        }
+        assert!(w.contains(&"remote-as".to_string()));
+        let w = words(
+            &["set", "bgp", "instance", "r1", "peer-group", "b", "before"],
+            &[],
+        );
+        assert_eq!(w, ["a", "c"]);
+        // `move` offers only positions once on an element; `edit` none.
+        let w = words(&["move", "bgp", "instance", "r1", "peer-group", "b"], &[]);
+        assert_eq!(w, ["first", "last", "before", "after"]);
+        let w = words(&["edit", "bgp", "instance", "r1", "peer-group", "b"], &[]);
+        assert!(!w.contains(&"first".to_string()));
+        // `move` still completes the path to an element.
+        let w = words(&["move", "bgp", "instance", "r1", "peer-group"], &[]);
+        assert_eq!(w, ["a", "b", "c"]);
     }
 }

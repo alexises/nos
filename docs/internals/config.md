@@ -13,7 +13,7 @@ store.save_to_disk().await                      // persist running config to con
 
 store.open_transaction(name, base).await        // Result<TransactionSnapshot, ConfigError> — create from Blank/Current, or resume if `name` exists
 store.apply_op(name, op).await                  // Result<TransactionSnapshot, ConfigError> — mutate a transaction, no validation
-store.set_transaction_path(name, path, value, if_match).await  // set/remove one JSON subsection (nos-restd), no validation
+store.set_transaction_path(name, path, value, if_match, position).await  // set/remove one JSON subsection, optionally at a list `position` (needs a value), no validation
 store.get_transaction(name).await               // Result<TransactionSnapshot, ConfigError>
 store.commit_transaction(name, if_match).await  // validate → promote to running → broadcast → remove transaction
 store.discard_transaction(name, if_match).await // remove transaction without touching running

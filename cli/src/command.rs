@@ -174,7 +174,7 @@ impl Command {
         }
         match trimmed.split_whitespace().next() {
             None => Command::Empty,
-            Some("edit" | "set" | "delete") => Command::Config(trimmed.to_string()),
+            Some("edit" | "set" | "delete" | "move") => Command::Config(trimmed.to_string()),
             Some(_) => Command::Unknown(trimmed.to_string()),
         }
     }

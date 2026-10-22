@@ -325,6 +325,49 @@ async fn transaction_lifecycle_over_the_config_tree() {
 }
 
 #[tokio::test]
+async fn put_with_a_position_query_inserts_or_moves_a_list_element() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/t1?base=blank", None).await;
+    let put = |name: &'static str, query: &'static str| async move {
+        send(
+            app,
+            Method::PUT,
+            &format!("/v1/transactions/t1/bgp-instance/{name}{query}"),
+            Some(bgp_instance(name, 1)),
+        )
+        .await
+        .0
+    };
+    let order = || async move {
+        let (_, v) = send(app, Method::GET, "/v1/transactions/t1/bgp-instance", None).await;
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    for (name, query) in [("a", ""), ("b", ""), ("c", "?first"), ("a", "?after=b")] {
+        assert_eq!(put(name, query).await, StatusCode::OK, "{name}{query}");
+    }
+    assert_eq!(order().await, ["c", "b", "a"]);
+    assert_eq!(put("c", "?last").await, StatusCode::OK);
+    assert_eq!(order().await, ["b", "a", "c"]);
+    // Unknown anchor: 404, nothing moved. More than one, unknown or empty: 400.
+    assert_eq!(put("a", "?after=zz").await, StatusCode::NOT_FOUND);
+    for bad in [
+        "?first&last",
+        "?before=",
+        "?sideways",
+        "?first=1",
+        "?before=a&after=b",
+    ] {
+        assert_eq!(put("a", bad).await, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(order().await, ["b", "a", "c"]);
+}
+
+#[tokio::test]
 async fn save_writes_the_running_config_to_disk() {
     let f = fixture_with(vec![], Some("config.yaml")).await;
     let app = &f.app;
