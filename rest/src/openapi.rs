@@ -123,7 +123,13 @@ fn walk(
             let seg = field_segment(prop, true);
             debug_assert!(field_matches(prop, &seg), "{prop} -> {seg}");
             let list_path = format!("{prefix}/{seg}");
-            emit(out, &list_path, inner, &format!("Every `{seg}` entry."));
+            emit(
+                out,
+                &list_path,
+                inner,
+                &format!("Every `{seg}` entry."),
+                false,
+            );
 
             let items = &inner["items"];
             let elem_path = format!("{list_path}/{{{}}}", seg.replace('-', "_"));
@@ -135,7 +141,7 @@ fn walk(
                 Some(k) => format!("One `{seg}`, addressed by its `{k}`."),
                 None => format!("One `{seg}`, addressed by its value."),
             };
-            emit(out, &elem_path, items, &what);
+            emit(out, &elem_path, items, &what, true);
             if let Some(t) = element_type {
                 walk(schemas, t, &elem_path, key, depth + 1, out);
             }
@@ -143,7 +149,7 @@ fn walk(
             let seg = field_segment(prop, false);
             debug_assert!(field_matches(prop, &seg), "{prop} -> {seg}");
             let path = format!("{prefix}/{seg}");
-            emit(out, &path, inner, &format!("The `{seg}` setting."));
+            emit(out, &path, inner, &format!("The `{seg}` setting."), false);
             if let Some(t) = ref_name(inner) {
                 walk(schemas, t, &path, None, depth + 1, out);
             }
@@ -167,7 +173,36 @@ fn parameters(path: &str) -> Vec<Value> {
         .collect()
 }
 
-fn emit(out: &mut Map<String, Value>, path: &str, schema: &Value, what: &str) {
+/// The optional `?first|last|before=<key>|after=<key>` of a list element's
+/// PUT (#539): at most one.
+fn position_parameters() -> Vec<Value> {
+    let q = |name: &str, desc: &str, flag: bool| {
+        let schema = if flag {
+            json!({ "type": "boolean" })
+        } else {
+            json!({ "type": "string" })
+        };
+        json!({ "name": name, "in": "query", "required": false,
+                "allowEmptyValue": flag, "schema": schema,
+                "description": format!("{desc} Give at most one of first, last, before, after.") })
+    };
+    vec![
+        q("first", "Put the element before every other one.", true),
+        q("last", "Put the element after every other one.", true),
+        q(
+            "before",
+            "Put the element just before the sibling with this key (404 if unknown).",
+            false,
+        ),
+        q(
+            "after",
+            "Put the element just after the sibling with this key (404 if unknown).",
+            false,
+        ),
+    ]
+}
+
+fn emit(out: &mut Map<String, Value>, path: &str, schema: &Value, what: &str, element: bool) {
     let body = json!({ "required": true, "content": { "application/json": { "schema": schema } } });
     let not_found = json!({ "description": "no such transaction or config path",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } } });
@@ -183,6 +218,7 @@ fn emit(out: &mut Map<String, Value>, path: &str, schema: &Value, what: &str) {
                      "responses": { "200": ok("the current value"), "404": not_found } },
             "put": { "tags": ["transactions"], "summary": format!("Set: {what}"),
                      "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+                     "parameters": if element { position_parameters() } else { Vec::new() },
                      "requestBody": body,
                      "responses": { "200": ok("the stored value"), "400": { "description": "invalid body" }, "404": not_found } },
             "delete": { "tags": ["transactions"], "summary": format!("Remove: {what}"),
@@ -222,6 +258,31 @@ mod tests {
             ["/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}"]["put"]
             ["requestBody"]["content"]["application/json"]["schema"];
         assert_eq!(body["$ref"], "#/components/schemas/BgpPeerGroup");
+    }
+
+    #[test]
+    fn only_list_element_puts_take_a_position() {
+        let d = doc();
+        let params = |p: &str| -> Vec<String> {
+            d["paths"][p]["put"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            params("/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}"),
+            ["first", "last", "before", "after"]
+        );
+        assert_eq!(
+            params("/v1/transactions/{tx}/bgp-instance"),
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            params("/v1/transactions/{tx}/hostname"),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

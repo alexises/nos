@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use garde::Validate as _;
 use nos_proto::{
-    config_path, diff_configs, sync_routing_table_refs, Config, ConfigDiff, ConfigOp,
-    TransactionBase, TransactionSnapshot,
+    config_path::{self, ListPosition},
+    diff_configs, sync_routing_table_refs, Config, ConfigDiff, ConfigOp, TransactionBase,
+    TransactionSnapshot,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info};
@@ -194,12 +195,24 @@ impl ConfigStore {
         path: &[String],
         value: Option<&str>,
         if_match: Option<u64>,
+        position: Option<ListPosition>,
     ) -> Result<TransactionSnapshot, ConfigError> {
         let (config, generation) = self.checkout(name, if_match).await?;
         let users_before = config.users.clone();
         let mut doc = serde_json::to_value(&config)?;
         match value {
-            Some(json) => config_path::set(&mut doc, path, serde_json::from_str(json)?)?,
+            Some(json) => config_path::set_at(
+                &mut doc,
+                path,
+                serde_json::from_str(json)?,
+                position.as_ref(),
+            )?,
+            None if position.is_some() => {
+                return Err(config_path::PathError::Invalid(
+                    "a position needs a value".to_string(),
+                )
+                .into());
+            }
             None => config_path::remove(&mut doc, path)?,
         }
         let mut new: Config = serde_json::from_value(doc)?;
@@ -487,6 +500,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_transaction_path_threads_the_list_position() {
+        let store = ConfigStore::new(Config::default(), None);
+        store
+            .open_transaction("t", TransactionBase::Blank)
+            .await
+            .unwrap();
+        let put = |name: &'static str, pos: Option<ListPosition>| {
+            let store = store.clone();
+            async move {
+                let body = serde_json::to_string(&instance(name, 1)).unwrap();
+                store
+                    .set_transaction_path(
+                        "t",
+                        &segs(&format!("bgp-instance/{name}")),
+                        Some(&body),
+                        None,
+                        pos,
+                    )
+                    .await
+            }
+        };
+        put("a", None).await.unwrap();
+        put("b", None).await.unwrap();
+        put("c", Some(ListPosition::First)).await.unwrap();
+        let snap = put("a", Some(ListPosition::After("b".into())))
+            .await
+            .unwrap();
+        let order: Vec<_> = snap
+            .config
+            .bgp_instances
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(order, ["c", "b", "a"]);
+        // An unknown anchor is refused and changes nothing.
+        assert!(put("a", Some(ListPosition::Before("zz".into())))
+            .await
+            .is_err());
+        // A position without a value is refused.
+        let err = store
+            .set_transaction_path(
+                "t",
+                &segs("bgp-instance/a"),
+                None,
+                None,
+                Some(ListPosition::Last),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("needs a value"), "{err}");
+        let snap = store.get_transaction("t").await.unwrap();
+        assert_eq!(snap.config.bgp_instances.len(), 3);
+    }
+
+    #[tokio::test]
     async fn set_transaction_path_sets_subsection_and_marks_dirty() {
         let store = ConfigStore::new(Config::default(), None);
         store
@@ -495,20 +563,20 @@ mod tests {
             .unwrap();
         let body = serde_json::to_string(&instance("r1", 65000)).unwrap();
         let snap = store
-            .set_transaction_path("t", &segs("bgp-instance/r1"), Some(&body), None)
+            .set_transaction_path("t", &segs("bgp-instance/r1"), Some(&body), None, None)
             .await
             .unwrap();
         assert!(snap.dirty);
         assert_eq!(snap.config.bgp_instances.len(), 1);
 
         let snap = store
-            .set_transaction_path("t", &segs("hostname"), Some("\"rest-host\""), None)
+            .set_transaction_path("t", &segs("hostname"), Some("\"rest-host\""), None, None)
             .await
             .unwrap();
         assert_eq!(snap.config.hostname, "rest-host");
 
         let snap = store
-            .set_transaction_path("t", &segs("bgp-instance/r1"), None, None)
+            .set_transaction_path("t", &segs("bgp-instance/r1"), None, None, None)
             .await
             .unwrap();
         assert_eq!(snap.config.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
@@ -536,22 +604,23 @@ mod tests {
                 &[],
                 Some(&serde_json::to_string(&whole).unwrap()),
                 None,
+                None,
             )
             .await
             .unwrap();
 
         // Type mismatch: rejected, transaction unchanged.
         assert!(store
-            .set_transaction_path("t", &segs("hostname"), Some("42"), None)
+            .set_transaction_path("t", &segs("hostname"), Some("42"), None, None)
             .await
             .is_err());
         // Unknown path / unknown transaction.
         assert!(store
-            .set_transaction_path("t", &segs("nope"), Some("1"), None)
+            .set_transaction_path("t", &segs("nope"), Some("1"), None, None)
             .await
             .is_err());
         assert!(store
-            .set_transaction_path("missing", &[], Some("{}"), None)
+            .set_transaction_path("missing", &[], Some("{}"), None, None)
             .await
             .is_err());
         assert_eq!(store.get_transaction("t").await.unwrap().config, whole);
@@ -784,12 +853,12 @@ mod tests {
         );
         // A matching precondition passes and bumps; `None` is unconditional.
         let snap = store
-            .set_transaction_path("t", &segs("hostname"), Some("\"h1\""), Some(1))
+            .set_transaction_path("t", &segs("hostname"), Some("\"h1\""), Some(1), None)
             .await
             .unwrap();
         assert_eq!(snap.generation, 2);
         let snap = store
-            .set_transaction_path("t", &segs("hostname"), Some("\"h2\""), None)
+            .set_transaction_path("t", &segs("hostname"), Some("\"h2\""), None, None)
             .await
             .unwrap();
         assert_eq!(snap.generation, 3);
@@ -798,7 +867,7 @@ mod tests {
         let stale = Some(2);
         assert!(matches!(
             store
-                .set_transaction_path("t", &segs("hostname"), Some("\"h3\""), stale)
+                .set_transaction_path("t", &segs("hostname"), Some("\"h3\""), stale, None)
                 .await,
             Err(ConfigError::PreconditionFailed {
                 expected: 2,
@@ -1193,6 +1262,7 @@ mod tests {
                 &segs("user/bob"),
                 Some(r#"{"name":"bob","password":"pw"}"#),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1263,14 +1333,14 @@ mod tests {
         // Path: a GET'd (redacted) whole config PUT back keeps the secret.
         let redacted = serde_json::to_string(&snap.config.redacted()).unwrap();
         let snap = store
-            .set_transaction_path("t", &[], Some(&redacted), None)
+            .set_transaction_path("t", &[], Some(&redacted), None, None)
             .await
             .unwrap();
         assert_eq!(snap.config.key("k"), Some("real"));
         // Section path, new label with the mask: refused, transaction unchanged.
         let body = r#"{"label":"n","secret":"<hidden>"}"#;
         assert!(store
-            .set_transaction_path("t", &segs("admin/key/n"), Some(body), None)
+            .set_transaction_path("t", &segs("admin/key/n"), Some(body), None, None)
             .await
             .is_err());
         assert_eq!(
@@ -1381,14 +1451,14 @@ mod tests {
         let body = user_json(50);
         let started = Instant::now();
         let err = store
-            .set_transaction_path("t", &segs("users"), Some(&body), None)
+            .set_transaction_path("t", &segs("users"), Some(&body), None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::TooManyClearPasswords(_)));
         assert!(started.elapsed() < Duration::from_millis(500));
         let ok = user_json(MAX_CLEAR_PASSWORDS_PER_EDIT);
         let snap = store
-            .set_transaction_path("t", &segs("users"), Some(&ok), None)
+            .set_transaction_path("t", &segs("users"), Some(&ok), None, None)
             .await
             .unwrap();
         assert!(snap.config.users.iter().all(|u| !is_clear(u)));
@@ -1406,7 +1476,7 @@ mod tests {
         let body = user_json(MAX_CLEAR_PASSWORDS_PER_EDIT);
         let s2 = store.clone();
         let hashing = tokio::spawn(async move {
-            s2.set_transaction_path("a", &segs("users"), Some(&body), None)
+            s2.set_transaction_path("a", &segs("users"), Some(&body), None, None)
                 .await
                 .unwrap();
         });

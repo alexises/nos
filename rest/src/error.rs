@@ -33,7 +33,9 @@ impl ApiError {
     /// daemon sends plain strings, so this keys on the stable prefixes of
     /// `nos-config`'s `ConfigError` messages.
     pub fn from_config(msg: String) -> Self {
-        if msg.starts_with("no transaction named") {
+        if msg.starts_with("no transaction named")
+            || msg.starts_with("config path: no such config path")
+        {
             ApiError::NotFound(msg)
         } else if msg.starts_with("validation failed") {
             ApiError::Unprocessable(msg)

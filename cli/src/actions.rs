@@ -1282,6 +1282,7 @@ async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
             &transaction,
             write_path,
             Some(value.to_string()),
+            edit.position.clone(),
         )
         .await
         {

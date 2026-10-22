@@ -172,6 +172,23 @@ fn list(
 ) {
     let find =
         |l: &'_ [Value], e: &Value| l.iter().find(|x| x[cx.key.name] == e[cx.key.name]).cloned();
+    // Pairing by key hides a pure reorder (#539); report the order of the
+    // elements both sides have. ponytail: a root-level list (`acls` itself)
+    // has no `fields` slot in `put`, so only nested lists report order.
+    let common = |l: &[Value], other: &[Value]| -> Vec<String> {
+        l.iter()
+            .filter(|e| find(other, e).is_some())
+            .map(|e| key_words(cx.key, e))
+            .collect()
+    };
+    let (old_order, new_order) = (common(base, cand), common(cand, base));
+    if old_order != new_order {
+        fields.push(FieldDiff {
+            label: format!("{} order", cx.label),
+            old: Some(old_order.join(", ")),
+            new: Some(new_order.join(", ")),
+        });
+    }
     let pairs = base.iter().map(|b| (Some(b.clone()), find(cand, b))).chain(
         cand.iter()
             .filter(|c| find(base, c).is_none())
@@ -385,6 +402,43 @@ mod tests {
         assert_eq!(prof.fields[0].label, "cost");
         assert_eq!(prof.fields[0].old, None);
         assert_eq!(prof.fields[0].new.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn reordering_nested_elements_is_a_diff_but_adding_one_is_not_an_order_change() {
+        let cfg = |names: &[&str]| Config {
+            bgp_instances: vec![BgpInstance {
+                name: "r1".into(),
+                peer_groups: names
+                    .iter()
+                    .map(|n| BgpPeerGroup {
+                        name: (*n).into(),
+                        ..dflt()
+                    })
+                    .collect(),
+                ..dflt()
+            }],
+            ..Default::default()
+        };
+        let order = |d: &ConfigDiff| -> Vec<FieldDiff> {
+            d.bgp_instances
+                .first()
+                .map(|i| i.fields.clone())
+                .unwrap_or_default()
+        };
+        let none = [] as [FieldDiff; 0];
+        let ab = cfg(&["a", "b"]);
+        assert!(diff_configs(&ab, &ab).is_empty());
+        let d = diff_configs(&ab, &cfg(&["b", "a"]));
+        assert_eq!(d.bgp_instances[0].status, DiffStatus::Modified);
+        let f = order(&d);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].label.ends_with("order"), "{f:?}");
+        assert_eq!(f[0].old.as_deref(), Some("a, b"));
+        assert_eq!(f[0].new.as_deref(), Some("b, a"));
+        // Adding or removing alone is not a reorder.
+        assert_eq!(order(&diff_configs(&ab, &cfg(&["a", "b", "c"]))), none);
+        assert_eq!(order(&diff_configs(&ab, &cfg(&["b"]))), none);
     }
 
     #[test]

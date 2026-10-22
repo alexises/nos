@@ -785,6 +785,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             path: vec!["hostname".to_string()],
             value: Some("\"h1\"".to_string()),
             if_match: Some(0),
+            position: None,
         })
         .await
         .unwrap();
@@ -799,6 +800,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             path: vec!["hostname".to_string()],
             value: Some("\"h2\"".to_string()),
             if_match: Some(0),
+            position: None,
         },
         Request::CommitTransaction {
             actor: None,
@@ -823,6 +825,73 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             assert_eq!((snap.generation, snap.config.hostname.as_str()), (1, "h1"));
         }
         other => panic!("expected Transaction event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn positioned_set_over_ipc_reorders_and_shows_in_the_diff() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+    let group = |n: &str| nos_proto::BgpPeerGroup {
+        name: n.to_string(),
+        ..Default::default()
+    };
+    let mut inst = instance("r1", 1);
+    inst.peer_groups = vec![group("a"), group("b")];
+    let running = Config {
+        bgp_instances: vec![inst],
+        ..Default::default()
+    };
+    let store = ConfigStore::new(running, None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(sock_path.clone()), &server_identity())
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    writer
+        .send(Request::OpenTransaction {
+            actor: None,
+            name: "t1".to_string(),
+            base: TransactionBase::Current,
+        })
+        .await
+        .unwrap();
+    next_event(&mut reader).await;
+    writer
+        .send(Request::SetTransactionPath {
+            name: "t1".to_string(),
+            path: ["bgp-instance", "r1", "peer-group", "b"]
+                .map(String::from)
+                .to_vec(),
+            value: Some(serde_json::to_string(&group("b")).unwrap()),
+            if_match: None,
+            position: Some(nos_proto::config_path::ListPosition::First),
+        })
+        .await
+        .unwrap();
+    match next_event(&mut reader).await {
+        Event::Transaction(snap) => {
+            let names: Vec<_> = snap.config.bgp_instances[0]
+                .peer_groups
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect();
+            assert_eq!(names, ["b", "a"]);
+        }
+        other => panic!("expected Transaction event, got {other:?}"),
+    }
+    writer
+        .send(Request::DiffTransaction {
+            name: "t1".to_string(),
+        })
+        .await
+        .unwrap();
+    match next_event(&mut reader).await {
+        Event::Diff(d) => {
+            assert_eq!(d.bgp_instances[0].status, DiffStatus::Modified);
+            assert!(d.bgp_instances[0].fields[0].label.ends_with("order"));
+        }
+        other => panic!("expected Diff event, got {other:?}"),
     }
 }
 

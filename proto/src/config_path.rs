@@ -19,6 +19,7 @@
 //! is identified by a field that isn't in it (a test walks every list in the
 //! schema-shaped fixture below).
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -205,21 +206,92 @@ fn check_element_key(value: &Value, key: &str) -> Result<(), PathError> {
 /// a list element that doesn't exist yet. An empty path replaces the whole
 /// document.
 pub fn set(root: &mut Value, path: &[String], value: Value) -> Result<(), PathError> {
-    match resolve(root, path)? {
-        Located::Existing(steps) => {
-            if matches!(steps.last(), Some(Step::Index(_))) {
+    set_at(root, path, value, None)
+}
+
+/// Where [`set_at`] puts a list element: the ends of the list, or next to a
+/// sibling named by its key.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ListPosition {
+    /// Before every other element.
+    First,
+    /// After every other element.
+    Last,
+    /// Just before the sibling with this key.
+    Before(String),
+    /// Just after the sibling with this key.
+    After(String),
+}
+
+/// [`set`] with an optional `position`. Without one an existing element is
+/// replaced in place and a new one appended; with one the path must name a
+/// list element, which is (re)inserted there (so on an existing element it is
+/// a move). An unknown anchor is [`PathError::NotFound`] and leaves `root`
+/// untouched.
+pub fn set_at(
+    root: &mut Value,
+    path: &[String],
+    value: Value,
+    position: Option<&ListPosition>,
+) -> Result<(), PathError> {
+    let (array, own) = match resolve(root, path)? {
+        Located::Existing(mut steps) => {
+            if let Some(&Step::Index(i)) = steps.last() {
                 check_element_key(&value, &path[path.len() - 1])?;
+                steps.pop();
+                (steps, Some(i))
+            } else if position.is_none() {
+                *at_mut(root, &steps) = value;
+                return Ok(());
+            } else {
+                return Err(PathError::Invalid(
+                    "a position needs a list element".to_string(),
+                ));
             }
-            *at_mut(root, &steps) = value;
         }
         Located::NewElement { array, key } => {
             check_element_key(&value, &key)?;
-            match at_mut(root, &array) {
-                Value::Array(items) => items.push(value),
-                _ => return Err(PathError::NotFound(describe(path))),
-            }
+            (array, None)
         }
+    };
+    let Value::Array(items) = at_mut(root, &array) else {
+        return Err(PathError::NotFound(describe(path)));
+    };
+    let Some(position) = position else {
+        match own {
+            Some(i) => items[i] = value,
+            None => items.push(value),
+        }
+        return Ok(());
+    };
+    let own_key = &path[path.len() - 1];
+    let anchor = match position {
+        ListPosition::Before(a) | ListPosition::After(a) => {
+            if a == own_key || norm(a) == norm(own_key) {
+                return Err(PathError::Invalid(
+                    "cannot position an element relative to itself".to_string(),
+                ));
+            }
+            // Resolve before mutating: an unknown anchor leaves the list as it was.
+            Some(find_element(items, a).ok_or_else(|| PathError::NotFound(a.clone()))?)
+        }
+        _ => None,
+    };
+    let at = match (position, anchor) {
+        (ListPosition::First, _) => 0,
+        (ListPosition::Before(_), Some(a)) => a,
+        (ListPosition::After(_), Some(a)) => a + 1,
+        _ => items.len(),
+    };
+    // Removing our own old slot shifts every later index down by one.
+    let at = match own {
+        Some(i) if i < at => at - 1,
+        _ => at,
+    };
+    if let Some(i) = own {
+        items.remove(i);
     }
+    items.insert(at.min(items.len()), value);
     Ok(())
 }
 
@@ -410,6 +482,97 @@ mod tests {
         let mut d = doc();
         set(&mut d, &[], json!({"hostname": "x"})).unwrap();
         assert_eq!(d, json!({"hostname": "x"}));
+    }
+
+    fn names(d: &Value) -> Vec<&str> {
+        d["prefix_lists"][0]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["cidr"].as_str().unwrap())
+            .collect()
+    }
+
+    fn three() -> Value {
+        let mut d = doc();
+        d["prefix_lists"][0]["entries"] = json!([{"cidr": "a"}, {"cidr": "b"}, {"cidr": "c"}]);
+        d
+    }
+
+    fn put(d: &mut Value, key: &str, pos: Option<&ListPosition>) -> Result<(), PathError> {
+        set_at(
+            d,
+            &p(&format!("prefix-list/pl/entry/{key}")),
+            json!({"cidr": key}),
+            pos,
+        )
+    }
+
+    #[test]
+    fn set_at_inserts_new_elements() {
+        for (pos, want) in [
+            (ListPosition::First, "xabc"),
+            (ListPosition::Last, "abcx"),
+            (ListPosition::Before("b".into()), "axbc"),
+            (ListPosition::After("b".into()), "abxc"),
+            (ListPosition::After("c".into()), "abcx"),
+        ] {
+            let mut d = three();
+            put(&mut d, "x", Some(&pos)).unwrap();
+            assert_eq!(names(&d).concat(), want);
+        }
+    }
+
+    #[test]
+    fn set_at_moves_existing_elements() {
+        for (key, pos, want) in [
+            ("c", ListPosition::First, "cab"),
+            ("a", ListPosition::Last, "bca"),
+            ("a", ListPosition::After("b".into()), "bac"),
+            ("a", ListPosition::Before("c".into()), "bac"),
+            ("c", ListPosition::Before("b".into()), "acb"),
+            ("a", ListPosition::Before("b".into()), "abc"),
+            ("b", ListPosition::After("a".into()), "abc"),
+        ] {
+            let mut d = three();
+            put(&mut d, key, Some(&pos)).unwrap();
+            assert_eq!(names(&d).concat(), want, "{key}");
+        }
+    }
+
+    #[test]
+    fn set_at_rejects_bad_anchors_and_paths_without_touching_the_doc() {
+        let mut d = three();
+        assert_eq!(
+            put(&mut d, "x", Some(&ListPosition::After("zz".into()))),
+            Err(PathError::NotFound("zz".into()))
+        );
+        assert!(matches!(
+            put(&mut d, "a", Some(&ListPosition::Before("a".into()))),
+            Err(PathError::Invalid(_))
+        ));
+        assert!(matches!(
+            set_at(
+                &mut d,
+                &p("hostname"),
+                json!("x"),
+                Some(&ListPosition::First)
+            ),
+            Err(PathError::Invalid(_))
+        ));
+        assert!(matches!(
+            set_at(&mut d, &[], json!({}), Some(&ListPosition::First)),
+            Err(PathError::Invalid(_))
+        ));
+        assert_eq!(d, three());
+    }
+
+    #[test]
+    fn set_at_without_position_keeps_place() {
+        let mut d = three();
+        put(&mut d, "b", None).unwrap();
+        put(&mut d, "x", None).unwrap();
+        assert_eq!(names(&d).concat(), "abcx");
     }
 
     #[test]

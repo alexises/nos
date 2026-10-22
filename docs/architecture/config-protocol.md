@@ -15,7 +15,7 @@ Client → Server:
   Request::CommitTransaction   validate, promote to running, broadcast, and delete the transaction (if_match: optional generation precondition, RFC 9110 §13.1.1)
   Request::DiscardTransaction  delete a named transaction without touching running config (if_match as above)
   Request::Describe            one-shot fetch of one operation's documentation, by Topic
-  Request::SetTransactionPath  set/remove one subsection of a named transaction by URL-style path (whole config for an empty path) — see nos_proto::config_path (if_match as above)
+  Request::SetTransactionPath  set/remove one subsection of a named transaction by URL-style path (whole config for an empty path) — see nos_proto::config_path (if_match as above); an optional `position` (`ListPosition`: First/Last/Before(k)/After(k)) inserts or moves the list element the path names (#539)
 
 Server → Client:
   Event::Config(Config)             config snapshot (initial + on every commit, incl. via a transaction commit)
