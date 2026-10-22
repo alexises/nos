@@ -172,6 +172,8 @@ impl InterfaceOp {
             InterfaceOp::Ensure { name } => {
                 if !config.interfaces.iter().any(|i| &i.name == name) {
                     config.interfaces.push(Interface {
+                        acl_in: None,
+                        acl_out: None,
                         name: name.clone(),
                         addresses: Vec::new(),
                         routing_table: None,
@@ -336,6 +338,8 @@ mod tests {
 
     fn interface(name: &str) -> Interface {
         Interface {
+            acl_in: None,
+            acl_out: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -382,6 +386,8 @@ mod tests {
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
             interfaces: vec![Interface {
+                acl_in: None,
+                acl_out: None,
                 ospfv3_profile: None,
                 name: "eth0".to_string(),
                 addresses: vec![iface_addr("10.0.0.1/24")],

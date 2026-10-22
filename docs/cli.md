@@ -137,6 +137,25 @@ Most lists are unordered, but where order matters (the first match wins) you pla
 - **A position is not a field.** `edit`, `delete`, and `set` on a plain field take no position word; a line like `set hostname first` just sets the hostname to `first`.
 - **Order shows in `diff`:** a reorder is reported as `<list> order` with the old and new key order, so it is committed and reaches daemons like any other change. Only lists nested inside an element report it.
 
+## Access lists
+
+An access list (`acl`) is an ordered list of permit/deny rules; the first rule that matches decides. This release only stores and validates them: nothing filters traffic until `nos-acld` ships (#541).
+
+- **Build one:**
+  - `set acl EDGE default-action permit` (the default is `deny`)
+  - `set acl EDGE rule p-bgp action permit`, then `set acl EDGE rule p-bgp protocol tcp` and `set acl EDGE rule p-bgp destination-port 179`
+- **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `log`. An unset field matches anything.
+- **Order:** a new rule is appended. `set acl EDGE rule d-bgp before p-bgp` inserts it, `move acl EDGE rule d-bgp after p-bgp` reorders it (see [Ordering list elements](#ordering-list-elements-first-last-before-after-move)). Rule names are required and unique within the ACL.
+- **Attach:** `set interface eth0 acl in EDGE` and `acl out EDGE`; the same on a subinterface (`eth0.100`) and on a port aggregate. The commit is refused for an unknown ACL, on a `loopback-*`, on a port aggregate member (attach it to the aggregate) and on a switching-profile port.
+- **Families:** a rule with an IPv4 prefix matches only IPv4, an IPv6 prefix only IPv6, no prefix both. `source` and `destination` must be in the same family; `icmp` is IPv4 and `icmpv6` IPv6.
+- **Caveats:**
+  - An interface ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first.
+  - On IPv6 permit `icmpv6` first: the default `deny` drops Neighbor Discovery.
+  - Only IPv4 and IPv6 are filtered; ARP, LACP, LLDP and STP always pass.
+  - A physical interface's ACL sees untagged frames only; attach to the subinterface for tagged traffic.
+  - A rule with a port, `established` or ICMP match never matches non-first IP fragments.
+  - `established` is stateless: it means TCP ACK or RST is set.
+
 ## Navigating: `edit`, `up`, `top`
 
 `edit` moves you into an object; the prompt shows the path:

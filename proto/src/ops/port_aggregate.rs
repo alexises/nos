@@ -158,6 +158,8 @@ impl PortAggregateOp {
             PortAggregateOp::Ensure { name, mode } => {
                 if !config.port_aggregates.iter().any(|a| &a.name == name) {
                     config.port_aggregates.push(PortAggregate {
+                        acl_in: None,
+                        acl_out: None,
                         name: name.clone(),
                         mode: *mode,
                         lacp_rate: LacpRate::default(),
@@ -286,6 +288,8 @@ mod tests {
 
     fn aggregate(name: &str) -> PortAggregate {
         PortAggregate {
+            acl_in: None,
+            acl_out: None,
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
             lacp_rate: LacpRate::default(),

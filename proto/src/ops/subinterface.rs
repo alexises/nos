@@ -255,6 +255,8 @@ fn ensure_subinterface_mut<'a>(
 ) -> Result<&'a mut Subinterface, OpError> {
     if !config.interfaces.iter().any(|i| i.name == interface) {
         config.interfaces.push(Interface {
+            acl_in: None,
+            acl_out: None,
             name: interface.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -275,6 +277,8 @@ fn ensure_subinterface_mut<'a>(
     let iface = find_interface_mut(config, interface)?;
     if !iface.subinterfaces.iter().any(|s| s.tag == tag) {
         iface.subinterfaces.push(Subinterface {
+            acl_in: None,
+            acl_out: None,
             tag,
             addresses: Vec::new(),
             routing_table: None,
@@ -297,6 +301,8 @@ mod tests {
 
     fn interface(name: &str, subinterfaces: Vec<Subinterface>) -> Interface {
         Interface {
+            acl_in: None,
+            acl_out: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -357,6 +363,8 @@ mod tests {
             interfaces: vec![interface(
                 "eth0",
                 vec![Subinterface {
+                    acl_in: None,
+                    acl_out: None,
                     tag: 0,
                     addresses: vec![InterfaceAddress {
                         address: addr("10.0.0.1/24"),
@@ -577,6 +585,8 @@ mod tests {
                 "eth0",
                 vec![
                     Subinterface {
+                        acl_in: None,
+                        acl_out: None,
                         tag: 0,
                         addresses: Vec::new(),
                         routing_table: None,
@@ -585,6 +595,8 @@ mod tests {
                         bfd_unsolicited: None,
                     },
                     Subinterface {
+                        acl_in: None,
+                        acl_out: None,
                         tag: 100,
                         addresses: Vec::new(),
                         routing_table: None,

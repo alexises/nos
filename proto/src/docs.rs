@@ -493,6 +493,36 @@ topics! {
     StpPortProfileMstInstanceCost,
     /// `StpPortMstInstance.priority`
     StpPortProfileMstInstancePriority,
+    /// `Config.acls`
+    Acl,
+    /// `Acl.default_action`
+    AclDefaultAction,
+    /// `Acl.rules`
+    AclRule,
+    /// `AclRule.action`
+    AclRuleAction,
+    /// `AclRule.protocol`
+    AclRuleProtocol,
+    /// `AclRule.source`
+    AclRuleSource,
+    /// `AclRule.destination`
+    AclRuleDestination,
+    /// `AclRule.source_port`
+    AclRuleSourcePort,
+    /// `AclRule.destination_port`
+    AclRuleDestinationPort,
+    /// `AclRule.established`
+    AclRuleEstablished,
+    /// `AclRule.icmp_type`
+    AclRuleIcmpType,
+    /// `AclRule.icmp_code`
+    AclRuleIcmpCode,
+    /// `AclRule.log`
+    AclRuleLog,
+    /// `Interface.acl_in`
+    InterfaceAclIn,
+    /// `Interface.acl_out`
+    InterfaceAclOut,
     /// `Interface.stp_port_profile`
     InterfaceStpPortProfile,
     /// `PortAggregate.stp_port_profile`

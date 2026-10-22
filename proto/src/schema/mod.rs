@@ -1,3 +1,5 @@
+/// Access lists (`Acl`): ordered permit/deny rules attached to interfaces.
+pub mod acl;
 /// The admin keystore (`Admin`): labelled secrets other sections reference.
 pub mod admin;
 /// Named AS-path regex lists (`AsPathList`) that RPL scripts match against.
@@ -55,6 +57,7 @@ pub mod switching_profile;
 /// Local login users (`User`) with argon2id password hashes.
 pub mod user;
 
+pub use acl::{Acl, AclAction, AclProtocol, AclRule, PortRange};
 pub use admin::{Admin, AdminKey, SECRET_MAX_LEN};
 pub use as_path_list::AsPathList;
 pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdMode, BfdProfile, EchoMode};
@@ -259,6 +262,17 @@ pub struct Config {
     #[cli(topic = StpPortProfile, words = "stp-port-profile")]
     pub stp_port_profiles: Vec<StpPortProfile>,
 
+    /// Named, ordered access lists, attached to interfaces with `acl in` /
+    /// `acl out`. `serde(default)` so on-disk config saved before this field
+    /// existed still loads.
+    #[serde(default)]
+    #[garde(
+        dive,
+        custom(|a: &Vec<Acl>, ctx: &Config| acl::valid_acl_references(a, ctx))
+    )]
+    #[cli(topic = Acl)]
+    pub acls: Vec<Acl>,
+
     /// The keystore: secrets under a label, referenced by label from the
     /// sections that need a key. Not shown by `show config` unless asked
     /// (`show config admin`); values never leave the daemons in clear
@@ -315,6 +329,7 @@ impl Default for Config {
             sbfd_reflector: SbfdReflector::default(),
             spanning_tree: SpanningTree::default(),
             stp_port_profiles: Vec::new(),
+            acls: Vec::new(),
             admin: Admin::default(),
         }
     }
