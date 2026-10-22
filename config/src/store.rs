@@ -48,12 +48,13 @@ impl Transaction {
 }
 
 /// One committed change, broadcast to every subscriber connection — the new
-/// running config (for classic `Subscribe`), and what changed to produce it
-/// (for `SubscribeDiff`). Internal only — never sent over the wire directly;
+/// and previous running config. Each connection projects both for its role
+/// (`Config::for_role`) and, for `SubscribeDiff`, diffs them. Internal only — never sent over the wire directly;
 /// `server.rs` unwraps this into `Event::Config`/`Event::Diff` per connection.
 pub(crate) struct CommitUpdate {
     pub config: Config,
-    pub diff: ConfigDiff,
+    /// The running config before this commit, for per-role diffs (#384).
+    pub prev: Config,
 }
 
 struct Inner {
@@ -236,12 +237,11 @@ impl ConfigStore {
         drop(txs);
 
         let mut running = self.0.running.write().await;
-        let diff = diff_configs(&running, &config);
-        *running = config.clone();
+        let prev = std::mem::replace(&mut *running, config.clone());
         drop(running);
         info!(transaction = %name, "config committed");
         // Ignore send errors — no active receivers is not a failure.
-        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, diff }));
+        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, prev }));
         Ok(warnings)
     }
 
@@ -266,11 +266,10 @@ impl ConfigStore {
             Some(u) => u.password = new,
             None => return Err(ConfigError::HashUpgradeRefused),
         }
-        let diff = diff_configs(&running, &config);
-        *running = config.clone();
+        let prev = std::mem::replace(&mut *running, config.clone());
         drop(running);
         info!(user = ?user, "password hash upgraded");
-        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, diff }));
+        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, prev }));
         Ok(())
     }
 
@@ -278,8 +277,11 @@ impl ConfigStore {
     /// event: everything currently in the running config, reported as
     /// `Added` (diffing against an empty config can never produce
     /// `Removed`/`Modified`).
-    pub(crate) async fn initial_diff(&self) -> ConfigDiff {
-        diff_configs(&Config::default(), &self.running_snapshot().await)
+    pub(crate) async fn initial_diff(&self, role: nos_proto::Role) -> ConfigDiff {
+        diff_configs(
+            &Config::default(),
+            &self.running_snapshot().await.for_role(role),
+        )
     }
 
     /// Computes the structural difference between the running config and a

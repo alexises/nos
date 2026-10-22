@@ -1346,6 +1346,118 @@ async fn every_role_is_gated_live_for_reads_edits_and_hash_upgrades() {
     }
 }
 
+/// A running config with a user, a BGP-referenced key and an unreferenced one.
+fn config_with_secrets() -> Config {
+    let key = |l: &str| nos_proto::AdminKey {
+        label: l.into(),
+        secret: format!("SECRET-{l}"),
+    };
+    let mut c = Config::default();
+    c.admin.keys = vec![key("kbgp"), key("kspare")];
+    c.users = vec![nos_proto::User {
+        name: "u".into(),
+        password: "SECRET-hash".into(),
+    }];
+    let mut i = instance("default", 65000);
+    i.peer_groups = vec![nos_proto::BgpPeerGroup {
+        auth: Some(nos_proto::BgpAuth::Md5 {
+            key_ref: "kbgp".into(),
+        }),
+        ..Default::default()
+    }];
+    c.bgp_instances = vec![i];
+    c
+}
+
+#[tokio::test]
+async fn get_and_subscribe_hand_each_role_only_its_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let store = ConfigStore::new(config_with_secrets(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+
+    // (role, sees the user hash, sees the BGP key, sees the spare key)
+    let cases = [
+        ("lldpd", false, false, false),
+        ("lacpd", false, false, false),
+        ("ribd", false, false, false),
+        ("watchdog", true, false, false),
+        ("bgpd", false, true, false),
+        ("user", true, true, true),
+        ("restd", true, true, true),
+    ];
+    for (role, hash, bgp, spare) in cases {
+        for req in [Request::Get, Request::Subscribe] {
+            let req = format!("{req:?}");
+            let (mut reader, mut writer) = connect_as(&path, role, "x").await;
+            writer
+                .send(if req == "Get" {
+                    Request::Get
+                } else {
+                    Request::Subscribe
+                })
+                .await
+                .unwrap();
+            let Event::Config(c) = next_event(&mut reader).await else {
+                panic!("{role}: not a config")
+            };
+            let labels = format!("{:?}", c.admin.keys);
+            assert_eq!(!c.users.is_empty(), hash, "{role} {req:?} users");
+            assert_eq!(labels.contains("kbgp"), bgp, "{role} {req:?} bgp key");
+            assert_eq!(labels.contains("kspare"), spare, "{role} {req:?} spare key");
+            // Non-secret content is always there.
+            assert_eq!(c.bgp_instances.len(), 1, "{role}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn diffs_are_projected_per_role_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let mut cfg = config_with_secrets();
+    cfg.bgp_instances.clear(); // a peer-group without a name would fail the commit
+    let store = ConfigStore::new(cfg, None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+    let scopes = vec![DiffScope::Hostname, DiffScope::Admin, DiffScope::Users];
+
+    let mut subs = Vec::new();
+    for role in ["ribd", "user"] {
+        let (mut reader, mut writer) = connect_as(&path, role, "x").await;
+        writer
+            .send(Request::SubscribeDiff {
+                scopes: scopes.clone(),
+            })
+            .await
+            .unwrap();
+        let initial = format!("{:?}", next_event(&mut reader).await);
+        assert_eq!(initial.contains("kspare"), role == "user", "{role} initial");
+        subs.push((role, reader, writer));
+    }
+
+    store.open_transaction("t", TransactionBase::Current).await;
+    for op in [
+        ConfigOp::SetHostname("renamed".into()),
+        ConfigOp::Admin(nos_proto::AdminOp::SetKey {
+            label: "knew".into(),
+            secret: "SECRET-new".into(),
+        }),
+    ] {
+        store.apply_op("t", op).await.unwrap();
+    }
+    store.commit_transaction("t", None).await.unwrap();
+
+    for (role, mut reader, _w) in subs {
+        let after = format!("{:?}", next_event(&mut reader).await);
+        assert!(after.contains("renamed"), "{role}: {after}");
+        assert_eq!(after.contains("knew"), role == "user", "{role}: {after}");
+    }
+}
+
 #[test]
 fn a_listen_address_displays_with_its_scheme() {
     let addr = ListenAddr::Unix("/run/nos/config.sock".into());

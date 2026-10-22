@@ -38,6 +38,8 @@ pub mod policy_definition;
 pub mod port_aggregate;
 /// Named prefix match lists (`PrefixList`) for RPL scripts.
 pub mod prefix_list;
+/// Per-role visibility of secrets (`Config::for_role`, #384).
+pub mod redact;
 /// Routing tables / VRFs (`RoutingTable`) and the protocol instances bound to each.
 pub mod routing_table;
 pub mod sbfd;

@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, PeerId};
-use nos_proto::{Event, IpcCodec, Request, Role};
+use nos_proto::{diff_configs, Event, IpcCodec, Request, Role};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -105,7 +105,7 @@ async fn serve(incoming: Incoming, store: ConfigStore) {
 /// task rather than producing a single reply `Event`.
 async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) -> Option<Event> {
     Some(match req {
-        Request::Get => Event::Config(store.running_snapshot().await),
+        Request::Get => Event::Config(store.running_snapshot().await.for_role(caller.role)),
         Request::Save => match store.save_to_disk().await {
             Ok(()) => Event::Saved,
             Err(e) => {
@@ -296,22 +296,27 @@ where
     }
     let reply = match req {
         Request::Subscribe => {
-            let forwarder = spawn_forwarder(store, sub_tx.clone(), |u| {
-                Some(Event::Config(u.config.clone()))
+            let role = caller.role;
+            let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| {
+                Some(Event::Config(u.config.for_role(role)))
             });
             set_forwarder(sub_task, Some(forwarder));
             debug!("IPC client subscribed");
-            Event::Config(store.running_snapshot().await)
+            Event::Config(store.running_snapshot().await.for_role(role))
         }
         Request::SubscribeDiff { scopes } => {
             let task_scopes = scopes.clone();
+            let role = caller.role;
             let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| {
-                let scoped = u.diff.scoped(&task_scopes);
+                // The diff of the role's own view: a key it may not see
+                // never shows up as an Added/Modified field.
+                let scoped = diff_configs(&u.prev.for_role(role), &u.config.for_role(role))
+                    .scoped(&task_scopes);
                 (!scoped.is_empty()).then_some(Event::Diff(scoped))
             });
             set_forwarder(sub_task, Some(forwarder));
             debug!(?scopes, "IPC client subscribed to diff");
-            Event::Diff(store.initial_diff().await.scoped(&scopes))
+            Event::Diff(store.initial_diff(role).await.scoped(&scopes))
         }
         Request::Unsubscribe => {
             set_forwarder(sub_task, None);

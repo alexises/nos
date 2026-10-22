@@ -18,6 +18,24 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 - **Key hygiene.** Every NOS-owned buffer holding a private key is `nos_pki::Zeroizing<Vec<u8>>` (wiped on drop): `Bundle.key`, the `Bundle::encode()` frame and the `read_from` body, and the key `generate_csr`/`generate_csr_for` return (the `nos` session key, `nos-restd`'s listener key). Use the `nos_pki::Zeroizing` re-export; no crate adds `zeroize` itself.
   - Ceilings: rustls/aws-lc-rs keep their own copy of the loaded key; rcgen's `KeyPair` and the REST test client's owned `PrivatePkcs8KeyDer` are not wiped; tokio stdin buffers, the kernel pipe buffer, swap and core dumps are out of reach.
 
+## Who sees which secrets (#384)
+
+- `allowed` lets every daemon read the config, so `nos-configd` also projects it: `Get`, `Subscribe`, `SubscribeDiff` (initial and per-commit) all go through `Config::for_role(role)` (`proto/src/schema/redact.rs`), a second layer after `allowed`. It clears `users` (password hashes) and the `admin.keys` entries the role has no use for; auth structures keep their key labels, so the config still parses.
+- Visibility:
+
+| Role | Users | Admin keys kept |
+|------|-------|-----------------|
+| `user`, `restd` | yes | all |
+| `watchdog` | yes | none |
+| `bgpd` | no | labels used by BGP auth (peer-groups, RPKI caches) and BFD profiles |
+| `ospfd` | no | OSPFv2 auth (profiles, virtual links) and BFD profiles |
+| `ospfv3d` | no | OSPFv3 auth and BFD profiles |
+| `ribd`, `bfdd` | no | BFD profile auth |
+| every other role | no | none |
+
+- Adding a secret-bearing field: extend `for_role` and the sentinel fixture in `redact.rs` (the test cannot notice a field missing from the fixture). Adding a role: classify it in `visible()` (exhaustive `match`).
+- The negative side (a foreign role sees no keys) is covered by `config/tests/ipc.rs`; the e2e harness only has user-role REST access, so the existing auth phases (`auth`, `ao`, `ospf-auth`, `ospfv3-auth`, `bfd-auth`) prove the allowed side.
+
 ## uid model (#512, #513)
 
 - **Who runs as whom.** `nos-watchdogd` runs as `nos-wd` (uid 990); it starts each daemon as its role's own user `nos-<role>` (uids 10001+ in `Role` declaration order, table in `watchdog/src/uids.rs`: `role_uid`, an exhaustive `match`, so a new `Role` won't compile until it has a uid). The image's `ENTRYPOINT` passes `--child-gid` (group `nos`), which also turns per-role uids on; unset (tests, non-container runs) every child keeps the watchdog's uid. `nos` (uid 991) is the shared client user: the `nos` shell, `nos-provision`, `nos-e2e` execs. Everyone has primary group `nos`.
