@@ -16,15 +16,24 @@ SUDO=
 if ! $SUDO modprobe vrf 2>/dev/null; then
     $SUDO apt-get install -y "linux-modules-extra-$(uname -r)" || true
 fi
-$SUDO modprobe vrf dummy bonding vxlan 8021q bridge ipip || true
-# EVPN local bias (nos-fdbd, tc): flower/skbedit mark, fw/gact drop, clsact;
-# STP BPDU trap (nos-interfaced): flower + gact drop on ingress.
-$SUDO modprobe cls_flower cls_fw act_skbedit act_gact sch_ingress || true
-# ACL `log` (nos-acld, #544): act_sample hands packets to psample. Not
-# optional: without them the `acl` phase's log step cannot pass.
-if ! $SUDO modprobe -a act_sample psample \
-    && ! { [ -d /sys/module/act_sample ] && [ -d /sys/module/psample ]; }; then
-    echo "act_sample/psample missing on $(uname -r): the acl phase's log step needs them" >&2
+# vrf..ipip: rtnetlink drivers. cls_flower..sch_ingress: EVPN local bias
+# (nos-fdbd, tc: flower/skbedit mark, fw/gact drop, clsact) and the STP BPDU
+# trap (nos-interfaced: flower + gact drop on ingress). act_sample/psample:
+# ACL `log` (nos-acld, #544); the acl phase's log step cannot pass without them.
+mods="vrf dummy bonding vxlan 8021q bridge ipip cls_flower cls_fw act_skbedit act_gact sch_ingress act_sample psample"
+# -a: without it every name after the first is a parameter of the first module.
+# shellcheck disable=SC2086
+$SUDO modprobe -a $mods || true
+# Loaded modules have /sys/module/<m>; built-ins without parameters don't, but
+# are listed in modules.builtin.
+missing=
+for m in $mods; do
+    [ -d "/sys/module/$m" ] && continue
+    grep -qE "/$m\.ko" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null && continue
+    missing="$missing $m"
+done
+if [ -n "$missing" ]; then
+    echo "kernel modules missing on $(uname -r):$missing" >&2
     exit 1
 fi
 lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge|ipip|cls_|act_|sch_ingress|psample' || true
