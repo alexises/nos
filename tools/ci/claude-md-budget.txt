@@ -18,3 +18,4 @@ proto/CLAUDE.md 8192
 rest/CLAUDE.md 8192
 rib/CLAUDE.md 8192
 stp/CLAUDE.md 8192
+tc/CLAUDE.md 8192

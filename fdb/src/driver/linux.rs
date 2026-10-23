@@ -24,9 +24,85 @@ use rtnetlink::{Handle, LinkUnspec, LinkVxlan, MulticastGroup};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+use nos_tc::{Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request, Verdict};
+
 use super::nexthop::{self, Nexthop};
-use super::tc::{self, Tc};
 use super::{is_local_mac, is_local_neigh, vxlan_name, DriverError, FdbDriver, Mac, VXLAN_PORT};
+
+/// Local bias (RFC 8365 §8.3.1, `docs/protocols/evpn-vxlan.md`): the bridge
+/// only sees the inner frame, so the *outer* source of a core-origin BUM
+/// frame is classified by `flower` on the VXLAN device's ingress
+/// (`enc_src_ip`) into `skb->mark`, and `fw` + `gact drop` on a segment
+/// port's egress acts on the mark. The top byte of every mark set here:
+/// any other mark is not ours.
+const MARK_MAGIC: u32 = 0xE500_0000;
+/// What `skbedit` may change: the magic byte and the segment bitmap, never
+/// the middle byte (left for anything else using marks).
+const MARK_MASK: u32 = 0xFF00_FFFF;
+/// The filter priorities: peers first, the catch-all after them (the first
+/// match wins); on a port the local-bias drop, then the DF drop.
+const PRIO_FIRST: u16 = 1;
+const PRIO_SECOND: u16 = 2;
+/// The multicast bit of the destination MAC: broadcast, IPv4 and IPv6
+/// multicast, i.e. the multi-destination frames local bias is about.
+const MCAST_MAC: [u8; 6] = [1, 0, 0, 0, 0, 0];
+
+/// `flower dst_mac <mcast> [enc_src_ip <src>] action skbedit mark
+/// <MARK_MAGIC | bits>/MARK_MASK pipe` on the VXLAN device's ingress. No
+/// `src` is the catch-all: every core-origin BUM frame, magic byte alone.
+fn mark_filter(ifindex: u32, prio: u16, handle: u32, src: Option<IpAddr>, bits: u16) -> Request {
+    Request::AddFilter(Filter {
+        ifindex,
+        hook: Hook::Ingress,
+        chain: 0,
+        prio,
+        protocol: Protocol::All,
+        handle,
+        kind: Kind::Flower(FlowerKeys {
+            eth_dst: Some((MCAST_MAC, Some(MCAST_MAC))),
+            enc_src_ip: src,
+            ..FlowerKeys::default()
+        }),
+        actions: vec![Action::new(ActionKind::Skbedit {
+            mark: MARK_MAGIC | u32::from(bits),
+            mask: MARK_MASK,
+            verdict: Verdict::Pipe,
+        })],
+        replace: false,
+    })
+}
+
+/// `fw handle <MARK_MAGIC | bits>/<magic byte | bits> action drop` on a
+/// port's egress: drops a frame whose mark has all of `bits` set (and the
+/// magic byte); `bits == 0` drops every marked frame. The head's mask is
+/// fixed by its first filter, one per priority (hence two priorities).
+fn drop_marked(ifindex: u32, prio: u16, bits: u16) -> Request {
+    Request::AddFilter(Filter {
+        ifindex,
+        hook: Hook::Egress,
+        chain: 0,
+        prio,
+        protocol: Protocol::All,
+        handle: MARK_MAGIC | u32::from(bits),
+        kind: Kind::Fw {
+            mask: 0xFF00_0000 | u32::from(bits),
+        },
+        actions: vec![Action::new(ActionKind::Gact(Verdict::Shot))],
+        replace: false,
+    })
+}
+
+/// Removes `handle` (or, with `handle == 0`, every filter) at `prio`.
+fn delete_filter(ifindex: u32, hook: Hook, prio: u16, handle: u32) -> Request {
+    Request::DelFilter {
+        ifindex,
+        hook,
+        chain: 0,
+        prio,
+        protocol: Protocol::All,
+        handle,
+    }
+}
 
 /// errno(3) values the kernel answers a missing object with.
 const ENODEV: i32 = 19;
@@ -219,26 +295,18 @@ impl LinuxFdbDriver {
         Ok(link.header.index)
     }
 
-    /// Runs one tc request on a blocking thread (see `tc`).
-    async fn tc(&self, req: Tc, tolerate: &'static [i32]) -> Result<(), DriverError> {
-        tokio::task::spawn_blocking(move || tc::send(&req, tolerate))
+    /// Runs one tc request on a blocking thread (`nos_tc::send` blocks).
+    async fn tc(&self, req: Request, tolerate: &'static [i32]) -> Result<(), DriverError> {
+        tokio::task::spawn_blocking(move || nos_tc::send(&req, tolerate))
             .await
             .map_err(|e| DriverError::Other(e.to_string()))?
             .map_err(|e| DriverError::Other(format!("tc request failed: {e}")))
     }
 
     /// Removes every filter at `prio`; nothing there is fine.
-    async fn tc_flush(&self, ifindex: u32, hook: tc::Hook, prio: u16) -> Result<(), DriverError> {
-        self.tc(
-            Tc::Delete {
-                ifindex,
-                hook,
-                prio,
-                handle: 0,
-            },
-            NO_FILTER,
-        )
-        .await
+    async fn tc_flush(&self, ifindex: u32, hook: Hook, prio: u16) -> Result<(), DriverError> {
+        self.tc(delete_filter(ifindex, hook, prio, 0), NO_FILTER)
+            .await
     }
 
     /// Adds (`present`) or removes `vni`'s metadata rule; already so is fine.
@@ -776,29 +844,12 @@ impl FdbDriver for LinuxFdbDriver {
         df_filter: bool,
     ) -> Result<(), DriverError> {
         let ifindex = self.bridge_index(port).await?;
-        self.tc(Tc::Clsact { ifindex }, &[EEXIST]).await?;
-        self.tc(
-            Tc::DropMarked {
-                ifindex,
-                prio: tc::PRIO_FIRST,
-                bits: bit,
-            },
-            &[],
-        )
-        .await?;
+        self.tc(Request::Clsact { ifindex }, &[EEXIST]).await?;
+        self.tc(drop_marked(ifindex, PRIO_FIRST, bit), &[]).await?;
         if df_filter {
-            self.tc(
-                Tc::DropMarked {
-                    ifindex,
-                    prio: tc::PRIO_SECOND,
-                    bits: 0,
-                },
-                &[],
-            )
-            .await
+            self.tc(drop_marked(ifindex, PRIO_SECOND, 0), &[]).await
         } else {
-            self.tc_flush(ifindex, tc::Hook::Egress, tc::PRIO_SECOND)
-                .await
+            self.tc_flush(ifindex, Hook::Egress, PRIO_SECOND).await
         }
     }
 
@@ -807,10 +858,8 @@ impl FdbDriver for LinuxFdbDriver {
             return Ok(());
         };
         let ifindex = link.header.index;
-        self.tc_flush(ifindex, tc::Hook::Egress, tc::PRIO_FIRST)
-            .await?;
-        self.tc_flush(ifindex, tc::Hook::Egress, tc::PRIO_SECOND)
-            .await
+        self.tc_flush(ifindex, Hook::Egress, PRIO_FIRST).await?;
+        self.tc_flush(ifindex, Hook::Egress, PRIO_SECOND).await
     }
 
     async fn set_local_bias(
@@ -820,64 +869,38 @@ impl FdbDriver for LinuxFdbDriver {
     ) -> Result<(), DriverError> {
         let ifindex = self.vxlan_index(vni).await?;
         if peers.is_empty() {
-            self.tc_flush(ifindex, tc::Hook::Ingress, tc::PRIO_FIRST)
-                .await?;
-            self.tc_flush(ifindex, tc::Hook::Ingress, tc::PRIO_SECOND)
-                .await?;
+            self.tc_flush(ifindex, Hook::Ingress, PRIO_FIRST).await?;
+            self.tc_flush(ifindex, Hook::Ingress, PRIO_SECOND).await?;
             self.bias.lock().unwrap().remove(&vni);
             return self.metadata_rule(vni, false).await;
         }
         // Before the marking: an `enc_src_ip` match needs tunnel metadata.
         self.metadata_rule(vni, true).await?;
-        self.tc(Tc::Clsact { ifindex }, &[EEXIST]).await?;
+        self.tc(Request::Clsact { ifindex }, &[EEXIST]).await?;
         let before = self.bias.lock().unwrap().get(&vni).copied();
         if before.is_none() {
             // A first call in this process: whatever an earlier one (killed
             // before it cleaned up) left under a handle we no longer know goes.
-            self.tc_flush(ifindex, tc::Hook::Ingress, tc::PRIO_FIRST)
-                .await?;
+            self.tc_flush(ifindex, Hook::Ingress, PRIO_FIRST).await?;
         }
         // Handle n is the n-th peer in address order; a peer set that changed
         // overwrites in place, so the marking is never absent in between.
         for (n, (peer, bit)) in (1u32..).zip(peers) {
-            self.tc(
-                Tc::Mark {
-                    ifindex,
-                    prio: tc::PRIO_FIRST,
-                    handle: n,
-                    src: Some(*peer),
-                    bits: *bit,
-                },
-                &[],
-            )
-            .await?;
+            self.tc(mark_filter(ifindex, PRIO_FIRST, n, Some(*peer), *bit), &[])
+                .await?;
         }
         let kept = u32::try_from(peers.len()).unwrap_or(u32::MAX);
         let had = u32::try_from(before.unwrap_or(0)).unwrap_or(u32::MAX);
         for handle in (kept + 1)..=had {
             self.tc(
-                Tc::Delete {
-                    ifindex,
-                    hook: tc::Hook::Ingress,
-                    prio: tc::PRIO_FIRST,
-                    handle,
-                },
+                delete_filter(ifindex, Hook::Ingress, PRIO_FIRST, handle),
                 NO_FILTER,
             )
             .await?;
         }
         // The catch-all: every other core-origin BUM frame, magic byte only.
-        self.tc(
-            Tc::Mark {
-                ifindex,
-                prio: tc::PRIO_SECOND,
-                handle: 1,
-                src: None,
-                bits: 0,
-            },
-            &[],
-        )
-        .await?;
+        self.tc(mark_filter(ifindex, PRIO_SECOND, 1, None, 0), &[])
+            .await?;
         self.bias.lock().unwrap().insert(vni, peers.len());
         Ok(())
     }
