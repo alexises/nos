@@ -91,6 +91,11 @@ pub(crate) const AFI_IPV6: u16 = 2;
 /// RFC 7432 EVPN: AFI L2VPN (25) / SAFI EVPN (70).
 pub(crate) const AFI_L2VPN: u16 = 25;
 pub(crate) const SAFI_EVPN: u8 = 70;
+/// RFC 8955 Flow Specification: SAFI 133, and 134 with a Route Distinguisher.
+#[allow(dead_code, reason = "wired by #558")]
+pub(crate) const SAFI_FLOWSPEC: u8 = 133;
+#[allow(dead_code, reason = "wired by #558")]
+pub(crate) const SAFI_FLOWSPEC_VPN: u8 = 134;
 
 const ATTR_ORIGIN: u8 = 1;
 const ATTR_AS_PATH: u8 = 2;
