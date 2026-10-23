@@ -165,6 +165,14 @@ fn resolve_peers(
                 .evpn_import_policy
                 .as_deref()
                 .map(|n| policy_cache.resolve(Some(n))),
+            flowspec_import_policy: group
+                .flowspec_import_policy
+                .as_deref()
+                .map(|n| policy_cache.resolve(Some(n))),
+            flowspec_export_policy: group
+                .flowspec_export_policy
+                .as_deref()
+                .map(|n| policy_cache.resolve(Some(n))),
             shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
             maximum_prefix: group.maximum_prefix,
             announce_rpki_state: group.announce_rpki_state,

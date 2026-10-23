@@ -141,7 +141,7 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE): run `tools/bench-bgp.s
 | `session.rs`, `tcp.rs`, `collision.rs` | `SessionManager`, `diff_peers`, `ao_delta`; VRF-scoped sockets; `PeerSlot` |
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
 | `message.rs`, `evpn.rs`, `flowspec*.rs`, `as_path.rs` | Wire codecs (`BgpCodec`) |
-| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `shared` (`SharedRib`), `tests/` |
+| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `shared` (`SharedRib`), `tests/` |
 | `rib_push_client.rs`, `fdb_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); `igp_client` polls every 2s; a `nos-ribd` restart goes unnoticed until the next change |
 | `rib_client.rs`, `interface_client.rs` | One-shot queries via `nos_daemon::ipc::one_shot` |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |

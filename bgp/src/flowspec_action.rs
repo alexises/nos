@@ -5,8 +5,8 @@
 //! type that cannot be decoded (a NaN rate) is `MalformedAction`, which the
 //! UPDATE parser turns into RFC 7606 treat-as-withdraw (RFC 8955 section 10).
 //! The IPv6 redirect (type 0x000d) lives in the 20-octet IPv6-address-
-//! specific attribute (RFC 5701), which NOS does not parse yet (#560), so
-//! `decode_redirect_ipv6` is wired to nothing for now.
+//! specific attribute (RFC 5701, `PathAttributes::ipv6_extended_communities`),
+//! decoded by `decode_redirect_ipv6`.
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -153,9 +153,10 @@ impl fmt::Display for FlowAction {
     }
 }
 
-/// One human string per action, a shadowed traffic-rate suffixed `(ignored)`.
+/// One human string per action, a shadowed traffic-rate suffixed `(ignored)`,
+/// then the IPv6 redirects of `ipv6` (RFC 5701 communities).
 #[must_use]
-pub fn describe(communities: &[u64]) -> Vec<String> {
+pub fn describe(communities: &[u64], ipv6: &[[u8; 20]]) -> Vec<String> {
     let Ok(actions) = decode_actions(communities) else {
         return Vec::new();
     };
@@ -169,6 +170,11 @@ pub fn describe(communities: &[u64]) -> Vec<String> {
                 a.to_string()
             }
         })
+        .chain(
+            ipv6.iter()
+                .filter_map(decode_redirect_ipv6)
+                .map(|a| a.to_string()),
+        )
         .collect()
 }
 
@@ -307,16 +313,19 @@ mod tests {
     #[test]
     fn describe_renders_each_action() {
         assert_eq!(
-            describe(&[
-                rate_comm(RATE_BYTES, 0.0),
-                rate_comm(RATE_BYTES, 1000.0),
-                rate_comm(RATE_PACKETS, 0.0),
-                rate_comm(RATE_PACKETS, 7.0),
-                comm(TRAFFIC_ACTION, [0, 0, 0, 0, 0, 3]),
-                comm(REDIRECT_AS2, [0xfd, 0xe8, 0, 0, 0, 10]),
-                comm(REDIRECT_IPV4, [192, 0, 2, 1, 0, 7]),
-                comm(MARKING, [0, 0, 0, 0, 0, 10]),
-            ]),
+            describe(
+                &[
+                    rate_comm(RATE_BYTES, 0.0),
+                    rate_comm(RATE_BYTES, 1000.0),
+                    rate_comm(RATE_PACKETS, 0.0),
+                    rate_comm(RATE_PACKETS, 7.0),
+                    comm(TRAFFIC_ACTION, [0, 0, 0, 0, 0, 3]),
+                    comm(REDIRECT_AS2, [0xfd, 0xe8, 0, 0, 0, 10]),
+                    comm(REDIRECT_IPV4, [192, 0, 2, 1, 0, 7]),
+                    comm(MARKING, [0, 0, 0, 0, 0, 10]),
+                ],
+                &[]
+            ),
             vec![
                 "discard",
                 "rate 1000 bytes/s (ignored)",
@@ -333,8 +342,25 @@ mod tests {
             local: 5,
         };
         assert_eq!(v6.to_string(), "redirect ipv6 [2001:db8::1]:5");
+        // RFC 8956 section 6.1: the IPv6 redirect comes from attribute 25;
+        // a non-redirect IPv6 community is no action.
+        let mut c = [0u8; 20];
+        c[1] = 0x0d;
+        c[2..18].copy_from_slice(
+            &"2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        c[19] = 5;
+        let mut other = c;
+        other[1] = 0x02;
         assert_eq!(
-            describe(&[rate_comm(RATE_BYTES, f32::NAN)]),
+            describe(&[comm(MARKING, [0, 0, 0, 0, 0, 1])], &[other, c]),
+            vec!["dscp 1", "redirect ipv6 [2001:db8::1]:5"]
+        );
+        assert_eq!(
+            describe(&[rate_comm(RATE_BYTES, f32::NAN)], &[c]),
             [] as [std::string::String; 0]
         );
     }

@@ -296,6 +296,8 @@ fn resolved_peer(addr: &str, shutdown: bool) -> ResolvedPeer {
         import_policy: accept.clone(),
         export_policy: accept,
         evpn_import_policy: None,
+        flowspec_import_policy: None,
+        flowspec_export_policy: None,
         enforce_first_as: true,
         flowspec_relax_dest: false,
         shutdown: shutdown.then_some(BgpShutdown { message: None }),
@@ -869,4 +871,38 @@ async fn run_reconnects_after_a_read_error() {
     until("reconnected", || accepted.load(Ordering::SeqCst) >= 2).await;
     shutdown.send(true).unwrap();
     finished(task).await;
+}
+
+#[test]
+fn flowspec_policies_resolve_per_peer_group_and_unset_is_none() {
+    let cfg = config(instance(json!({
+        "peers": [
+            {"remote_address": "127.0.0.2", "peer_group": "g"},
+            {"remote_address": "127.0.0.3", "peer_group": "h"},
+        ],
+        "peer_groups": [
+            group("g", json!({
+                "flowspec_import_policy": "deny-all",
+                "flowspec_export_policy": "accept-all",
+            })),
+            group("h", json!({})),
+        ],
+    })));
+    let peers = super::resolve_peers(
+        own(&cfg),
+        &std::collections::HashMap::new(),
+        &mut PolicyCache::default(),
+        &cfg,
+    );
+    let g = peers.iter().find(|p| p.peer_group == "g").unwrap();
+    assert_eq!(
+        g.flowspec_import_policy.as_deref(),
+        Some(&*nos_rpl::DENY_ALL)
+    );
+    assert_eq!(
+        g.flowspec_export_policy.as_deref(),
+        Some(&*nos_rpl::ACCEPT_ALL)
+    );
+    let h = peers.iter().find(|p| p.peer_group == "h").unwrap();
+    assert!(h.flowspec_import_policy.is_none() && h.flowspec_export_policy.is_none());
 }

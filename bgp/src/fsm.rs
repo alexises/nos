@@ -745,12 +745,14 @@ async fn resend_loc_rib(
         );
         return;
     }
-    // Re-advertising Flowspec is #560; a refresh for it is not a unicast one.
-    if rr.safi == message::SAFI_FLOWSPEC {
-        debug!(peer = %peer.remote_address, "ignoring route-refresh for flowspec");
-        return;
-    }
-    let Some(family) = family_of_afi(rr.afi) else {
+    // A Flowspec refresh names its own family (resent by `resend_all`); any
+    // other SAFI keeps meaning unicast of its AFI.
+    let family = if rr.safi == message::SAFI_FLOWSPEC {
+        gr::family_of(rr.afi, rr.safi)
+    } else {
+        family_of_afi(rr.afi)
+    };
+    let Some(family) = family else {
         debug!(
             peer = %peer.remote_address, afi = rr.afi,
             "ignoring route-refresh for unrecognized afi"
@@ -1364,6 +1366,7 @@ async fn report_established(
         remote_is_ibgp,
     );
     rib.set_peer_confed(peer.remote_address, kind == PeerKind::ConfedExternal);
+    rib.set_peer_flowspec(&slot.peer);
     rib.set_peer_local_as(
         peer.remote_address,
         slot.peer.local_as.filter(|_| kind == PeerKind::External),
@@ -1373,7 +1376,6 @@ async fn report_established(
         peer.remote_address,
         slot.peer.enforce_first_as && !slot.peer.route_server_client,
     );
-    rib.set_peer_flowspec_relax(peer.remote_address, slot.peer.flowspec_relax_dest);
     rib.set_peer_add_path_send_count(peer.remote_address, slot.peer.add_path_send_count);
     rib.set_peer_rpki_state(
         peer.remote_address,
@@ -1693,32 +1695,23 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
     match update {
         OutboundUpdate::Announce(route) if route.use_mp => {
             let path_ids = route.path_id.map_or_else(Vec::new, |id| vec![id]);
+            let (prefix, next_hop) = (route.prefix, route.next_hop);
             BgpMessage::Update(message::UpdateMessage {
                 withdrawn_routes: Vec::new(),
                 withdrawn_path_ids: Vec::new(),
                 nlri: Vec::new(),
                 nlri_path_ids: Vec::new(),
-                attributes: Some(message::PathAttributes {
-                    origin: route.origin,
-                    as_path: route.as_path,
-                    next_hop: Ipv4Addr::UNSPECIFIED, // unused: the real next-hop lives in mp_reach
-                    local_pref: route.local_pref,
-                    med: route.med,
-                    originator_id: route.originator_id,
-                    cluster_list: route.cluster_list,
-                    communities: route.communities,
-                    extended_communities: route.extended_communities,
-                    large_communities: route.large_communities,
-                    pmsi: None,
-                    atomic_aggregate: route.atomic_aggregate,
-                    aggregator: route.aggregator,
-                    otc: route.otc,
-                }),
+                // The legacy next hop is unused: the real one lives in mp_reach.
+                attributes: Some(advertised_attributes(
+                    route,
+                    Ipv4Addr::UNSPECIFIED,
+                    Vec::new(),
+                )),
                 mp_reach: vec![message::MpReachNlri {
-                    afi: afi_of_ipnet(route.prefix),
+                    afi: afi_of_ipnet(prefix),
                     safi: 1,
-                    next_hop: route.next_hop,
-                    nlri: vec![route.prefix],
+                    next_hop,
+                    nlri: vec![prefix],
                     nlri_path_ids: path_ids,
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
@@ -1728,29 +1721,55 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
         }
         OutboundUpdate::Announce(route) => {
             let path_ids = route.path_id.map_or_else(Vec::new, |id| vec![id]);
+            let (prefix, next_hop) = (route.prefix, expect_ipv4_addr(route.next_hop));
             BgpMessage::Update(message::UpdateMessage {
                 withdrawn_routes: Vec::new(),
                 withdrawn_path_ids: Vec::new(),
-                nlri: vec![expect_ipv4_net(route.prefix)],
+                nlri: vec![expect_ipv4_net(prefix)],
                 nlri_path_ids: path_ids,
-                attributes: Some(message::PathAttributes {
-                    origin: route.origin,
-                    as_path: route.as_path,
-                    next_hop: expect_ipv4_addr(route.next_hop),
-                    local_pref: route.local_pref,
-                    med: route.med,
-                    originator_id: route.originator_id,
-                    cluster_list: route.cluster_list,
-                    communities: route.communities,
-                    extended_communities: route.extended_communities,
-                    large_communities: route.large_communities,
-                    pmsi: None,
-                    atomic_aggregate: route.atomic_aggregate,
-                    aggregator: route.aggregator,
-                    otc: route.otc,
-                }),
+                attributes: Some(advertised_attributes(route, next_hop, Vec::new())),
                 mp_reach: Vec::new(),
                 mp_unreach: Vec::new(),
+            })
+        }
+        // RFC 8955 section 4: no next hop (`encode_mp_reach` writes length 0).
+        OutboundUpdate::AnnounceFlowspec(f) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            attributes: Some(advertised_attributes(
+                f.route,
+                Ipv4Addr::UNSPECIFIED,
+                f.ipv6_extended_communities,
+            )),
+            mp_reach: vec![message::MpReachNlri {
+                afi: afi_of(f.family),
+                safi: message::SAFI_FLOWSPEC,
+                next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                evpn: Vec::new(),
+                flowspec: vec![f.nlri],
+            }],
+            mp_unreach: Vec::new(),
+        }),
+        OutboundUpdate::WithdrawFlowspec(family, nlri) => {
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                attributes: None,
+                mp_reach: Vec::new(),
+                mp_unreach: vec![message::MpUnreachNlri {
+                    afi: afi_of(family),
+                    safi: message::SAFI_FLOWSPEC,
+                    withdrawn: Vec::new(),
+                    withdrawn_path_ids: Vec::new(),
+                    evpn: Vec::new(),
+                    flowspec: vec![nlri],
+                }],
             })
         }
         OutboundUpdate::Withdraw(prefix, use_mp, path_id) if use_mp => {
@@ -1802,6 +1821,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 communities: Vec::new(),
                 extended_communities: route.extended_communities,
                 large_communities: Vec::new(),
+                ipv6_extended_communities: Vec::new(),
                 pmsi: route.pmsi,
             }),
             mp_reach: vec![message::MpReachNlri {
@@ -1843,6 +1863,32 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 mp_unreach: Vec::new(),
             })
         }
+    }
+}
+
+/// The path attributes of one advertised route; `next_hop` is the legacy
+/// `NEXT_HOP`, only encoded with plain NLRI.
+fn advertised_attributes(
+    route: crate::rib::AdvertisedRoute,
+    next_hop: Ipv4Addr,
+    ipv6_extended_communities: Vec<[u8; 20]>,
+) -> message::PathAttributes {
+    message::PathAttributes {
+        origin: route.origin,
+        as_path: route.as_path,
+        next_hop,
+        local_pref: route.local_pref,
+        med: route.med,
+        originator_id: route.originator_id,
+        cluster_list: route.cluster_list,
+        communities: route.communities,
+        extended_communities: route.extended_communities,
+        large_communities: route.large_communities,
+        ipv6_extended_communities,
+        pmsi: None,
+        atomic_aggregate: route.atomic_aggregate,
+        aggregator: route.aggregator,
+        otc: route.otc,
     }
 }
 

@@ -471,6 +471,18 @@ pub enum BgpPeerGroupOp {
         /// Name of the BGP peer group this op targets.
         name: String,
     },
+    /// Sets the Flowspec import (`export: false`) or export policy of the
+    /// BGP peer group; `None` clears it (accept all).
+    SetFlowspecPolicy {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+        /// `true` for `flowspec_export_policy`, `false` for `flowspec_import_policy`.
+        export: bool,
+        /// Name of the policy, or `None` to clear it.
+        policy: Option<String>,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -532,6 +544,21 @@ impl BgpPeerGroupOp {
             | BgpPeerGroupOp::ClearEvpnImportPolicy { .. }
             | BgpPeerGroupOp::SetEnforceFirstAs { .. }
             | BgpPeerGroupOp::ClearEnforceFirstAs { .. } => self.apply_part3(config),
+            BgpPeerGroupOp::SetFlowspecPolicy {
+                instance,
+                name,
+                export,
+                policy,
+            } => {
+                let group = find_group_mut(config, instance, name)?;
+                let slot = if *export {
+                    &mut group.flowspec_export_policy
+                } else {
+                    &mut group.flowspec_import_policy
+                };
+                slot.clone_from(policy);
+                Ok(())
+            }
         }
     }
 
@@ -564,6 +591,8 @@ impl BgpPeerGroupOp {
                         evpn_import_policy: None,
                         enforce_first_as: None,
                         flowspec_validation: crate::schema::BgpFlowspecValidation::default(),
+                        flowspec_import_policy: None,
+                        flowspec_export_policy: None,
                         shutdown: None,
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                         announce_rpki_state: false,
@@ -1062,6 +1091,8 @@ mod tests {
             evpn_import_policy: None,
             enforce_first_as: None,
             flowspec_validation: crate::schema::BgpFlowspecValidation::default(),
+            flowspec_import_policy: None,
+            flowspec_export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
@@ -1287,6 +1318,27 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].import_policy, None);
+    }
+
+    #[test]
+    fn set_and_clear_flowspec_policies() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        let op = |export, policy: Option<&str>| BgpPeerGroupOp::SetFlowspecPolicy {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            export,
+            policy: policy.map(str::to_string),
+        };
+        op(false, Some("in")).apply(&mut cfg).unwrap();
+        op(true, Some("out")).apply(&mut cfg).unwrap();
+        let g = &cfg.bgp_instances[0].peer_groups[0];
+        assert_eq!(g.flowspec_import_policy.as_deref(), Some("in"));
+        assert_eq!(g.flowspec_export_policy.as_deref(), Some("out"));
+        op(false, None).apply(&mut cfg).unwrap();
+        let g = &cfg.bgp_instances[0].peer_groups[0];
+        assert_eq!(g.flowspec_import_policy, None);
+        assert_eq!(g.flowspec_export_policy.as_deref(), Some("out"));
+        assert!(op(true, None).apply(&mut config_with(vec![])).is_err());
     }
 
     #[test]

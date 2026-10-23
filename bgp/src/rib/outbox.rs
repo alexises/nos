@@ -18,7 +18,7 @@ use ipnet::IpNet;
 use tokio::sync::{mpsc, Notify};
 use tracing::{info, warn};
 
-use super::{build_advertisement, family_of, message, BgpRib, OutboundUpdate};
+use super::{build_advertisement, family_of, message, BgpRib, FlowspecKey, OutboundUpdate};
 
 /// Queued updates per peer. Steady state needs far less; a full-table dump
 /// overflows it by design and is handled by the backlog.
@@ -41,13 +41,15 @@ pub(super) struct Backlog {
     markers: Vec<OutboundUpdate>,
     /// An EVPN update was dropped: not coalescable, the session is ceased.
     evpn_lost: bool,
+    /// Flowspec rules whose latest update was dropped.
+    flows: HashSet<FlowspecKey>,
     /// Prefixes re-sent so far in this overflow episode (for the log).
     drained: usize,
 }
 
 impl Backlog {
     fn is_empty(&self) -> bool {
-        self.dirty.is_empty() && self.markers.is_empty() && !self.evpn_lost
+        self.dirty.is_empty() && self.flows.is_empty() && self.markers.is_empty() && !self.evpn_lost
     }
 
     fn push(&mut self, update: OutboundUpdate) {
@@ -64,6 +66,12 @@ impl Backlog {
             OutboundUpdate::AnnounceEvpn(_) | OutboundUpdate::WithdrawEvpn(_) => {
                 self.evpn_lost = true;
             }
+            OutboundUpdate::AnnounceFlowspec(adv) => {
+                self.flows.insert((adv.family, adv.nlri));
+            }
+            OutboundUpdate::WithdrawFlowspec(family, nlri) => {
+                self.flows.insert((family, nlri));
+            }
             marker @ (OutboundUpdate::RefreshMarker { .. } | OutboundUpdate::EndOfRib(_)) => {
                 if !self.markers.contains(&marker) {
                     self.markers.push(marker);
@@ -75,6 +83,7 @@ impl Backlog {
     /// Folds in `newer`, which was parked after `self` was taken.
     fn merge(&mut self, newer: Backlog) {
         self.dirty.extend(newer.dirty);
+        self.flows.extend(newer.flows);
         for (prefix, ids) in newer.lost_ids {
             self.lost_ids.entry(prefix).or_default().extend(ids);
         }
@@ -211,6 +220,11 @@ impl BgpRib {
             self.resync_prefix(peer, *prefix, lost.as_ref());
         }
         backlog.drained += batch.len();
+        // ponytail: every lost rule at once, not batched (Flowspec tables are
+        // small); batch like `dirty` if one ever overflows the queue alone.
+        for k in std::mem::take(&mut backlog.flows) {
+            self.sync_flow_to(peer, &k, true);
+        }
         if backlog.dirty.is_empty() {
             for m in trail {
                 tx.send(m);
@@ -253,6 +267,7 @@ impl BgpRib {
                     self.local_asn,
                     self.source_is_rr_client(route),
                     self.cluster_id,
+                    None,
                 )
             });
         if let Some(adv) = adv {

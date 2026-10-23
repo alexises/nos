@@ -3,9 +3,9 @@
 //! calls. Moved verbatim out of `rib.rs`.
 
 use super::{
-    apply_verdict, family_of, message, to_policy_input, AdvertisedRoute, Arc, AsPath, HashMap,
-    Instant, IpAddr, IpNet, Ipv4Addr, NextHopMode, PeerOutbox, RibRoute, RouteOrigin,
-    DEFAULT_LOCAL_PREF,
+    apply_verdict, family_of, message, to_policy_input, AddressFamily, AdvertisedRoute, Arc,
+    AsPath, HashMap, Instant, IpAddr, IpNet, Ipv4Addr, NextHopMode, PeerOutbox, RibRoute,
+    RouteOrigin, DEFAULT_LOCAL_PREF,
 };
 use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
 
@@ -247,7 +247,11 @@ pub(super) fn otc_leak(remote: nos_proto::BgpRole, otc: Option<u32>, peer_as: u3
 /// local address for next-hop-self). `source_is_rr_client` is whether the
 /// peer `best` was learned from (if any) is a route-reflector client;
 /// `cluster_id` is this instance's own effective RFC 4456 cluster-id, used
-/// only when actually reflecting.
+/// only when actually reflecting. `flow` is `None` for a unicast route; for
+/// a Flowspec rule (`flowspec_out`) its family and the peer's Flowspec
+/// export policy, and the unicast-only RFC 9234 and RFC 8097 steps are
+/// skipped.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_advertisement(
     prefix: IpNet,
     best: &RibRoute,
@@ -256,8 +260,10 @@ pub(super) fn build_advertisement(
     local_asn: u32,
     source_is_rr_client: bool,
     cluster_id: Ipv4Addr,
+    flow: Option<(AddressFamily, &nos_rpl::CompiledPolicy)>,
 ) -> Option<AdvertisedRoute> {
-    if !outbox.negotiated_afs.contains(&family_of(prefix)) {
+    let family = flow.map_or_else(|| family_of(prefix), |(f, _)| f);
+    if !outbox.negotiated_afs.contains(&family) {
         return None;
     }
     if best.origin == RouteOrigin::Peer(peer) {
@@ -294,12 +300,13 @@ pub(super) fn build_advertisement(
         adjusted.med = None;
     }
     let verdict = nos_rpl::vm::run(
-        &outbox.export_policy,
+        flow.map_or(&*outbox.export_policy, |(_, p)| p),
         &to_policy_input(prefix, &adjusted, Some((peer, outbox.remote_asn))),
     );
     let nh_edit = apply_verdict(&mut adjusted, verdict)?;
-    // RFC 9234 §5 egress, after policy so it cannot defeat it.
+    // RFC 9234 §5 egress, after policy so it cannot defeat it (unicast only).
     match (outbox.remote_role, adjusted.otc) {
+        _ if flow.is_some() => {}
         (Some(Customer | Peer | RouteServerClient), None) => {
             adjusted.otc = Some(outbox.local_as.map_or(local_asn, |l| l.asn));
         }
@@ -315,7 +322,7 @@ pub(super) fn build_advertisement(
     adjusted
         .extended_communities
         .retain(|&c| !crate::rpki::community::is_ov(c));
-    if outbox.is_ibgp && outbox.announce_rpki_state {
+    if outbox.is_ibgp && outbox.announce_rpki_state && flow.is_none() {
         adjusted
             .extended_communities
             .push(crate::rpki::community::encode(adjusted.validation_state));

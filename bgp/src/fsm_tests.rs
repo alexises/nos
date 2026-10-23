@@ -52,6 +52,8 @@ fn rpeer() -> ResolvedPeer {
         import_policy: accept.clone(),
         export_policy: accept,
         evpn_import_policy: None,
+        flowspec_import_policy: None,
+        flowspec_export_policy: None,
         enforce_first_as: true,
         flowspec_relax_dest: false,
         shutdown: None,
@@ -125,6 +127,7 @@ fn path_attrs(asn: u32) -> PathAttributes {
         communities: vec![],
         extended_communities: vec![],
         large_communities: vec![],
+        ipv6_extended_communities: Vec::new(),
         pmsi: None,
     }
 }
@@ -434,6 +437,42 @@ fn announces_encode_as_legacy_nlri_or_mp_reach() {
     ))));
     assert_eq!(u.mp_reach[0].afi, AFI_IPV4);
     assert_eq!(u.mp_reach[0].nlri_path_ids.len(), 0);
+}
+
+#[test]
+fn flowspec_encodes_as_safi_133_with_its_ipv6_communities() {
+    let rule = crate::flowspec::FlowSpec::decode(
+        crate::flowspec::Afi::V6,
+        &[7, 1, 32, 0, 0x20, 0x01, 0x0d, 0xb8],
+    )
+    .unwrap()
+    .0;
+    let c = [3u8; 20];
+    let u = expect_update(outbound_update_to_message(
+        OutboundUpdate::AnnounceFlowspec(crate::rib::AdvertisedFlowspec {
+            family: AddressFamily::Ipv6Flowspec,
+            nlri: rule.clone(),
+            route: route("2001:db8::/32", "2001:db8::1", true, None),
+            ipv6_extended_communities: vec![c],
+        }),
+    ));
+    assert_eq!(u.nlri.len(), 0);
+    let mp = &u.mp_reach[0];
+    assert_eq!((mp.afi, mp.safi), (AFI_IPV6, message::SAFI_FLOWSPEC));
+    assert_eq!(mp.nlri.len(), 0);
+    assert_eq!(mp.flowspec, std::slice::from_ref(&rule));
+    let a = u.attributes.unwrap();
+    assert_eq!(a.ipv6_extended_communities, [c]);
+    assert_eq!(a.extended_communities, [5]);
+    assert_eq!(a.local_pref, Some(150));
+
+    let u = expect_update(outbound_update_to_message(
+        OutboundUpdate::WithdrawFlowspec(AddressFamily::Ipv6Flowspec, rule.clone()),
+    ));
+    assert!(u.attributes.is_none() && u.mp_reach.is_empty());
+    let mp = &u.mp_unreach[0];
+    assert_eq!((mp.afi, mp.safi), (AFI_IPV6, message::SAFI_FLOWSPEC));
+    assert_eq!(mp.flowspec, [rule]);
 }
 
 #[test]

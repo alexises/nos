@@ -111,6 +111,10 @@ pub struct ResolvedPeer {
     pub export_policy: Arc<nos_rpl::CompiledPolicy>,
     /// The peer-group's EVPN import policy; `None` accepts every EVPN route.
     pub evpn_import_policy: Option<Arc<nos_rpl::CompiledPolicy>>,
+    /// The peer-group's Flowspec import/export policies; `None` accepts
+    /// every rule (`BgpRib::set_peer_flowspec_policies`).
+    pub flowspec_import_policy: Option<Arc<nos_rpl::CompiledPolicy>>,
+    pub flowspec_export_policy: Option<Arc<nos_rpl::CompiledPolicy>>,
     /// Effective administrative shutdown (the peer's own, else its
     /// peer-group's): no session is opened or accepted while set.
     pub shutdown: Option<BgpShutdown>,
@@ -811,7 +815,10 @@ impl SessionManager {
                 validity: route
                     .validity
                     .map_or_else(|| "unknown".to_string(), |v| v.to_string()),
-                actions: crate::flowspec_action::describe(&route.attributes.extended_communities),
+                actions: crate::flowspec_action::describe(
+                    &route.attributes.extended_communities,
+                    &route.attributes.ipv6_extended_communities,
+                ),
             })
             .collect()
     }
@@ -1577,6 +1584,8 @@ mod tests {
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             evpn_import_policy: None,
+            flowspec_import_policy: None,
+            flowspec_export_policy: None,
             enforce_first_as: true,
             flowspec_relax_dest: false,
             shutdown: None,

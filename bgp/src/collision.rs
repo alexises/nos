@@ -564,6 +564,8 @@ mod tests {
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             evpn_import_policy: None,
+            flowspec_import_policy: None,
+            flowspec_export_policy: None,
             enforce_first_as: true,
             flowspec_relax_dest: false,
             shutdown: None,

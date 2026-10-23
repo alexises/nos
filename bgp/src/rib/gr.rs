@@ -89,6 +89,7 @@ impl BgpRib {
                 self.local_asn,
                 source_is_rr_client,
                 self.cluster_id,
+                None,
             ) {
                 outbox.tx.send(OutboundUpdate::Announce(adv));
                 advertised.insert(*prefix);
@@ -96,6 +97,7 @@ impl BgpRib {
         }
         self.adj_rib_out.insert(peer, advertised);
         self.announce_evpn_to(peer);
+        self.announce_flowspec_to(peer);
         if add_path {
             let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
             for prefix in prefixes {
@@ -179,7 +181,12 @@ impl BgpRib {
         if enhanced {
             outbox.tx.send(marker(message::REFRESH_BORR));
         }
-        if outbox.add_path_tx.contains(&family) {
+        if matches!(
+            family,
+            AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec
+        ) {
+            self.resend_flowspec(peer, family);
+        } else if outbox.add_path_tx.contains(&family) {
             // The same top N again, under the same ids (a path the export
             // policy now refuses gives its id up), plus every prefix still
             // holding an id toward this peer.
@@ -212,6 +219,7 @@ impl BgpRib {
                     self.local_asn,
                     source_is_rr_client,
                     self.cluster_id,
+                    None,
                 ) {
                     outbox.tx.send(OutboundUpdate::Announce(adv));
                 }
@@ -287,19 +295,8 @@ impl BgpRib {
             return 0;
         };
         let keys: Vec<_> = set.iter().filter(|(f, _)| *f == family).cloned().collect();
-        let mut count = 0;
-        for key in keys {
-            set.remove(&key);
-            if let Some(r) = self
-                .flowspec_adj_rib_in
-                .get_mut(&peer)
-                .and_then(|t| t.remove(&key))
-            {
-                count += 1;
-                info!(peer = %peer, family = %family, route = %r.nlri, "flowspec route withdrawn");
-            }
-        }
-        count
+        set.retain(|(f, _)| *f != family);
+        keys.iter().filter(|k| self.drop_flow(peer, k)).count()
     }
 
     /// Purges `peer`'s stale routes of `family`; returns how many.
@@ -495,17 +492,15 @@ impl BgpRib {
                 info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
         }
-        if let Some(table) = self.flowspec_adj_rib_in.get_mut(&peer) {
-            let stale = self.flowspec_stale.entry(peer).or_default();
-            table.retain(|key, r| {
-                let keep = families.contains(&r.family);
-                if keep {
-                    stale.insert(key.clone());
-                } else {
-                    info!(peer = %peer, family = %r.family, route = %r.nlri, "flowspec route withdrawn");
-                }
-                keep
-            });
+        let (keep, drop): (Vec<_>, Vec<_>) = self
+            .flowspec_adj_rib_in
+            .get(&peer)
+            .into_iter()
+            .flat_map(|t| t.keys().cloned())
+            .partition(|k| families.contains(&k.0));
+        self.flowspec_stale.entry(peer).or_default().extend(keep);
+        for k in drop {
+            self.drop_flow(peer, &k);
         }
         let now = Instant::now();
         self.gr_deadline

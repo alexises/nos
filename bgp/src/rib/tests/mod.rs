@@ -18,6 +18,7 @@ mod evpn;
 mod evpn_import;
 mod first_as;
 mod flowspec;
+mod flowspec_select;
 mod flowspec_validation;
 mod gr;
 mod next_hop;
@@ -193,6 +194,7 @@ fn ebgp_update(nlri: Vec<&str>, as_path: Vec<u32>, next_hop: &str) -> UpdateMess
             communities: Vec::new(),
             extended_communities: Vec::new(),
             large_communities: Vec::new(),
+            ipv6_extended_communities: Vec::new(),
             pmsi: None,
         }),
         mp_reach: vec![],
@@ -276,6 +278,7 @@ fn update_with(
             communities: Vec::new(),
             extended_communities: Vec::new(),
             large_communities: Vec::new(),
+            ipv6_extended_communities: Vec::new(),
             pmsi: None,
         }),
         ..empty_update()

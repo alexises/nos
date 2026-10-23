@@ -34,6 +34,16 @@ The route a policy sees depends on where it runs:
 - On **redistribution into BGP**, the route is a local one: empty AS path, origin IGP, local preference 100, no MED, and `this.bgp.peer` unset (`peer_as` is 0). The changes the policy makes (communities, local preference, AS-path prepends and so on) are kept and advertised.
 - On **redistribution into OSPF**, only `this.prefix` is meaningful and only the verdict counts: attribute changes are ignored.
 
+### Flowspec rules
+
+`flowspec-import-policy` and `flowspec-export-policy` on a peer-group (see [BGP: Flowspec](bgp.md#policies)) run the same language on Flowspec rules:
+
+- `this.prefix` is the rule's destination prefix component, or `0.0.0.0/0` (`::/0` for IPv6) when the rule has none. Match on it like on a unicast prefix: `if this.prefix == 192.0.2.0/24:` or a prefix list.
+- The traffic actions are extended communities: `this.bgp.extended_communities.contains(...)` matches one, `.add(...)`/`.remove(...)` retags it. A rewrite is kept and advertised.
+- The AS path, origin, local preference, MED, communities, large communities, peer and peer AS are the route's, as for unicast. There is no next hop, and the RPKI validation state is always `not-found`.
+- On import, a `set this.bgp.local_pref` steers which peer's copy wins. An AS-path `prepend` is ignored on import (RFC 8955 validation reads the path as received); on export it is kept.
+- Unset accepts every rule, unlike `import-policy`/`export-policy`.
+
 **Changing a policy resets BGP sessions.** When you change a peer-group's import or export policy, or edit a policy (or a prefix list, community alias, community group or AS-path list it uses) that a peer-group uses, the sessions of that peer-group are reset so that every route is evaluated again (see [BGP: How BGP is configured](bgp.md#how-bgp-is-configured)). A redistribution policy change takes effect without resetting any session.
 
 ## Writing a first policy
@@ -422,6 +432,8 @@ Created with `edit policy-definition <name>`; deleted with `delete` inside it. R
 |---|---|---|---|---|---|---|
 | import-policy | `set bgp instance <i> peer-group <g> import-policy <p>` / `set import-policy <p>`; `delete import-policy` (relative) | `bgp-instance/<i>/peer-group/<g>/import-policy`, `"<p>"` or `null` | `deny-all` | `accept-all`, `deny-all` or an existing policy | Filters received routes; resets the group's sessions | `GET …/import-policy`; `show route` |
 | export-policy | `set bgp instance <i> peer-group <g> export-policy <p>` / `set export-policy <p>`; `delete export-policy` (relative) | `bgp-instance/<i>/peer-group/<g>/export-policy`, `"<p>"` or `null` | `deny-all` | as import-policy | Filters advertised routes; resets the group's sessions | `GET …/export-policy`; `show route` on the peer |
+| flowspec-import-policy | `set bgp instance <i> peer-group <g> flowspec-import-policy <p>` / `set flowspec-import-policy <p>`; `delete flowspec-import-policy` (relative) | `bgp-instance/<i>/peer-group/<g>/flowspec-import-policy`, `"<p>"` or `null` | accept all | as import-policy | Filters received Flowspec rules; resets the group's sessions | `show bgp flowspec` |
+| flowspec-export-policy | `set bgp instance <i> peer-group <g> flowspec-export-policy <p>` / `set flowspec-export-policy <p>`; `delete flowspec-export-policy` (relative) | `bgp-instance/<i>/peer-group/<g>/flowspec-export-policy`, `"<p>"` or `null` | accept all | as import-policy | Filters advertised Flowspec rules; resets the group's sessions | `show bgp flowspec` on the peer |
 | redistribute policy | `set routing-table <t> redistribute bgp\|ospf policy <p>` / `set redistribute bgp\|ospf policy <p>`; without `policy <p>` to remove it | `routing-table/<t>/redistribute`, `{"from":"Static","to":"Bgp","policy":"<p>"}`; or `…/redistribute/policy` | `accept-all` | as import-policy | Filters static routes before they enter BGP or OSPF | `show config` (routing-table line) |
 
 ### Prefix list

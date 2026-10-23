@@ -527,6 +527,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Tune the RFC 8955 section 6 validation of received Flowspec rules.",
             "Every received rule is validated and `show bgp flowspec` prints the result; an invalid rule stays visible but is never used. `disable-dest-prefix-rule` stops requiring a destination prefix component (rule (a)); such a rule skips the unicast checks, which need a destination. Validation itself cannot be disabled. Changing it restarts the peer-group's sessions.",
         ),
+        Topic::BgpPeerGroupFlowspecImportPolicy => (
+            "Filter the Flowspec rules this peer-group's peers send us through a routing policy.",
+            "Names a policy-definition applied to every valid Flowspec rule received from this peer-group's peers, before best-path selection; a rejected rule is dropped as if withdrawn. Scripts see the rule's destination prefix as `this.prefix` (the family's default route when the rule has none), plus its communities, extended communities (the traffic actions) and AS path. Rewrites are kept, so a policy can set local-pref or retag actions. Unlike import-policy, unset accepts every rule.",
+        ),
+        Topic::BgpPeerGroupFlowspecExportPolicy => (
+            "Filter the Flowspec rules we advertise to this peer-group's peers through a routing policy.",
+            "Names a policy-definition applied to every selected Flowspec rule before it is advertised to this peer-group's peers. Scripts see the same input as flowspec-import-policy; rewrites are kept. Unlike export-policy, unset advertises every rule.",
+        ),
         Topic::BgpPeerGroupShutdown => (
             "Administratively shut every peer in a peer-group.",
             concat!(

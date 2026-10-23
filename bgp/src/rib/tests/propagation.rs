@@ -409,7 +409,9 @@ fn peer_disconnected_withdraws_every_route_it_contributed() {
         OutboundUpdate::AnnounceEvpn(_)
         | OutboundUpdate::WithdrawEvpn(_)
         | OutboundUpdate::RefreshMarker { .. }
-        | OutboundUpdate::EndOfRib(_) => String::new(),
+        | OutboundUpdate::EndOfRib(_)
+        | OutboundUpdate::AnnounceFlowspec(_)
+        | OutboundUpdate::WithdrawFlowspec(..) => String::new(),
     });
     assert_eq!(
         updates,

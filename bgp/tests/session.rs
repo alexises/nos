@@ -47,6 +47,8 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         import_policy: accept.clone(),
         export_policy: accept,
         evpn_import_policy: None,
+        flowspec_import_policy: None,
+        flowspec_export_policy: None,
         enforce_first_as: true,
         flowspec_relax_dest: false,
         shutdown: None,

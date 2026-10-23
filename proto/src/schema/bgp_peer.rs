@@ -123,6 +123,8 @@ mod tests {
             evpn_import_policy: None,
             enforce_first_as: None,
             flowspec_validation: crate::schema::BgpFlowspecValidation::default(),
+            flowspec_import_policy: None,
+            flowspec_export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
