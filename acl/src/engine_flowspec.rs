@@ -8,11 +8,15 @@ use std::sync::Arc;
 use nos_proto::{FlowRule, FlowspecRuleStatus, FlowspecSet};
 use tracing::{error, info, warn};
 
-use super::Engine;
+use super::{resolve, Engine};
 use crate::driver::Driver;
 use crate::flowspec::{lower, Lowered, PRIO_FIRST, RULE_CAP};
+use crate::plan::Device as PlanDevice;
 
 const CAPPED: &str = "rule cap";
+/// A rule no device holds: no `flowspec` device in the instance's table,
+/// or the device is absent.
+const NOT_ATTACHED: &str = "not attached";
 
 /// One instance's last snapshot, each rule lowered once.
 #[derive(Debug)]
@@ -50,6 +54,9 @@ pub(super) struct State {
     capped: BTreeSet<(String, usize)>,
     /// Devices named but absent, logged once.
     pending: BTreeSet<String>,
+    /// Per instance, the `flowspec` devices of the last plan (#562), added
+    /// to the devices its snapshot names.
+    pub(super) attached: BTreeMap<String, Vec<PlanDevice>>,
 }
 
 impl State {
@@ -135,13 +142,22 @@ impl<D: Driver> Engine<D> {
         let mut capped = BTreeSet::new();
         let mut pending = BTreeSet::new();
         for (instance, set) in &self.fs.sets {
-            for dev in &set.devices {
-                let Some(link) = links.get(dev) else {
-                    pending.insert(dev.clone());
+            let attached = self.fs.attached.get(instance).into_iter().flatten();
+            let named: BTreeSet<Result<String, String>> = set
+                .devices
+                .iter()
+                .cloned()
+                .map(Ok)
+                .chain(attached.map(|d| resolve(d, &self.links)))
+                .collect();
+            for dev in named {
+                let Some(link) = dev.as_ref().ok().and_then(|n| links.get(n)) else {
+                    let (Ok(shown) | Err(shown)) = dev;
+                    pending.insert(shown);
                     continue;
                 };
                 let (_, want) = desired
-                    .entry(dev.clone())
+                    .entry(link.name.clone())
                     .or_insert_with(|| (link.ifindex, Vec::new()));
                 for (i, l) in set.lowered.iter().enumerate() {
                     let Ok(l) = l else { continue };
@@ -248,6 +264,16 @@ impl<D: Driver> Engine<D> {
                 }
             }
         }
+        let held: BTreeSet<(&str, usize)> = self
+            .fs
+            .devices
+            .values()
+            .flat_map(|d| &d.slots)
+            .filter_map(|s| match s {
+                Held::Rule(instance, r, _) => Some((instance.as_str(), *r)),
+                _ => None,
+            })
+            .collect();
         let mut out = Vec::new();
         for (instance, set) in &self.fs.sets {
             for (i, (rule, l)) in set.rules.iter().zip(&set.lowered).enumerate() {
@@ -255,6 +281,9 @@ impl<D: Driver> Engine<D> {
                     Err(why) => Some(why.clone()),
                     Ok(_) if self.fs.capped.contains(&(instance.clone(), i)) => {
                         Some(CAPPED.to_string())
+                    }
+                    Ok(_) if !held.contains(&(instance.as_str(), i)) => {
+                        Some(NOT_ATTACHED.to_string())
                     }
                     Ok(_) => None,
                 };

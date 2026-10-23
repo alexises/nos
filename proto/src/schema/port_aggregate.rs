@@ -220,6 +220,14 @@ pub struct PortAggregate {
     #[cli(topic = InterfaceAclOut, words = "acl out")]
     pub acl_out: Option<String>,
 
+    /// Applies the flowspec rules of the BGP instance owning this device's
+    /// routing table to the IP packets arriving here (RFC 8955 section 5:
+    /// ingress only); placement rules are `acl::valid_flowspec_placements`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceFlowspec, words = "flowspec")]
+    pub flowspec: bool,
+
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
@@ -250,6 +258,7 @@ impl Default for PortAggregate {
         Self {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: String::new(),
             mode: PortAggregateMode::default(),
             lacp_rate: LacpRate::default(),
@@ -410,6 +419,7 @@ mod tests {
         PortAggregate {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: name.to_string(),
             mode: PortAggregateMode::Xor, // arbitrary — mode has no bearing on the validators tested here
             lacp_rate: LacpRate::default(),
@@ -568,6 +578,7 @@ mod tests {
         agg.subinterfaces = vec![crate::schema::Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag: 0,
             addresses: vec![InterfaceAddress {
                 address: "10.0.0.1/24".parse().unwrap(),
@@ -600,6 +611,7 @@ mod tests {
             a.subinterfaces = vec![crate::schema::Subinterface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 tag: 0,
                 addresses: vec![InterfaceAddress {
                     address: addr.parse().unwrap(),

@@ -25,6 +25,9 @@ pub async fn run(
         DiffScope::Acls,
         DiffScope::Interfaces,
         DiffScope::PortAggregates,
+        // Which instance owns a `flowspec` device's table.
+        DiffScope::BgpInstances,
+        DiffScope::RoutingTables,
     ];
     let mut compiler = Compiler::default();
     while !*shutdown.borrow() {

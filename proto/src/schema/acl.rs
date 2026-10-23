@@ -371,6 +371,132 @@ fn one_per_device(
     Ok(())
 }
 
+/// One device with `flowspec` set (#562): its parent `Interface` or
+/// `PortAggregate` (`aggregate`), the subinterface tag (0: the parent
+/// itself), and the routing table whose BGP instance's rules it enforces:
+/// the subinterface's, the untagged subinterface's for the parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowspecPoint<'a> {
+    /// The `Interface` or `PortAggregate` name.
+    pub parent: &'a str,
+    /// `parent` is a `PortAggregate`.
+    pub aggregate: bool,
+    /// Subinterface tag; 0 is the parent's own device.
+    pub tag: u16,
+    /// The owning routing table, if the device has one.
+    pub table: Option<&'a str>,
+}
+
+impl FlowspecPoint<'_> {
+    /// The device as the user names it: `parent` or `parent.tag`.
+    #[must_use]
+    pub fn device(&self) -> String {
+        if self.tag == 0 {
+            self.parent.to_string()
+        } else {
+            format!("{}.{}", self.parent, self.tag)
+        }
+    }
+}
+
+/// Every device with `flowspec` set, in config order.
+#[must_use]
+pub fn flowspec_points(cfg: &Config) -> Vec<FlowspecPoint<'_>> {
+    let parents = cfg
+        .interfaces
+        .iter()
+        .map(|i| (i.name.as_str(), false, i.flowspec, &i.subinterfaces[..]))
+        .chain(
+            cfg.port_aggregates
+                .iter()
+                .map(|a| (a.name.as_str(), true, a.flowspec, &a.subinterfaces[..])),
+        );
+    let mut out = Vec::new();
+    for (parent, aggregate, own, subs) in parents {
+        let point = |tag: u16| FlowspecPoint {
+            parent,
+            aggregate,
+            tag,
+            table: subs
+                .iter()
+                .find(|s| s.tag == tag)
+                .and_then(|s| s.routing_table.as_deref()),
+        };
+        if own {
+            out.push(point(0));
+        }
+        out.extend(subs.iter().filter(|s| s.flowspec).map(|s| point(s.tag)));
+    }
+    out
+}
+
+const FLOWSPEC_TWICE: &str = "flowspec is set on both the device and its untagged \
+                              subinterface, which are one device: keep one";
+
+/// `flowspec` placement (#562): the `acl in` rules (no loopback, aggregate
+/// member or switching-profile port; not on both a parent and its untagged
+/// subinterface), plus a routing table that a BGP instance uses.
+pub(crate) fn valid_flowspec_placements(_acls: &[Acl], ctx: &Config) -> garde::Result {
+    let refuse = |name: &str, why: &str| Err(garde::Error::new(format!("{name}: {why}")));
+    let any = |own: bool, subs: &[super::Subinterface]| own || subs.iter().any(|s| s.flowspec);
+    let twice = |own: bool, subs: &[super::Subinterface]| {
+        own && subs.iter().any(|s| s.tag == 0 && s.flowspec)
+    };
+    for i in &ctx.interfaces {
+        if !any(i.flowspec, &i.subinterfaces) {
+            continue;
+        }
+        if loopback_table_name(&i.name).is_some() {
+            return refuse(&i.name, "flowspec cannot be set on a loopback");
+        }
+        if i.port_aggregate.is_some() {
+            return refuse(
+                &i.name,
+                "flowspec cannot be set on a port aggregate member: set it on the aggregate",
+            );
+        }
+        if i.switching_profile.is_some() {
+            return refuse(
+                &i.name,
+                "flowspec cannot be set on a switching-profile port",
+            );
+        }
+        if twice(i.flowspec, &i.subinterfaces) {
+            return refuse(&i.name, FLOWSPEC_TWICE);
+        }
+    }
+    for a in &ctx.port_aggregates {
+        if a.switching_profile.is_some() && any(a.flowspec, &a.subinterfaces) {
+            return refuse(
+                &a.name,
+                "flowspec cannot be set on a switching-profile port",
+            );
+        }
+        if twice(a.flowspec, &a.subinterfaces) {
+            return refuse(&a.name, FLOWSPEC_TWICE);
+        }
+    }
+    for p in flowspec_points(ctx) {
+        let Some(table) = p.table else {
+            return refuse(
+                &p.device(),
+                "flowspec needs a routing table (on the untagged subinterface for the device itself)",
+            );
+        };
+        if !ctx
+            .bgp_instances
+            .iter()
+            .any(|b| b.routing_table.as_deref() == Some(table))
+        {
+            return refuse(
+                &p.device(),
+                &format!("flowspec needs a bgp instance in routing table {table}"),
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +704,7 @@ mod tests {
                 name: "eth0".into(),
                 acl_in: Some("A".into()),
                 acl_out: Some("A".into()),
+                flowspec: false,
                 ..Default::default()
             }],
             ..Default::default()
@@ -595,6 +722,7 @@ mod tests {
             c.interfaces[0].subinterfaces = vec![Subinterface {
                 tag: 100,
                 acl_out: Some(name.into()),
+                flowspec: false,
                 ..Default::default()
             }];
         };
@@ -629,6 +757,7 @@ mod tests {
                 tag,
                 acl_in: (!out).then(|| "A".into()),
                 acl_out: out.then(|| "A".into()),
+                flowspec: false,
                 ..Default::default()
             };
             c.interfaces[0].subinterfaces = vec![sub.clone()];
@@ -687,5 +816,182 @@ mod tests {
             assert!(placed(f, false));
             assert!(!placed(f, true));
         }
+    }
+
+    /// #562: `eth0` (untagged in `rt1`, `.100` in `rt2`) and `bond0` (`.7`
+    /// in `rt1`); `b1` runs in `rt1`.
+    fn flowspec(f: impl FnOnce(&mut Config)) -> Result<(), String> {
+        use crate::schema::{BgpInstance, RoutingTable};
+        let sub = |tag, rt: &str| Subinterface {
+            tag,
+            routing_table: Some(rt.into()),
+            ..Default::default()
+        };
+        let mut c = Config {
+            routing_tables: vec![
+                RoutingTable {
+                    name: "rt1".into(),
+                    bgp_instance: Some("b1".into()),
+                    ..Default::default()
+                },
+                RoutingTable {
+                    name: "rt2".into(),
+                    ..Default::default()
+                },
+            ],
+            bgp_instances: vec![BgpInstance {
+                name: "b1".into(),
+                routing_table: Some("rt1".into()),
+                asn: 65000,
+                ..Default::default()
+            }],
+            interfaces: vec![Interface {
+                name: "eth0".into(),
+                subinterfaces: vec![sub(0, "rt1"), sub(100, "rt2")],
+                ..Default::default()
+            }],
+            port_aggregates: vec![PortAggregate {
+                name: "bond0".into(),
+                subinterfaces: vec![sub(7, "rt1")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        f(&mut c);
+        c.validate_with(&c).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn flowspec_placement() {
+        flowspec(|_| {}).unwrap();
+        flowspec(|c| c.interfaces[0].flowspec = true).unwrap();
+        flowspec(|c| c.interfaces[0].subinterfaces[0].flowspec = true).unwrap();
+        flowspec(|c| c.port_aggregates[0].subinterfaces[0].flowspec = true).unwrap();
+        let err = flowspec(|c| {
+            c.interfaces[0].flowspec = true;
+            c.interfaces[0].subinterfaces[0].flowspec = true;
+        })
+        .unwrap_err();
+        assert!(err.contains("keep one"), "{err}");
+        // rt2 has no BGP instance; the bond itself has no table.
+        let err = flowspec(|c| c.interfaces[0].subinterfaces[1].flowspec = true).unwrap_err();
+        assert!(
+            err.contains("eth0.100: flowspec needs a bgp instance in routing table rt2"),
+            "{err}"
+        );
+        let err = flowspec(|c| c.port_aggregates[0].flowspec = true).unwrap_err();
+        assert!(
+            err.contains("bond0: flowspec needs a routing table"),
+            "{err}"
+        );
+        let err = flowspec(|c| {
+            c.port_aggregates[0].subinterfaces.push(Subinterface {
+                tag: 0,
+                routing_table: Some("rt1".into()),
+                flowspec: true,
+                ..Default::default()
+            });
+            c.port_aggregates[0].flowspec = true;
+        })
+        .unwrap_err();
+        assert!(err.contains("bond0: flowspec is set on both"), "{err}");
+    }
+
+    #[test]
+    fn flowspec_refused_where_acl_is() {
+        use crate::schema::SwitchingProfile;
+        let sp = |c: &mut Config| {
+            c.switching_profiles = vec![SwitchingProfile {
+                name: "sp".into(),
+                ..Default::default()
+            }];
+        };
+        let refused = |f: fn(&mut Config), why: &str| {
+            let err = flowspec(|c| {
+                sp(c);
+                f(c);
+            })
+            .unwrap_err();
+            assert!(err.contains(why), "{err}");
+        };
+        refused(
+            |c| {
+                c.interfaces.push(Interface {
+                    name: "loopback-rt1".into(),
+                    flowspec: true,
+                    ..Default::default()
+                });
+            },
+            "loopback-rt1: flowspec cannot be set on a loopback",
+        );
+        refused(
+            |c| {
+                c.interfaces.push(Interface {
+                    name: "eth1".into(),
+                    port_aggregate: Some("bond0".into()),
+                    flowspec: true,
+                    ..Default::default()
+                });
+            },
+            "eth1: flowspec cannot be set on a port aggregate member",
+        );
+        refused(
+            |c| {
+                c.interfaces.push(Interface {
+                    name: "eth2".into(),
+                    switching_profile: Some("sp".into()),
+                    flowspec: true,
+                    ..Default::default()
+                });
+            },
+            "eth2: flowspec cannot be set on a switching-profile port",
+        );
+        refused(
+            |c| {
+                c.port_aggregates[0].switching_profile = Some("sp".into());
+                c.port_aggregates[0].subinterfaces.clear();
+                c.port_aggregates[0].flowspec = true;
+            },
+            "bond0: flowspec cannot be set on a switching-profile port",
+        );
+    }
+
+    #[test]
+    fn flowspec_points_name_their_device_and_table() {
+        let mut c = Config::default();
+        c.interfaces.push(Interface {
+            name: "eth0".into(),
+            flowspec: true,
+            subinterfaces: vec![
+                Subinterface {
+                    tag: 0,
+                    routing_table: Some("rt1".into()),
+                    ..Default::default()
+                },
+                Subinterface {
+                    tag: 5,
+                    flowspec: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        c.port_aggregates.push(PortAggregate {
+            name: "agg".into(),
+            flowspec: true,
+            ..Default::default()
+        });
+        let shown: Vec<_> = flowspec_points(&c)
+            .iter()
+            .map(|p| (p.device(), p.aggregate, p.table))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("eth0".to_string(), false, Some("rt1")),
+                ("eth0.5".to_string(), false, None),
+                ("agg".to_string(), true, None),
+            ]
+        );
     }
 }

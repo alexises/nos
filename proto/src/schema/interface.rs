@@ -113,6 +113,14 @@ pub struct Subinterface {
     #[garde(skip)]
     #[cli(topic = InterfaceAclOut, words = "acl out")]
     pub acl_out: Option<String>,
+
+    /// Applies the flowspec rules of the BGP instance owning this device's
+    /// routing table to the IP packets arriving here (RFC 8955 section 5:
+    /// ingress only); placement rules are `acl::valid_flowspec_placements`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceFlowspec, words = "flowspec")]
+    pub flowspec: bool,
 }
 
 fn valid_subinterface_tag(tag: u16) -> garde::Result {
@@ -270,6 +278,14 @@ pub struct Interface {
     #[garde(skip)]
     #[cli(topic = InterfaceAclOut, words = "acl out")]
     pub acl_out: Option<String>,
+
+    /// Applies the flowspec rules of the BGP instance owning this device's
+    /// routing table to the IP packets arriving here (RFC 8955 section 5:
+    /// ingress only); placement rules are `acl::valid_flowspec_placements`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceFlowspec, words = "flowspec")]
+    pub flowspec: bool,
 
     /// The LACP Actor Port Priority `nos-lacpd` advertises for this link
     /// (802.1AX); `None` = 32768. Lower is higher priority. Only meaningful
@@ -542,6 +558,7 @@ mod tests {
         Interface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             name: name.to_string(),
             addresses: addresses
@@ -574,6 +591,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 0,
@@ -750,6 +768,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 0,
@@ -776,6 +795,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 100,
@@ -809,6 +829,7 @@ mod tests {
             Subinterface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 100,
@@ -819,6 +840,7 @@ mod tests {
             Subinterface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 100,
@@ -837,6 +859,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 4095,
@@ -855,6 +878,7 @@ mod tests {
             Subinterface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 0,
@@ -865,6 +889,7 @@ mod tests {
             Subinterface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 4094,
@@ -1066,6 +1091,7 @@ mod tests {
         crate::schema::PortAggregate {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: name.to_string(),
             mode: crate::schema::PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use nos_proto::schema::{Acl, Config, Subinterface};
+use nos_proto::schema::{flowspec_points, Acl, Config, Subinterface};
 use tracing::{error, info};
 
 use crate::compile::{compile_within, Compiled, MAX_LEVELS};
@@ -33,6 +33,9 @@ pub struct Attachment {
 pub struct Plan {
     pub acls: BTreeMap<String, Arc<Compiled>>,
     pub attachments: Vec<Attachment>,
+    /// Per BGP instance, the devices its flowspec rules filter (ingress):
+    /// every `flowspec` device whose routing table the instance owns.
+    pub flowspec: BTreeMap<String, Vec<Device>>,
 }
 
 fn attach(
@@ -85,6 +88,29 @@ pub fn attachments(cfg: &Config) -> Vec<Attachment> {
     out
 }
 
+/// Every `flowspec` device, per BGP instance owning its routing table
+/// (#562 D-A). Placement is the commit's job
+/// (`schema::acl::valid_flowspec_placements`).
+pub fn flowspec_devices(cfg: &Config) -> BTreeMap<String, Vec<Device>> {
+    let mut out: BTreeMap<String, Vec<Device>> = BTreeMap::new();
+    for p in flowspec_points(cfg) {
+        let device = if p.aggregate {
+            Device::Aggregate {
+                name: p.parent.to_string(),
+                tag: p.tag,
+            }
+        } else {
+            Device::Kernel(p.device())
+        };
+        for b in &cfg.bgp_instances {
+            if p.table.is_some() && b.routing_table.as_deref() == p.table {
+                out.entry(b.name.clone()).or_default().push(device.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Compiles each ACL once per change; a failed compile keeps the last good
 /// one (fail closed: the kernel keeps enforcing it).
 pub struct Compiler {
@@ -125,6 +151,7 @@ impl Compiler {
         Plan {
             acls,
             attachments: attachments(cfg),
+            flowspec: flowspec_devices(cfg),
         }
     }
 }
@@ -202,6 +229,53 @@ mod tests {
                 at(agg(7), Direction::Out, "F"),
             ]
         );
+    }
+
+    /// #562 D-A: a device follows its own table (the untagged
+    /// subinterface's for the parent); a table no instance owns gives none.
+    #[test]
+    fn flowspec_devices_follow_their_table_to_its_instance() {
+        use nos_proto::schema::BgpInstance;
+        let in_table = |tag, rt: &str, flowspec| Subinterface {
+            tag,
+            routing_table: Some(rt.into()),
+            flowspec,
+            ..Default::default()
+        };
+        let cfg = Config {
+            bgp_instances: vec![BgpInstance {
+                name: "b1".into(),
+                routing_table: Some("rt1".into()),
+                ..Default::default()
+            }],
+            interfaces: vec![Interface {
+                name: "eth0".into(),
+                flowspec: true,
+                subinterfaces: vec![in_table(0, "rt1", false), in_table(9, "rt2", true)],
+                ..Default::default()
+            }],
+            port_aggregates: vec![PortAggregate {
+                name: "agg".into(),
+                subinterfaces: vec![in_table(7, "rt1", true)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let got = flowspec_devices(&cfg);
+        assert_eq!(
+            got,
+            BTreeMap::from([(
+                "b1".to_string(),
+                vec![
+                    Device::Kernel("eth0".into()),
+                    Device::Aggregate {
+                        name: "agg".into(),
+                        tag: 7
+                    }
+                ]
+            )])
+        );
+        assert_eq!(Compiler::default().plan(&cfg).flowspec, got);
     }
 
     /// `rules` denies that each overlap every earlier one without being

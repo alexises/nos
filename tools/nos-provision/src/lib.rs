@@ -954,6 +954,12 @@ pub struct Args {
     #[arg(long)]
     pub acl_in: Vec<String>,
 
+    /// `IFACE=on|off` sets `flowspec` on an interface (#562): the BGP
+    /// instance owning its untagged subinterface's table filters it.
+    /// Repeatable.
+    #[arg(long)]
+    pub flowspec_interface: Vec<String>,
+
     /// `spanning-tree region` as `NAME:REVISION` (MSTP, #321).
     #[arg(long)]
     pub stp_region: Option<String>,

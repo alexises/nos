@@ -1,4 +1,5 @@
-//! `--acl-rule`/`--acl-default`/`--acl-in` (#541): applied straight to a
+//! `--acl-rule`/`--acl-default`/`--acl-in` (#541) and
+//! `--flowspec-interface` (#562): applied straight to a
 //! local `Config`, like the spanning-tree flags (no `ConfigOp` exists for an
 //! ACL). Only `nos-e2e` applies them; the binary refuses them.
 
@@ -52,6 +53,14 @@ fn parse_rule(flag: &str) -> anyhow::Result<RuleFlag> {
     Ok((f[0].to_string(), rule, before))
 }
 
+fn on_off(s: &str) -> anyhow::Result<bool> {
+    Ok(match s {
+        "on" => true,
+        "off" => false,
+        _ => bail!("want on or off, not '{s}'"),
+    })
+}
+
 /// `NAME=VALUE`.
 fn pair<'a>(flag: &'a str, what: &str) -> anyhow::Result<(&'a str, &'a str)> {
     flag.split_once('=')
@@ -68,6 +77,9 @@ pub fn check(args: &Args) -> anyhow::Result<()> {
     }
     for f in &args.acl_in {
         pair(f, "acl-in")?;
+    }
+    for f in &args.flowspec_interface {
+        on_off(pair(f, "flowspec-interface")?.1)?;
     }
     Ok(())
 }
@@ -112,11 +124,25 @@ pub fn apply_acl(args: &Args, config: &mut Config) {
             i.acl_in = (!name.is_empty()).then(|| name.to_string());
         }
     }
+    for (iface, value) in args
+        .flowspec_interface
+        .iter()
+        .filter_map(|f| f.split_once('='))
+    {
+        if let Ok(on) = on_off(value) {
+            for i in config.interfaces.iter_mut().filter(|i| i.name == iface) {
+                i.flowspec = on;
+            }
+        }
+    }
 }
 
 /// True when any ACL flag is given (the binary refuses them).
 pub fn any(args: &Args) -> bool {
-    !(args.acl_rule.is_empty() && args.acl_default.is_empty() && args.acl_in.is_empty())
+    !(args.acl_rule.is_empty()
+        && args.acl_default.is_empty()
+        && args.acl_in.is_empty()
+        && args.flowspec_interface.is_empty())
 }
 
 #[cfg(test)]
@@ -203,6 +229,13 @@ mod tests {
         assert_eq!(c.acls[0].rules[0].action, AclAction::Deny);
         apply_acl(&args(&["--acl-in", "eth0="]), &mut c);
         assert_eq!(c.interfaces[0].acl_in, None);
+        let on = args(&["--flowspec-interface", "eth0=on"]);
+        check(&on).unwrap();
+        assert!(any(&on));
+        apply_acl(&on, &mut c);
+        assert!(c.interfaces[0].flowspec);
+        apply_acl(&args(&["--flowspec-interface", "eth0=off"]), &mut c);
+        assert!(!c.interfaces[0].flowspec);
         assert!(!any(&args(&[])));
     }
 
@@ -250,6 +283,8 @@ mod tests {
             ["--acl-default", "E"],
             ["--acl-default", "E=maybe"],
             ["--acl-in", "eth0"],
+            ["--flowspec-interface", "eth0"],
+            ["--flowspec-interface", "eth0=yes"],
         ] {
             assert!(check(&args(&bad)).is_err(), "{bad:?}");
         }

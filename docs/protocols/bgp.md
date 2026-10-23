@@ -328,7 +328,7 @@ Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Un
 
 ### Flowspec (RFC 8955, RFC 8956)
 
-NOS learns Flowspec rules, validates them (RFC 8955 section 6), filters them through per-peer-group policies, picks a best path per rule and re-advertises it to its other peers. It originates no rule of its own and does not enforce them in the dataplane yet.
+NOS learns Flowspec rules, validates them (RFC 8955 section 6), filters them through per-peer-group policies, picks a best path per rule and re-advertises it to its other peers. It originates no rule of its own. It enforces the selected rules on the interfaces you mark with `flowspec`: see [Filter DDoS traffic with flowspec](#filter-ddos-traffic-with-flowspec).
 
 - Enable it per peer-group, like any address family: `set bgp instance r1 peer-group pg1 address-family ipv4-flowspec` (and `ipv6-flowspec`). The family is off unless configured, and negotiated only when the peer advertises it too (AFI 1 or 2, SAFI 133).
 - A rule is a list of components (destination, source, protocol, ports, ICMP, TCP flags, length, DSCP, fragment, flow label). The actions are the extended communities of the route, shown decoded: `traffic-rate:0:0` is "discard", `redirect:65000:10`, `traffic-marking:10`.
@@ -364,7 +364,7 @@ The traffic actions are decoded from the route's extended communities and shown 
 - `0x8009` traffic-marking: the DSCP value.
 - The redirect to an IPv6 address (RFC 8956 section 6.1, sub-type `0x0d`) travels in the IPv6-address-specific extended community attribute (RFC 5701, attribute 25). It is shown as `redirect ipv6 [<addr>]:<n>` after the other actions, and re-advertised unchanged (a non-transitive one is dropped toward eBGP).
 - Interference (RFC 8955 section 7.7): when a route carries several traffic-rates, the first in attribute order wins and the others are shown with `(ignored)`.
-- Nothing is enforced yet; the actions are only decoded.
+- What the dataplane does with each action: [Filter DDoS traffic with flowspec](#filter-ddos-traffic-with-flowspec).
 
 To see the rules received, use `show bgp flowspec` (`GET /v1/bgp/flowspec`):
 
@@ -393,6 +393,36 @@ Two peer-group settings filter Flowspec rules, apart from `import-policy`/`expor
 - Unset accepts every rule (Flowspec is an explicitly configured family). `delete flowspec-import-policy` returns to that.
 - REST: `"flowspec_import_policy": "<policy>"` / `"flowspec_export_policy": "<policy>"` on the peer-group, `null` to unset. Changing either restarts the group's sessions.
 - What a policy sees and can rewrite: [routing policy](routing-policy.md#flowspec-rules).
+
+#### Filter DDoS traffic with flowspec
+
+The selected (valid, best) rules of a BGP instance can filter the packets arriving on the interfaces of its routing table. `nos-acld` turns each rule into tc filters on the interface's ingress (RFC 8955 section 5: inbound only).
+
+1. Receive the rules: `set bgp instance r1 peer-group pg1 address-family ipv4-flowspec` (and `ipv6-flowspec`), with the covering unicast routes from the same peer so the rules are valid ([Validity](#validity)).
+2. Mark the ingress interfaces: `set interface eth0 flowspec` (also on a subinterface, `set interface eth0 subinterface 100 flowspec`, or a port aggregate, `set port-aggregate agg0 flowspec`). REST: `"flowspec": true`.
+   - The rules applied are those of the BGP instance whose routing table owns the device: the subinterface's `routing-table`, the untagged subinterface's for the interface itself.
+   - The commit is refused on a loopback, a port aggregate member (set it on the aggregate), a switching-profile port, on both an interface and its untagged subinterface, without a routing table, or when no BGP instance uses that table.
+3. Check each rule with `show bgp flowspec` (`GET /v1/bgp/flowspec`): the selected copy ends with `dataplane:` and one of
+   - `installed`: filtering;
+   - `unsupported (<why>)`: not installed, for the reason given;
+   - `not-attached`: no `flowspec` interface in the instance's table, or the interface is absent;
+   - `unknown`: `nos-acld` did not answer.
+
+```
+edge-1> show bgp flowspec
+bgp instance r1:
+  from 10.0.0.2 dest 192.0.2.1/32 proto =6 dst-port =8080 [traffic-rate:0:0] valid actions: discard dataplane: installed
+```
+
+4. Counters: `show acl` (end of the output) and `GET /v1/flowspec` give packets and bytes per rule, summed over its interfaces.
+
+What is enforced:
+
+- traffic-rate 0 drops; a rate above 0 polices (bytes or packets per second); traffic-marking rewrites the DSCP; traffic-action `sample` samples; the `terminal` bit set lets the later rules and the ACL see the packet too, clear (the default) lets only the ACL see it.
+- Rules apply in RFC 8955 section 5.1 order, before any `acl in` on the same interface.
+- Unsupported, never approximated: packet length, flow label, fragment `DF`/`LF`, a non-zero IPv6 offset, redirects. Up to 90 rules per interface; the rest show `unsupported (rule cap)`.
+- The log: `flowspec rules received instance=… rules=… installable=…` and `flowspec applied interface=… rules=…` (`nos-acld`), `flowspec rule unsupported instance=… flow=… reason=…` once per rule.
+- Restarts: a stopping `nos-bgpd` removes its rules; during a graceful-restart deferral the installed rules stay until selection ends. If `nos-acld` restarts, the filters stay enforced and `nos-bgpd` pushes the rules again when it reconnects.
 
 ### Four-octet AS numbers (RFC 6793)
 

@@ -57,7 +57,7 @@ pub mod switching_profile;
 /// Local login users (`User`) with argon2id password hashes.
 pub mod user;
 
-pub use acl::{Acl, AclAction, AclProtocol, AclRule, PortRange};
+pub use acl::{flowspec_points, Acl, AclAction, AclProtocol, AclRule, FlowspecPoint, PortRange};
 pub use admin::{Admin, AdminKey, SECRET_MAX_LEN};
 pub use as_path_list::AsPathList;
 pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdMode, BfdProfile, EchoMode};
@@ -268,7 +268,8 @@ pub struct Config {
     #[serde(default)]
     #[garde(
         dive,
-        custom(|a: &Vec<Acl>, ctx: &Config| acl::valid_acl_references(a, ctx))
+        custom(|a: &Vec<Acl>, ctx: &Config| acl::valid_acl_references(a, ctx)),
+        custom(|a: &Vec<Acl>, ctx: &Config| acl::valid_flowspec_placements(a, ctx))
     )]
     #[cli(topic = Acl)]
     pub acls: Vec<Acl>,

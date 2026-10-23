@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_bgp::session::SessionManager;
-use nos_bgp::{fdb_push_client, reconcile, rib_push_client, server};
+use nos_bgp::{acl_push_client, fdb_push_client, reconcile, rib_push_client, server};
 use nos_daemon::{bootstrap, watchdog};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
@@ -124,6 +124,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+    let acl_push_task = acl_push_client::spawn(
+        args.watchdog_socket.clone(),
+        sessions.clone(),
+        shutdown_rx.clone(),
+    );
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
@@ -131,11 +136,17 @@ async fn main() -> anyhow::Result<()> {
         sessions.clone(),
         shutdown_rx,
     ));
-    let server_task = server::start(&listen_socket, args.instance.clone(), sessions, &identity)
-        .inspect_err(|e| {
-            tracing::error!(instance = %args.instance, error = %e, "failed to start BGP IPC server");
-        })
-        .context("starting BGP IPC server")?;
+    let server_task = server::start(
+        &listen_socket,
+        args.instance.clone(),
+        sessions,
+        &identity,
+        args.watchdog_socket.clone(),
+    )
+    .inspect_err(|e| {
+        tracing::error!(instance = %args.instance, error = %e, "failed to start BGP IPC server");
+    })
+    .context("starting BGP IPC server")?;
 
     wait_for_shutdown_signal()
         .await
@@ -154,6 +165,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(e) = ip_vrf_push_task.await {
         warn!(instance = %args.instance, error = %e, "ip-vrf push task ended abnormally");
+    }
+    if let Err(e) = acl_push_task.await {
+        warn!(instance = %args.instance, error = %e, "acl push task ended abnormally");
     }
     if let Err(e) = igp_task.await {
         warn!(instance = %args.instance, error = %e, "igp task ended abnormally");

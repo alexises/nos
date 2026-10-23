@@ -172,23 +172,8 @@ impl InterfaceOp {
             InterfaceOp::Ensure { name } => {
                 if !config.interfaces.iter().any(|i| &i.name == name) {
                     config.interfaces.push(Interface {
-                        acl_in: None,
-                        acl_out: None,
                         name: name.clone(),
-                        addresses: Vec::new(),
-                        routing_table: None,
-                        ospf_profile: None,
-                        ospfv3_profile: None,
-                        switching_profile: None,
-                        port_aggregate: None,
-                        stp_port_profile: None,
-                        lacp_port_priority: None,
-                        lacp_mode: crate::schema::LacpMode::default(),
-                        mtu: None,
-                        lldp_transmit: false,
-                        lldp_receive: false,
-                        lldp_destination: crate::schema::LldpDestination::default(),
-                        subinterfaces: Vec::new(),
+                        ..Interface::default()
                     });
                 }
                 Ok(())
@@ -340,6 +325,7 @@ mod tests {
         Interface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -388,6 +374,7 @@ mod tests {
             interfaces: vec![Interface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 ospfv3_profile: None,
                 name: "eth0".to_string(),
                 addresses: vec![iface_addr("10.0.0.1/24")],

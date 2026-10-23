@@ -113,6 +113,7 @@ impl<D: Driver> Engine<D> {
     /// One pass. Nothing happens until the link table is known.
     pub fn sync(&mut self, plan: &Plan, links: &LinkTable) {
         self.acls.clone_from(&plan.acls);
+        self.fs.attached.clone_from(&plan.flowspec);
         self.links.clone_from(links);
         if !links.known {
             return;

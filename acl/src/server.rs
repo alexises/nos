@@ -25,12 +25,12 @@ pub fn start<D: Driver>(
 }
 
 /// Queries are for people, and `Restd` on their behalf; flow rules come
-/// from `nos-bgpd` only.
+/// from `nos-bgpd` only, which also reads their state back for
+/// `show bgp flowspec` (#562).
 pub fn allowed(role: Role, request: &AclRequest) -> bool {
     match request {
-        AclRequest::Show { .. } | AclRequest::ShowFlowspec => {
-            matches!(role, Role::User | Role::Restd)
-        }
+        AclRequest::Show { .. } => matches!(role, Role::User | Role::Restd),
+        AclRequest::ShowFlowspec => matches!(role, Role::User | Role::Restd | Role::Bgpd),
         AclRequest::PushFlowspec(_) => role == Role::Bgpd,
     }
 }
@@ -128,7 +128,11 @@ mod tests {
                 people,
                 "{role:?}"
             );
-            assert_eq!(allowed(role, &AclRequest::ShowFlowspec), people, "{role:?}");
+            assert_eq!(
+                allowed(role, &AclRequest::ShowFlowspec),
+                people || role == Role::Bgpd,
+                "{role:?}"
+            );
             assert_eq!(allowed(role, &push()), role == Role::Bgpd, "{role:?}");
         }
     }

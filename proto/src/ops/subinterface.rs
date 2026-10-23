@@ -257,6 +257,7 @@ fn ensure_subinterface_mut<'a>(
         config.interfaces.push(Interface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: interface.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -279,6 +280,7 @@ fn ensure_subinterface_mut<'a>(
         iface.subinterfaces.push(Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag,
             addresses: Vec::new(),
             routing_table: None,
@@ -303,6 +305,7 @@ mod tests {
         Interface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -365,6 +368,7 @@ mod tests {
                 vec![Subinterface {
                     acl_in: None,
                     acl_out: None,
+                    flowspec: false,
                     tag: 0,
                     addresses: vec![InterfaceAddress {
                         address: addr("10.0.0.1/24"),
@@ -587,6 +591,7 @@ mod tests {
                     Subinterface {
                         acl_in: None,
                         acl_out: None,
+                        flowspec: false,
                         tag: 0,
                         addresses: Vec::new(),
                         routing_table: None,
@@ -597,6 +602,7 @@ mod tests {
                     Subinterface {
                         acl_in: None,
                         acl_out: None,
+                        flowspec: false,
                         tag: 100,
                         addresses: Vec::new(),
                         routing_table: None,

@@ -823,6 +823,7 @@ mod tests {
         iface.subinterfaces = vec![nos_proto::Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag: 0,
             addresses: vec![iface_addr.clone()],
             routing_table: Some("rt1".to_string()),
@@ -845,6 +846,7 @@ mod tests {
         iface.subinterfaces = vec![nos_proto::Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag: 300,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),

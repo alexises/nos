@@ -160,6 +160,7 @@ impl PortAggregateOp {
                     config.port_aggregates.push(PortAggregate {
                         acl_in: None,
                         acl_out: None,
+                        flowspec: false,
                         name: name.clone(),
                         mode: *mode,
                         lacp_rate: LacpRate::default(),
@@ -290,6 +291,7 @@ mod tests {
         PortAggregate {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
             lacp_rate: LacpRate::default(),

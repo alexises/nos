@@ -140,6 +140,11 @@ pub struct FlowspecRouteSummary {
     /// each (`discard`, `redirect rt 65000:10`, `dscp 10`); a traffic-rate
     /// shadowed by an earlier one is suffixed `(ignored)`.
     pub actions: Vec<String>,
+    /// For the selected copy of a rule only, its state in `nos-acld`:
+    /// `installed`, `unsupported (<why>)`, `not-attached` (no `flowspec`
+    /// device in this instance's table) or `unknown` (`nos-acld` did not
+    /// answer); `None` for any other copy.
+    pub dataplane: Option<String>,
 }
 
 /// RFC 6811 origin validation state of a route, for `show bgp routes`.

@@ -614,3 +614,37 @@ fn acl_rules_order_and_attach() {
         .collect();
     assert!(offered.contains(&"in".to_string()) && offered.contains(&"out".to_string()));
 }
+
+/// #562: `flowspec` is a bare flag on an interface, a subinterface and a port
+/// aggregate, and `show config` prints it back.
+#[test]
+fn flowspec_flag() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    for line in [
+        "set interface eth0 flowspec",
+        "set interface eth0 subinterface 100 flowspec",
+        "set port-aggregate agg0 flowspec",
+    ] {
+        let edit = config_grammar::parse(line, &[], &doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set_at(&mut doc, &path, value, edit.position.as_ref()).unwrap();
+        }
+    }
+    let cfg: Config = serde_json::from_value(doc.clone()).unwrap();
+    let eth0 = cfg.interfaces.iter().find(|i| i.name == "eth0").unwrap();
+    assert!(eth0.flowspec);
+    assert!(eth0
+        .subinterfaces
+        .iter()
+        .any(|s| s.tag == 100 && s.flowspec));
+    assert!(cfg
+        .port_aggregates
+        .iter()
+        .any(|a| a.name == "agg0" && a.flowspec));
+    let shown = nos_proto::cli::render::render_root(&doc)
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(shown.contains("flowspec"), "{shown}");
+}

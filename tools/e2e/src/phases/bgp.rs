@@ -2837,7 +2837,7 @@ fn gobgp_dockerfile() -> String {
 }
 
 /// Runs one `gobgp` CLI command inside the GoBGP container; its output.
-async fn gobgp(w: &World, args: &[&str]) -> anyhow::Result<String> {
+pub(super) async fn gobgp(w: &World, args: &[&str]) -> anyhow::Result<String> {
     let mut cmd = vec!["gobgp"];
     cmd.extend_from_slice(args);
     let (code, out) = w.dock.exec("router-g", &cmd).await?;
@@ -2883,7 +2883,12 @@ async fn gobgp_speaker(
     watchdog_args: &[&str],
 ) -> anyhow::Result<()> {
     w.start(A, Some(flags), watchdog_args).await?;
+    start_gobgp(w, afi_safis).await
+}
 
+/// Builds/starts the GoBGP speaker (router-g) peering router-a over
+/// `afi_safis`, and waits for a router-a session and gobgpd's gRPC API.
+pub(super) async fn start_gobgp(w: &World, afi_safis: &[&str]) -> anyhow::Result<()> {
     log("building/starting the GoBGP speaker (router-g)");
     w.dock
         .ensure_image(GOBGP_IMAGE, &gobgp_dockerfile())
@@ -3542,7 +3547,7 @@ async fn arp_broadcast(w: &World, ce_link: Option<&str>) -> anyhow::Result<(usiz
     ))
 }
 
-async fn gobgp_owned(w: &World, args: Vec<String>) -> anyhow::Result<String> {
+pub(super) async fn gobgp_owned(w: &World, args: Vec<String>) -> anyhow::Result<String> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     gobgp(w, &refs).await
 }

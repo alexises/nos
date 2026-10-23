@@ -218,3 +218,44 @@ fn show_sums_counters_and_shutdown_clears() {
     );
     assert_eq!(e.show_flowspec(), []);
 }
+
+/// #562: a pushed instance with no devices of its own reaches the
+/// `flowspec` devices the plan gives it (an aggregate through its bond); a
+/// rule no device holds shows `not attached`.
+#[test]
+fn the_plan_attaches_an_instance_to_its_flowspec_devices() {
+    use crate::plan::Device;
+    let mut table = links(&[("eth0", 4), ("bond7", 6)]);
+    table.links.get_mut("bond7").unwrap().port_aggregate = Some("agg".into());
+    let mut e = Engine::new(NoopDriver::default());
+    e.sync(&Plan::default(), &table);
+    e.push_flowspec(set("b1", &[], vec![rule(6)]));
+    assert_eq!(take(&mut e), []);
+    assert_eq!(
+        e.show_flowspec()[0].unsupported.as_deref(),
+        Some("not attached")
+    );
+    let mut plan = Plan::default();
+    plan.flowspec.insert(
+        "b1".into(),
+        vec![
+            Device::Kernel("eth0".into()),
+            Device::Aggregate {
+                name: "agg".into(),
+                tag: 0,
+            },
+            Device::Aggregate {
+                name: "gone".into(),
+                tag: 3,
+            },
+        ],
+    );
+    plan.flowspec
+        .insert("b2".into(), vec![Device::Kernel("eth0".into())]);
+    e.sync(&plan, &table);
+    assert_eq!(take(&mut e), [put(6, 10, 0), put(4, 10, 0)]);
+    assert_eq!(e.show_flowspec()[0].unsupported, None);
+    // The flag goes: the rules come off.
+    e.sync(&Plan::default(), &table);
+    assert_eq!(take(&mut e), [clear(6, 10), clear(4, 10)]);
+}

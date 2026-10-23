@@ -312,3 +312,184 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     a.provision(&["--no-hold-time"]).await?;
     a.wait_new(ESTABLISHED, est, 60).await
 }
+
+/// `flowspec-dataplane` (#562): the destination of every rule, router-a's
+/// own address, so router-g's probes arrive on its `eth0`. Not port 8080:
+/// that is the REST API the harness drives router-a through.
+const FSD_DEST: &str = "10.50.0.2/32";
+const FSD_TCP_PORT: &str = "9999";
+const FSD_UDP_PORT: &str = "9998";
+/// nos-provision's default BGP instance, the `instance` of every push.
+const FSD_INSTANCE: &str = "r1";
+
+/// `flowspec applied` with `n` rules on router-a's `eth0`.
+fn fsd_applied(n: usize) -> String {
+    format!("flowspec applied interface=eth0 rules={n}")
+}
+
+/// `gobgp global rib <verb> -a ipv4-flowspec match <m> [then <then>]`.
+fn fsd_rule(verb: &str, m: &[&str], then: &[&str]) -> Vec<String> {
+    let mut args = vec!["global", "rib", verb, "-a", "ipv4-flowspec", "match"];
+    args.extend_from_slice(m);
+    if verb == "add" {
+        args.push("then");
+        args.extend_from_slice(then);
+    }
+    args.into_iter().map(str::to_string).collect()
+}
+
+/// Sends `script` (a bash `/dev/tcp` or `/dev/udp` probe) from router-g
+/// until `GET /v1/flowspec`'s row whose actions contain `action` counts a
+/// packet; that row.
+async fn fsd_counted(w: &World, script: &str, action: &str) -> anyhow::Result<serde_json::Value> {
+    let a = w.a()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // A dropped SYN would retry for minutes: `timeout` bounds it. The
+        // exit code is the probe's, refused or timed out, and is ignored.
+        w.dock
+            .exec("router-g", &["timeout", "2", "bash", "-c", script])
+            .await?;
+        let body = a
+            .rest_expect(Method::GET, "/v1/flowspec", None, 200)
+            .await?;
+        let rows: serde_json::Value = serde_json::from_str(&body)?;
+        let row = rows.as_array().and_then(|r| {
+            r.iter().find(|r| {
+                r["actions"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|x| x == action))
+            })
+        });
+        if let Some(row) = row.filter(|r| r["packets"].as_u64() > Some(0)) {
+            return Ok(row.clone());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "no flowspec rule with '{action}' counted a packet: {body}"
+        );
+    }
+}
+
+/// `show bgp flowspec` over REST must contain `want`.
+async fn fsd_show_contains(a: &Router, want: &str) -> anyhow::Result<()> {
+    let body = a
+        .rest_expect(Method::GET, "/v1/bgp/flowspec", None, 200)
+        .await?;
+    anyhow::ensure!(
+        body.contains(want),
+        "show bgp flowspec lacks {want}: {body}"
+    );
+    Ok(())
+}
+
+/// `flowspec-dataplane` (#562): GoBGP (router-g) originates flowspec rules
+/// to router-a, whose `nos-bgpd` validates them (a covering unicast route
+/// from GoBGP too), pushes the valid best ones to `nos-acld`, which installs
+/// them on `eth0` (`flowspec` set on it): a TCP drop counts router-g's
+/// probes, a rate limit (police) counts its UDP, a packet-length rule is
+/// unsupported, and withdrawing them clears `eth0`.
+pub async fn flowspec_dataplane(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let g_up = format!("bgp session established peer={IP_G}");
+    let base = a.count(&g_up);
+    log("router-a: a flowspec peer-group toward GoBGP, flowspec on eth0");
+    let flags = |on: &str| {
+        crate::router::strings(&[
+            "--address",
+            &format!("{IP_A}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--peer-group",
+            "pg-fs",
+            "--remote-as",
+            &ASN_G.to_string(),
+            "--peer",
+            IP_G,
+            "--flowspec",
+            "--flowspec-interface",
+            &format!("eth0={on}"),
+        ])
+    };
+    a.provision_flags(&flags("on")).await?;
+    super::bgp::start_gobgp(w, &["ipv4-unicast", "ipv4-flowspec"]).await?;
+    let a = w.a()?;
+    a.wait_new(&g_up, base, 60).await?;
+    // RFC 8955 section 6: the rules' destination needs a unicast route from
+    // the same originator. The connected route stays the one installed.
+    super::bgp::gobgp(w, &["global", "rib", "add", "-a", "ipv4", SUBNET]).await?;
+
+    log("step 1: drop TCP from router-g: installed, counted, shown");
+    let tcp = [
+        "destination",
+        FSD_DEST,
+        "source",
+        &format!("{IP_G}/32"),
+        "protocol",
+        "tcp",
+        "destination-port",
+        &format!("=={FSD_TCP_PORT}"),
+    ];
+    let applied = a.count(&fsd_applied(1));
+    super::bgp::gobgp_owned(w, fsd_rule("add", &tcp, &["discard"])).await?;
+    a.wait_new(&fsd_applied(1), applied, 60).await?;
+    let probe = format!("echo > /dev/tcp/{IP_A}/{FSD_TCP_PORT}");
+    let row = fsd_counted(w, &probe, "rate 0 bytes/s").await?;
+    anyhow::ensure!(
+        row["instance"] == FSD_INSTANCE && row["unsupported"].is_null(),
+        "drop rule: {row}"
+    );
+    fsd_show_contains(a, "\"dataplane\":\"installed\"").await?;
+
+    log("step 2: rate-limit UDP: a police filter that counts");
+    let udp = [
+        "destination",
+        FSD_DEST,
+        "protocol",
+        "udp",
+        "destination-port",
+        &format!("=={FSD_UDP_PORT}"),
+    ];
+    let applied = a.count(&fsd_applied(2));
+    super::bgp::gobgp_owned(w, fsd_rule("add", &udp, &["rate-limit", "1000"])).await?;
+    a.wait_new(&fsd_applied(2), applied, 60).await?;
+    let probe = format!("echo x > /dev/udp/{IP_A}/{FSD_UDP_PORT}");
+    fsd_counted(w, &probe, "rate 1000 bytes/s").await?;
+
+    log("step 3: a packet-length rule is unsupported, logged and shown");
+    let len = ["destination", FSD_DEST, "packet-length", "==64"];
+    let unsupported = format!(
+        "flowspec rule unsupported instance={FSD_INSTANCE} flow=.*reason=packet length: no flower key"
+    );
+    let base = a.count(&unsupported);
+    super::bgp::gobgp_owned(w, fsd_rule("add", &len, &["discard"])).await?;
+    a.wait_new(&unsupported, base, 60).await?;
+    fsd_show_contains(a, "unsupported (packet length: no flower key)").await?;
+
+    log("step 4: GoBGP withdraws every rule: eth0 is cleared");
+    let cleared = a.count(&fsd_applied(0));
+    for m in [&tcp[..], &udp[..], &len[..]] {
+        super::bgp::gobgp_owned(w, fsd_rule("del", m, &[])).await?;
+    }
+    a.wait_new(&fsd_applied(0), cleared, 60).await?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = a
+            .rest_expect(Method::GET, "/v1/flowspec", None, 200)
+            .await?;
+        if body.trim() == "[]" {
+            break;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "rules left after the withdrawal: {body}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    // Leave router-a as the phases after this one expect it.
+    w.dock.container_remove("router-g").await;
+    w.a()?.provision_flags(&flags("off")).await
+}

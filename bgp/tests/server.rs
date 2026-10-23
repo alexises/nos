@@ -56,6 +56,7 @@ fn start() -> (
         "r1".to_string(),
         SessionManager::new("r1".to_string()),
         &shared().identity("bgpd", "r1"),
+        tmp.path().join("no-watchdog.sock"),
     )
     .unwrap();
     (tmp, path, server)

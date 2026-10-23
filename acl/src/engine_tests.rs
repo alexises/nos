@@ -48,6 +48,7 @@ fn plan(acl: &Arc<Compiled>, at: &[(Device, Direction)]) -> Plan {
                 acl: "E".into(),
             })
             .collect(),
+        flowspec: BTreeMap::new(),
     }
 }
 
