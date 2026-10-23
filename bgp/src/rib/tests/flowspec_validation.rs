@@ -8,6 +8,12 @@ use crate::rib::{FlowValidity, InvalidReason};
 const P1: &str = "10.0.0.1";
 const P2: &str = "10.0.0.2";
 
+/// RFC 8955 as written, for the tests that prove it.
+const STRICT: nos_proto::BgpFlowspecValidation = nos_proto::BgpFlowspecValidation {
+    disable_dest_prefix_rule: false,
+    rfc8955_strict: true,
+};
+
 fn dest(bytes: &[u8]) -> FlowSpec {
     FlowSpec::decode(Afi::V4, bytes).unwrap().0
 }
@@ -112,6 +118,7 @@ fn flow_follows_the_unicast_route_announce_and_withdraw() {
 #[test]
 fn originator_id_and_peer_down_are_honoured() {
     let mut rib = setup();
+    rib.set_peer_flowspec_validation(addr(P1), STRICT);
     announce(&mut rib, P2, 65002, "10.1.0.0/16");
     // The flow comes from P1 with no ORIGINATOR_ID: P2 owns the unicast route.
     feed(
@@ -252,6 +259,7 @@ fn indexes_are_built_from_routes_learned_before_the_first_flow() {
 #[test]
 fn the_first_as_check_applies_to_ebgp_only() {
     let mut rib = setup();
+    rib.set_peer_flowspec_validation(addr(P1), STRICT);
     announce(&mut rib, P1, 65001, "10.1.0.0/16");
     // eBGP peer P1 (AS 65001) sending a path starting with another AS.
     feed(
@@ -304,14 +312,20 @@ fn rule_a_and_its_knob() {
         validity(&rib, &no_dest),
         invalid(InvalidReason::NoDestinationPrefix)
     );
-    rib.set_peer_flowspec_relax(addr(P1), true);
+    rib.set_peer_flowspec_validation(
+        addr(P1),
+        nos_proto::BgpFlowspecValidation {
+            disable_dest_prefix_rule: true,
+            ..Default::default()
+        },
+    );
     feed(
         &mut rib,
         P1,
         &flow_update(65001, None, vec![no_dest.clone()]),
     );
     assert_eq!(validity(&rib, &no_dest), VALID);
-    rib.set_peer_flowspec_relax(addr(P1), false);
+    rib.set_peer_flowspec_validation(addr(P1), nos_proto::BgpFlowspecValidation::default());
     feed(
         &mut rib,
         P1,
@@ -347,4 +361,37 @@ fn index_compaction_drops_withdrawn_rules() {
         &flow_update(65001, None, vec![flow_in_10_1()]),
     );
     assert_eq!(rib.flow_ix.entries(), 1);
+}
+
+#[test]
+fn rfc9117_is_the_default_and_strict_restores_rfc8955() {
+    let mut rib = setup();
+    announce(&mut rib, P1, 65001, "10.1.0.0/16");
+    // Same leftmost AS as the covering route: valid.
+    feed(
+        &mut rib,
+        P1,
+        &flow_update(65001, None, vec![flow_in_10_1()]),
+    );
+    assert_eq!(validity(&rib, &flow_in_10_1()), VALID);
+    // eBGP flow whose leftmost AS is not the best-match route's.
+    feed(
+        &mut rib,
+        P1,
+        &flow_update(65099, None, vec![flow_in_10_1()]),
+    );
+    assert_eq!(
+        validity(&rib, &flow_in_10_1()),
+        invalid(InvalidReason::LeftmostAsMismatch)
+    );
+    rib.set_peer_flowspec_validation(addr(P1), STRICT);
+    feed(
+        &mut rib,
+        P1,
+        &flow_update(65099, None, vec![flow_in_10_1()]),
+    );
+    assert_eq!(
+        validity(&rib, &flow_in_10_1()),
+        invalid(InvalidReason::BadNeighbourAs)
+    );
 }

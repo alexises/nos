@@ -583,8 +583,8 @@ pub struct BgpRib {
     flowspec_export: HashMap<IpAddr, Arc<CompiledPolicy>>,
     /// The Flowspec twin of `evpn_stale`.
     flowspec_stale: HashMap<IpAddr, HashSet<FlowspecKey>>,
-    /// Peers whose peer-group relaxes rule (a) (`set_peer_flowspec_relax`).
-    flowspec_relax_dest: HashSet<IpAddr>,
+    /// Peers whose peer-group tunes Flowspec validation (`set_peer_flowspec_validation`).
+    flowspec_validation: HashMap<IpAddr, nos_proto::BgpFlowspecValidation>,
     /// Derived indexes for incremental Flowspec revalidation.
     flow_ix: flowspec_validate::FlowIndexes,
     /// RFC 7313: paths (prefix, path id) in a peer's Adj-RIB-In marked stale
@@ -723,7 +723,7 @@ impl BgpRib {
             flowspec_import: HashMap::new(),
             flowspec_export: HashMap::new(),
             flowspec_stale: HashMap::new(),
-            flowspec_relax_dest: HashSet::new(),
+            flowspec_validation: HashMap::new(),
             flow_ix: flowspec_validate::FlowIndexes::default(),
             stale: HashMap::new(),
             evpn_stale: HashMap::new(),
@@ -878,13 +878,17 @@ impl BgpRib {
         }
     }
 
-    /// Records whether `peer`'s peer-group relaxes RFC 8955 rule (a) (a flow
-    /// need not carry a destination prefix). Call before `peer_established`.
-    pub fn set_peer_flowspec_relax(&mut self, peer: IpAddr, relax: bool) {
-        if relax {
-            self.flowspec_relax_dest.insert(peer);
+    /// Records `peer`'s peer-group Flowspec validation knobs. Call before
+    /// `peer_established`.
+    pub fn set_peer_flowspec_validation(
+        &mut self,
+        peer: IpAddr,
+        v: nos_proto::BgpFlowspecValidation,
+    ) {
+        if v == nos_proto::BgpFlowspecValidation::default() {
+            self.flowspec_validation.remove(&peer);
         } else {
-            self.flowspec_relax_dest.remove(&peer);
+            self.flowspec_validation.insert(peer, v);
         }
     }
 

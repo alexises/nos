@@ -55,7 +55,7 @@ fn rpeer() -> ResolvedPeer {
         flowspec_import_policy: None,
         flowspec_export_policy: None,
         enforce_first_as: true,
-        flowspec_relax_dest: false,
+        flowspec_validation: nos_proto::BgpFlowspecValidation::default(),
         shutdown: None,
         maximum_prefix: BgpMaximumPrefix::default(),
         announce_rpki_state: false,

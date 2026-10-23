@@ -50,7 +50,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         flowspec_import_policy: None,
         flowspec_export_policy: None,
         enforce_first_as: true,
-        flowspec_relax_dest: false,
+        flowspec_validation: nos_proto::BgpFlowspecValidation::default(),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,

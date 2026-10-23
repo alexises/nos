@@ -17,6 +17,7 @@ fn flow(dest: Option<&str>) -> Flow {
         }),
         originator: ip("10.0.0.1"),
         ebgp: None,
+        local_domain: false,
     }
 }
 
@@ -24,15 +25,47 @@ fn uni(originator: Option<&str>, neighbour_as: u32) -> Unicast {
     Unicast {
         originator: originator.map(ip),
         neighbour_as,
+        leftmost_as: Some(neighbour_as),
+    }
+}
+
+const STRICT: nos_proto::BgpFlowspecValidation = nos_proto::BgpFlowspecValidation {
+    disable_dest_prefix_rule: false,
+    rfc8955_strict: true,
+};
+
+fn mode(relax: bool, strict: bool) -> nos_proto::BgpFlowspecValidation {
+    nos_proto::BgpFlowspecValidation {
+        disable_dest_prefix_rule: relax,
+        rfc8955_strict: strict,
     }
 }
 
 /// A unicast view from `(prefix, route)` pairs and a list of
 /// `(more-specific prefix, neighbour AS)`.
 fn run(f: &Flow, relax: bool, routes: &[(&str, Unicast)], more: &[(&str, u32)]) -> FlowValidity {
+    run_mode(f, mode(relax, true), routes, more)
+}
+
+/// `run` in the default RFC 9117 mode.
+fn run9117(
+    f: &Flow,
+    relax: bool,
+    routes: &[(&str, Unicast)],
+    more: &[(&str, u32)],
+) -> FlowValidity {
+    run_mode(f, mode(relax, false), routes, more)
+}
+
+fn run_mode(
+    f: &Flow,
+    m: nos_proto::BgpFlowspecValidation,
+    routes: &[(&str, Unicast)],
+    more: &[(&str, u32)],
+) -> FlowValidity {
     validate(
         f,
-        relax,
+        m,
         |n| routes.iter().find(|(p, _)| net(p) == n).map(|(_, u)| *u),
         |n| {
             more.iter()
@@ -47,7 +80,7 @@ use FlowValidity::{Invalid, Valid};
 use InvalidReason as R;
 
 #[test]
-fn rule_a_needs_a_destination_prefix_unless_relaxed() {
+fn rule_a_needs_a_destination_prefix_unless_relaxed_strict() {
     let f = flow(None);
     assert_eq!(run(&f, false, &[], &[]), Invalid(R::NoDestinationPrefix));
     // Relaxed: (b) and (c) have nothing to look up.
@@ -59,7 +92,7 @@ fn rule_a_needs_a_destination_prefix_unless_relaxed() {
 }
 
 #[test]
-fn rule_a_ipv6_offset_must_be_zero() {
+fn rule_a_ipv6_offset_must_be_zero_strict() {
     let mut f = flow(None);
     f.dest = Some(Prefix {
         net: net("2001:db8::/64"),
@@ -76,7 +109,7 @@ fn rule_a_ipv6_offset_must_be_zero() {
 }
 
 #[test]
-fn rule_b_best_match_and_originator() {
+fn rule_b_best_match_and_originator_strict() {
     let f = flow(Some("192.0.2.0/24"));
     assert_eq!(run(&f, false, &[], &[]), Invalid(R::NoUnicastRoute));
     // A covering route from the same originator validates it.
@@ -100,7 +133,7 @@ fn rule_b_best_match_and_originator() {
 }
 
 #[test]
-fn rule_c_more_specific_from_another_as() {
+fn rule_c_more_specific_from_another_as_strict() {
     let f = flow(Some("192.0.0.0/16"));
     let r = [("192.0.0.0/16", uni(Some("10.0.0.1"), 65001))];
     // Same neighbouring AS is fine, another one is not.
@@ -119,7 +152,7 @@ fn rule_c_more_specific_from_another_as() {
 }
 
 #[test]
-fn ebgp_leftmost_as_must_be_the_neighbour() {
+fn ebgp_leftmost_as_must_be_the_neighbour_strict() {
     let r = [("192.0.0.0/16", uni(Some("10.0.0.1"), 65001))];
     let mut f = flow(Some("192.0.2.0/24"));
     f.ebgp = Some((65001, Some(65001)));
@@ -131,6 +164,74 @@ fn ebgp_leftmost_as_must_be_the_neighbour() {
     // iBGP: no check at all.
     f.ebgp = None;
     assert_eq!(run(&f, false, &r, &[]), Valid);
+}
+
+/// The unicast route is `192.0.0.0/16` from another originator, AS 65001.
+fn other_originator() -> [(&'static str, Unicast); 1] {
+    [("192.0.0.0/16", uni(Some("10.0.0.9"), 65001))]
+}
+
+#[test]
+fn rfc9117_empty_or_confed_path_skips_the_originator_match() {
+    let r = other_originator();
+    let mut f = flow(Some("192.0.2.0/24"));
+    assert_eq!(run9117(&f, false, &r, &[]), Invalid(R::OriginatorMismatch));
+    f.local_domain = true;
+    assert_eq!(run9117(&f, false, &r, &[]), Valid);
+    // Strict: b.2 does not exist.
+    assert_eq!(run(&f, false, &r, &[]), Invalid(R::OriginatorMismatch));
+    // (c) is still enforced after b.2.
+    assert_eq!(
+        run9117(&f, false, &r, &[("192.0.2.0/25", 65002)]),
+        Invalid(R::MoreSpecificFromOtherAs)
+    );
+}
+
+#[test]
+fn rfc9117_no_covering_route_is_valid_only_for_a_local_domain_flow() {
+    let mut f = flow(Some("192.0.2.0/24"));
+    assert_eq!(run9117(&f, false, &[], &[]), Invalid(R::NoUnicastRoute));
+    f.local_domain = true;
+    assert_eq!(run9117(&f, false, &[], &[]), Valid);
+    assert_eq!(run(&f, false, &[], &[]), Invalid(R::NoUnicastRoute));
+}
+
+#[test]
+fn rfc9117_ebgp_compares_the_leftmost_as_with_the_best_match() {
+    let r = [("192.0.0.0/16", uni(Some("10.0.0.1"), 65001))];
+    let mut f = flow(Some("192.0.2.0/24"));
+    // A route server: the flow's leftmost AS is not the peer's, but it is
+    // the best-match route's.
+    f.ebgp = Some((65500, Some(65001)));
+    assert_eq!(run9117(&f, false, &r, &[]), Valid);
+    assert_eq!(run(&f, false, &r, &[]), Invalid(R::BadNeighbourAs));
+    f.ebgp = Some((65001, Some(65002)));
+    assert_eq!(run9117(&f, false, &r, &[]), Invalid(R::LeftmostAsMismatch));
+    f.ebgp = Some((65001, None));
+    assert_eq!(run9117(&f, false, &r, &[]), Invalid(R::LeftmostAsMismatch));
+    // A best match without a leftmost AS (a local route) never agrees.
+    let local = [(
+        "192.0.0.0/16",
+        Unicast {
+            originator: Some(ip("10.0.0.1")),
+            neighbour_as: 65000,
+            leftmost_as: None,
+        },
+    )];
+    f.ebgp = Some((65001, Some(65001)));
+    assert_eq!(
+        run9117(&f, false, &local, &[]),
+        Invalid(R::LeftmostAsMismatch)
+    );
+    assert_eq!(run_mode(&f, STRICT, &local, &[]), Valid);
+}
+
+#[test]
+fn rfc9117_without_a_destination_falls_back_to_the_neighbour_as() {
+    let mut f = flow(None);
+    assert_eq!(run9117(&f, true, &[], &[]), Valid);
+    f.ebgp = Some((65001, Some(65009)));
+    assert_eq!(run9117(&f, true, &[], &[]), Invalid(R::BadNeighbourAs));
 }
 
 #[test]
@@ -146,6 +247,7 @@ fn displays_are_short_and_stable() {
         (R::OriginatorMismatch, "originator-mismatch"),
         (R::MoreSpecificFromOtherAs, "more-specific-from-other-as"),
         (R::BadNeighbourAs, "bad-neighbour-as"),
+        (R::LeftmostAsMismatch, "leftmost-as-mismatch"),
     ] {
         assert_eq!(r.to_string(), s);
     }

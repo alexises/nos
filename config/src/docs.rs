@@ -524,8 +524,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "On by default for eBGP (RFC 4271 section 6.3): an UPDATE whose AS_PATH does not start with the peer's AS is treated as a withdraw and logged. Set to false to accept such paths. A route-server-client peer-group is always exempt. iBGP and confederation peers are never checked.",
         ),
         Topic::BgpPeerGroupFlowspecValidation => (
-            "Tune the RFC 8955 section 6 validation of received Flowspec rules.",
-            "Every received rule is validated and `show bgp flowspec` prints the result; an invalid rule stays visible but is never used. `disable-dest-prefix-rule` stops requiring a destination prefix component (rule (a)); such a rule skips the unicast checks, which need a destination. Validation itself cannot be disabled. Changing it restarts the peer-group's sessions.",
+            "Tune the validation of received Flowspec rules (RFC 8955 section 6 as updated by RFC 9117).",
+            "Every received rule is validated and `show bgp flowspec` prints the result; an invalid rule stays visible but is never used. `disable-dest-prefix-rule` stops requiring a destination prefix component (rule (a)); such a rule skips the unicast checks, which need a destination. `rfc8955-strict` (default false) swaps the default RFC 9117 procedure for RFC 8955 as written: RFC 9117 accepts a flow with an empty or confederation-only AS_PATH without an originator match (and without a covering route), and for eBGP compares the flow's leftmost AS with the best-match route's rather than the neighbour's (`leftmost-as-mismatch`). Validation itself cannot be disabled. Changing it restarts the peer-group's sessions.",
         ),
         Topic::BgpPeerGroupFlowspecImportPolicy => (
             "Filter the Flowspec rules this peer-group's peers send us through a routing policy.",
