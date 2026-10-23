@@ -26,9 +26,17 @@ Because `nos-interfaced` needs to enslave an interface into the VRF device that 
 Several daemons put filters on the same device's `clsact` qdisc, all through the `nos-tc` crate (hand-encoded netlink: `netlink-packet-route` has no `gact`/`skbedit`/`fw`):
 
 - Every owner ensures the qdisc (`Request::Clsact`, tolerating `EEXIST`) and never deletes it.
-- Each owner keeps to its own priorities on chain 0 (table in `tc/CLAUDE.md`): `nos-fdbd` 1 and 2 (local bias), `nos-interfaced` 1 (BPDU trap, bridge-port ingress, never a VXLAN port; fdbd's prio 1 there is on egress), `nos-acld` 100 (#541). A lower priority runs first.
+- Each owner keeps to its own priorities on chain 0 (table in `tc/CLAUDE.md`): `nos-fdbd` 1 and 2 (local bias), `nos-interfaced` 1 (BPDU trap, bridge-port ingress, never a VXLAN port; fdbd's prio 1 there is on egress), `nos-acld` flowspec band 10..99 (#561) and ACL 100 (#541). A lower priority runs first.
 - Delete by priority (`DelFilter`, `handle` 0 for all of it) or by chain (`FlushChain`), never the whole hook.
 - Calls block: run them on `spawn_blocking`.
+- Chains and fall-through (spike of #563, Linux 7.2, `spike_goto_chain_miss_and_unspec_fall_through` in `nos-tc`'s kernel test):
+  - A miss inside a `goto chain` target does **not** fall back to the remaining chain-0 filters: classification of that packet ends there. Anything that must run after a chain (a lower-priority chain-0 filter) is never reached.
+  - A filter whose last verdict is `Verdict::Unspec` (matched, counted, `TC_ACT_UNSPEC`) **does** fall through to the next filter of the same chain (and of chain 0 when it sits in chain 0).
+  - So a rule that must fall through uses `Verdict::Unspec`, and an ordered rule list that must be followed by other chain-0 owners (the ACL at 100) lives directly in chain 0, one priority per rule (band 10..99 for flowspec), never behind a `goto chain` entry.
+- Rewrites and policing (#563):
+  - `ActionKind::Police { rate, burst, unit }`: exceed drops, conform `pipe`. `Bytes` is bytes/s and bytes (above 2^32 bytes/s the kernel gets `TCA_POLICE_RATE64`); `Packets` is packets/s and packets (`PKTRATE64`/`PKTBURST64`; the kernel meters it against the one TBF burst, so `nos-tc` writes the burst in both). Both are accepted by Linux 7.2. The packet bucket starts empty, so the first packet after install can be dropped.
+  - `Pedit::Dscp` rewrites the DSCP only (ECN, and for IPv6 the version and flow label, are kept). Pair it with a filter of the same family (`Protocol::Ip`/`Ipv6`). The IPv4 form is encoded as two table entries, `pedit` then `csum` (IPv4 header): without it the rewritten header fails its checksum and is dropped (`InHdrErrors`), as checked in the kernel test.
+  - `FlowerKeys.ip_tos` matches the DSCP and never the ECN bits. Flower has no IPv6 flow-label key on Linux 7.2 (no `TCA_FLOWER_KEY_*` for it in `pkt_cls.h`): that match is unsupported and must be refused by callers.
 - Check by hand in a throwaway namespace: `unshare -Urn`, then `tc filter show dev <dev> ingress` (add `chain <n>`, `-s` for counters).
 
 ## Access lists (`nos-acld`, #541)

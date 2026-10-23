@@ -11,8 +11,10 @@ A leaf crate (only `netlink-sys`, no NOS dependencies, like `nos-l2-socket`): th
   - `Protocol::Ip`/`Ipv6` also send `TCA_FLOWER_KEY_ETH_TYPE`: flower ignores every L3 key without it.
   - `Kind::Flower(FlowerKeys)` (all `None` = match-all; a keyless flower, not `matchall`, because only flower replaces in place) or `Kind::Fw { mask }`.
   - An exact port (`min == max`) uses the `TCP_*`/`UDP_*` key (needs `ip_proto` 6 or 17); a range uses `PORT_*_MIN/MAX` (the kernel wants min below max).
-- `Action { kind, cookie }`: `Gact(Verdict)`, `Skbedit { mark, mask, verdict }` or `Sample { rate, trunc, group }` (`act_sample`, always `pipe`; the kernel hands the cookie to psample); `Verdict::GotoChain(n)` is `TC_ACT_GOTO_CHAIN | n`, `n < 2^28`. A cookie is at most 16 bytes.
-- `encode` refuses (`InvalidInput`) what the kernel would reject less clearly: long cookie, chain ≥ 2^28, inverted range, exact port without tcp/udp, prefix too long.
+- `Action { kind, cookie }`: `Gact(Verdict)`, `Skbedit { mark, mask, verdict }`, `Sample { rate, trunc, group }` (`act_sample`, always `pipe`; the kernel hands the cookie to psample), `Police { rate, burst, unit: Bytes|Packets }` (exceed drops, conform `pipe`; neither may be 0) or `Pedit(Pedit::Dscp { value <= 63, family })` (the IPv4 form also emits an `act_csum` entry, so it takes two table slots). `Verdict::GotoChain(n)` is `TC_ACT_GOTO_CHAIN | n`, `n < 2^28`; `Verdict::Unspec` is `TC_ACT_UNSPEC`: matched and counted, the next filter runs. A cookie is at most 16 bytes.
+- `FlowerKeys.ip_tos: Some(dscp)` matches the DSCP (ECN masked out). No flow-label key exists in flower on 7.2: unsupported, refuse it upstream.
+- Fall-through facts (spike, #563): a miss inside a `goto chain` target ends classification (no fall back to later chain-0 filters); an `Unspec` filter falls through to the next filter of its chain. Details in `docs/architecture/linux-drivers.md`.
+- `encode` refuses (`InvalidInput`) what the kernel would reject less clearly: long cookie, chain ≥ 2^28, inverted range, exact port without tcp/udp, prefix too long, police rate or burst 0, DSCP over 63.
 - `send(&Request, tolerate)` and `dump(ifindex, hook, chain) -> Vec<FilterStats>` **block**: call them from `spawn_blocking`.
 - psample (generic netlink, hand-decoded, #544): `psample() -> Psample { family, group, user_cookie }` (`CTRL_CMD_GETFAMILY`; `ENOENT` until the module loads; `user_cookie` = `CTRL_ATTR_MAXATTR` reaches `PSAMPLE_ATTR_USER_COOKIE`), `SampleSocket::open` joins `packets` (`CAP_NET_ADMIN`), `recv() -> Vec<Sample { group, in_ifindex, out_ifindex, cookie, data }>` (blocking; `ENOBUFS` = drops, socket still usable).
 - `FilterStats`: one row per **action** (`chain, prio, handle, action, cookie, packets, bytes`); `TCA_STATS_PKT64` wins over the 32-bit `gnet_stats_basic` count. A missing chain dumps as an empty list.
@@ -24,6 +26,7 @@ A leaf crate (only `netlink-sys`, no NOS dependencies, like `nos-l2-socket`): th
 | `nos-fdbd` | VXLAN ingress | 1, 2 | `flower enc_src_ip` + `skbedit mark` (peers, catch-all) |
 | `nos-fdbd` | segment port egress | 1, 2 | `fw` + `gact drop` (local bias, DF) |
 | `nos-interfaced` | bridge port ingress | 1 | `flower dst_mac` + `gact drop`, protocol 802.2 |
+| `nos-acld` flowspec (#561, part B) | ingress/egress | 10..99 | one flower prio per rule and protocol, directly in chain 0 (a `goto chain` miss would skip the ACL) |
 | `nos-acld` (#541) | ingress/egress | 100 | keyless flower `goto chain` 1000/1001 |
 
 - Nobody deletes the `clsact` qdisc: every owner only ensures it.

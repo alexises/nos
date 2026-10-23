@@ -555,3 +555,250 @@ fn sample_pipes_to_its_psample_group_with_the_cookie() {
     assert_eq!(act[2], (TCA_ACT_COOKIE, vec![0, 0, 0, 7]));
     assert_eq!(action_attrs(&m, 1)[0].1, b"gact\0".to_vec());
 }
+
+fn one(protocol: Protocol, keys: FlowerKeys, kind: ActionKind) -> Vec<u8> {
+    add(filter(
+        protocol,
+        Kind::Flower(keys),
+        vec![Action::new(kind)],
+    ))
+}
+
+fn refused(protocol: Protocol, keys: FlowerKeys, kind: ActionKind) -> io::ErrorKind {
+    let f = filter(protocol, Kind::Flower(keys), vec![Action::new(kind)]);
+    encode(&Request::AddFilter(f), 1).unwrap_err().kind()
+}
+
+fn nested_attrs(v: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    attrs(v).into_iter().map(|(k, v)| (k, v.to_vec())).collect()
+}
+
+#[test]
+fn unspec_verdict_is_minus_one_in_every_verdict_field() {
+    for kind in [
+        ActionKind::Gact(Verdict::Unspec),
+        ActionKind::Skbedit {
+            mark: 1,
+            mask: 1,
+            verdict: Verdict::Unspec,
+        },
+    ] {
+        let m = one(Protocol::Ip, FlowerKeys::default(), kind);
+        let opts = nested_attrs(&action_attrs(&m, 0)[1].1);
+        assert_eq!(
+            i32::from_ne_bytes(opts[0].1[8..12].try_into().unwrap()),
+            -1,
+            "{opts:?}"
+        );
+    }
+}
+
+#[test]
+fn police_bytes_carry_rate_burst_ticks_and_a_pipe_result() {
+    let m = one(
+        Protocol::Ip,
+        FlowerKeys::default(),
+        ActionKind::Police {
+            rate: 125_000,
+            burst: 10_000,
+            unit: RateUnit::Bytes,
+        },
+    );
+    let act = action_attrs(&m, 0);
+    assert_eq!(act[0], (TCA_ACT_KIND, b"police\0".to_vec()));
+    let opts = nested_attrs(&act[1].1);
+    let kinds: Vec<_> = opts.iter().map(|o| o.0).collect();
+    assert_eq!(kinds, [TCA_POLICE_TBF, TCA_POLICE_RATE, TCA_POLICE_RESULT]);
+    let tbf = &opts[0].1;
+    assert_eq!(tbf.len(), 56);
+    assert_eq!(u32_at(tbf, 4), TC_ACT_SHOT as u32, "exceed drops");
+    // 10 kB at 125 kB/s = 80 ms = 1_250_000 ticks of 64 ns.
+    assert_eq!(u32_at(tbf, 12), 1_250_000);
+    assert_eq!(tbf[20], 3, "cell_log");
+    assert_eq!(u32_at(tbf, 28), 125_000, "rate");
+    assert_eq!(opts[1].1.len(), 1024, "rate table");
+    assert_eq!(opts[2].1, (TC_ACT_PIPE as u32).to_ne_bytes());
+}
+
+#[test]
+fn police_above_32_bits_sends_rate64_and_all_ones() {
+    let m = one(
+        Protocol::Ip,
+        FlowerKeys::default(),
+        ActionKind::Police {
+            rate: 10_000_000_000,
+            burst: 1000,
+            unit: RateUnit::Bytes,
+        },
+    );
+    let opts = nested_attrs(&action_attrs(&m, 0)[1].1);
+    assert_eq!(u32_at(&opts[0].1, 28), u32::MAX);
+    let r64 = opts.iter().find(|o| o.0 == TCA_POLICE_RATE64).unwrap();
+    assert_eq!(r64.1, 10_000_000_000u64.to_ne_bytes());
+}
+
+#[test]
+fn police_packets_send_pps_and_the_burst_in_the_tbf_and_pktburst() {
+    let m = one(
+        Protocol::Ip,
+        FlowerKeys::default(),
+        ActionKind::Police {
+            rate: 100,
+            burst: 5,
+            unit: RateUnit::Packets,
+        },
+    );
+    let opts = nested_attrs(&action_attrs(&m, 0)[1].1);
+    let kinds: Vec<_> = opts.iter().map(|o| o.0).collect();
+    assert_eq!(
+        kinds,
+        [
+            TCA_POLICE_TBF,
+            TCA_POLICE_PKTRATE64,
+            TCA_POLICE_PKTBURST64,
+            TCA_POLICE_RESULT
+        ]
+    );
+    // 5 packets at 100 pps = 50 ms = 781_250 ticks.
+    assert_eq!(u32_at(&opts[0].1, 12), 781_250);
+    assert_eq!(u32_at(&opts[0].1, 28), 0, "no byte rate");
+    assert_eq!(opts[1].1, 100u64.to_ne_bytes());
+    assert_eq!(opts[2].1, 781_250u64.to_ne_bytes());
+}
+
+#[test]
+fn pedit_dscp_ipv4_keeps_ecn_and_is_followed_by_a_header_csum() {
+    let m = one(
+        Protocol::Ip,
+        FlowerKeys::default(),
+        ActionKind::Pedit(Pedit::Dscp {
+            value: 46,
+            family: PeditFamily::Ip,
+        }),
+    );
+    let act = action_attrs(&m, 0);
+    assert_eq!(act[0], (TCA_ACT_KIND, b"pedit\0".to_vec()));
+    let opts = nested_attrs(&act[1].1);
+    let sel = &opts[0].1;
+    assert_eq!(opts[0].0, TCA_PEDIT_PARMS_EX);
+    assert_eq!(sel.len(), 20 + 4 + 24);
+    assert_eq!(
+        i32::from_ne_bytes(sel[8..12].try_into().unwrap()),
+        TC_ACT_PIPE
+    );
+    assert_eq!(sel[20], 1, "nkeys");
+    assert_eq!(hex(&sel[24..28]), "ff03ffff", "mask keeps ECN");
+    assert_eq!(hex(&sel[28..32]), "00b80000", "46 << 2 in the TOS byte");
+    assert_eq!(u32_at(sel, 32), 0, "offset 0 from the IPv4 header");
+    let key_ex = nested_attrs(&opts[1].1);
+    let key = nested_attrs(&key_ex[0].1);
+    assert_eq!(
+        key[0],
+        (TCA_PEDIT_KEY_EX_HTYPE, 2u16.to_ne_bytes().to_vec())
+    );
+    assert_eq!(key[1], (TCA_PEDIT_KEY_EX_CMD, 0u16.to_ne_bytes().to_vec()));
+    // The second table entry is the checksum action.
+    let csum = action_attrs(&m, 1);
+    assert_eq!(csum[0], (TCA_ACT_KIND, b"csum\0".to_vec()));
+    let parms = &nested_attrs(&csum[1].1)[0];
+    assert_eq!(parms.0, TCA_CSUM_PARMS);
+    assert_eq!(u32_at(&parms.1, 20), TCA_CSUM_UPDATE_FLAG_IPV4HDR);
+}
+
+#[test]
+fn pedit_dscp_ipv6_straddles_the_first_word_and_needs_no_csum() {
+    let m = one(
+        Protocol::Ipv6,
+        FlowerKeys::default(),
+        ActionKind::Pedit(Pedit::Dscp {
+            value: 0b10_1110,
+            family: PeditFamily::Ipv6,
+        }),
+    );
+    let sel = &nested_attrs(&action_attrs(&m, 0)[1].1)[0].1;
+    // DSCP 101110 = traffic class bits 7..2: 1011 in byte 0, 10 in byte 1.
+    assert_eq!(
+        hex(&sel[24..28]),
+        "f03fffff",
+        "keeps version, ECN, flow label"
+    );
+    assert_eq!(hex(&sel[28..32]), "0b800000");
+    let key_ex = nested_attrs(&nested_attrs(&action_attrs(&m, 0)[1].1)[1].1);
+    let key = nested_attrs(&key_ex[0].1);
+    assert_eq!(key[0].1, 3u16.to_ne_bytes());
+    // No second action: the table has one entry.
+    let top = attrs(&m[36..]);
+    let opts = attrs(top.iter().find(|(k, _)| *k == TCA_OPTIONS).unwrap().1);
+    let table = opts.iter().find(|(k, _)| *k == TCA_FLOWER_ACT).unwrap().1;
+    assert_eq!(attrs(table).len(), 1);
+}
+
+#[test]
+fn pedit_csum_shifts_the_following_action_index() {
+    let f = filter(
+        Protocol::Ip,
+        Kind::Flower(FlowerKeys::default()),
+        vec![
+            Action::new(ActionKind::Pedit(Pedit::Dscp {
+                value: 1,
+                family: PeditFamily::Ip,
+            })),
+            Action::new(ActionKind::Gact(Verdict::Shot)),
+        ],
+    );
+    let m = add(f);
+    let top = attrs(&m[36..]);
+    let opts = attrs(top.iter().find(|(k, _)| *k == TCA_OPTIONS).unwrap().1);
+    let table = opts.iter().find(|(k, _)| *k == TCA_FLOWER_ACT).unwrap().1;
+    let idx: Vec<_> = attrs(table).iter().map(|(k, _)| *k).collect();
+    assert_eq!(idx, [1, 2, 3], "pedit, csum, gact");
+}
+
+#[test]
+fn ip_tos_key_is_the_dscp_shifted_with_the_ecn_masked_out() {
+    let k = keys(&flower(
+        Protocol::Ip,
+        FlowerKeys {
+            ip_tos: Some(46),
+            ..FlowerKeys::default()
+        },
+    ));
+    assert!(k.contains(&(TCA_FLOWER_KEY_IP_TOS, vec![0xB8])), "{k:?}");
+    assert!(
+        k.contains(&(TCA_FLOWER_KEY_IP_TOS_MASK, vec![0xFC])),
+        "{k:?}"
+    );
+}
+
+#[test]
+fn police_pedit_and_tos_refusals() {
+    let none = FlowerKeys::default;
+    let police = |rate, burst| ActionKind::Police {
+        rate,
+        burst,
+        unit: RateUnit::Bytes,
+    };
+    let dscp = |value| {
+        ActionKind::Pedit(Pedit::Dscp {
+            value,
+            family: PeditFamily::Ip,
+        })
+    };
+    for kind in [police(0, 10), police(10, 0), dscp(64)] {
+        assert_eq!(
+            refused(Protocol::Ip, none(), kind),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    let tos = FlowerKeys {
+        ip_tos: Some(64),
+        ..none()
+    };
+    assert_eq!(
+        refused(Protocol::Ip, tos, ActionKind::Gact(Verdict::Ok)),
+        io::ErrorKind::InvalidInput
+    );
+    // The edge values are accepted.
+    one(Protocol::Ip, none(), police(1, 1));
+    one(Protocol::Ip, none(), dscp(63));
+}

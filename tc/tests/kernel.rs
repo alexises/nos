@@ -11,8 +11,8 @@ use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::process::Command;
 
 use nos_tc::{
-    dump, psample, send, Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request,
-    Sample, SampleSocket, Verdict, FLAG_IS_FRAGMENT,
+    dump, psample, send, Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Pedit, PeditFamily,
+    Protocol, RateUnit, Request, Sample, SampleSocket, Verdict, FLAG_IS_FRAGMENT,
 };
 
 const EEXIST: i32 = 17;
@@ -647,4 +647,311 @@ fn psample_reports_the_device_direction_and_cookie() {
         assert_eq!(&s.data[12..14], &[8, 0], "{s:?}");
         assert_eq!(s.data.len(), 14 + 20 + 8 + 7, "{s:?}");
     }
+}
+
+/// The IPv4 / IPv6 destination `pair(.., n)` resolves to its `b` end.
+fn dst4(n: u8) -> String {
+    format!("198.51.{n}.9")
+}
+
+fn dst6(n: u8) -> String {
+    format!("fd00:51:{n}::9")
+}
+
+/// A veth pair `a`/`b`, `a` holding `198.51.n.1/24` and `fd00:51:n::1/64`
+/// with permanent neighbours for `dst4(n)` / `dst6(n)` resolving to `b`, so
+/// a packet sent to either arrives on `b`'s ingress (nobody owns the
+/// destination there). One subnet per test: they share a netns. Returns
+/// `(a, b)` ifindexes, clsact on both.
+fn pair(a: &str, b: &str, n: u8) -> (u32, u32) {
+    let mac = n;
+    let ma = format!("02:00:00:00:{mac:02x}:01");
+    let mb = format!("02:00:00:00:{mac:02x}:02");
+    run(&[
+        "ip", "link", "add", a, "address", &ma, "type", "veth", "peer", "name", b, "address", &mb,
+    ]);
+    for d in [a, b] {
+        run(&["ip", "link", "set", d, "up"]);
+    }
+    run(&["ip", "addr", "add", &format!("198.51.{n}.1/24"), "dev", a]);
+    run(&[
+        "ip",
+        "-6",
+        "addr",
+        "add",
+        &format!("fd00:51:{n}::1/64"),
+        "dev",
+        a,
+        "nodad",
+    ]);
+    for (ip, fam) in [(dst4(n), "-4"), (dst6(n), "-6")] {
+        run(&[
+            "ip",
+            fam,
+            "neigh",
+            "add",
+            &ip,
+            "lladdr",
+            &mb,
+            "dev",
+            a,
+            "nud",
+            "permanent",
+        ]);
+    }
+    let ids = (idx(a), idx(b));
+    for i in [ids.0, ids.1] {
+        send(&Request::Clsact { ifindex: i }, &[EEXIST]).unwrap();
+    }
+    ids
+}
+
+/// One UDP packet to `dst`:`port` with TOS byte `tos`, from `python3` (the
+/// independent sender; std has no `IP_TOS`/`IPV6_TCLASS`).
+fn udp(dst: &str, port: u16, tos: u8) {
+    udp_burst(dst, port, tos, 1);
+}
+
+/// `n` back-to-back packets from one `python3` process.
+fn udp_burst(dst: &str, port: u16, tos: u8, n: u32) {
+    let v6 = dst.contains(':');
+    let (family, level, opt) = if v6 {
+        ("AF_INET6", "IPPROTO_IPV6", "IPV6_TCLASS")
+    } else {
+        ("AF_INET", "IPPROTO_IP", "IP_TOS")
+    };
+    let script = format!(
+        "import socket\n\
+         s=socket.socket(socket.{family},socket.SOCK_DGRAM)\n\
+         s.setsockopt(socket.{level},socket.{opt},{tos})\n\
+         for i in range({n}): s.sendto(b'x'*64,('{dst}',{port}))",
+    );
+    run(&["python3", "-c", &script]);
+}
+
+fn udp_dport(port: u16) -> FlowerKeys {
+    FlowerKeys {
+        ip_proto: Some(17),
+        dst_port: Some((port, port)),
+        ..FlowerKeys::default()
+    }
+}
+
+fn pkts(ifindex: u32, chain: u32, prio: u16, handle: u32) -> u64 {
+    dump(ifindex, Hook::Ingress, chain)
+        .unwrap()
+        .iter()
+        .filter(|s| s.prio == prio && s.handle == handle)
+        .map(|s| s.packets)
+        .sum()
+}
+
+fn add_h(ifindex: u32, chain: u32, prio: u16, handle: u32, keys: FlowerKeys, v: Verdict) {
+    send(
+        &Request::AddFilter(Filter {
+            ifindex,
+            hook: Hook::Ingress,
+            chain,
+            prio,
+            protocol: Protocol::Ip,
+            handle,
+            kind: Kind::Flower(keys),
+            actions: gact(v),
+            replace: false,
+        }),
+        &[],
+    )
+    .unwrap();
+}
+
+/// The spike behind part B's decision A (#563): what tc does after a miss
+/// inside a `goto chain` target, and whether an `Unspec` filter falls
+/// through to the next filter of its chain. Prints the answers.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn spike_goto_chain_miss_and_unspec_fall_through() {
+    let (_, b) = pair("g0", "g1", 10);
+    let d = dst4(10);
+    // (1) chain 0 prio 10 jumps to chain 100, which only holds a filter that
+    // misses; chain 0 prio 20 would match the same packet.
+    add_h(b, 0, 10, 1, udp_dport(7000), Verdict::GotoChain(100));
+    add_h(b, 0, 20, 1, udp_dport(7000), Verdict::Ok);
+    add_h(b, 100, 1, 1, udp_dport(9999), Verdict::Ok);
+    udp(&d, 7000, 0);
+    let fallback = pkts(b, 0, 20, 1);
+    assert_eq!(pkts(b, 0, 10, 1), 1, "the goto filter saw the packet");
+    println!("SPIKE1 chain-0 prio 20 after a miss in the goto target: {fallback} packet(s)");
+    // (2) the target chain holds an Unspec filter, then an Ok one.
+    add_h(b, 100, 2, 1, udp_dport(7000), Verdict::Unspec);
+    add_h(b, 100, 3, 1, udp_dport(7000), Verdict::Ok);
+    udp(&d, 7000, 0);
+    let (unspec, next) = (pkts(b, 100, 2, 1), pkts(b, 100, 3, 1));
+    println!("SPIKE2 unspec filter {unspec}, next filter of the chain {next}");
+    assert_eq!(
+        fallback, 0,
+        "a goto-chain miss does not fall back to chain 0"
+    );
+    assert_eq!(
+        (unspec, next),
+        (1, 1),
+        "Unspec falls through inside the chain"
+    );
+}
+
+fn show(dev: &str, hook: &str) -> String {
+    run(&["tc", "-d", "filter", "show", "dev", dev, hook])
+}
+
+fn add_on(
+    ifindex: u32,
+    hook: Hook,
+    protocol: Protocol,
+    prio: u16,
+    keys: FlowerKeys,
+    acts: Vec<Action>,
+) {
+    send(
+        &Request::AddFilter(Filter {
+            ifindex,
+            hook,
+            chain: 0,
+            prio,
+            protocol,
+            handle: 1,
+            kind: Kind::Flower(keys),
+            actions: acts,
+            replace: false,
+        }),
+        &[],
+    )
+    .unwrap();
+}
+
+/// `Ip: ... InHdrErrors ...` of this netns: IPv4 packets dropped for a bad
+/// header (checksum included).
+fn ip_hdr_errors() -> u64 {
+    let snmp = std::fs::read_to_string("/proc/net/snmp").unwrap();
+    let mut lines = snmp.lines().filter(|l| l.starts_with("Ip:"));
+    let names: Vec<_> = lines.next().unwrap().split_whitespace().collect();
+    let vals: Vec<_> = lines.next().unwrap().split_whitespace().collect();
+    let at = names.iter().position(|n| *n == "InHdrErrors").unwrap();
+    vals[at].parse().unwrap()
+}
+
+fn police(rate: u64, burst: u32, unit: RateUnit) -> Action {
+    Action::new(ActionKind::Police { rate, burst, unit })
+}
+
+/// `act_police` in bytes: the kernel reads back the rate and burst it was
+/// given, and the excess is dropped (later actions see conforming packets
+/// only).
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn police_bytes_reads_back_and_drops_the_excess() {
+    let (_, b) = pair("p0", "p1", 20);
+    let acts = vec![
+        police(125_000, 200, RateUnit::Bytes),
+        Action::new(ActionKind::Gact(Verdict::Pipe)),
+    ];
+    add(b, 0, 1, Protocol::Ip, udp_dport(7100), acts);
+    let shown = show("p1", "ingress");
+    println!("POLICE_BYTES {shown}");
+    assert!(shown.contains("police 0x"), "{shown}");
+    assert!(shown.contains("rate 1Mbit burst 200b"), "{shown}");
+    assert!(shown.contains("action drop/pipe"), "{shown}");
+    udp_burst(&dst4(20), 7100, 0, 10);
+    let rows = dump(b, Hook::Ingress, 0).unwrap();
+    let count = |kind: &str| rows.iter().find(|r| r.action == kind).map(|r| r.packets);
+    assert_eq!(count("police"), Some(10), "{rows:?}");
+    let conform = count("gact").unwrap();
+    assert!((1..10).contains(&conform), "{conform} conforming of 10");
+}
+
+/// A rate above 2^32 bytes/s takes `TCA_POLICE_RATE64`.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn police_rate64_reads_back() {
+    let (_, b) = pair("q0", "q1", 21);
+    add(
+        b,
+        0,
+        1,
+        Protocol::Ip,
+        udp_dport(7101),
+        vec![police(10_000_000_000, 1_000_000, RateUnit::Bytes)],
+    );
+    let shown = show("q1", "ingress");
+    println!("POLICE_RATE64 {shown}");
+    assert!(shown.contains("rate 80Gbit"), "{shown}");
+}
+
+/// Packet-rate policing: 7.2 accepts `PKTRATE64`/`PKTBURST64`.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn police_packets_reads_back_and_drops_the_excess() {
+    let (_, b) = pair("r0", "r1", 22);
+    let acts = vec![
+        police(100, 5, RateUnit::Packets),
+        Action::new(ActionKind::Gact(Verdict::Pipe)),
+    ];
+    add(b, 0, 1, Protocol::Ip, udp_dport(7102), acts);
+    let shown = show("r1", "ingress");
+    println!("POLICE_PKTS {shown}");
+    assert!(shown.contains("pkts_rate 100 pkts_burst 5"), "{shown}");
+    // The packet bucket starts empty and fills with elapsed time.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    udp_burst(&dst4(22), 7102, 0, 8);
+    let rows = dump(b, Hook::Ingress, 0).unwrap();
+    let conform = rows.iter().find(|r| r.action == "gact").unwrap().packets;
+    assert!((1..8).contains(&conform), "{conform} conforming of 8");
+}
+
+/// The tos key matches the DSCP only (ECN ignored), for v4 and v6.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn ip_tos_key_matches_the_dscp_not_the_ecn() {
+    let (_, b) = pair("t0", "t1", 23);
+    for (proto, dst, prio) in [(Protocol::Ip, dst4(23), 1), (Protocol::Ipv6, dst6(23), 2)] {
+        let keys = FlowerKeys {
+            ip_tos: Some(46),
+            ..udp_dport(7103)
+        };
+        add(b, 0, prio, proto, keys, gact(Verdict::Pipe));
+        udp(&dst, 7103, 46 << 2);
+        udp(&dst, 7103, 46 << 2 | 2); // ECT(0)
+        udp(&dst, 7103, 10 << 2);
+        assert_eq!(pkts(b, 0, prio, 1), 2, "{proto:?}: both DSCP-46 packets");
+    }
+    let shown = show("t1", "ingress");
+    println!("IP_TOS {shown}");
+    assert!(shown.contains("ip_tos 184/0xfc"), "{shown}");
+}
+
+/// `Pedit::Dscp` on egress rewrites real packets: the peer's ingress key
+/// sees the new DSCP, ECN survives, and (IPv4) the header checksum still
+/// verifies.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn pedit_dscp_rewrites_v4_and_v6_packets() {
+    let (a, b) = pair("e0", "e1", 24);
+    let before = ip_hdr_errors();
+    for (proto, dst, family, prio) in [
+        (Protocol::Ip, dst4(24), PeditFamily::Ip, 1),
+        (Protocol::Ipv6, dst6(24), PeditFamily::Ipv6, 2),
+    ] {
+        let rewrite = Action::new(ActionKind::Pedit(Pedit::Dscp { value: 46, family }));
+        add_on(a, Hook::Egress, proto, prio, udp_dport(7104), vec![rewrite]);
+        let keys = FlowerKeys {
+            ip_tos: Some(46),
+            ..udp_dport(7104)
+        };
+        add(b, 0, prio, proto, keys, gact(Verdict::Pipe));
+        // DSCP 0 with ECT(0) in, DSCP 46 out; matching ignores the ECN.
+        udp(&dst, 7104, 2);
+        assert_eq!(pkts(b, 0, prio, 1), 1, "{proto:?} rewritten to dscp 46");
+    }
+    let shown = show("e0", "egress");
+    println!("PEDIT {shown}");
+    assert!(shown.contains("pedit") && shown.contains("csum"), "{shown}");
+    assert_eq!(ip_hdr_errors(), before, "IPv4 header checksum still valid");
 }

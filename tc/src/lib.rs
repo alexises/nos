@@ -15,8 +15,8 @@ mod socket;
 
 pub use decode::FilterStats;
 pub use encode::{
-    encode, Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request, Verdict,
-    FLAG_FRAG_IS_FIRST, FLAG_IS_FRAGMENT,
+    encode, Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Pedit, PeditFamily, Protocol,
+    RateUnit, Request, Verdict, FLAG_FRAG_IS_FIRST, FLAG_IS_FRAGMENT,
 };
 pub use genl::{Psample, Sample};
 pub use socket::{dump, psample, send, SampleSocket};

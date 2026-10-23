@@ -76,6 +76,10 @@ pub struct FlowerKeys {
     pub icmp_code: Option<u8>,
     /// `(flags, mask)` of [`FLAG_IS_FRAGMENT`]/[`FLAG_FRAG_IS_FIRST`].
     pub flags: Option<(u32, u32)>,
+    /// The DSCP (6 bits, `0..=63`) of an IPv4 TOS or IPv6 traffic class; the
+    /// two ECN bits are never matched. Needs `Protocol::Ip`/`Ipv6`. Flower
+    /// has no IPv6 flow-label key on Linux 7.2: that match is unsupported.
+    pub ip_tos: Option<u8>,
     /// The tunnel's outer source (needs tunnel metadata on the device).
     pub enc_src_ip: Option<IpAddr>,
 }
@@ -96,6 +100,9 @@ pub enum Verdict {
     Ok,
     Shot,
     Pipe,
+    /// `TC_ACT_UNSPEC`: the filter matched and counted, tc goes on to the
+    /// next filter (iproute2's `continue`).
+    Unspec,
     /// Continue at the head of chain `n` (`n < 2^28`).
     GotoChain(u32),
 }
@@ -106,11 +113,38 @@ impl Verdict {
             Self::Ok => TC_ACT_OK,
             Self::Shot => TC_ACT_SHOT,
             Self::Pipe => TC_ACT_PIPE,
+            Self::Unspec => TC_ACT_UNSPEC,
             // Checked below 2^28 by `check`, so the cast keeps every bit.
             #[allow(clippy::cast_possible_wrap, reason = "kernel int, bit pattern")]
             Self::GotoChain(c) => (TC_ACT_GOTO_CHAIN | c) as i32,
         }
     }
+}
+
+/// What a [`ActionKind::Police`] rate and burst count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateUnit {
+    /// `rate` bytes per second, `burst` bytes.
+    Bytes,
+    /// `rate` packets per second, `burst` packets.
+    Packets,
+}
+
+/// The IP family a [`Pedit::Dscp`] rewrites; pair it with a filter of the
+/// same [`Protocol`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeditFamily {
+    Ip,
+    Ipv6,
+}
+
+/// A packet rewrite (`act_pedit`, extended keys, `set`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pedit {
+    /// Sets the DSCP (`value <= 63`) and keeps ECN (and, for IPv6, the
+    /// version and flow label). The IPv4 form is followed by an `act_csum`
+    /// action fixing the header checksum, so it takes two table entries.
+    Dscp { value: u8, family: PeditFamily },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +164,14 @@ pub enum ActionKind {
         trunc: u32,
         group: u32,
     },
+    /// `act_police`: packets within `rate`/`burst` continue (`pipe`), the
+    /// excess is dropped. Neither may be 0 (a rate of 0 is `Gact(Shot)`).
+    Police {
+        rate: u64,
+        burst: u32,
+        unit: RateUnit,
+    },
+    Pedit(Pedit),
 }
 
 /// One action; a non-empty `cookie` (at most 16 bytes) is read back by
@@ -229,6 +271,16 @@ fn check(f: &Filter) -> io::Result<()> {
         match a.kind {
             ActionKind::Gact(v) | ActionKind::Skbedit { verdict: v, .. } => check_verdict(v)?,
             ActionKind::Sample { .. } => {}
+            ActionKind::Police { rate, burst, .. } => {
+                if rate == 0 || burst == 0 {
+                    return Err(invalid("police rate and burst must be above 0"));
+                }
+            }
+            ActionKind::Pedit(Pedit::Dscp { value, .. }) => {
+                if value > 63 {
+                    return Err(invalid("dscp over 63"));
+                }
+            }
         }
     }
     if let Kind::Flower(k) = &f.kind {
@@ -236,6 +288,9 @@ fn check(f: &Filter) -> io::Result<()> {
         check_port(k.dst_port, k.ip_proto)?;
         check_prefix(k.src_ip)?;
         check_prefix(k.dst_ip)?;
+        if k.ip_tos.is_some_and(|d| d > 63) {
+            return Err(invalid("dscp over 63"));
+        }
     }
     Ok(())
 }
@@ -268,12 +323,124 @@ fn tc_gen(action: i32) -> Vec<u8> {
     v
 }
 
+/// `struct tc_police`: `limit`/`mtu` 0, the rate in bytes per second
+/// (`~0` when it needs `TCA_POLICE_RATE64`), `burst` in 64 ns ticks.
+fn tc_police(exceed: i32, rate: u32, cell_log: u8, burst_ticks: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(56);
+    v.extend_from_slice(&0u32.to_ne_bytes()); // index
+    v.extend_from_slice(&exceed.to_ne_bytes());
+    v.extend_from_slice(&0u32.to_ne_bytes()); // limit
+    v.extend_from_slice(&burst_ticks.to_ne_bytes());
+    v.extend_from_slice(&0u32.to_ne_bytes()); // mtu
+                                              // rate: cell_log, linklayer (ethernet), overhead, cell_align, mpu, rate
+    v.extend_from_slice(&[cell_log, 1, 0, 0, 0, 0, 0, 0]);
+    v.extend_from_slice(&rate.to_ne_bytes());
+    v.resize(56, 0); // peakrate, refcnt, bindcnt, capab
+    v
+}
+
+/// `count` units at `rate` units/s as `PSCHED_TICKS` (64 ns), as iproute2
+/// computes a burst.
+fn burst_ticks(count: u64, rate: u64) -> u32 {
+    let ns = u128::from(count) * 1_000_000_000 / u128::from(rate);
+    u32::try_from(ns >> 6).unwrap_or(u32::MAX)
+}
+
+/// The cell size shift of the rate table: 8 bytes per cell.
+const POLICE_CELL_LOG: u8 = 3;
+
+/// `TCA_POLICE_RATE`: 256 entries, the ticks to send `(i + 1) << cell_log`
+/// bytes. The kernel only checks its presence and size (it computes its
+/// own), but refuses a byte-rate police without it (`ENOMEM`).
+fn rate_table(rate: u64) -> Vec<u8> {
+    (1u64..=256)
+        .flat_map(|cell| burst_ticks(cell << POLICE_CELL_LOG, rate).to_ne_bytes())
+        .collect()
+}
+
+fn police(p: &mut Vec<u8>, rate: u64, burst: u32, unit: RateUnit) {
+    match unit {
+        RateUnit::Bytes => {
+            let small = u32::try_from(rate).ok();
+            let tbf = tc_police(
+                TC_ACT_SHOT,
+                small.unwrap_or(u32::MAX),
+                POLICE_CELL_LOG,
+                burst_ticks(u64::from(burst), rate),
+            );
+            nla(p, TCA_POLICE_TBF, &tbf);
+            nla(p, TCA_POLICE_RATE, &rate_table(rate));
+            if small.is_none() {
+                nla(p, TCA_POLICE_RATE64, &rate.to_ne_bytes());
+            }
+        }
+        RateUnit::Packets => {
+            // The kernel meters both modes against the one TBF burst.
+            let ticks = burst_ticks(u64::from(burst), rate);
+            nla(p, TCA_POLICE_TBF, &tc_police(TC_ACT_SHOT, 0, 0, ticks));
+            nla(p, TCA_POLICE_PKTRATE64, &rate.to_ne_bytes());
+            nla(p, TCA_POLICE_PKTBURST64, &u64::from(ticks).to_ne_bytes());
+        }
+    }
+    #[allow(clippy::cast_sign_loss, reason = "TC_ACT_PIPE is 3")]
+    let pipe = TC_ACT_PIPE as u32;
+    nla(p, TCA_POLICE_RESULT, &pipe.to_ne_bytes());
+}
+
+/// One `set` key on the first 32-bit word of the IP header: `(old & mask) ^
+/// val`, both in packet byte order.
+fn pedit(p: &mut Vec<u8>, value: u8, family: PeditFamily) {
+    let (mask, val, htype) = match family {
+        // byte 1 is the TOS: keep the ECN bits.
+        PeditFamily::Ip => (
+            [0xFF, 0x03, 0xFF, 0xFF],
+            [0, value << 2, 0, 0],
+            TCA_PEDIT_HDR_TYPE_IP4,
+        ),
+        // the traffic class is the low nibble of byte 0 and the high nibble
+        // of byte 1; its DSCP is the top 6 of those 8 bits.
+        PeditFamily::Ipv6 => (
+            [0xF0, 0x3F, 0xFF, 0xFF],
+            [value >> 2, (value & 3) << 6, 0, 0],
+            TCA_PEDIT_HDR_TYPE_IP6,
+        ),
+    };
+    // struct tc_pedit_sel: tc_gen, nkeys, flags, 2 pad; then one tc_pedit_key
+    // (mask, val, off, at, offmask, shift).
+    let mut sel = tc_gen(TC_ACT_PIPE);
+    sel.extend_from_slice(&[1, 0, 0, 0]);
+    sel.extend_from_slice(&mask);
+    sel.extend_from_slice(&val);
+    sel.extend_from_slice(&[0u8; 16]);
+    nla(p, TCA_PEDIT_PARMS_EX, &sel);
+    nested(p, TCA_PEDIT_KEYS_EX, |ks| {
+        nested(ks, TCA_PEDIT_KEY_EX, |k| {
+            nla(k, TCA_PEDIT_KEY_EX_HTYPE, &htype.to_ne_bytes());
+            nla(k, TCA_PEDIT_KEY_EX_CMD, &TCA_PEDIT_CMD_SET.to_ne_bytes());
+        });
+    });
+}
+
+/// `act_csum` recomputing the IPv4 header checksum.
+fn csum_ipv4(tab: &mut Vec<u8>, index: u16) {
+    nested(tab, index, |act| {
+        nla(act, TCA_ACT_KIND, &cstr("csum"));
+        nested(act, TCA_ACT_OPTIONS, |p| {
+            let mut v = tc_gen(TC_ACT_PIPE);
+            v.extend_from_slice(&TCA_CSUM_UPDATE_FLAG_IPV4HDR.to_ne_bytes());
+            nla(p, TCA_CSUM_PARMS, &v);
+        });
+    });
+}
+
 fn action(tab: &mut Vec<u8>, index: u16, a: &Action) {
     nested(tab, index, |act| {
         let name = match a.kind {
             ActionKind::Gact(_) => "gact",
             ActionKind::Skbedit { .. } => "skbedit",
             ActionKind::Sample { .. } => "sample",
+            ActionKind::Police { .. } => "police",
+            ActionKind::Pedit(_) => "pedit",
         };
         nla(act, TCA_ACT_KIND, &cstr(name));
         nested(act, TCA_ACT_OPTIONS, |p| match a.kind {
@@ -293,6 +460,8 @@ fn action(tab: &mut Vec<u8>, index: u16, a: &Action) {
                 nla(p, TCA_SAMPLE_TRUNC_SIZE, &trunc.to_ne_bytes());
                 nla(p, TCA_SAMPLE_PSAMPLE_GROUP, &group.to_ne_bytes());
             }
+            ActionKind::Police { rate, burst, unit } => police(p, rate, burst, unit),
+            ActionKind::Pedit(Pedit::Dscp { value, family }) => pedit(p, value, family),
         });
         if !a.cookie.is_empty() {
             nla(act, TCA_ACT_COOKIE, &a.cookie);
@@ -306,8 +475,18 @@ fn actions(out: &mut Vec<u8>, kind: u16, acts: &[Action]) {
         return;
     }
     nested(out, kind, |tab| {
-        for (i, a) in (1u16..).zip(acts) {
-            action(tab, i, a);
+        let mut index = 0u16;
+        for a in acts {
+            index += 1;
+            action(tab, index, a);
+            if let ActionKind::Pedit(Pedit::Dscp {
+                family: PeditFamily::Ip,
+                ..
+            }) = a.kind
+            {
+                index += 1;
+                csum_ipv4(tab, index);
+            }
         }
     });
 }
@@ -421,6 +600,10 @@ fn flower(o: &mut Vec<u8>, k: &FlowerKeys, protocol: Protocol) {
     if let Some((flags, mask)) = k.flags {
         nla(o, TCA_FLOWER_KEY_FLAGS, &flags.to_be_bytes());
         nla(o, TCA_FLOWER_KEY_FLAGS_MASK, &mask.to_be_bytes());
+    }
+    if let Some(dscp) = k.ip_tos {
+        nla(o, TCA_FLOWER_KEY_IP_TOS, &[dscp << 2]);
+        nla(o, TCA_FLOWER_KEY_IP_TOS_MASK, &[0xFC]);
     }
     match k.enc_src_ip {
         Some(IpAddr::V4(a)) => nla(o, TCA_FLOWER_KEY_ENC_IPV4_SRC, &a.octets()),

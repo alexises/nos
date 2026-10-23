@@ -41,6 +41,7 @@ pub const TCA_ACT_OPTIONS: u16 = 2;
 pub const TCA_ACT_STATS: u16 = 4;
 pub const TCA_ACT_COOKIE: u16 = 6;
 pub const TC_COOKIE_MAX_SIZE: usize = 16;
+pub const TC_ACT_UNSPEC: i32 = -1;
 pub const TC_ACT_OK: i32 = 0;
 pub const TC_ACT_SHOT: i32 = 2;
 pub const TC_ACT_PIPE: i32 = 3;
@@ -68,6 +69,8 @@ pub const TCA_FLOWER_KEY_UDP_SRC: u16 = 20;
 pub const TCA_FLOWER_KEY_UDP_DST: u16 = 21;
 pub const TCA_FLOWER_KEY_ENC_IPV4_SRC: u16 = 27;
 pub const TCA_FLOWER_KEY_ENC_IPV6_SRC: u16 = 31;
+pub const TCA_FLOWER_KEY_IP_TOS: u16 = 73;
+pub const TCA_FLOWER_KEY_IP_TOS_MASK: u16 = 74;
 pub const TCA_FLOWER_KEY_FLAGS: u16 = 47;
 pub const TCA_FLOWER_KEY_FLAGS_MASK: u16 = 48;
 pub const TCA_FLOWER_KEY_ICMPV4_CODE: u16 = 49;
@@ -90,6 +93,28 @@ pub const TCA_GACT_PARMS: u16 = 2;
 pub const TCA_SKBEDIT_PARMS: u16 = 2;
 pub const TCA_SKBEDIT_MARK: u16 = 5;
 pub const TCA_SKBEDIT_MASK: u16 = 8;
+
+// include/uapi/linux/pkt_sched.h: `act_police` (`struct tc_police` is 56 bytes)
+pub const TCA_POLICE_TBF: u16 = 1;
+pub const TCA_POLICE_RATE: u16 = 2;
+pub const TCA_POLICE_RESULT: u16 = 5;
+pub const TCA_POLICE_RATE64: u16 = 8;
+pub const TCA_POLICE_PKTRATE64: u16 = 10;
+pub const TCA_POLICE_PKTBURST64: u16 = 11;
+
+// include/uapi/linux/tc_act/tc_pedit.h
+pub const TCA_PEDIT_PARMS_EX: u16 = 4;
+pub const TCA_PEDIT_KEYS_EX: u16 = 5;
+pub const TCA_PEDIT_KEY_EX: u16 = 6;
+pub const TCA_PEDIT_KEY_EX_HTYPE: u16 = 1;
+pub const TCA_PEDIT_KEY_EX_CMD: u16 = 2;
+pub const TCA_PEDIT_HDR_TYPE_IP4: u16 = 2;
+pub const TCA_PEDIT_HDR_TYPE_IP6: u16 = 3;
+pub const TCA_PEDIT_CMD_SET: u16 = 0;
+
+// include/uapi/linux/tc_act/tc_csum.h
+pub const TCA_CSUM_PARMS: u16 = 1;
+pub const TCA_CSUM_UPDATE_FLAG_IPV4HDR: u32 = 1;
 
 // include/uapi/linux/tc_act/tc_sample.h
 pub const TCA_SAMPLE_PARMS: u16 = 2;
