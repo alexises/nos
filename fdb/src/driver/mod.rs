@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 pub mod linux;
 mod nexthop;
 pub mod noop;
-pub mod tc;
 
 pub use linux::LinuxFdbDriver;
 pub use noop::NoopFdbDriver;

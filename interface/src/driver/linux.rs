@@ -20,8 +20,9 @@ use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{Handle, LinkBond, LinkBridge, LinkDummy, LinkUnspec, LinkVlan, MulticastGroup};
 use tracing::{debug, info, trace, warn};
 
+use nos_tc::{Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request, Verdict};
+
 use super::links::{self, Delta, LinkHub};
-use super::tc::{self, Tc};
 use super::{
     bridge_registry, port_aggregate_registry, rib_client, BridgePortRef, DriverError,
     InterfaceDriver, LinkWatch, DEFAULT_MTU,
@@ -58,6 +59,43 @@ const ENETDOWN: i32 = 100;
 /// Deleting a filter that isn't there: `ENOENT`, or `EINVAL` when the device
 /// has no filter chain at all yet.
 const NO_FILTER: &[i32] = &[ENOENT, EINVAL, ENODEV];
+
+/// The STP BPDU trap (`docs/internals/stp.md`): a `BR_NO_STP` bridge floods
+/// the BPDU group MAC, so every bridge port gets an ingress `flower dst_mac
+/// <group> action drop` at this one priority. The drop happens after the
+/// `ETH_P_ALL` packet tap, so `nos-stpd` still sees every BPDU.
+const TRAP_PRIO: u16 = 1;
+/// Every trapped destination with its filter handle: the IEEE 802.1D/Q BPDU
+/// group address (STP, RSTP, MSTP), then Cisco's SSTP (per-VLAN STP).
+const TRAPPED: [(u32, [u8; 6]); 2] = [
+    (1, [0x01, 0x80, 0xc2, 0, 0, 0]),
+    (2, [0x01, 0x00, 0x0c, 0xcc, 0xcc, 0xcd]),
+];
+/// Protocol 802.2: every BPDU (IEEE or SSTP) is an 802.3 frame with an LLC
+/// header, and a frame carrying a VLAN tag reads as `ETH_P_8021Q` to the
+/// classifier, so the trap never drops the tagged SSTP of a trunk's
+/// sub-links on their parent port (#322); the sub-link itself sees the tag
+/// already removed.
+const TRAP_PROTOCOL: Protocol = Protocol::Llc802_2;
+
+/// `flower dst_mac <dst_mac> action drop` (exact, no mask) on `ifindex`'s
+/// ingress.
+fn bpdu_trap(ifindex: u32, handle: u32, dst_mac: [u8; 6]) -> Request {
+    Request::AddFilter(Filter {
+        ifindex,
+        hook: Hook::Ingress,
+        chain: 0,
+        prio: TRAP_PRIO,
+        protocol: TRAP_PROTOCOL,
+        handle,
+        kind: Kind::Flower(FlowerKeys {
+            eth_dst: Some((dst_mac, None)),
+            ..FlowerKeys::default()
+        }),
+        actions: vec![Action::new(ActionKind::Gact(Verdict::Shot))],
+        replace: false,
+    })
+}
 
 /// `IFLA_BRPORT_STATE` / `IFLA_BRPORT_FLUSH`, sent as raw attributes.
 const IFLA_BRPORT_STATE: u16 = 1;
@@ -259,8 +297,8 @@ impl LinuxInterfaceDriver {
         Ok(())
     }
 
-    async fn tc(&self, req: Tc, tolerate: &'static [i32]) -> Result<(), DriverError> {
-        tokio::task::spawn_blocking(move || tc::send(&req, tolerate))
+    async fn tc(&self, req: Request, tolerate: &'static [i32]) -> Result<(), DriverError> {
+        tokio::task::spawn_blocking(move || nos_tc::send(&req, tolerate))
             .await
             .map_err(|e| DriverError::Other(e.to_string()))?
             .map_err(|e| DriverError::Other(format!("tc request failed: {e}")))
@@ -376,17 +414,10 @@ impl LinuxInterfaceDriver {
     }
 
     async fn install_trap(&self, name: &str, index: u32) -> Result<(), DriverError> {
-        self.tc(Tc::Clsact { ifindex: index }, &[EEXIST]).await?;
-        for (handle, dst_mac) in tc::TRAPPED {
-            self.tc(
-                Tc::BpduTrap {
-                    ifindex: index,
-                    handle,
-                    dst_mac,
-                },
-                &[],
-            )
+        self.tc(Request::Clsact { ifindex: index }, &[EEXIST])
             .await?;
+        for (handle, dst_mac) in TRAPPED {
+            self.tc(bpdu_trap(index, handle, dst_mac), &[]).await?;
         }
         if self.stp.lock().unwrap().trapped.insert(index) {
             info!(interface = %name, "bpdu trap installed");
@@ -398,15 +429,16 @@ impl LinuxInterfaceDriver {
         if !self.stp.lock().unwrap().trapped.remove(&index) {
             return Ok(());
         }
-        for (handle, _) in tc::TRAPPED {
-            self.tc(
-                Tc::Delete {
-                    ifindex: index,
-                    handle,
-                },
-                NO_FILTER,
-            )
-            .await?;
+        for (handle, _) in TRAPPED {
+            let del = Request::DelFilter {
+                ifindex: index,
+                hook: Hook::Ingress,
+                chain: 0,
+                prio: TRAP_PRIO,
+                protocol: TRAP_PROTOCOL,
+                handle,
+            };
+            self.tc(del, NO_FILTER).await?;
         }
         info!(interface = %name, "bpdu trap removed");
         Ok(())

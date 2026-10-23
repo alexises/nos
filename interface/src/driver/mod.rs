@@ -14,7 +14,6 @@ pub mod linux;
 pub mod noop;
 pub mod port_aggregate_registry;
 pub mod rib_client;
-pub mod tc;
 
 use async_trait::async_trait;
 use thiserror::Error;

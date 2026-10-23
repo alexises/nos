@@ -26,7 +26,7 @@ async-trait        = { workspace = true }
 rtnetlink          = { workspace = true }
 netlink-packet-core  = { workspace = true }
 netlink-packet-route = { workspace = true }
-netlink-sys          = { workspace = true }
+nos-tc               = { workspace = true }
 fs2                = { workspace = true }
 serde_norway         = { workspace = true }
 tempfile           = { workspace = true }

@@ -1868,6 +1868,7 @@ dependencies = [
  "nos-log-client",
  "nos-pki",
  "nos-proto",
+ "nos-tc",
  "rtnetlink",
  "tempfile",
  "thiserror",
@@ -1889,11 +1890,11 @@ dependencies = [
  "futures",
  "netlink-packet-core",
  "netlink-packet-route",
- "netlink-sys",
  "nos-daemon",
  "nos-log-client",
  "nos-pki",
  "nos-proto",
+ "nos-tc",
  "proptest",
  "rtnetlink",
  "serde",
@@ -2226,6 +2227,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "nos-tc"
+version = "0.1.0"
+dependencies = [
+ "netlink-sys",
 ]
 
 [[package]]
