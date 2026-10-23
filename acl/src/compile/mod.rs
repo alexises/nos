@@ -1,8 +1,10 @@
-//! An `Acl` to tc flower filters (pure). One user rule is one level, and one
-//! level is one flower priority per family in the ACL's chain: tc walks the
-//! priorities in order, so the first matching rule decides, as written. The
-//! optimiser (#542) packs disjoint rules into shared levels.
+//! An `Acl` to tc flower filters (pure). A level is one flower priority per
+//! family in the ACL's chain: tc walks the priorities in order. `optimize`
+//! drops shadowed and trailing rules and packs pairwise disjoint rules into
+//! one level, so the first matching level is the first matching user rule.
 
+mod keys;
+mod optimize;
 mod rule;
 
 use nos_proto::schema::{Acl, AclAction};
@@ -36,10 +38,13 @@ pub struct Level {
 pub struct Compiled {
     pub levels: Vec<Level>,
     pub default_action: AclAction,
-    /// User rules compiled (`levels.len()` until #542).
+    /// User rules in the ACL, dropped ones included.
     pub rules: usize,
-    /// Rules dropped because an earlier rule hides them (0 until #542).
-    pub shadowed: usize,
+    /// Rules (indices into `Acl.rules`) no packet can reach because one
+    /// earlier rule matches everything they do: no filter, counter reads 0.
+    pub shadowed: Vec<u32>,
+    /// Trailing rules whose action is the default's: no filter, counter 0.
+    pub trailing: Vec<u32>,
 }
 
 impl Compiled {
@@ -67,23 +72,24 @@ pub const MAX_LEVELS: usize = (u16::MAX as usize - 2) / 2;
 
 /// Compiles `acl`. Fails only when it would not fit tc's priority space.
 pub fn compile(acl: &Acl) -> Result<Compiled, String> {
-    if acl.rules.len() > MAX_LEVELS {
+    compile_within(acl, MAX_LEVELS)
+}
+
+/// [`compile`] with a lower level limit (tests of the failure path).
+pub fn compile_within(acl: &Acl, max_levels: usize) -> Result<Compiled, String> {
+    let p = optimize::pack(acl);
+    if p.levels.len() > max_levels {
         return Err(format!(
-            "{} rules, at most {MAX_LEVELS} fit in tc's priorities",
-            acl.rules.len()
+            "{} levels, at most {max_levels} fit in tc's priorities",
+            p.levels.len()
         ));
     }
-    let levels = (0u32..)
-        .zip(&acl.rules)
-        .map(|(i, r)| Level {
-            filters: rule::filters(r, i),
-        })
-        .collect::<Vec<_>>();
     Ok(Compiled {
-        rules: levels.len(),
-        levels,
+        rules: acl.rules.len(),
+        levels: p.levels,
         default_action: acl.default_action,
-        shadowed: 0,
+        shadowed: p.shadowed,
+        trailing: p.trailing,
     })
 }
 
@@ -103,23 +109,43 @@ mod tests {
     }
 
     #[test]
-    fn rule_order_is_level_order_then_defaults() {
+    fn overlapping_rules_keep_their_order_then_defaults() {
+        let acl = Acl {
+            name: "A".into(),
+            default_action: AclAction::Deny,
+            rules: vec![
+                rule("a", AclAction::Permit, Some(AclProtocol::Icmp)),
+                rule("b", AclAction::Permit, None),
+            ],
+        };
+        // b (any) overlaps a, but permit == ... deny default: both stay.
+        let c = compile(&acl).unwrap();
+        assert_eq!((c.rules, c.shadowed.len(), c.levels.len()), (2, 0, 2));
+        assert_eq!(c.levels[0].filters.len(), 1);
+        assert_eq!(c.levels[0].filters[0].rule, 0);
+        assert_eq!(c.levels[1].filters.len(), 2);
+        assert!(c.levels[1].filters.iter().all(|f| f.rule == 1));
+        assert_eq!(c.default_action, AclAction::Deny);
+        assert_eq!(c.filters(), 5);
+    }
+
+    #[test]
+    fn dropped_rules_still_count_and_are_reported() {
         let acl = Acl {
             name: "A".into(),
             default_action: AclAction::Permit,
             rules: vec![
                 rule("a", AclAction::Deny, Some(AclProtocol::Icmp)),
-                rule("b", AclAction::Permit, None),
+                rule("b", AclAction::Deny, Some(AclProtocol::Icmp)),
+                rule("c", AclAction::Permit, None),
             ],
         };
         let c = compile(&acl).unwrap();
-        assert_eq!((c.rules, c.shadowed, c.levels.len()), (2, 0, 2));
-        assert_eq!(c.levels[0].filters.len(), 1);
-        assert_eq!(c.levels[0].filters[0].rule, 0);
-        assert_eq!(c.levels[1].filters.len(), 2);
-        assert!(c.levels[1].filters.iter().all(|f| f.rule == 1));
-        assert_eq!(c.default_action, AclAction::Permit);
-        assert_eq!(c.filters(), 5);
+        assert_eq!(
+            (c.rules, &c.shadowed[..], &c.trailing[..]),
+            (3, &[1][..], &[2][..])
+        );
+        assert_eq!((c.levels.len(), c.filters()), (1, 3));
     }
 
     #[test]
@@ -138,11 +164,21 @@ mod tests {
     }
 
     #[test]
-    fn too_many_rules_do_not_compile() {
-        let acl = Acl {
-            rules: vec![AclRule::default(); MAX_LEVELS + 1],
+    fn too_many_levels_do_not_fit() {
+        let chain = |n: u16| Acl {
+            default_action: AclAction::Permit,
+            rules: (0..n)
+                .map(|i| AclRule {
+                    action: AclAction::Deny,
+                    destination_port: Some(nos_proto::schema::PortRange { start: 0, end: i }),
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         };
-        assert!(compile(&acl).unwrap_err().contains("at most"));
+        assert_eq!(compile_within(&chain(3), 3).unwrap().levels.len(), 3);
+        assert!(compile_within(&chain(4), 3)
+            .unwrap_err()
+            .contains("at most 3"));
     }
 }

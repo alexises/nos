@@ -222,6 +222,22 @@ mod tests {
     }
 
     #[test]
+    fn a_port_range_and_udp_parse() {
+        let a = args(&["--acl-rule", "E,r,deny,udp,any,198.51.100.0/25,1000-2000"]);
+        let mut c = Config::default();
+        apply_acl(&a, &mut c);
+        let r = &c.acls[0].rules[0];
+        assert_eq!(r.protocol, Some(AclProtocol::Udp));
+        assert_eq!(
+            r.destination_port,
+            Some(PortRange {
+                start: 1000,
+                end: 2000
+            })
+        );
+    }
+
+    #[test]
     fn bad_flags_are_refused() {
         for bad in [
             ["--acl-rule", "E,r,permit"],

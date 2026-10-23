@@ -20,6 +20,10 @@ tracing     = { workspace = true }
 clap        = { workspace = true }
 anyhow      = { workspace = true }
 
+[dev-dependencies]
+ipnet    = { workspace = true }
+proptest = { workspace = true }
+
 [[bin]]
 name = "nos-acld"
 path = "src/main.rs"
