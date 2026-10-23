@@ -57,11 +57,14 @@ async fn main() -> anyhow::Result<()> {
     );
     info!(driver = ?args.driver, "nos-acld starting");
     match args.driver {
-        DriverKind::Linux => serve(args, LinuxDriver, identity, shutdown_tx, shutdown_rx).await,
+        DriverKind::Linux => {
+            serve(args, LinuxDriver, true, identity, shutdown_tx, shutdown_rx).await
+        }
         DriverKind::Noop => {
             serve(
                 args,
                 NoopDriver::default(),
+                false,
                 identity,
                 shutdown_tx,
                 shutdown_rx,
@@ -74,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
 async fn serve<D: Driver>(
     args: Args,
     driver: D,
+    log: bool,
     identity: nos_pki::Identity,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
@@ -101,7 +105,7 @@ async fn serve<D: Driver>(
     let server_task = server::start(&args.listen_socket, engine.clone(), &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start acl IPC server"))
         .context("starting acl IPC server")?;
-    let engine_task = tokio::spawn(engine::run(engine, plan_rx, links_rx, shutdown_rx));
+    let engine_task = tokio::spawn(engine::run(engine, plan_rx, links_rx, shutdown_rx, log));
 
     wait_for_shutdown_signal()
         .await

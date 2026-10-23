@@ -23,6 +23,8 @@ pub struct Filter {
     /// The user rule's index in `Acl.rules` (the tc action cookie, read back
     /// by `show acl`'s counters, #543).
     pub rule: u32,
+    /// The rule's `log`: a `sample` action precedes the verdict (#544).
+    pub log: bool,
 }
 
 /// Filters that may share priorities: at most one of them matches a packet.
@@ -53,6 +55,11 @@ impl Compiled {
     /// Every filter, the two defaults included.
     pub fn filters(&self) -> usize {
         self.levels.iter().map(|l| l.filters.len()).sum::<usize>() + 2
+    }
+
+    /// Some filter samples to psample (a kept `log` rule).
+    pub fn logs(&self) -> bool {
+        self.levels.iter().flat_map(|l| &l.filters).any(|f| f.log)
     }
 }
 
@@ -134,6 +141,25 @@ mod tests {
         assert!(c.levels[1].filters.iter().all(|f| f.rule == 1));
         assert_eq!(c.default_action, AclAction::Deny);
         assert_eq!(c.filters(), 5);
+        assert!(!c.logs());
+    }
+
+    #[test]
+    fn a_kept_log_rule_logs_on_each_of_its_filters() {
+        let mut logged = rule("l", AclAction::Deny, Some(AclProtocol::Tcp));
+        logged.log = true;
+        logged.established = true;
+        let acl = Acl {
+            name: "A".into(),
+            default_action: AclAction::Permit,
+            rules: vec![rule("a", AclAction::Deny, Some(AclProtocol::Icmp)), logged],
+        };
+        let c = compile(&acl).unwrap();
+        assert!(c.logs());
+        let f: Vec<_> = c.levels.iter().flat_map(|l| &l.filters).collect();
+        // The ACK and RST filters of both families log, the ICMP one not.
+        assert_eq!(f.iter().filter(|f| f.log).count(), 4);
+        assert!(f.iter().all(|f| f.log == (f.rule == 1)));
     }
 
     #[test]

@@ -10,6 +10,7 @@
 mod consts;
 mod decode;
 mod encode;
+mod genl;
 mod socket;
 
 pub use decode::FilterStats;
@@ -17,4 +18,5 @@ pub use encode::{
     encode, Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request, Verdict,
     FLAG_FRAG_IS_FIRST, FLAG_IS_FRAGMENT,
 };
-pub use socket::{dump, send};
+pub use genl::{Psample, Sample};
+pub use socket::{dump, psample, send, SampleSocket};

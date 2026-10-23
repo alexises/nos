@@ -20,7 +20,14 @@ $SUDO modprobe vrf dummy bonding vxlan 8021q bridge ipip || true
 # EVPN local bias (nos-fdbd, tc): flower/skbedit mark, fw/gact drop, clsact;
 # STP BPDU trap (nos-interfaced): flower + gact drop on ingress.
 $SUDO modprobe cls_flower cls_fw act_skbedit act_gact sch_ingress || true
-lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge|ipip|cls_|act_|sch_ingress' || true
+# ACL `log` (nos-acld, #544): act_sample hands packets to psample. Not
+# optional: without them the `acl` phase's log step cannot pass.
+if ! $SUDO modprobe -a act_sample psample \
+    && ! { [ -d /sys/module/act_sample ] && [ -d /sys/module/psample ]; }; then
+    echo "act_sample/psample missing on $(uname -r): the acl phase's log step needs them" >&2
+    exit 1
+fi
+lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge|ipip|cls_|act_|sch_ingress|psample' || true
 uname -r
 
 # `docker cp` to a host path writes as the caller, who can't set the

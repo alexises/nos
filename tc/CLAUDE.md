@@ -11,9 +11,10 @@ A leaf crate (only `netlink-sys`, no NOS dependencies, like `nos-l2-socket`): th
   - `Protocol::Ip`/`Ipv6` also send `TCA_FLOWER_KEY_ETH_TYPE`: flower ignores every L3 key without it.
   - `Kind::Flower(FlowerKeys)` (all `None` = match-all; a keyless flower, not `matchall`, because only flower replaces in place) or `Kind::Fw { mask }`.
   - An exact port (`min == max`) uses the `TCP_*`/`UDP_*` key (needs `ip_proto` 6 or 17); a range uses `PORT_*_MIN/MAX` (the kernel wants min below max).
-- `Action { kind, cookie }`: `Gact(Verdict)` or `Skbedit { mark, mask, verdict }`; `Verdict::GotoChain(n)` is `TC_ACT_GOTO_CHAIN | n`, `n < 2^28`. A cookie is at most 16 bytes.
+- `Action { kind, cookie }`: `Gact(Verdict)`, `Skbedit { mark, mask, verdict }` or `Sample { rate, trunc, group }` (`act_sample`, always `pipe`; the kernel hands the cookie to psample); `Verdict::GotoChain(n)` is `TC_ACT_GOTO_CHAIN | n`, `n < 2^28`. A cookie is at most 16 bytes.
 - `encode` refuses (`InvalidInput`) what the kernel would reject less clearly: long cookie, chain ≥ 2^28, inverted range, exact port without tcp/udp, prefix too long.
 - `send(&Request, tolerate)` and `dump(ifindex, hook, chain) -> Vec<FilterStats>` **block**: call them from `spawn_blocking`.
+- psample (generic netlink, hand-decoded, #544): `psample() -> Psample { family, group, user_cookie }` (`CTRL_CMD_GETFAMILY`; `ENOENT` until the module loads; `user_cookie` = `CTRL_ATTR_MAXATTR` reaches `PSAMPLE_ATTR_USER_COOKIE`), `SampleSocket::open` joins `packets` (`CAP_NET_ADMIN`), `recv() -> Vec<Sample { group, in_ifindex, out_ifindex, cookie, data }>` (blocking; `ENOBUFS` = drops, socket still usable).
 - `FilterStats`: one row per **action** (`chain, prio, handle, action, cookie, packets, bytes`); `TCA_STATS_PKT64` wins over the 32-bit `gnet_stats_basic` count. A missing chain dumps as an empty list.
 
 ## Priorities in use (chain 0, first match wins)
@@ -33,7 +34,8 @@ A leaf crate (only `netlink-sys`, no NOS dependencies, like `nos-l2-socket`): th
 - `consts.rs`: uapi values, grouped by header; private (N2 of #545).
 - `encode.rs` (pure): types, `encode`, `dump_request`. Tests in `encode_tests.rs`, including the golden bytes of the former fdb/interfaced encoders.
 - `decode.rs` (pure): `ack`, `dump_part`. Tests in `decode_tests.rs`, including a captured kernel dump reply.
-- `socket.rs`: the only I/O, a fresh socket per call.
+- `genl.rs` (pure): family request/reply, psample sample decode. Tests in `genl_tests.rs`, from a captured kernel reply and sample.
+- `socket.rs`: the only I/O, a fresh socket per call (plus the long-lived `SampleSocket`).
 
 ## Adding a key or an action
 
@@ -44,4 +46,4 @@ A leaf crate (only `netlink-sys`, no NOS dependencies, like `nos-l2-socket`): th
 ## Kernel test
 
 - `unshare -Urn cargo test -p nos-tc --test kernel -- --ignored` (needs `ip`, `tc`).
-- With `NOS_TC_CAPTURE=1 ... --nocapture` it prints `DUMP_REPLY <hex>`, the source of `decode_tests.rs`'s fixture.
+- With `NOS_TC_CAPTURE=1 ... --nocapture` it prints `DUMP_REPLY`, `FAMILY_REPLY` and `SAMPLE_MSG` hex, the sources of `decode_tests.rs`'s and `genl_tests.rs`'s fixtures.

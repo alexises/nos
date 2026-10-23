@@ -94,6 +94,7 @@ mod tests {
             keys,
             action: AclAction::Deny,
             rule: 0,
+            log: false,
         }
     }
 

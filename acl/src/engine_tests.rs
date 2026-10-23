@@ -113,6 +113,32 @@ fn attach_update_alternates_chains_then_detach() {
 }
 
 #[test]
+fn a_log_sample_names_the_installed_device_acl_and_rule() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    let acl = Acl {
+        name: "E".into(),
+        default_action: AclAction::Permit,
+        rules: vec![AclRule {
+            name: "l".into(),
+            action: AclAction::Deny,
+            log: true,
+            ..Default::default()
+        }],
+    };
+    let logged = Arc::new(compile(&acl).unwrap());
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    assert!(!e.logs());
+    e.sync(&plan(&logged, &[(eth("eth0"), In)]), &l);
+    assert!(e.logs());
+    let names = |n: &str| Some(("eth0".to_string(), "E".to_string(), n.to_string()));
+    assert_eq!(e.log_target(4, In, 0), names("l"));
+    assert_eq!(e.log_target(4, In, 1), None, "past the rules");
+    assert_eq!(e.log_target(4, Out, 0), None, "other direction");
+    assert_eq!(e.log_target(5, In, 0), None, "other device");
+}
+
+#[test]
 fn an_absent_device_waits_for_its_link() {
     let mut e = Engine::new(NoopDriver::default());
     let p = plan(&compiled(1), &[(eth("eth1"), Out)]);
@@ -246,7 +272,7 @@ async fn run_applies_changes_and_cleans_up_on_shutdown() {
     let (links_tx, links_rx) = watch::channel(LinkTable::default());
     let (stop_tx, stop_rx) = watch::channel(false);
     let engine = Arc::new(Mutex::new(Engine::new(NoopDriver::default())));
-    let task = tokio::spawn(run(engine.clone(), plan_rx, links_rx, stop_rx));
+    let task = tokio::spawn(run(engine.clone(), plan_rx, links_rx, stop_rx, false));
     plan_tx
         .send(Some(plan(&compiled(1), &[(eth("eth0"), In)])))
         .unwrap();
@@ -266,7 +292,7 @@ async fn run_stops_when_its_inputs_close() {
     let (_links_tx, links_rx) = watch::channel(LinkTable::default());
     let (_stop_tx, stop_rx) = watch::channel(false);
     let engine = Arc::new(Mutex::new(Engine::new(NoopDriver::default())));
-    let task = tokio::spawn(run(engine.clone(), plan_rx, links_rx, stop_rx));
+    let task = tokio::spawn(run(engine.clone(), plan_rx, links_rx, stop_rx, false));
     drop(plan_tx);
     task.await.unwrap();
     assert_eq!(engine.lock().unwrap().driver().calls, NONE);

@@ -5,6 +5,7 @@ pub mod compile;
 pub mod driver;
 pub mod engine;
 pub mod link_client;
+pub mod logger;
 pub mod plan;
 pub mod reconcile;
 pub mod server;

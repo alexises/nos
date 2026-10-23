@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 use crate::compile::Compiled;
 use crate::driver::{idle, Direction, Driver};
 use crate::link_client::LinkTable;
+use crate::logger;
 use crate::plan::{Device, Plan};
 use crate::status;
 
@@ -239,6 +240,34 @@ impl<D: Driver> Engine<D> {
         out
     }
 
+    /// `(interface, acl, rule)` names of rule index `rule` installed on
+    /// (`ifindex`, `dir`), for an `acl log` line; `None` for what this run did
+    /// not install or an index past the ACL.
+    pub fn log_target(
+        &self,
+        ifindex: u32,
+        dir: Direction,
+        rule: u32,
+    ) -> Option<(String, String, String)> {
+        let ((dev, _), at) = self
+            .installed
+            .iter()
+            .find(|((_, d), at)| *d == dir && at.ifindex == ifindex)?;
+        let (rule, _) = at
+            .acl
+            .as_ref()?
+            .rule_names
+            .get(usize::try_from(rule).ok()?)?;
+        Some((dev.clone(), at.name.clone()?, rule.clone()))
+    }
+
+    /// An installed ACL has a `log` rule.
+    pub fn logs(&self) -> bool {
+        self.installed
+            .values()
+            .any(|at| at.acl.as_ref().is_some_and(|a| a.logs()))
+    }
+
     /// Clean stop (SIGINT): every entry, then its chains.
     pub fn shutdown(&mut self) {
         let keys: Vec<Key> = self.installed.keys().cloned().collect();
@@ -261,21 +290,27 @@ impl<D: Driver> Engine<D> {
 pub type Shared<D> = Arc<Mutex<Engine<D>>>;
 
 /// Runs passes on every plan or link change until `shutdown`, then removes
-/// everything it installed.
+/// everything it installed. With `log` (the Linux driver), the first pass
+/// that installs a `log` rule starts the [`logger`] thread.
 pub async fn run<D: Driver>(
     engine: Shared<D>,
     mut plan_rx: watch::Receiver<Option<Plan>>,
     mut links_rx: watch::Receiver<LinkTable>,
     mut shutdown: watch::Receiver<bool>,
+    mut log: bool,
 ) {
     loop {
         let plan = plan_rx.borrow_and_update().clone();
         let links = links_rx.borrow_and_update().clone();
         if let Some(plan) = plan {
-            let engine = engine.clone();
-            tokio::task::spawn_blocking(move || engine.lock().unwrap().sync(&plan, &links))
+            let pass = engine.clone();
+            tokio::task::spawn_blocking(move || pass.lock().unwrap().sync(&plan, &links))
                 .await
                 .expect("acl pass panicked");
+            if log && engine.lock().unwrap().logs() {
+                log = false;
+                logger::spawn(engine.clone());
+            }
         }
         tokio::select! {
             r = plan_rx.changed() => if r.is_err() { break },

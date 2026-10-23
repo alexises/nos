@@ -21,15 +21,15 @@ pub struct FilterStats {
     pub bytes: u64,
 }
 
-fn bad(msg: &str) -> io::Error {
+pub(crate) fn bad(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-fn u16_at(b: &[u8], at: usize) -> u16 {
+pub(crate) fn u16_at(b: &[u8], at: usize) -> u16 {
     u16::from_ne_bytes([b[at], b[at + 1]])
 }
 
-fn u32_at(b: &[u8], at: usize) -> u32 {
+pub(crate) fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_ne_bytes(b[at..at + 4].try_into().unwrap())
 }
 
@@ -39,7 +39,7 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 
 /// The `(type, payload)` attributes of a block, one level deep, flags
 /// stripped.
-fn attrs(b: &[u8]) -> io::Result<Vec<(u16, &[u8])>> {
+pub(crate) fn attrs(b: &[u8]) -> io::Result<Vec<(u16, &[u8])>> {
     let mut v = Vec::new();
     let mut at = 0;
     while at + 4 <= b.len() {
@@ -53,11 +53,11 @@ fn attrs(b: &[u8]) -> io::Result<Vec<(u16, &[u8])>> {
     Ok(v)
 }
 
-fn find<'a>(attrs: &[(u16, &'a [u8])], kind: u16) -> Option<&'a [u8]> {
+pub(crate) fn find<'a>(attrs: &[(u16, &'a [u8])], kind: u16) -> Option<&'a [u8]> {
     attrs.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
 }
 
-fn errno_of(msg: &[u8]) -> io::Result<i32> {
+pub(crate) fn errno_of(msg: &[u8]) -> io::Result<i32> {
     if msg.len() < 20 {
         return Err(bad("short netlink error"));
     }

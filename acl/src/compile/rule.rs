@@ -54,6 +54,7 @@ pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
             },
             action: r.action,
             rule: index,
+            log: r.log,
         })
         .collect()
 }
