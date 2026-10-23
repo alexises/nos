@@ -51,6 +51,7 @@ fn higher_local_pref_wins_best_path() {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                ipv6_extended_communities: Vec::new(),
                 pmsi: None,
             }),
             ..empty_update()
@@ -79,6 +80,7 @@ fn higher_local_pref_wins_best_path() {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                ipv6_extended_communities: Vec::new(),
                 pmsi: None,
             }),
             ..empty_update()

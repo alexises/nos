@@ -112,7 +112,9 @@ fn route_server_client_without_add_path_gets_only_ordinary_single_best() {
         OutboundUpdate::AnnounceEvpn(_)
         | OutboundUpdate::WithdrawEvpn(_)
         | OutboundUpdate::RefreshMarker { .. }
-        | OutboundUpdate::EndOfRib(_) => true,
+        | OutboundUpdate::EndOfRib(_)
+        | OutboundUpdate::AnnounceFlowspec(_)
+        | OutboundUpdate::WithdrawFlowspec(..) => true,
     }));
     // Still transparent (no AS_PATH prepend) — that's governed by
     // is_rs_client alone, independent of ADD-PATH negotiation. Only

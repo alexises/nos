@@ -647,6 +647,14 @@ pub struct Args {
     /// (define it with `--policy-name`); unset leaves it as is (accept all).
     #[arg(long)]
     pub evpn_import_policy: Option<String>,
+    /// If set, points `--peer-group`'s Flowspec import policy at this policy;
+    /// unset leaves it as is (accept all).
+    #[arg(long)]
+    pub flowspec_import_policy: Option<String>,
+    /// If set, points `--peer-group`'s Flowspec export policy at this policy;
+    /// unset leaves it as is (advertise all).
+    #[arg(long)]
+    pub flowspec_export_policy: Option<String>,
 
     /// If set, ensures a loopback interface for `--routing-table` (named
     /// `loopback-<routing-table>`, per `nos_proto::LOOPBACK_PREFIX` — the
@@ -2406,6 +2414,19 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         ));
     }
+    for (export, policy) in [
+        (false, &args.flowspec_import_policy),
+        (true, &args.flowspec_export_policy),
+    ] {
+        if let Some(policy) = policy {
+            ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetFlowspecPolicy {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                export,
+                policy: Some(policy.clone()),
+            }));
+        }
+    }
 
     if args.wants_bfd_profile() {
         ops.push(ConfigOp::BfdProfile(BfdProfileOp::Ensure {
@@ -4110,6 +4131,28 @@ mod tests {
                 enabled: false,
             }),
         );
+    }
+
+    #[test]
+    fn flowspec_policy_flags_set_the_peer_group_policies() {
+        let ops = ops(&[
+            "--flowspec-import-policy",
+            "fs-in",
+            "--flowspec-export-policy",
+            "fs-out",
+        ])
+        .unwrap();
+        for (export, policy) in [(false, "fs-in"), (true, "fs-out")] {
+            has(
+                &ops,
+                &ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetFlowspecPolicy {
+                    instance: "r1".into(),
+                    name: "pg1".into(),
+                    export,
+                    policy: Some(policy.into()),
+                }),
+            );
+        }
     }
 
     #[test]

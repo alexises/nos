@@ -115,6 +115,9 @@ const ATTR_COMMUNITY: u8 = 8;
 const ATTR_EXTENDED_COMMUNITIES: u8 = 16;
 /// RFC 8092 §3 large community — a list of 12-byte (3×u32) values.
 const ATTR_LARGE_COMMUNITY: u8 = 32;
+/// RFC 5701 IPv6 address specific extended community — a list of 20-byte
+/// values (RFC 8956 section 6.1's IPv6 redirect lives here).
+const ATTR_IPV6_EXTENDED_COMMUNITIES: u8 = 25;
 const ATTR_PMSI_TUNNEL: u8 = 22;
 /// RFC 9234 §4.1 Only to Customer (optional transitive, one ASN).
 const ATTR_OTC: u8 = 35;
@@ -440,6 +443,11 @@ pub struct PathAttributes {
     /// local data 2. Empty iff the wire message carried no `LARGE_COMMUNITY`
     /// attribute.
     pub large_communities: Vec<(u32, u32, u32)>,
+    /// RFC 5701 `IPV6_EXTENDED_COMMUNITIES`, 20 raw wire bytes each. Empty
+    /// iff the wire message carried none.
+    // ponytail: only Flowspec re-advertises them (#560); a unicast route
+    // drops them on re-advertisement.
+    pub ipv6_extended_communities: Vec<[u8; 20]>,
     /// RFC 6514 §5 PMSI Tunnel — carried on EVPN Type-3 routes (RFC 8365
     /// §8.2.1), which is where the VNI of an inclusive multicast route lives.
     pub pmsi: Option<Pmsi>,
@@ -1380,6 +1388,7 @@ struct ParsedAttributes {
     communities: Vec<u32>,
     extended_communities: Vec<u64>,
     large_communities: Vec<(u32, u32, u32)>,
+    ipv6_extended_communities: Vec<[u8; 20]>,
     pmsi: Option<Pmsi>,
     atomic_aggregate: bool,
     aggregator: Option<Aggregator>,
@@ -1412,6 +1421,7 @@ fn expected_flags(attr_type: u8) -> Option<u8> {
         | ATTR_COMMUNITY
         | ATTR_EXTENDED_COMMUNITIES
         | ATTR_LARGE_COMMUNITY
+        | ATTR_IPV6_EXTENDED_COMMUNITIES
         | ATTR_AS4_PATH
         | ATTR_AS4_AGGREGATOR
         | ATTR_PMSI_TUNNEL
@@ -1548,6 +1558,11 @@ fn parse_one_attribute(
                 })
                 .collect();
         }
+        // RFC 5701 section 3 / RFC 7606 section 7.15.
+        ATTR_IPV6_EXTENDED_COMMUNITIES => match value.as_chunks::<20>() {
+            (c, []) => acc.out.ipv6_extended_communities = c.to_vec(),
+            _ => acc.out.withdraw = true,
+        },
         // RFC 7606 §7.7/§7.8: a malformed one is discarded, not a withdraw.
         ATTR_ATOMIC_AGGREGATE => acc.out.atomic_aggregate = value.is_empty(),
         ATTR_AGGREGATOR => {
@@ -1984,6 +1999,7 @@ fn parse_update(
                     communities: parsed.communities,
                     extended_communities: parsed.extended_communities,
                     large_communities: parsed.large_communities,
+                    ipv6_extended_communities: parsed.ipv6_extended_communities,
                     pmsi: parsed.pmsi,
                     atomic_aggregate: parsed.atomic_aggregate,
                     aggregator: parsed.aggregator,
@@ -2228,6 +2244,14 @@ fn encode_path_attrs(
             &value,
         );
     }
+    if !attrs.ipv6_extended_communities.is_empty() {
+        encode_attribute(
+            out,
+            ATTR_FLAG_OPTIONAL_TRANSITIVE,
+            ATTR_IPV6_EXTENDED_COMMUNITIES,
+            attrs.ipv6_extended_communities.as_flattened(),
+        );
+    }
 }
 
 /// Builds the whole path-attribute TLV list for one UPDATE: the legacy
@@ -2396,6 +2420,7 @@ mod tests {
                 communities: vec![],
                 extended_communities: vec![],
                 large_communities: vec![],
+                ipv6_extended_communities: Vec::new(),
                 pmsi: None,
             }),
             mp_reach: vec![],
@@ -2782,6 +2807,74 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_extended_communities_roundtrip_and_bad_length_is_treat_as_withdraw() {
+        let mut update = as_path_update(vec![65001]);
+        let mut c = [0u8; 20];
+        c[1] = 0x0d;
+        c[19] = 7;
+        update
+            .attributes
+            .as_mut()
+            .unwrap()
+            .ipv6_extended_communities = vec![c, [1; 20]];
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update.clone())
+        );
+        assert!(attr_types(&update, false).contains(&ATTR_IPV6_EXTENDED_COMMUNITIES));
+        update
+            .attributes
+            .as_mut()
+            .unwrap()
+            .ipv6_extended_communities = Vec::new();
+        assert!(!attr_types(&update, false).contains(&ATTR_IPV6_EXTENDED_COMMUNITIES));
+        for len in [19usize, 21] {
+            let mut attrs = Vec::new();
+            encode_attribute(&mut attrs, 0x40, ATTR_ORIGIN, &[0]);
+            encode_attribute(&mut attrs, 0x40, ATTR_AS_PATH, &[]);
+            encode_attribute(&mut attrs, 0x40, ATTR_NEXT_HOP, &[192, 0, 2, 1]);
+            encode_attribute(
+                &mut attrs,
+                0xC0,
+                ATTR_IPV6_EXTENDED_COMMUNITIES,
+                &vec![0; len],
+            );
+            let p = parse_path_attributes(&attrs, &HashSet::new(), false).unwrap();
+            assert!(p.withdraw, "length {len}");
+        }
+    }
+
+    /// RFC 7606 section 3(d): a Flowspec announcement missing a mandatory
+    /// attribute becomes a withdrawal of its rules.
+    #[test]
+    fn a_flowspec_announcement_without_origin_is_treat_as_withdraw() {
+        let mut attrs = Vec::new();
+        encode_attribute(&mut attrs, 0x40, ATTR_AS_PATH, &[]);
+        let mut reach = Vec::new();
+        encode_attribute(
+            &mut reach,
+            0x80,
+            ATTR_MP_REACH_NLRI,
+            &encode_mp_reach(&MpReachNlri {
+                afi: AFI_IPV4,
+                safi: SAFI_FLOWSPEC,
+                next_hop: Ipv4Addr::UNSPECIFIED.into(),
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn: vec![],
+                flowspec: flow_rules(flowspec::Afi::V4),
+            }),
+        );
+        attrs.extend(reach);
+        let mut body = vec![0, 0];
+        body.extend(u16::try_from(attrs.len()).unwrap().to_be_bytes());
+        body.extend(attrs);
+        let u = parse_update(&body, &HashSet::new(), false).unwrap();
+        assert!(u.attributes.is_none() && u.mp_reach.is_empty());
+        assert_eq!(u.mp_unreach[0].flowspec, flow_rules(flowspec::Afi::V4));
+    }
+
+    #[test]
     fn malformed_aggregate_attributes_are_discarded_not_withdrawn() {
         let mut attrs = Vec::new();
         encode_attribute(&mut attrs, 0x40, ATTR_ORIGIN, &[0]);
@@ -3071,6 +3164,7 @@ mod tests {
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
+            ipv6_extended_communities: Vec::new(),
             pmsi: None,
         }
     }
@@ -3111,6 +3205,7 @@ mod tests {
                 communities: vec![(65000 << 16) | 100, 0xFFFF_FF01],
                 extended_communities: vec![(0u64 << 56) | (2u64 << 48) | 100],
                 large_communities: vec![(65000, 1, 1)],
+                ipv6_extended_communities: Vec::new(),
                 pmsi: None,
                 ..attrs(vec![65001], Some(200))
             }),
@@ -3572,6 +3667,7 @@ mod tests {
                 communities: vec![],
                 extended_communities: vec![],
                 large_communities: vec![],
+                ipv6_extended_communities: Vec::new(),
                 pmsi: None,
             })
         );

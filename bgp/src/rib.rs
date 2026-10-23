@@ -101,11 +101,13 @@ mod adj_in;
 mod aggregate;
 mod decision;
 mod evpn_out;
+mod flowspec_out;
 mod flowspec_validate;
 mod gr;
 mod outbox;
 mod shared;
 pub use evpn_out::{feeds as evpn_feeds, AdvertisedEvpn, EvpnSource};
+pub use flowspec_out::AdvertisedFlowspec;
 #[cfg(test)]
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
@@ -241,9 +243,9 @@ pub enum RouteOrigin {
     Peer(IpAddr),
 }
 
-/// One received Flowspec (RFC 8955) route — `Adj-RIB-In` content, nothing
-/// derived. The whole attribute set is kept: validation (#559) and policy
-/// (#560) read it.
+/// One received Flowspec (RFC 8955) route — `Adj-RIB-In` content, after
+/// the peer's Flowspec import policy. The whole attribute set is kept:
+/// validation (#559), selection and propagation (#560) read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowspecRoute {
     /// `Ipv4Flowspec` or `Ipv6Flowspec` (the same bytes differ per AFI).
@@ -253,14 +255,18 @@ pub struct FlowspecRoute {
     /// Learned over iBGP or from a confederation member (RFC 8955 section 6
     /// assumes those validated: no first-AS check).
     pub learned_via_ibgp: bool,
+    /// The advertising peer's BGP Identifier (decision step 9).
+    pub router_id: Ipv4Addr,
+    /// When first received with these attributes (decision step 8).
+    pub received_at: Instant,
     /// RFC 8955 section 6 state; `None` only between learning and the first
     /// validation, which follows at once.
     pub validity: Option<FlowValidity>,
 }
 
 impl FlowspecRoute {
-    /// Valid, so eligible for what later consumes routes (#560): an invalid
-    /// route stays in the Adj-RIB-In for `show`, nothing more.
+    /// Valid, so a best-path candidate (`select_flow`): an invalid route
+    /// stays in the Adj-RIB-In for `show`, nothing more.
     #[must_use]
     pub fn is_usable(&self) -> bool {
         self.validity == Some(FlowValidity::Valid)
@@ -390,6 +396,9 @@ pub enum OutboundUpdate {
     },
     /// RFC 4724 §2 End-of-RIB for one family, after a session's initial dump.
     EndOfRib(AddressFamily),
+    /// A selected Flowspec rule (see `flowspec_out`).
+    AnnounceFlowspec(AdvertisedFlowspec),
+    WithdrawFlowspec(AddressFamily, FlowSpec),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -562,9 +571,16 @@ pub struct BgpRib {
     /// Peers with an EVPN import policy (`set_peer_evpn_import_policy`); a
     /// peer absent here accepts every EVPN route.
     evpn_import: HashMap<IpAddr, Arc<CompiledPolicy>>,
-    /// Received Flowspec routes per peer (receive-only, #558: no validation,
-    /// policy or best path yet).
+    /// Received Flowspec routes per peer (after import policy, validated).
     flowspec_adj_rib_in: HashMap<IpAddr, HashMap<FlowspecKey, FlowspecRoute>>,
+    /// Per rule, the selected copy and the peer it came from (`select_flow`).
+    flowspec_loc: HashMap<FlowspecKey, (IpAddr, FlowspecRoute)>,
+    /// What each peer was last sent per rule (`sync_flow_to`).
+    flowspec_adj_rib_out: HashMap<IpAddr, HashMap<FlowspecKey, AdvertisedFlowspec>>,
+    /// Peers with a Flowspec import / export policy
+    /// (`set_peer_flowspec_policies`); a peer absent here accepts all.
+    flowspec_import: HashMap<IpAddr, Arc<CompiledPolicy>>,
+    flowspec_export: HashMap<IpAddr, Arc<CompiledPolicy>>,
     /// The Flowspec twin of `evpn_stale`.
     flowspec_stale: HashMap<IpAddr, HashSet<FlowspecKey>>,
     /// Peers whose peer-group relaxes rule (a) (`set_peer_flowspec_relax`).
@@ -702,6 +718,10 @@ impl BgpRib {
             evpn_adj_rib_in: HashMap::new(),
             evpn_import: HashMap::new(),
             flowspec_adj_rib_in: HashMap::new(),
+            flowspec_loc: HashMap::new(),
+            flowspec_adj_rib_out: HashMap::new(),
+            flowspec_import: HashMap::new(),
+            flowspec_export: HashMap::new(),
             flowspec_stale: HashMap::new(),
             flowspec_relax_dest: HashSet::new(),
             flow_ix: flowspec_validate::FlowIndexes::default(),
@@ -1242,6 +1262,7 @@ impl BgpRib {
         self.damping.clear_peer(peer);
         self.adj_rib_out.remove(&peer);
         self.evpn_adj_rib_out.remove(&peer);
+        self.flowspec_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
         if let (false, Some(gr)) = (retained.is_empty(), gr) {
@@ -1253,10 +1274,15 @@ impl BgpRib {
         self.evpn_stale.remove(&peer);
         self.flowspec_stale.remove(&peer);
         self.gr_deadline.remove(&peer);
-        if let Some(routes) = self.flowspec_adj_rib_in.remove(&peer) {
-            for r in routes.values() {
-                info!(peer = %peer, family = %r.family, route = %r.nlri, "flowspec route withdrawn");
-            }
+        let flows: Vec<FlowspecKey> = self
+            .flowspec_adj_rib_in
+            .remove(&peer)
+            .into_iter()
+            .flat_map(HashMap::into_keys)
+            .collect();
+        for k in flows {
+            info!(peer = %peer, family = %k.0, route = %k.1, "flowspec route withdrawn");
+            self.select_flow(&k);
         }
         if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
             // mac_mobility's record of this route's (vni, mac) is
@@ -1516,6 +1542,7 @@ impl BgpRib {
                     self.local_asn,
                     source_is_rr_client,
                     self.cluster_id,
+                    None,
                 )
             });
 
@@ -1635,6 +1662,7 @@ impl BgpRib {
                 self.local_asn,
                 self.source_is_rr_client(route),
                 self.cluster_id,
+                None,
             ) {
                 selected.push(((route.origin, *id), route, adv));
             }

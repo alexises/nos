@@ -135,6 +135,10 @@ topics! {
     BgpPeerGroupEnforceFirstAs,
     /// `BgpPeerGroup.flowspec_validation`
     BgpPeerGroupFlowspecValidation,
+    /// `BgpPeerGroup.flowspec_import_policy`
+    BgpPeerGroupFlowspecImportPolicy,
+    /// `BgpPeerGroup.flowspec_export_policy`
+    BgpPeerGroupFlowspecExportPolicy,
     /// `BgpPeerGroup.shutdown`
     BgpPeerGroupShutdown,
     /// `BgpInstance.peers`

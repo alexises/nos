@@ -242,6 +242,9 @@ impl BgpRib {
         }
         self.compact_flows();
         self.revalidate_flow(peer, k);
+        // An attribute change (or a reject) re-selects even when the
+        // validity did not move.
+        self.select_flow(k);
     }
 
     /// Drops index entries of rules no longer held once they outnumber the
@@ -316,6 +319,7 @@ impl BgpRib {
         if r.validity != Some(new) {
             r.validity = Some(new);
             info!(peer = %peer, family = %r.family, flow = %r.nlri, validity = %new, "flowspec validity changed");
+            self.select_flow(k);
         }
     }
 

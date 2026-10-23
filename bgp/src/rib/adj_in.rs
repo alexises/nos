@@ -105,35 +105,59 @@ pub(super) fn learn_evpn(
     }
 }
 
+/// One received Flowspec batch's per-peer context, handed to `learn_flowspec`.
+pub(super) struct FlowRx<'a> {
+    pub from: IpAddr,
+    pub family: AddressFamily,
+    pub attributes: &'a message::PathAttributes,
+    pub learned_via_ibgp: bool,
+    pub router_id: Ipv4Addr,
+    /// The peer's Flowspec import policy (`None` accepts all), its AS and
+    /// whether it is a confederation peer.
+    pub import: Option<(&'a CompiledPolicy, u32, bool)>,
+}
+
 /// Stores one `MP_REACH_NLRI` batch's Flowspec rules in a peer's Flowspec
-/// Adj-RIB-In, logging only rules that are new or changed, and returns their
-/// keys for validation (which needs the unicast RIB, so the caller runs it).
-/// A re-announcement keeps the rule's validity until it is re-validated.
+/// Adj-RIB-In through its import policy (a reject is a withdraw), logging
+/// only rules that are new or changed, and returns their keys for
+/// validation and selection (which need the whole RIB, so the caller runs
+/// them). A re-announcement keeps the rule's validity until it is
+/// re-validated, and its age when nothing changed.
 pub(super) fn learn_flowspec(
     table: &mut HashMap<FlowspecKey, FlowspecRoute>,
-    from: IpAddr,
-    family: AddressFamily,
     mp: &message::MpReachNlri,
-    attributes: &message::PathAttributes,
-    learned_via_ibgp: bool,
+    rx: &FlowRx<'_>,
 ) -> Vec<FlowspecKey> {
+    let (from, family) = (rx.from, rx.family);
     let mut keys = Vec::with_capacity(mp.flowspec.len());
     for nlri in &mp.flowspec {
         let k = (family, nlri.clone());
         let mut route = FlowspecRoute {
             family,
             nlri: nlri.clone(),
-            attributes: attributes.clone(),
-            learned_via_ibgp,
+            attributes: rx.attributes.clone(),
+            learned_via_ibgp: rx.learned_via_ibgp,
+            router_id: rx.router_id,
+            received_at: Instant::now(),
             validity: None,
         };
+        keys.push(k.clone());
+        if let Some((policy, peer_as, confed)) = rx.import
+            && !super::flowspec_out::import_flow(policy, &mut route, from, peer_as, confed)
+        {
+            table.remove(&k);
+            warn!(peer = %from, family = %family, route = %nlri, "flowspec route rejected by import policy");
+            continue;
+        }
         if let Some(old) = table.get(&k) {
             route.validity = old.validity;
+            if old.attributes == route.attributes {
+                route.received_at = old.received_at;
+            }
         }
-        if table.insert(k.clone(), route.clone()) != Some(route) {
+        if table.insert(k, route.clone()) != Some(route) {
             info!(peer = %from, family = %family, route = %nlri, "flowspec route learned");
         }
-        keys.push(k);
     }
     keys
 }
@@ -543,13 +567,7 @@ impl BgpRib {
                 continue;
             };
             for rule in &u.flowspec {
-                let removed = self
-                    .flowspec_adj_rib_in
-                    .get_mut(&from)
-                    .is_some_and(|t| t.remove(&(family, rule.clone())).is_some());
-                if removed {
-                    info!(peer = %from, family = %family, route = %rule, "flowspec route withdrawn");
-                }
+                self.drop_flow(from, &(family, rule.clone()));
             }
         }
         for &(prefix, id) in &withdrawn {
@@ -705,13 +723,19 @@ impl BgpRib {
                 {
                     warn!(peer = %from, family = %family, "flowspec routes for a family not negotiated, ignored");
                 } else {
-                    flow_keys.extend(learn_flowspec(
-                        self.flowspec_adj_rib_in.entry(from).or_default(),
+                    let import = self.flowspec_import.get(&from).cloned();
+                    let rx = FlowRx {
                         from,
                         family,
+                        attributes: attrs,
+                        learned_via_ibgp: remote_is_ibgp || from_confed,
+                        router_id: remote_bgp_id,
+                        import: import.as_deref().map(|p| (p, peer_as, from_confed)),
+                    };
+                    flow_keys.extend(learn_flowspec(
+                        self.flowspec_adj_rib_in.entry(from).or_default(),
                         mp,
-                        attrs,
-                        remote_is_ibgp || from_confed,
+                        &rx,
                     ));
                 }
             }
@@ -744,16 +768,11 @@ impl BgpRib {
             }
         }
         for m in &update.mp_reach {
-            let (Some(family), Some(table)) = (
-                flowspec_family(m.afi),
-                self.flowspec_adj_rib_in.get_mut(&from),
-            ) else {
+            let Some(family) = flowspec_family(m.afi) else {
                 continue;
             };
             for rule in &m.flowspec {
-                if table.remove(&(family, rule.clone())).is_some() {
-                    info!(peer = %from, family = %family, route = %rule, "flowspec route withdrawn");
-                }
+                self.drop_flow(from, &(family, rule.clone()));
             }
         }
         if let Some(table) = self.evpn_adj_rib_in.get_mut(&from) {

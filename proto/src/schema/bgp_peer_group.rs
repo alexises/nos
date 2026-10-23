@@ -638,6 +638,21 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupFlowspecValidation)]
     pub flowspec_validation: BgpFlowspecValidation,
+
+    /// Policy applied to valid Flowspec rules received from this group's
+    /// peers before best-path selection. Like `evpn_import_policy`, `None`
+    /// accepts every rule; rewrites are honoured.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = BgpPeerGroupFlowspecImportPolicy)]
+    pub flowspec_import_policy: Option<String>,
+
+    /// Policy applied to Flowspec rules advertised to this group's peers.
+    /// `None` advertises every selected rule.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = BgpPeerGroupFlowspecExportPolicy)]
+    pub flowspec_export_policy: Option<String>,
 }
 
 /// Knobs of the RFC 8955 §6 Flowspec validation procedure.
@@ -970,6 +985,8 @@ mod tests {
             evpn_import_policy: None,
             enforce_first_as: None,
             flowspec_validation: BgpFlowspecValidation::default(),
+            flowspec_import_policy: None,
+            flowspec_export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

@@ -2947,8 +2947,12 @@ fn flowspec_flags() -> Vec<String> {
 /// withdrawal. RFC 8955 section 6 validation (#559): with no covering unicast
 /// route each rule is `invalid:no-covering-unicast-route`; GoBGP announcing a
 /// covering prefix flips it to `valid` (revalidation, logged as `flowspec
-/// validity changed`) and withdrawing that prefix flips it back. Nothing is
-/// enforced yet (#560).
+/// validity changed`) and withdrawing that prefix flips it back.
+/// Propagation (#560): router-a re-advertises the valid IPv4 rule (never the
+/// invalid IPv6 one) to router-b over eBGP; router-b's Flowspec import
+/// policy (matching the destination prefix) and router-a's Flowspec export
+/// policy each stop it, and the covering prefix's withdrawal withdraws it
+/// from router-b. Nothing is enforced (no dataplane).
 pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
     gobgp_speaker(
         w,
@@ -2957,7 +2961,36 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
         &[],
     )
     .await?;
-    let a = w.a()?;
+    // router-b peers router-a over eBGP, Flowspec on both ends.
+    let a_to_b = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--address",
+            &format!("{IP_A}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--peer-group",
+            "pg-b",
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B,
+            "--flowspec",
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    let b_flags = |extra: &[&str]| {
+        let mut f = B.base_flags();
+        f.push("--flowspec".into());
+        f.extend(strings(extra));
+        f
+    };
+    w.a()?.provision_flags(&a_to_b(&[])).await?;
+    w.start(B, Some(b_flags(&[])), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    b.established().await?;
 
     let rules: [(&str, &[&str], &str); 2] = [
         (
@@ -3037,11 +3070,18 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
         bail!("expected the IPv4 rule valid and the IPv6 one invalid: {body}");
     }
 
-    // Withdrawing the covering prefix revalidates it again.
+    flowspec_propagation(w, &a_to_b, &b_flags).await?;
+    let (a, b) = (w.a()?, w.b()?);
+
+    // Withdrawing the covering prefix revalidates it again, and router-b
+    // loses the rule.
     let invalid = changed("ipv4-flowspec", "invalid:no-covering-unicast-route");
     let base = a.count(&invalid);
+    let b_withdrawn = format!("flowspec route withdrawn peer={IP_A} family=ipv4-flowspec");
+    let b_base = b.count(&b_withdrawn);
     gobgp(w, &["global", "rib", "del", "-a", family, prefix]).await?;
     a.wait_new(&invalid, base, 30).await?;
+    b.wait_new(&b_withdrawn, b_base, 30).await?;
 
     log("withdrawing the IPv4 rule explicitly");
     let base = a.count(&withdrawn("ipv4-flowspec"));
@@ -3052,6 +3092,91 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
         bail!("expected only the IPv6 rule after the withdrawal: {body}");
     }
     Ok(())
+}
+
+/// The #560 half of `flowspec`, run while router-a holds GoBGP's IPv4 rule
+/// as valid and its IPv6 one as invalid: router-b learns and validates the
+/// IPv4 rule only; its import policy, then router-a's export policy, keep it
+/// out (each change restarts the session), and accept-all brings it back.
+async fn flowspec_propagation(
+    w: &World,
+    a_to_b: &dyn Fn(&[&str]) -> Vec<String>,
+    b_flags: &dyn Fn(&[&str]) -> Vec<String>,
+) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let learned = format!("flowspec route learned peer={IP_A} family=ipv4-flowspec");
+    let b_show = || b.rest_expect(Method::GET, "/v1/bgp/flowspec", None, 200);
+
+    log("router-a re-advertises the valid IPv4 rule to router-b, not the invalid IPv6 one");
+    a.wait(&format!(
+        "flowspec route advertised peer={IP_B} family=ipv4-flowspec"
+    ))
+    .await?;
+    b.wait(&learned).await?;
+    b.wait(&format!(
+        "flowspec validity changed peer={IP_A} family=ipv4-flowspec.*validity=valid"
+    ))
+    .await?;
+    let body = b_show().await?;
+    for want in ["dest 192.0.2.0/24", "traffic-rate:0:0", "discard", IP_A] {
+        if !body.contains(want) {
+            bail!("router-b's show bgp flowspec is missing {want}: {body}");
+        }
+    }
+    if body.contains("2001:db8:f::/48") {
+        bail!("an invalid rule was propagated to router-b: {body}");
+    }
+
+    log("router-b's flowspec import policy rejects the rule by its destination prefix");
+    let reject = policy_file(
+        "flowspec-reject-dest",
+        "if this.prefix == 192.0.2.0/24:\n    reject\naccept\n",
+    )?;
+    let rejected =
+        format!("flowspec route rejected by import policy peer={IP_A} family=ipv4-flowspec");
+    let (base, sessions) = (b.count(&rejected), b.count("bgp session established"));
+    b.provision_flags(&b_flags(&[
+        "--policy-name",
+        "flowspec-reject-dest",
+        "--policy-source-file",
+        &reject,
+        "--flowspec-import-policy",
+        "flowspec-reject-dest",
+    ]))
+    .await?;
+    reestablished(b, sessions).await?;
+    b.wait_new(&rejected, base, 60).await?;
+    if b_show().await?.contains("dest 192.0.2.0/24") {
+        bail!("router-b still shows a rule its import policy rejects");
+    }
+    let (base, sessions) = (b.count(&learned), b.count("bgp session established"));
+    b.provision_flags(&b_flags(&["--flowspec-import-policy", "accept-all"]))
+        .await?;
+    reestablished(b, sessions).await?;
+    b.wait_new(&learned, base, 60).await?;
+
+    log("router-a's flowspec export policy toward router-b keeps the rule from it");
+    let deny = policy_file("flowspec-export-deny", "reject\n")?;
+    let (base, sessions) = (b.count(&learned), b.count("bgp session established"));
+    a.provision_flags(&a_to_b(&[
+        "--policy-name",
+        "flowspec-export-deny",
+        "--policy-source-file",
+        &deny,
+        "--flowspec-export-policy",
+        "flowspec-export-deny",
+    ]))
+    .await?;
+    reestablished(b, sessions).await?;
+    b.assert_quiet(&learned, base, 15).await?;
+    if b_show().await?.contains("dest 192.0.2.0/24") {
+        bail!("router-a advertised a rule its export policy rejects");
+    }
+    let sessions = b.count("bgp session established");
+    a.provision_flags(&a_to_b(&["--flowspec-export-policy", "accept-all"]))
+        .await?;
+    reestablished(b, sessions).await?;
+    b.wait_new(&learned, base, 60).await
 }
 
 /// RFC 7432 EVPN, receive side. No NOS router originates EVPN yet, so an
