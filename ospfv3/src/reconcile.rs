@@ -1277,6 +1277,7 @@ mod tests {
             ifindex: 5,
             admin_up: true,
             carrier: up,
+            port_aggregate: None,
         };
         apply(
             &mut t,
@@ -1329,6 +1330,7 @@ mod tests {
             ifindex: 1,
             admin_up: up,
             carrier: up,
+            port_aggregate: None,
         };
         apply(
             &mut t,

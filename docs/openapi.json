@@ -2108,7 +2108,7 @@
         "description": "A named network interface. For a loopback interface (see\n`LOOPBACK_PREFIX`), `addresses`/`routing_table` carry its (flat) L3\nconfig directly, exactly as before this type gained subinterfaces — a\nloopback has no VLAN/dot1q concept, so there's nothing for per-tag\naddressing to buy it. For every other (physical) interface, `addresses`\nmust be empty and `routing_table` must be unset: all of its L3 config\nlives under `subinterfaces` instead, tag 0 for the untagged/native case\n(what used to be these same flat fields) — see `valid_addressing_split`.\n\n`switching_profile`, if set, names a `SwitchingProfile` trunking this\ninterface into one or more `BroadcastDomain`s — unchanged, still a\nphysical-interface-level field regardless of `subinterfaces`. A tag\nclaimed by an L2 `switching_profile` member and a tag claimed by an L3\n`Subinterface` are mutually exclusive on the same interface: Linux only\nallows one master device per link (physical or per-tag sub-link), and an\nL2 member wants that link's master to be the domain's bridge while an L3\nsubinterface wants it to be a VRF. See\n`valid_subinterface_and_switching_profile_tags`, wired one level up on\n`Config.interfaces` (`valid_interfaces`) since it needs to see sibling\nfields — the same reason `RoutingTable`'s redistribute rule is wired on\n`Config.routing_tables`.",
         "properties": {
           "acl_in": {
-            "description": "Names an `Acl` filtering IP packets arriving on this link. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+            "description": "Names an `Acl` filtering IP packets arriving on this link; the placement\nrules are `acl::valid_acl_references`.",
             "type": [
               "string",
               "null"
@@ -3638,7 +3638,7 @@
         "description": "A named Linux bonding device, statically (`Xor`) or LACP-negotiated\n(`Lacp`). Same\nconfig surface as a *physical* `Interface` (never a loopback — bonding a\nloopback makes no sense): `switching_profile`/`mtu`/`subinterfaces`, all\nvalidated by the exact same helpers `Interface` uses, plus `mode`/\n`lacp_rate`. All L3\nconfig (addresses/routing-table/OSPF) lives under `subinterfaces` (tag 0\nfor the untagged/native case), exactly like a physical `Interface` — a\n`PortAggregate` never gets the loopback-style flat `addresses`/\n`routing_table` fields, since there's no \"loopback bond\" concept. An\n`Interface` becomes a bonded member by setting its own `port_aggregate`\nfield to this aggregate's name — the same reference-by-name shape\n`Interface.switching_profile` already uses for L2 trunk membership —\nrather than this type holding a member list itself.",
         "properties": {
           "acl_in": {
-            "description": "Names an `Acl` filtering IP packets arriving on this bond. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+            "description": "Names an `Acl` filtering IP packets arriving on this bond; the placement\nrules are `acl::valid_acl_references`.",
             "type": [
               "string",
               "null"
@@ -5364,7 +5364,7 @@
         "description": "One VLAN-scoped L3 attachment point on a physical `Interface`. `tag == 0`\nis the untagged/native case — what used to be `Interface.addresses`/\n`routing_table` directly, before L3 config moved under per-tag\nsubinterfaces. `1..=4094` is a real 802.1q tag, realized by\n`nos-interfaced`'s Linux driver as its own `<interface>.<tag>` kernel\nsub-interface (the same convention already used for a `Dot1q`\nswitching-profile member). A tag used by a `Subinterface` here and a tag\nused by the same interface's `switching_profile` (an `Untagged` member\nclaims tag 0, a `Dot1q(n)` member claims tag `n`) must be disjoint — see\n`valid_subinterface_and_switching_profile_tags`. Loopback interfaces\nnever have any `Subinterface`s — see `valid_addressing_split`.",
         "properties": {
           "acl_in": {
-            "description": "Names an `Acl` filtering IP packets arriving on this subinterface. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+            "description": "Names an `Acl` filtering IP packets arriving on this subinterface; the\nplacement rules are `acl::valid_acl_references`.",
             "type": [
               "string",
               "null"
@@ -28263,7 +28263,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this link. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this link; the placement\nrules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"
@@ -28316,7 +28316,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Names an `Acl` filtering IP packets arriving on this link. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                "description": "Names an `Acl` filtering IP packets arriving on this link; the placement\nrules are `acl::valid_acl_references`.",
                 "type": [
                   "string",
                   "null"
@@ -28331,7 +28331,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this link. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this link; the placement\nrules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"
@@ -30592,7 +30592,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface; the\nplacement rules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"
@@ -30654,7 +30654,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Names an `Acl` filtering IP packets arriving on this subinterface. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                "description": "Names an `Acl` filtering IP packets arriving on this subinterface; the\nplacement rules are `acl::valid_acl_references`.",
                 "type": [
                   "string",
                   "null"
@@ -30669,7 +30669,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface; the\nplacement rules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"
@@ -44177,7 +44177,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this bond. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this bond; the placement\nrules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"
@@ -44230,7 +44230,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Names an `Acl` filtering IP packets arriving on this bond. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                "description": "Names an `Acl` filtering IP packets arriving on this bond; the placement\nrules are `acl::valid_acl_references`.",
                 "type": [
                   "string",
                   "null"
@@ -44245,7 +44245,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this bond. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this bond; the placement\nrules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"
@@ -46204,7 +46204,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface; the\nplacement rules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"
@@ -46266,7 +46266,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Names an `Acl` filtering IP packets arriving on this subinterface. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                "description": "Names an `Acl` filtering IP packets arriving on this subinterface; the\nplacement rules are `acl::valid_acl_references`.",
                 "type": [
                   "string",
                   "null"
@@ -46281,7 +46281,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface. Inert until\n`nos-acld`; the placement rules are `acl::valid_acl_references`.",
+                  "description": "Names an `Acl` filtering IP packets arriving on this subinterface; the\nplacement rules are `acl::valid_acl_references`.",
                   "type": [
                     "string",
                     "null"

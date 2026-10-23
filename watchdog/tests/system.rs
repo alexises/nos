@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const DAEMONS: [&str; 13] = [
+const DAEMONS: [&str; 14] = [
     "nos-configd",
     "nos-bgpd",
     "nos-ribd",
@@ -30,6 +30,7 @@ const DAEMONS: [&str; 13] = [
     "nos-lacpd",
     "nos-lldpd",
     "nos-stpd",
+    "nos-acld",
     "nos-provision",
 ];
 
@@ -104,6 +105,7 @@ impl Stack {
             .args(["--lacpd-bin", &b("nos-lacpd")])
             .args(["--lldpd-bin", &b("nos-lldpd")])
             .args(["--stpd-bin", &b("nos-stpd")])
+            .args(["--acld-bin", &b("nos-acld")])
             .args(["--config-socket", &d("config.sock")])
             .args(["--listen-socket", &d("watchdog.sock")])
             .args(["--pki-dir", &d("pki")])
@@ -116,7 +118,7 @@ impl Stack {
             .arg(format!("--configd-arg=--listen={}", d("config.sock")))
             .arg(format!("--configd-arg=--config-file={}", d("config.yaml")))
             .args(["--ribd-arg=--driver=noop", "--interfaced-arg=--driver=noop"])
-            .args(["--fdbd-arg=--driver=noop"])
+            .args(["--fdbd-arg=--driver=noop", "--acld-arg=--driver=noop"])
             .arg(format!(
                 "--ribd-arg=--table-registry-path={}",
                 d("tables.yaml")
@@ -305,6 +307,7 @@ fn whole_stack_starts_reconfigures_and_stops_cleanly() {
         "nos-lacpd",
         "nos-lldpd",
         "nos-stpd",
+        "nos-acld",
         "nos-bgpd[r1]",
         "nos-ribd[rt1]",
         "nos-ospfd[o1]",

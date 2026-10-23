@@ -1,0 +1,278 @@
+use std::collections::BTreeMap;
+
+use nos_proto::schema::{Acl, AclAction, AclRule};
+use nos_proto::LinkState;
+
+use super::*;
+use crate::compile::compile;
+use crate::driver::{Call, NoopDriver, ACL_CHAIN_A as A, ACL_CHAIN_B as B};
+use crate::plan::Attachment;
+
+use Direction::{In, Out};
+
+fn link(name: &str, ifindex: u32, aggregate: Option<&str>) -> LinkState {
+    LinkState {
+        name: name.into(),
+        ifindex,
+        admin_up: true,
+        carrier: true,
+        port_aggregate: aggregate.map(Into::into),
+    }
+}
+
+fn links(l: &[LinkState]) -> LinkTable {
+    LinkTable {
+        known: true,
+        links: l.iter().map(|l| (l.name.clone(), l.clone())).collect(),
+    }
+}
+
+fn compiled(rules: usize) -> Arc<Compiled> {
+    let acl = Acl {
+        name: "E".into(),
+        default_action: AclAction::Permit,
+        rules: vec![AclRule::default(); rules],
+    };
+    Arc::new(compile(&acl).unwrap())
+}
+
+fn plan(acl: &Arc<Compiled>, at: &[(Device, Direction)]) -> Plan {
+    Plan {
+        acls: BTreeMap::from([("E".to_string(), acl.clone())]),
+        attachments: at
+            .iter()
+            .map(|(device, dir)| Attachment {
+                device: device.clone(),
+                dir: *dir,
+                acl: "E".into(),
+            })
+            .collect(),
+    }
+}
+
+fn eth(n: &str) -> Device {
+    Device::Kernel(n.into())
+}
+
+/// No driver call.
+const NONE: Vec<Call> = Vec::new();
+
+/// The calls since the last `take`.
+fn take(e: &mut Engine<NoopDriver>) -> Vec<Call> {
+    std::mem::take(&mut e.driver_mut().calls)
+}
+
+#[test]
+fn nothing_happens_before_the_link_table_is_known() {
+    let mut e = Engine::new(NoopDriver::default());
+    e.sync(
+        &plan(&compiled(1), &[(eth("eth0"), In)]),
+        &LinkTable::default(),
+    );
+    assert_eq!(e.driver().calls, NONE);
+}
+
+#[test]
+fn attach_update_alternates_chains_then_detach() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    let one = compiled(1);
+    e.sync(&plan(&one, &[(eth("eth0"), In)]), &l);
+    assert_eq!(
+        take(&mut e),
+        [Call::Install(4, In, A), Call::Switch(4, In, A)]
+    );
+
+    // Same ACL (another Arc, equal value): nothing to do.
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    assert_eq!(take(&mut e), NONE);
+
+    e.sync(&plan(&compiled(2), &[(eth("eth0"), In)]), &l);
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Install(4, In, B),
+            Call::Switch(4, In, B),
+            Call::Flush(4, In, A)
+        ]
+    );
+    e.sync(&plan(&one, &[(eth("eth0"), In)]), &l);
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Install(4, In, A),
+            Call::Switch(4, In, A),
+            Call::Flush(4, In, B)
+        ]
+    );
+
+    e.sync(&plan(&one, &[]), &l);
+    assert_eq!(take(&mut e), [Call::Detach(4, In)]);
+    assert!(e.live().is_empty());
+}
+
+#[test]
+fn an_absent_device_waits_for_its_link() {
+    let mut e = Engine::new(NoopDriver::default());
+    let p = plan(&compiled(1), &[(eth("eth1"), Out)]);
+    e.sync(&p, &links(&[link("eth0", 4, None)]));
+    e.sync(&p, &links(&[link("eth0", 4, None)]));
+    assert_eq!(take(&mut e), NONE);
+    assert!(e.pending.contains(&("eth1".to_string(), Out)));
+    e.sync(&p, &links(&[link("eth1", 5, None)]));
+    assert_eq!(
+        take(&mut e),
+        [Call::Install(5, Out, A), Call::Switch(5, Out, A)]
+    );
+    assert!(e.pending.is_empty());
+
+    // Gone: the kernel took the filters with it, so no call; back with a
+    // new ifindex: a fresh install.
+    e.sync(&p, &links(&[]));
+    assert_eq!(take(&mut e), NONE);
+    assert!(e.live().is_empty());
+    e.sync(&p, &links(&[link("eth1", 9, None)]));
+    assert_eq!(
+        take(&mut e),
+        [Call::Install(9, Out, A), Call::Switch(9, Out, A)]
+    );
+}
+
+#[test]
+fn an_aggregate_resolves_through_its_bond() {
+    let mut e = Engine::new(NoopDriver::default());
+    let agg = |tag| Device::Aggregate {
+        name: "agg".into(),
+        tag,
+    };
+    let p = plan(&compiled(1), &[(agg(0), In), (agg(7), Out)]);
+    e.sync(&p, &links(&[link("bond1.7", 6, None)]));
+    assert_eq!(take(&mut e), NONE);
+    assert!(e.pending.contains(&("agg".to_string(), In)));
+    assert!(e.pending.contains(&("agg.7".to_string(), Out)));
+    e.sync(
+        &p,
+        &links(&[link("bond1", 5, Some("agg")), link("bond1.7", 6, None)]),
+    );
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Install(5, In, A),
+            Call::Switch(5, In, A),
+            Call::Install(6, Out, A),
+            Call::Switch(6, Out, A),
+        ]
+    );
+}
+
+#[test]
+fn a_previous_run_is_adopted_replaced_or_removed() {
+    let mut driver = NoopDriver::default();
+    driver.live.insert((4, In), B);
+    driver.live.insert((5, Out), A);
+    let mut e = Engine::new(driver);
+    let l = links(&[link("eth0", 4, None), link("eth1", 5, None)]);
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Detach(5, Out),
+            Call::Install(4, In, A),
+            Call::Switch(4, In, A),
+            Call::Flush(4, In, B),
+        ]
+    );
+    // The sweep runs once.
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    assert_eq!(take(&mut e), NONE);
+}
+
+#[test]
+fn a_refused_install_keeps_the_live_chain() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    take(&mut e);
+    e.driver_mut().fail_install = true;
+    let two = plan(&compiled(2), &[(eth("eth0"), In)]);
+    e.sync(&two, &l);
+    assert_eq!(
+        take(&mut e),
+        [Call::Install(4, In, B), Call::Flush(4, In, B)]
+    );
+    assert_eq!(e.live()[&("eth0".to_string(), In)], A);
+    // Retried on the next pass.
+    e.sync(&two, &l);
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Install(4, In, B),
+            Call::Switch(4, In, B),
+            Call::Flush(4, In, A)
+        ]
+    );
+}
+
+#[test]
+fn an_acl_without_a_compile_leaves_the_device_alone() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    take(&mut e);
+    let mut p = plan(&compiled(2), &[(eth("eth0"), In)]);
+    p.acls.clear();
+    e.sync(&p, &l);
+    assert_eq!(take(&mut e), NONE);
+    assert_eq!(e.live().len(), 1);
+}
+
+#[test]
+fn shutdown_removes_everything() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    e.sync(
+        &plan(&compiled(1), &[(eth("eth0"), In), (eth("eth0"), Out)]),
+        &l,
+    );
+    take(&mut e);
+    e.shutdown();
+    assert_eq!(take(&mut e), [Call::Detach(4, In), Call::Detach(4, Out)]);
+}
+
+#[tokio::test]
+async fn run_applies_changes_and_cleans_up_on_shutdown() {
+    let (plan_tx, plan_rx) = watch::channel(None);
+    let (links_tx, links_rx) = watch::channel(LinkTable::default());
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let task = tokio::spawn(run(
+        Engine::new(NoopDriver::default()),
+        plan_rx,
+        links_rx,
+        stop_rx,
+    ));
+    plan_tx
+        .send(Some(plan(&compiled(1), &[(eth("eth0"), In)])))
+        .unwrap();
+    links_tx.send(links(&[link("eth0", 4, None)])).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    stop_tx.send(true).unwrap();
+    let e = task.await.unwrap();
+    let calls = &e.driver().calls;
+    assert!(calls.contains(&Call::Switch(4, In, A)), "{calls:?}");
+    assert_eq!(calls.last(), Some(&Call::Detach(4, In)));
+}
+
+#[tokio::test]
+async fn run_stops_when_its_inputs_close() {
+    let (plan_tx, plan_rx) = watch::channel(None);
+    let (_links_tx, links_rx) = watch::channel(LinkTable::default());
+    let (_stop_tx, stop_rx) = watch::channel(false);
+    let task = tokio::spawn(run(
+        Engine::new(NoopDriver::default()),
+        plan_rx,
+        links_rx,
+        stop_rx,
+    ));
+    drop(plan_tx);
+    assert_eq!(task.await.unwrap().driver().calls, NONE);
+}

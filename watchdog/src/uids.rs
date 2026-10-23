@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Context;
 use nos_proto::broker::Role;
 
-/// `Some(uid)` for the thirteen roles `nos-watchdogd` spawns, `None` for
+/// `Some(uid)` for the fourteen roles `nos-watchdogd` spawns, `None` for
 /// `Watchdog` (its own uid, `nos-wd`) and `User` (a person, never a process).
 /// Exhaustive on purpose: a new `Role` fails to compile until it gets a uid.
 /// 10001+ in `Role` declaration order; new roles append, never renumber.
@@ -28,6 +28,7 @@ pub const fn role_uid(role: Role) -> Option<u32> {
         Role::Restd => Some(10011),
         Role::Bfdd => Some(10012),
         Role::Stpd => Some(10013),
+        Role::Acld => Some(10014),
     }
 }
 
@@ -65,8 +66,8 @@ mod tests {
     #[test]
     fn table_covers_every_daemon_role_uniquely() {
         let uids: Vec<_> = Role::ALL.into_iter().filter_map(role_uid).collect();
-        assert_eq!(uids.len(), 13);
-        assert_eq!(uids.iter().collect::<HashSet<_>>().len(), 13);
+        assert_eq!(uids.len(), 14);
+        assert_eq!(uids.iter().collect::<HashSet<_>>().len(), 14);
         assert!(uids.iter().all(|u| *u >= 10_000));
         assert_eq!(
             (role_uid(Role::Watchdog), role_uid(Role::User)),

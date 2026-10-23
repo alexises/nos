@@ -1,6 +1,5 @@
 //! Named, ordered access lists (`acl`), attached to an interface with
-//! `acl in <name>` / `acl out <name>`. Declaration only until `nos-acld`
-//! (#541): attaching one is inert.
+//! `acl in <name>` / `acl out <name>`; `nos-acld` compiles them to tc.
 
 use std::fmt;
 use std::str::FromStr;
@@ -323,6 +322,7 @@ pub(crate) fn valid_acl_references(_acls: &[Acl], ctx: &Config) -> garde::Result
             known(&s.acl_in)?;
             known(&s.acl_out)?;
         }
+        one_per_device(&i.name, [&i.acl_in, &i.acl_out], &i.subinterfaces)?;
         if i.acl_in.is_none() && i.acl_out.is_none() {
             continue;
         }
@@ -345,6 +345,27 @@ pub(crate) fn valid_acl_references(_acls: &[Acl], ctx: &Config) -> garde::Result
         for s in &a.subinterfaces {
             known(&s.acl_in)?;
             known(&s.acl_out)?;
+        }
+        one_per_device(&a.name, [&a.acl_in, &a.acl_out], &a.subinterfaces)?;
+    }
+    Ok(())
+}
+
+/// The untagged (tag 0) subinterface is its parent's own kernel device: one
+/// ACL per direction there, set on either, not both.
+fn one_per_device(
+    name: &str,
+    parent: [&Option<String>; 2],
+    subs: &[super::Subinterface],
+) -> garde::Result {
+    for s in subs.iter().filter(|s| s.tag == 0) {
+        for (dir, p, s) in [("in", parent[0], &s.acl_in), ("out", parent[1], &s.acl_out)] {
+            if p.is_some() && s.is_some() {
+                return Err(garde::Error::new(format!(
+                    "{name}: acl {dir} is set on both the interface and its untagged subinterface, \
+                     which are one device: keep one"
+                )));
+            }
         }
     }
     Ok(())
@@ -598,6 +619,36 @@ mod tests {
         assert!(!attach(|c| {
             agg(c, "A");
             c.port_aggregates[0].subinterfaces[0].acl_in = Some("nope".into());
+        }));
+    }
+
+    #[test]
+    fn one_acl_per_direction_on_the_untagged_device() {
+        let untagged = |c: &mut Config, tag: u16, out: bool| {
+            let sub = Subinterface {
+                tag,
+                acl_in: (!out).then(|| "A".into()),
+                acl_out: out.then(|| "A".into()),
+                ..Default::default()
+            };
+            c.interfaces[0].subinterfaces = vec![sub.clone()];
+            c.port_aggregates = vec![PortAggregate {
+                name: "agg".into(),
+                acl_in: Some("A".into()),
+                subinterfaces: vec![sub],
+                ..Default::default()
+            }];
+        };
+        assert!(!attach(|c| untagged(c, 0, false)));
+        assert!(!attach(|c| untagged(c, 0, true)));
+        assert!(attach(|c| untagged(c, 5, false)));
+        assert!(!attach(|c| {
+            untagged(c, 0, false);
+            c.interfaces[0].acl_in = None;
+        }));
+        assert!(attach(|c| {
+            untagged(c, 0, true);
+            c.interfaces[0].acl_out = None;
         }));
     }
 
