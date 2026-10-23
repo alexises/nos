@@ -11,7 +11,8 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 - `compile/` (pure): `compile(&Acl) -> Compiled { levels, default_action, rules, shadowed, trailing }` (the last two are rule indices = cookies, #543). `rule.rs` splits by family (prefix family, else `icmp` v4 / `icmpv6` v6, else both) and `established` into two filters (ACK, RST).
 - `server.rs` + `status.rs` (#543): `--listen-socket` (watchdog `--acld-listen-socket`, `ServiceRef::Acl`) serves `AclRequest::Show` to `User`/`Restd`. `Engine::show` dumps each installed chain (`Driver::counters`, `gact` rows by kind) under the same lock a pass takes; `status::status` (pure) sums per cookie across filters and devices, ignores stale cookies, marks dropped rules. Counters reset on any recompile (new chain; `ponytail:` carry-over left out). Every ACL of the last plan is listed, unattached ones at 0.
 - `logger/` (#544): `Logger` (pure: sample -> `acl log` line, token bucket per (ifindex, direction, rule), overrun throttle), `packet.rs` (frame -> 5-tuple), and a detached `acl-log` thread on psample, started by `engine::run` (Linux driver only) once a `log` rule is installed; it names samples via `Engine::log_target`.
-- `driver/`: `Driver` trait (`live_chain`, `install`, `switch`, `flush`, `detach`, `counters`), `noop.rs` (records calls, tests), `linux.rs` (only `nos-tc` calls; coverage-excluded). Request building (`chain_requests`, `entry_request`, `live_from`) is pure, in `driver/mod.rs`.
+- Flowspec (#561): `flowspec.rs` (pure `lower(&FlowRule) -> Lowered`, refuse what flower cannot express), `engine_flowspec.rs` (per-instance snapshots from `AclRequest::PushFlowspec`, `Role::Bgpd` only; one chain-0 prio per rule in 10..99, rewritten per changed prio), `flowspec_file.rs` (hidden `--flowspec-file` test hook). Layout and lowering table: `docs/architecture/linux-drivers.md`.
+- `driver/`: `Driver` trait (`live_chain`, `install`, `switch`, `flush`, `detach`, `counters`, `flowspec_set`/`_prios`/`_counters`), `noop.rs` (records calls, tests), `linux.rs` (only `nos-tc` calls; coverage-excluded). Request building (`chain_requests`, `entry_request`, `live_from`) is pure, in `driver/mod.rs`.
 
 ## Kernel layout (details: `docs/architecture/linux-drivers.md`)
 
@@ -19,6 +20,7 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 - Level `l`: prios `2l+1` (`ip`) and `2l+2` (`ipv6`) (the kernel refuses two protocols at one prio); a level holds every filter of the rules packed there. Defaults: one keyless filter per family after the rules. Cookies: user rule index (not the level), `u32::MAX` for defaults (`show acl` reads them).
 - Update = install idle chain, replace entry (`NLM_F_REPLACE`), flush old. Flush tolerates `ENOENT`/`EINVAL`.
 - Never delete the `clsact` qdisc; stay off other owners' priorities (`tc/CLAUDE.md`).
+- `switch` also keeps chain 999 (`flowspec::EXIT_CHAIN`) pointing at the live ACL chain: a flowspec rule without the T bit jumps there, so the ACL still runs.
 
 ## Optimiser (`compile/optimize.rs`, `keys.rs`)
 

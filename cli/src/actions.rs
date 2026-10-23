@@ -796,6 +796,13 @@ async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
         Ok(acls) => println!("{}", format::render_acls(&acls)),
         Err(e) => eprintln!("error: {e}"),
     }
+    if name.is_none() {
+        match acl_client::show_flowspec(&acl_socket).await {
+            Ok(rules) if rules.is_empty() => {}
+            Ok(rules) => println!("{}", format::render_flowspec_rules(&rules)),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
 }
 
 async fn show_lldp_statistics(watchdog_socket: &Path) {

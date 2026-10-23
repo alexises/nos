@@ -8,10 +8,17 @@
 //! packet sees no ACL or half of one), then flushes the old chain.
 //! `nos-fdbd`/`nos-interfaced` own lower priorities on chain 0 (`tc/CLAUDE.md`):
 //! nothing here deletes the qdisc or touches their priorities.
+//!
+//! Flowspec (#561) sits on chain 0 ingress too, one priority per rule in the
+//! band [`flowspec::PRIO_FIRST`]..=[`flowspec::PRIO_LAST`], before the ACL
+//! entry. A rule that stops flowspec evaluation jumps to
+//! [`flowspec::EXIT_CHAIN`], whose one filter (kept by [`Driver::switch`])
+//! jumps on to the live ACL chain.
 
 mod linux;
 mod noop;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 
@@ -24,6 +31,7 @@ use nos_tc::{
 };
 
 use crate::compile::{prio, Compiled, DEFAULT_COOKIE};
+use crate::flowspec::{self, Lowered};
 
 /// Chain 0 priority of the entry filter: above every priority `nos-fdbd` and
 /// `nos-interfaced` use (1, 2), so theirs run first.
@@ -91,6 +99,18 @@ pub trait Driver: Send + 'static {
     fn detach(&mut self, ifindex: u32, dir: Direction) -> io::Result<()>;
     /// The counters of `chain`'s filters, one per action cookie (`show acl`).
     fn counters(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<Vec<Counter>>;
+    /// Replaces flowspec priority `prio` on `ifindex`'s ingress: removes what
+    /// it holds, then (with `rule`) installs it with cookie `rule.0`.
+    fn flowspec_set(
+        &mut self,
+        ifindex: u32,
+        prio: u16,
+        rule: Option<(u32, &Lowered)>,
+    ) -> io::Result<()>;
+    /// The flowspec priorities holding filters (the start sweep).
+    fn flowspec_prios(&mut self, ifindex: u32) -> io::Result<Vec<u16>>;
+    /// Matched `(packets, bytes)` per flowspec priority.
+    fn flowspec_counters(&mut self, ifindex: u32) -> io::Result<BTreeMap<u16, (u64, u64)>>;
 }
 
 /// One filter's `gact` counters: the action cookie (a rule index, or
@@ -228,6 +248,90 @@ pub fn entry_delete(ifindex: u32, dir: Direction) -> Request {
     }
 }
 
+/// The filter of [`flowspec::EXIT_CHAIN`]: on to the live ACL `chain`, so a
+/// flowspec rule that stops flowspec evaluation still meets the ACL.
+pub fn exit_request(ifindex: u32, dir: Direction, chain: u32) -> Request {
+    match entry_request(ifindex, dir, chain) {
+        Request::AddFilter(f) => Request::AddFilter(Filter {
+            chain: flowspec::EXIT_CHAIN,
+            ..f
+        }),
+        other => other,
+    }
+}
+
+/// The filters of flowspec priority `prio` for `rule`; the cookie (the rule
+/// index) is on the first action only, so a dump counts each filter once.
+pub fn flowspec_requests(ifindex: u32, prio: u16, cookie: u32, rule: &Lowered) -> Vec<Request> {
+    let actions: Vec<Action> = rule
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(i, kind)| Action {
+            kind: kind.clone(),
+            cookie: if i == 0 {
+                cookie.to_be_bytes().to_vec()
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+    rule.filters
+        .iter()
+        .map(|keys| {
+            Request::AddFilter(Filter {
+                ifindex,
+                hook: Hook::Ingress,
+                chain: 0,
+                prio,
+                protocol: rule.protocol,
+                handle: 0,
+                kind: Kind::Flower(keys.clone()),
+                actions: actions.clone(),
+                replace: false,
+            })
+        })
+        .collect()
+}
+
+/// Deletes every filter at flowspec priority `prio` if it holds `protocol`:
+/// the kernel answers `EINVAL` for another protocol, `ENOENT` for none (a
+/// swept priority's protocol is unknown, so the driver tries both).
+pub fn flowspec_delete(ifindex: u32, prio: u16, protocol: Protocol) -> Request {
+    Request::DelFilter {
+        ifindex,
+        hook: Hook::Ingress,
+        chain: 0,
+        prio,
+        protocol,
+        handle: 0,
+    }
+}
+
+fn in_band(r: &FilterStats) -> bool {
+    r.chain == 0 && (flowspec::PRIO_FIRST..=flowspec::PRIO_LAST).contains(&r.prio)
+}
+
+/// The flowspec priorities of a chain-0 dump.
+pub fn flowspec_prios_from(rows: &[FilterStats]) -> Vec<u16> {
+    let mut v: Vec<u16> = rows.iter().filter(|r| in_band(r)).map(|r| r.prio).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// `(packets, bytes)` per flowspec priority: the cookie-carrying (first)
+/// action of each filter, summed.
+pub fn flowspec_counters_from(rows: &[FilterStats]) -> BTreeMap<u16, (u64, u64)> {
+    let mut out: BTreeMap<u16, (u64, u64)> = BTreeMap::new();
+    for r in rows.iter().filter(|r| in_band(r) && r.cookie.len() == 4) {
+        let s = out.entry(r.prio).or_default();
+        s.0 = s.0.saturating_add(r.packets);
+        s.1 = s.1.saturating_add(r.bytes);
+    }
+    out
+}
+
 /// The live chain from a chain-0 dump: our entry's cookie.
 pub fn live_from(rows: &[FilterStats]) -> Option<u32> {
     rows.iter()
@@ -243,6 +347,86 @@ mod tests {
 
     use super::*;
     use crate::compile::compile;
+
+    #[test]
+    fn flowspec_filters_share_a_priority_and_count_once() {
+        let rule = Lowered {
+            protocol: Protocol::Ipv6,
+            filters: vec![
+                FlowerKeys {
+                    ip_proto: Some(6),
+                    ..Default::default()
+                },
+                FlowerKeys {
+                    ip_proto: Some(17),
+                    ..Default::default()
+                },
+            ],
+            actions: vec![
+                ActionKind::Pedit(nos_tc::Pedit::Dscp {
+                    value: 1,
+                    family: nos_tc::PeditFamily::Ipv6,
+                }),
+                ActionKind::Gact(Verdict::Shot),
+            ],
+        };
+        let reqs = flowspec_requests(4, 12, 3, &rule);
+        assert_eq!(reqs.len(), 2);
+        for r in &reqs {
+            let Request::AddFilter(f) = r else { panic!() };
+            assert_eq!(
+                (f.ifindex, f.hook, f.chain, f.prio, f.protocol, f.handle, f.replace),
+                (4, Hook::Ingress, 0, 12, Protocol::Ipv6, 0, false)
+            );
+            assert_eq!(f.actions[0].cookie, vec![0, 0, 0, 3]);
+            assert_eq!(f.actions[1].cookie, Vec::<u8>::new());
+        }
+        assert_eq!(
+            flowspec_delete(4, 12, Protocol::Ipv6),
+            Request::DelFilter {
+                ifindex: 4,
+                hook: Hook::Ingress,
+                chain: 0,
+                prio: 12,
+                protocol: Protocol::Ipv6,
+                handle: 0,
+            }
+        );
+        let row = |chain, prio, cookie: &[u8], packets| FilterStats {
+            chain,
+            prio,
+            cookie: cookie.to_vec(),
+            packets,
+            bytes: packets * 10,
+            action: "gact".into(),
+            ..Default::default()
+        };
+        let rows = [
+            row(0, 1, &[0, 0, 0, 0], 99),
+            row(0, 12, &[0, 0, 0, 3], 2),
+            row(0, 12, &[], 1),
+            row(0, 12, &[0, 0, 0, 3], 5),
+            row(0, 10, &[0, 0, 0, 0], 4),
+            row(0, ACL_PRIO, &ACL_CHAIN_A.to_be_bytes(), 7),
+            row(5, 20, &[0, 0, 0, 1], 8),
+        ];
+        assert_eq!(flowspec_prios_from(&rows), [10, 12]);
+        assert_eq!(
+            flowspec_counters_from(&rows),
+            BTreeMap::from([(10, (4, 40)), (12, (7, 70))])
+        );
+        let Request::AddFilter(x) = exit_request(4, Direction::In, ACL_CHAIN_B) else {
+            panic!()
+        };
+        assert_eq!(
+            (x.chain, x.prio, x.handle, x.replace),
+            (flowspec::EXIT_CHAIN, ACL_PRIO, 1, true)
+        );
+        assert_eq!(
+            x.actions[0].kind,
+            ActionKind::Gact(Verdict::GotoChain(ACL_CHAIN_B))
+        );
+    }
 
     #[test]
     fn idle_alternates() {

@@ -147,6 +147,7 @@ All are `GET`, and each returns the same data as the matching shell command, as 
 - `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.
 - `/v1/port-aggregates[/{name}]` and `/v1/lacp[/{name}]`: bonds, their members and LACP state.
 - `/v1/acl` and `/v1/acl/{name}`: every ACL (or one) with its attachments and, per rule, packets and bytes summed over its filters and devices; `default_packets`/`default_bytes` count what hit the default action. A rule the optimiser dropped has `dropped` (`shadowed` or `trailing`) and stays at 0. An unknown name is `404`, `nos-acld` not running is `503`.
+- `/v1/flowspec`: every flowspec rule `nos-acld` holds, per BGP instance in order: `flow`, `actions`, `unsupported` (why it is not installed, `null` when it is) and packets/bytes summed over its devices.
 - `/v1/lldp/neighbors`: LLDP neighbours. `/v1/lldp/statistics`: each LLDP-enabled interface's IEEE 802.1AB counters.
 - `/v1/spanning-tree` (bridge, ports, `topology`, per-port `counters`), `/v1/spanning-tree/instance/{id}`, `/domain/{name}`, `/mst-config`, and `/v1/spanning-tree/counters` (one `{tree, port, counters}` row per port and tree, RFC 4318 names): `404` for an instance or domain the mode does not have, `503` when `nos-stpd` is not running. See [Spanning tree](protocols/stp.md#read-the-detail).
 - `/v1/bfd/reflector`: the Seamless BFD reflector (`discriminators` as 32-bit numbers, `received`, `replied`, and `discarded` with a counter per reason); `nos-bfdd` not running is `503`.

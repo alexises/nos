@@ -446,6 +446,27 @@ pub fn render_acls(acls: &[nos_proto::AclStatus]) -> String {
     out.join("\n")
 }
 
+/// Render the flowspec rules `nos-acld` holds, after the ACLs in `show acl`.
+pub fn render_flowspec_rules(rules: &[nos_proto::FlowspecRuleStatus]) -> String {
+    let mut out = vec!["flowspec rules:".to_string()];
+    for r in rules {
+        let state = r
+            .unsupported
+            .as_deref()
+            .map_or("installed".to_string(), |why| format!("unsupported: {why}"));
+        out.push(format!(
+            "  {} {}: {} -> {}, packets {}, bytes {}",
+            r.instance,
+            r.flow,
+            state,
+            r.actions.join(", "),
+            r.packets,
+            r.bytes
+        ));
+    }
+    out.join("\n")
+}
+
 /// Render `nos-lldpd`'s per-interface counters, for `show lldp statistics`.
 pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
     if stats.is_empty() {
@@ -2556,6 +2577,27 @@ mod tests {
             render_lldp_statistics(&[stats]),
             "eth1: tx 1, rx 2, rx errors 3, rx discarded 4, tlvs discarded 5, \
              tlvs unrecognized 6, ageouts 7, too many neighbors 8"
+        );
+    }
+
+    #[test]
+    fn render_flowspec_rules_installed_and_unsupported() {
+        let rule = |flow: &str, unsupported: Option<&str>, packets| nos_proto::FlowspecRuleStatus {
+            instance: "b1".into(),
+            flow: flow.into(),
+            actions: vec!["rate 0 bytes/s".into()],
+            unsupported: unsupported.map(Into::into),
+            packets,
+            bytes: packets * 10,
+        };
+        assert_eq!(
+            render_flowspec_rules(&[
+                rule("proto =6", None, 3),
+                rule("len =64", Some("packet length: no flower key"), 0),
+            ]),
+            "flowspec rules:\n  \
+             b1 proto =6: installed -> rate 0 bytes/s, packets 3, bytes 30\n  \
+             b1 len =64: unsupported: packet length: no flower key -> rate 0 bytes/s, packets 0, bytes 0"
         );
     }
 

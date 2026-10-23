@@ -285,7 +285,7 @@ These work in both modes. Only `clear` acts on anything, and it never changes co
 - `show interface [<name>]`: what is actually applied to each interface and subinterface: addresses, routing table, MTU.
 - `show port-aggregate [<name>]` and `show lacp [<name>]`: bonds, their members, and LACP negotiation state.
 - `show version`: the nos version and short git revision (`nos 0.1.0 (abc1234)`); the revision is `unknown` outside `make docker-build`. Answered by the shell itself, in any mode.
-- `show acl [<name>]`: where each ACL is attached, and per rule the packets and bytes it matched (summed over all its filters and devices), then the default action's. Use it to see what a deny hits or whether a rule is ever reached. Counters reset whenever the ACL is edited (including `move`) or `nos-acld` restarts, since each change installs a new chain.
+- `show acl [<name>]`: where each ACL is attached, and per rule the packets and bytes it matched (summed over all its filters and devices), then the default action's. Use it to see what a deny hits or whether a rule is ever reached. Counters reset whenever the ACL is edited (including `move`) or `nos-acld` restarts, since each change installs a new chain. Without a name, the flowspec rules `nos-acld` holds follow: `installed` or `unsupported: <reason>`, their actions and counters.
 - `show lldp neighbors`: every LLDP neighbour heard, on every interface; `show lldp neighbors detail` adds its VLANs, link aggregation, maximum frame size and MAC/PHY fields. `show lldp statistics`: frames sent, received, in error and discarded, TLVs skipped, ageouts and table-full drops, per LLDP-enabled interface.
 - `show spanning-tree domain <bd>`: one Rapid-PVST+ tree (bridge id with the VLAN, root, every member port's role and state, `Compat` and `PVID-inconsistent` marks).
 - `show spanning-tree instance <id>` and `show spanning-tree mst-config`: one MST instance (0 is the CIST) with its VLANs, root and ports, and the MST region name, revision, digest and VLAN map.
@@ -489,7 +489,7 @@ Full module table, before it was condensed in `cli/CLAUDE.md` (#263):
 | `log_client.rs` | IPC calls to the resolved `nos-logd` instance: `get_logs` (one-shot `LogRequest::GetLogs`) and `tail` (long-lived, like `client::subscribe` — sends `LogRequest::Tail` and returns the reader for the caller to loop on) |
 | `bgp_client.rs` | One-shot IPC call to a resolved `nos-bgpd` instance: `get_summary` (`BgpRequest::GetSummary`) |
 | `lacp_client.rs` | One-shot IPC call to the resolved `nos-lacpd` instance: `get_summary` (`LacpRequest::GetSummary`) |
-| `acl_client.rs` | One-shot IPC call to the resolved `nos-acld`: `show(name)` returns the `AclStatus` list (`AclRequest::Show`) |
+| `acl_client.rs` | One-shot IPC call to the resolved `nos-acld`: `show(name)` returns the `AclStatus` list (`AclRequest::Show`), `show_flowspec()` the flowspec rules (`AclRequest::ShowFlowspec`) |
 | `lldp_client.rs` | One-shot IPC call to the resolved `nos-lldpd` instance: `get_neighbors` (`LldpRequest::GetNeighbors`), `get_statistics` (`LldpRequest::GetStatistics`) |
 | `bfd_client.rs` | One-shot IPC call to the resolved `nos-bfdd`: `get_sessions` (`BfdRequest::GetSessions`), `get_reflector` (`BfdRequest::GetReflector`) |
 | `fdb_client.rs` | One-shot IPC call to a domain's resolved `nos-fdbd` instance: `get_table` (`FdbRequest::GetMacs`), connecting with `connect_role` like `rib_client.rs`. |

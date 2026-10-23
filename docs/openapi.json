@@ -2244,6 +2244,53 @@
         ],
         "type": "object"
       },
+      "FlowspecRuleStatus": {
+        "description": "One flow rule's state in the dataplane, for `show acl` and\n`GET /v1/flowspec`.",
+        "properties": {
+          "actions": {
+            "description": "Its actions as text.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bytes": {
+            "description": "Bytes matched, summed over every device.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "flow": {
+            "description": "The flow as text.",
+            "type": "string"
+          },
+          "instance": {
+            "description": "The BGP instance that pushed it.",
+            "type": "string"
+          },
+          "packets": {
+            "description": "Packets matched, summed over every device.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unsupported": {
+            "description": "Why it is not installed (an unsupported match or action, the rule\ncap); `None` when installed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "instance",
+          "flow",
+          "actions",
+          "packets",
+          "bytes"
+        ],
+        "type": "object"
+      },
       "GrSummary": {
         "description": "A peer's RFC 4724 / RFC 8538 graceful restart capability.",
         "properties": {
@@ -6514,6 +6561,40 @@
           }
         },
         "summary": "A broadcast domain's forwarding database: local and EVPN-learned MACs, flood list",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/flowspec": {
+      "get": {
+        "operationId": "flowspec_rules",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FlowspecRuleStatus"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Every flowspec rule nos-acld holds: installed or why not, with packet and byte counters",
         "tags": [
           "show"
         ]

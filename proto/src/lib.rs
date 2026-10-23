@@ -44,7 +44,10 @@ pub mod validators;
 pub mod version;
 pub use version::VersionInfo;
 
-pub use acl::{AclAttachment, AclDirection, AclEvent, AclRequest, AclRuleStatus, AclStatus};
+pub use acl::{
+    AclAttachment, AclDirection, AclEvent, AclRequest, AclRuleStatus, AclStatus, FlowBitOp,
+    FlowComponent, FlowNumOp, FlowRule, FlowRuleAction, FlowspecRuleStatus, FlowspecSet,
+};
 pub use bfd::{
     BfdDiag, BfdEvent, BfdRequest, BfdSessionKind, BfdSessionView, BfdState, ReflectorDiscards,
     ReflectorView, SessionKey,

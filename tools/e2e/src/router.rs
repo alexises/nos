@@ -187,7 +187,11 @@ impl Router {
         let yaml = serde_norway::to_string(&config)?;
 
         // A big log buffer, so the backlog re-read after a reconnect is complete.
-        let mut cmd = strings(&["--logd-arg=--capacity=200000"]);
+        // `nos-acld` watches a flowspec file the `acl` phase writes (#561).
+        let mut cmd = strings(&[
+            "--logd-arg=--capacity=200000",
+            &format!("--acld-arg=--flowspec-file={FLOWSPEC_DIR}/{FLOWSPEC_FILE}"),
+        ]);
         cmd.extend(strings(watchdog_args));
         log(format!("starting {} at {}", id.name, id.ip));
         dock.start(&ContainerSpec {

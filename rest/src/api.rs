@@ -62,6 +62,7 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::lacp_one))
         .routes(routes!(show::acl_list))
         .routes(routes!(show::acl_one))
+        .routes(routes!(show::flowspec_rules))
         .routes(routes!(show::lldp_neighbors))
         .routes(routes!(show::lldp_statistics))
         .routes(routes!(show::spanning_tree))

@@ -11,13 +11,13 @@ use axum::Json;
 use futures::{Stream, StreamExt};
 use nos_proto::{
     AclEvent, AclRequest, AclStatus, BfdEvent, BfdRequest, BfdSessionView, BgpEvent, BgpRequest,
-    Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, FlowspecRouteSummary, InterfaceEvent,
-    InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpLinkStats,
-    LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary,
-    OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request,
-    PeerSummary, PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, ReflectorView,
-    RibEvent, RibRequest, ServiceRef, StpEvent, StpInstance, StpMst, StpPortCounters, StpRequest,
-    StpSummary, VersionInfo,
+    Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, FlowspecRouteSummary,
+    FlowspecRuleStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest,
+    LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest,
+    LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
+    Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
+    PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
+    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -167,10 +167,21 @@ pub async fn lacp_one(
 }
 
 async fn acls(d: &Daemons, name: Option<String>) -> ApiResult<Vec<AclStatus>> {
-    let AclEvent::Acls(v) = d
+    match d
         .service(ServiceRef::Acl, AclRequest::Show { name })
-        .await?;
-    Ok(v)
+        .await?
+    {
+        AclEvent::Acls(v) => Ok(v),
+        other @ (AclEvent::Ack | AclEvent::Flowspec(_)) => Err(unexpected("nos-acld", &other)),
+    }
+}
+
+#[utoipa::path(get, path = "/v1/flowspec", tag = "show", summary = "Every flowspec rule nos-acld holds: installed or why not, with packet and byte counters", responses((status = 200, body = Vec<FlowspecRuleStatus>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn flowspec_rules(State(d): State<Daemons>) -> ApiResult<Json<Vec<FlowspecRuleStatus>>> {
+    match d.service(ServiceRef::Acl, AclRequest::ShowFlowspec).await? {
+        AclEvent::Flowspec(v) => Ok(Json(v)),
+        other @ (AclEvent::Ack | AclEvent::Acls(_)) => Err(unexpected("nos-acld", &other)),
+    }
 }
 
 #[utoipa::path(get, path = "/v1/acl", tag = "show", summary = "Every ACL: attachments and per-rule packet and byte counters", responses((status = 200, body = Vec<AclStatus>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
@@ -722,6 +733,14 @@ mod acl_tests {
             attached: vec![],
             rules: vec![],
         }
+    }
+
+    #[test]
+    fn a_wrong_acld_reply_is_a_bad_gateway() {
+        assert!(matches!(
+            unexpected("nos-acld", &AclEvent::Ack),
+            ApiError::BadGateway(m) if m == "nos-acld sent an unexpected reply: Ack"
+        ));
     }
 
     #[test]
