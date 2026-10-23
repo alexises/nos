@@ -378,6 +378,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                             BgpEvent::PeerNotFound
                         }
                         BgpRequest::GetEvpnRoutes => BgpEvent::EvpnRoutes(Vec::new()),
+                        BgpRequest::GetFlowspecRoutes => BgpEvent::FlowspecRoutes(Vec::new()),
                         BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
                         _ => BgpEvent::Summary(Vec::new()),
                     }]
@@ -476,6 +477,7 @@ const QUERIES: &[&str] = &[
     "show log configd --follow",
     "show bgp brief",
     "show bgp evpn",
+    "show bgp flowspec",
     "show bgp rpki",
     "show ospf neigh",
     "show ospf database",
@@ -558,6 +560,8 @@ async fn configd_is_down_for_every_operational_command() {
             "show config admin",
             "show bgp brief",
             "show bgp evpn",
+            "show bgp flowspec",
+            "show bgp flowspec",
             "show bgp rpki",
             "show ospf neigh",
             "show ospf database",
@@ -814,6 +818,8 @@ async fn no_protocol_instances_are_configured() {
             "",
             "show bgp brief",
             "show bgp evpn",
+            "show bgp flowspec",
+            "show bgp flowspec",
             "show bgp rpki",
             "show ospf neigh",
             "show ospf database",

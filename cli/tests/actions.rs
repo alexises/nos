@@ -160,6 +160,7 @@ fn lab() -> Lab {
             "bgp" => serve(role, name, &path, |r: BgpRequest| {
                 vec![match r {
                     BgpRequest::GetEvpnRoutes => BgpEvent::EvpnRoutes(Vec::new()),
+                    BgpRequest::GetFlowspecRoutes => BgpEvent::FlowspecRoutes(Vec::new()),
                     BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
                     BgpRequest::SendRouteRefresh { .. } => BgpEvent::RouteRefreshSent,
                     BgpRequest::ClearPeer { .. } => BgpEvent::PeerCleared,
@@ -246,6 +247,8 @@ async fn every_show_command_runs_against_its_daemon() {
             "show log configd --follow",
             "show bgp brief",
             "show bgp evpn",
+            "show bgp flowspec",
+            "show bgp flowspec",
             "show bgp rpki",
             "show ospf neigh",
             "show ospf database",

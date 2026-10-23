@@ -712,6 +712,19 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowBgpEvpn),
+    cmd!(["show" "bgp" "flowspec"],
+        Doc::Local {
+            summary: "Show every Flowspec rule received from BGP peers, across every instance.",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for the Flowspec (RFC 8955/8956, SAFI 133) rules its peers \
+                     sent: peer, the rule's components and extended communities (the actions). \
+                     Only peers whose peer-group has `address-family ipv4-flowspec` or \
+                     `ipv6-flowspec` exchange them. Receive-only: rules are neither validated \
+                     nor enforced. An instance whose nos-bgpd isn't running is reported \
+                     individually rather than aborting the whole command.",
+        },
+        Always,
+        Command::ShowBgpFlowspec),
     cmd!(["show" "bgp" "rpki"],
         Doc::Local {
             summary: "Show every BGP instance's RPKI cache sessions (RFC 8210).",

@@ -58,6 +58,7 @@ pub async fn bgp_soft_in(
         ))),
         other @ (BgpEvent::Summary(_)
         | BgpEvent::EvpnRoutes(_)
+        | BgpEvent::FlowspecRoutes(_)
         | BgpEvent::PeerCleared
         | BgpEvent::Routes(_)
         | BgpEvent::RpkiSummary(_)) => Err(unexpected("nos-bgpd", &other)),
@@ -110,6 +111,7 @@ pub async fn bgp_clear_peer(
         ))),
         other @ (BgpEvent::Summary(_)
         | BgpEvent::EvpnRoutes(_)
+        | BgpEvent::FlowspecRoutes(_)
         | BgpEvent::RouteRefreshSent
         | BgpEvent::Routes(_)
         | BgpEvent::RpkiSummary(_)) => Err(unexpected("nos-bgpd", &other)),

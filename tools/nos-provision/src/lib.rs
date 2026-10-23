@@ -380,6 +380,11 @@ pub struct Args {
     #[arg(long)]
     pub evpn: bool,
 
+    /// If set, adds `address-family ipv4-flowspec` and `ipv6-flowspec`
+    /// (RFC 8955/8956, SAFI 133) to `--peer-group`.
+    #[arg(long)]
+    pub flowspec: bool,
+
     /// If set, overrides `--peer-group`'s connect-retry time in seconds
     /// (`BgpPeerGroupOp::SetConnectRetryTime`). The default is RFC 4271's
     /// 120s, which leaves both sides Idle that long after a collision.
@@ -1409,7 +1414,7 @@ fn parse_family(s: &str) -> Result<AddressFamily, String> {
     AddressFamily::ALL
         .into_iter()
         .find(|af| af.as_str() == s)
-        .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn)"))
+        .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn, ipv4-flowspec, ipv6-flowspec)"))
 }
 
 fn parse_add_path(s: &str) -> Result<nos_proto::BgpAddPath, String> {
@@ -2564,6 +2569,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: args.peer_group.clone(),
             af: AddressFamily::L2vpnEvpn,
         }));
+    }
+    if args.flowspec {
+        for af in [AddressFamily::Ipv4Flowspec, AddressFamily::Ipv6Flowspec] {
+            ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::AddAddressFamily {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                af,
+            }));
+        }
     }
     if args.route_reflector_client {
         ops.push(ConfigOp::BgpPeerGroup(
@@ -5747,6 +5761,7 @@ mod tests {
             "--ao-remove-key",
             "9",
             "--evpn",
+            "--flowspec",
             "--route-server-client",
             "--route-reflector-client",
             "--save",
@@ -5778,6 +5793,8 @@ mod tests {
             "SetRouteServerClient",
             "SetRouteReflectorClient",
             "L2vpnEvpn",
+            "Ipv4Flowspec",
+            "Ipv6Flowspec",
         ] {
             shows(&o, m);
         }

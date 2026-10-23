@@ -603,6 +603,7 @@ async fn fake_evpn_peer(
             next_hop: "192.0.2.2".parse().unwrap(),
             nlri: vec![],
             nlri_path_ids: vec![],
+            flowspec: vec![],
             evpn: vec![
                 EvpnNlri::MacIp {
                     rd,

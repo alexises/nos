@@ -992,6 +992,7 @@ fn prefix_counters_match_a_recount_through_every_mutation() {
             withdrawn: vec![prefix("2001:db8:1::/48")],
             withdrawn_path_ids: vec![],
             evpn: vec![],
+            flowspec: Vec::new(),
         }],
         ..empty_update()
     };

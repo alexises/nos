@@ -357,6 +357,8 @@ fn maximum_prefix_families_are_independent_and_warning_only_never_trips() {
             ipv4: limit(5, false),
             ipv6: limit(1, false),
             l2vpn_evpn: None,
+            ipv4_flowspec: None,
+            ipv6_flowspec: None,
         },
     );
     let accept = &nos_rpl::ACCEPT_ALL;
@@ -387,6 +389,8 @@ fn maximum_prefix_families_are_independent_and_warning_only_never_trips() {
             ipv4: limit(2, true),
             ipv6: limit(1, true),
             l2vpn_evpn: None,
+            ipv4_flowspec: None,
+            ipv6_flowspec: None,
         },
     );
     assert_eq!(rib.check_max_prefix(peer), None, "warning-only never trips");

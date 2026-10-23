@@ -622,3 +622,15 @@ proptest! {
         prop_assert_eq!(cmp_precedence(&a, &b), want);
     }
 }
+
+#[test]
+fn action_communities_render_as_text() {
+    assert_eq!(format_action(0x8006_0000_0000_0000), "traffic-rate:0:0");
+    assert_eq!(
+        format_action(0x8006_fde8_476a_6000),
+        "traffic-rate:65000:60000"
+    );
+    assert_eq!(format_action(0x8008_fde8_0000_000a), "redirect:65000:10");
+    assert_eq!(format_action(0x8009_0000_0000_000a), "traffic-marking:10");
+    assert_eq!(format_action(0x0002_fde8_0000_2710), "RT:65000:10000");
+}

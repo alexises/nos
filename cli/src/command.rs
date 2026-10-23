@@ -84,6 +84,9 @@ pub enum Command {
     /// `show bgp evpn` — every EVPN route received by every configured BGP
     /// instance.
     ShowBgpEvpn,
+    /// `show bgp flowspec` — every Flowspec rule received by every configured
+    /// BGP instance.
+    ShowBgpFlowspec,
     /// `show bgp rpki` — every configured BGP instance's RPKI cache sessions.
     ShowBgpRpki,
     /// `show bgp routes` — every BGP instance's unicast routes with their
@@ -578,6 +581,10 @@ mod tests {
     #[test]
     fn show_bgp_evpn() {
         assert_eq!(Command::parse("show bgp evpn"), Command::ShowBgpEvpn);
+        assert_eq!(
+            Command::parse("show bgp flowspec"),
+            Command::ShowBgpFlowspec
+        );
         assert_eq!(Command::parse("show bgp rpki"), Command::ShowBgpRpki);
         assert_eq!(Command::parse("show bgp routes"), Command::ShowBgpRoutes);
     }

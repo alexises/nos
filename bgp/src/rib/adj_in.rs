@@ -2,10 +2,10 @@
 //! Moved verbatim out of `rib.rs`.
 
 use super::{
-    apply_policy, debug, family_index, info, message, otc_leak, ov_state, warn, Arc, BgpRib,
-    CompiledPolicy, Damping, EvpnNlri, EvpnRoute, HashMap, HashSet, Instant, IpAddr, IpNet,
-    Ipv4Addr, MacMobility, RibRoute, RouteOrigin, SmallVec, UpdateMessage, CHANGE_PENALTY,
-    DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
+    apply_policy, debug, family_index, info, message, otc_leak, ov_state, warn, AddressFamily, Arc,
+    BgpRib, CompiledPolicy, Damping, EvpnNlri, EvpnRoute, FlowspecKey, FlowspecRoute, HashMap,
+    HashSet, Instant, IpAddr, IpNet, Ipv4Addr, MacMobility, RibRoute, RouteOrigin, SmallVec,
+    UpdateMessage, CHANGE_PENALTY, DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
 };
 use crate::as_path::SegKind;
 use nos_proto::BgpRole::{Peer, Provider, RouteServer};
@@ -102,6 +102,37 @@ pub(super) fn learn_evpn(
         if table.insert(nlri.route_key(), route.clone()) != Some(route) {
             info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, "evpn route learned");
         }
+    }
+}
+
+/// Stores one `MP_REACH_NLRI` batch's Flowspec rules in a peer's Flowspec
+/// Adj-RIB-In, logging only rules that are new or changed. No policy, no
+/// validation (#559/#560).
+pub(super) fn learn_flowspec(
+    table: &mut HashMap<FlowspecKey, FlowspecRoute>,
+    from: IpAddr,
+    family: AddressFamily,
+    mp: &message::MpReachNlri,
+    attributes: &message::PathAttributes,
+) {
+    for nlri in &mp.flowspec {
+        let route = FlowspecRoute {
+            family,
+            nlri: nlri.clone(),
+            attributes: attributes.clone(),
+        };
+        if table.insert((family, nlri.clone()), route.clone()) != Some(route) {
+            info!(peer = %from, family = %family, route = %nlri, "flowspec route learned");
+        }
+    }
+}
+
+/// The Flowspec family of an MP batch's AFI.
+pub(super) fn flowspec_family(afi: u16) -> Option<AddressFamily> {
+    match afi {
+        message::AFI_IPV4 => Some(AddressFamily::Ipv4Flowspec),
+        message::AFI_IPV6 => Some(AddressFamily::Ipv6Flowspec),
+        _ => None,
     }
 }
 
@@ -458,6 +489,23 @@ impl BgpRib {
                 stale.remove(&n.route_key());
             }
         }
+        if let Some(stale) = self.flowspec_stale.get_mut(&from) {
+            for (m_afi, rule) in update
+                .mp_reach
+                .iter()
+                .flat_map(|m| m.flowspec.iter().map(move |r| (m.afi, r)))
+                .chain(
+                    update
+                        .mp_unreach
+                        .iter()
+                        .flat_map(|m| m.flowspec.iter().map(move |r| (m.afi, r))),
+                )
+            {
+                if let Some(f) = flowspec_family(m_afi) {
+                    stale.remove(&(f, rule.clone()));
+                }
+            }
+        }
         let withdrawn = withdrawn_paths(update);
         let announced = announced_paths(update);
         // RFC 7313 / RFC 4724: any path the peer mentions again is no
@@ -477,6 +525,20 @@ impl BgpRib {
                 .is_some_and(|t| t.remove(&nlri.route_key()).is_some());
             if removed {
                 info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+            }
+        }
+        for u in &update.mp_unreach {
+            let Some(family) = flowspec_family(u.afi) else {
+                continue;
+            };
+            for rule in &u.flowspec {
+                let removed = self
+                    .flowspec_adj_rib_in
+                    .get_mut(&from)
+                    .is_some_and(|t| t.remove(&(family, rule.clone())).is_some());
+                if removed {
+                    info!(peer = %from, family = %family, route = %rule, "flowspec route withdrawn");
+                }
             }
         }
         for &(prefix, id) in &withdrawn {
@@ -618,6 +680,28 @@ impl BgpRib {
                         .map(|(vni, mac, _)| (vni, mac)),
                 );
             }
+            if !mp.flowspec.is_empty()
+                && let Some(family) = flowspec_family(mp.afi)
+            {
+                // D-d: NLRI for a family this session did not negotiate is
+                // ignored (a test RIB without an outbox has no session to
+                // check against).
+                if self
+                    .peer_outboxes
+                    .get(&from)
+                    .is_some_and(|o| !o.negotiated_afs.contains(&family))
+                {
+                    warn!(peer = %from, family = %family, "flowspec routes for a family not negotiated, ignored");
+                } else {
+                    learn_flowspec(
+                        self.flowspec_adj_rib_in.entry(from).or_default(),
+                        from,
+                        family,
+                        mp,
+                        attrs,
+                    );
+                }
+            }
         }
         for (vni, mac) in evpn_recheck {
             self.mac_mobility_recheck(vni, mac);
@@ -638,6 +722,19 @@ impl BgpRib {
             if self.remove_path(from, prefix, id).is_some() {
                 debug!(peer = %from, path_id = id, "bgp: withdrew path for {prefix} from adj-rib-in");
                 touched.insert(prefix);
+            }
+        }
+        for m in &update.mp_reach {
+            let (Some(family), Some(table)) = (
+                flowspec_family(m.afi),
+                self.flowspec_adj_rib_in.get_mut(&from),
+            ) else {
+                continue;
+            };
+            for rule in &m.flowspec {
+                if table.remove(&(family, rule.clone())).is_some() {
+                    info!(peer = %from, family = %family, route = %rule, "flowspec route withdrawn");
+                }
             }
         }
         if let Some(table) = self.evpn_adj_rib_in.get_mut(&from) {
