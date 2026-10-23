@@ -249,6 +249,7 @@ fn ensure_subinterface_mut<'a>(
         agg.subinterfaces.push(Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag,
             addresses: Vec::new(),
             routing_table: None,
@@ -269,6 +270,7 @@ mod tests {
         PortAggregate {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),
@@ -408,6 +410,7 @@ mod tests {
         let sub = |tag| Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag,
             addresses: Vec::new(),
             routing_table: None,
@@ -481,6 +484,7 @@ mod tests {
                 vec![Subinterface {
                     acl_in: None,
                     acl_out: None,
+                    flowspec: false,
                     tag: 100,
                     addresses: Vec::new(),
                     routing_table: None,

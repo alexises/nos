@@ -300,6 +300,35 @@ impl BgpRib {
         }
     }
 
+    /// The selected rules as `nos-acld` takes them (#562): IPv4 first, each
+    /// family in RFC 8955 section 5.1 order. `None` while deferring
+    /// (graceful restart): `nos-acld` keeps what it was last sent.
+    pub fn flowspec_push_snapshot(&self) -> Option<Vec<nos_proto::FlowRule>> {
+        if self.deferring() {
+            return None;
+        }
+        let mut rules: Vec<&FlowspecRoute> = self.flowspec_loc.values().map(|(_, r)| r).collect();
+        let v6 = |r: &FlowspecRoute| r.family == AddressFamily::Ipv6Flowspec;
+        rules.sort_by(|a, b| {
+            v6(a)
+                .cmp(&v6(b))
+                .then_with(|| crate::flowspec::cmp_precedence(&a.nlri, &b.nlri))
+        });
+        Some(
+            rules
+                .into_iter()
+                .map(crate::acl_push_client::flow_rule)
+                .collect(),
+        )
+    }
+
+    /// `r`, held from `peer`, is the selected copy of its rule.
+    pub fn flowspec_selected(&self, peer: IpAddr, r: &FlowspecRoute) -> bool {
+        self.flowspec_loc
+            .get(&(r.family, r.nlri.clone()))
+            .is_some_and(|(p, _)| *p == peer)
+    }
+
     /// The peer whose copy of rule `k` is selected.
     #[cfg(test)]
     pub(crate) fn flowspec_best(&self, k: &FlowspecKey) -> Option<IpAddr> {

@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
         .context("--config-socket is required")?;
     let ops = build_ops(args)?;
     if nos_provision::acl_flags(args) {
-        bail!("--acl-* flags are applied by nos-e2e only, not over the config socket");
+        bail!("--acl-* and --flowspec-interface flags are applied by nos-e2e only, not over the config socket");
     }
 
     log_in(&cli).await?;

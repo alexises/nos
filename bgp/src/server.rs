@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
@@ -15,16 +15,23 @@ use crate::session::SessionManager;
 /// summaries.
 ///
 /// Returns a `JoinHandle` the caller must keep alive for the server to run.
+/// `watchdog_socket` resolves `nos-acld` for `show bgp flowspec`.
 pub fn start(
     listen_socket: &Path,
     instance: String,
     sessions: Arc<SessionManager>,
     identity: &Identity,
+    watchdog_socket: PathBuf,
 ) -> std::io::Result<JoinHandle<()>> {
     let listener = identity.listen(listen_socket)?;
     info!(instance = %instance, socket = %listen_socket.display(), "BGP IPC server listening");
-    Ok(tokio::spawn(accept_loop(listener, instance, sessions)))
+    let ctx = Arc::new((instance, sessions, watchdog_socket));
+    Ok(tokio::spawn(accept_loop(listener, ctx)))
 }
+
+/// What every connection needs: the instance name, the sessions, the
+/// watchdog socket.
+type Ctx = Arc<(String, Arc<SessionManager>, PathBuf)>;
 
 /// Session queries and `clear bgp` are for people (and `Restd` on their
 /// behalf); the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
@@ -46,14 +53,14 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
     }
 }
 
-async fn accept_loop(listener: Listener, instance: String, sessions: Arc<SessionManager>) {
+async fn accept_loop(listener: Listener, ctx: Ctx) {
     loop {
         match listener.accept().await {
             Ok(incoming) => {
-                tokio::spawn(serve(incoming, instance.clone(), sessions.clone()));
+                tokio::spawn(serve(incoming, ctx.clone()));
             }
             Err(e) => {
-                error!(instance = %instance, error = %e, "BGP IPC accept loop terminated");
+                error!(instance = %ctx.0, error = %e, "BGP IPC accept loop terminated");
                 break;
             }
         }
@@ -65,20 +72,15 @@ async fn accept_loop(listener: Listener, instance: String, sessions: Arc<Session
 /// over one long-lived connection, mirroring `nos-logd`'s handling of
 /// `LogRequest::Push`) gets no reply at all, so the loop just keeps reading
 /// further requests on the same connection.
-async fn serve(incoming: Incoming, instance: String, sessions: Arc<SessionManager>) {
+async fn serve(incoming: Incoming, ctx: Ctx) {
     match incoming.handshake_as(Role::parse).await {
-        Ok((stream, role, name)) => handle_connection(stream, role, name, instance, sessions).await,
-        Err(e) => debug!(instance = %instance, error = %e, "BGP IPC handshake refused"),
+        Ok((stream, role, name)) => handle_connection(stream, role, name, ctx).await,
+        Err(e) => debug!(instance = %ctx.0, error = %e, "BGP IPC handshake refused"),
     }
 }
 
-async fn handle_connection(
-    stream: Stream,
-    role: Role,
-    name: String,
-    instance: String,
-    sessions: Arc<SessionManager>,
-) {
+async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
+    let (instance, sessions, watchdog_socket) = &*ctx;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<BgpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<BgpEvent>::default());
@@ -113,7 +115,10 @@ async fn handle_connection(
                 }
             }
             BgpRequest::GetFlowspecRoutes => {
-                let event = BgpEvent::FlowspecRoutes(sessions.flowspec_route_summaries().await);
+                let acld = crate::acl_push_client::show(watchdog_socket).await;
+                let event = BgpEvent::FlowspecRoutes(
+                    sessions.flowspec_route_summaries(acld.as_deref()).await,
+                );
                 if writer.send(event).await.is_err() {
                     break;
                 }

@@ -1185,6 +1185,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 100,
@@ -1240,6 +1241,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 0,
@@ -1330,6 +1332,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 0,
@@ -1368,6 +1371,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             ospfv3_profile: None,
             bfd_unsolicited: None,
             tag: 0,
@@ -1468,6 +1472,7 @@ mod tests {
             Subinterface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 0,
@@ -1478,6 +1483,7 @@ mod tests {
             Subinterface {
                 acl_in: None,
                 acl_out: None,
+                flowspec: false,
                 ospfv3_profile: None,
                 bfd_unsolicited: None,
                 tag: 1,

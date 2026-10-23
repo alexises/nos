@@ -215,6 +215,31 @@ fn a_withdrawn_flow_is_withdrawn_downstream() {
     assert_eq!(flows(&mut ebgp).len(), 0);
 }
 
+/// #562: what `nos-acld` gets is the selected rules, more specific first
+/// (RFC 8955 section 5.1), and nothing while deferring.
+#[test]
+fn the_acld_snapshot_is_the_selected_rules_in_precedence_order() {
+    let (mut rib, _rx) = setup();
+    assert_eq!(rib.flowspec_push_snapshot(), Some(vec![]));
+    feed(&mut rib, SRC, false, "2.2.2.1", &unicast(vec![65001], None));
+    let narrow = FlowSpec::decode(Afi::V4, &[6, 1, 25, 10, 1, 2, 0])
+        .unwrap()
+        .0;
+    let mut u = flow_update(vec![65001], None, None);
+    u.mp_reach[0].flowspec = vec![rule(), narrow.clone()];
+    feed(&mut rib, SRC, false, "2.2.2.1", &u);
+    let snap = rib.flowspec_push_snapshot().unwrap();
+    let shown: Vec<&str> = snap.iter().map(|r| r.flow.as_str()).collect();
+    assert_eq!(shown, [narrow.to_string(), rule().to_string()]);
+    assert_eq!(snap[0].actions, [nos_proto::FlowRuleAction::RateBytes(0.0)]);
+    let held = rib.flowspec_routes();
+    assert_eq!(held.len(), 2);
+    assert!(held.iter().all(|(p, r)| rib.flowspec_selected(*p, r)));
+    assert!(!rib.flowspec_selected(addr(EBGP), held[0].1));
+    rib.begin_deferral(0, 120, 360, [addr(EBGP)]);
+    assert_eq!(rib.flowspec_push_snapshot(), None);
+}
+
 /// #558 left this untested: an UPDATE treated as withdraw (here, a looped
 /// `AS_PATH`) removes the Flowspec rules it announces too.
 #[test]

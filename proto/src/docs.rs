@@ -547,6 +547,8 @@ topics! {
     SwitchingProfileMemberStpCost,
     /// `SwitchingProfileMember.stp_priority`
     SwitchingProfileMemberStpPriority,
+    /// `Interface.flowspec` (also `Subinterface`/`PortAggregate`)
+    InterfaceFlowspec,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

@@ -1080,6 +1080,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
@@ -1135,6 +1136,7 @@ mod tests {
         iface.subinterfaces = vec![Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
@@ -1305,6 +1307,7 @@ mod tests {
         let sub = |tag, addresses| Subinterface {
             acl_in: None,
             acl_out: None,
+            flowspec: false,
             tag,
             addresses,
             routing_table: Some("rt1".into()),

@@ -725,6 +725,17 @@ impl SessionManager {
         self.bgp_rib.subscribe()
     }
 
+    /// This process's BGP instance name.
+    pub fn instance(&self) -> &str {
+        &self.instance
+    }
+
+    /// The selected flowspec rules for `acl_push_client`; `None` while
+    /// deferring (graceful restart).
+    pub async fn flowspec_push_snapshot(&self) -> Option<Vec<nos_proto::FlowRule>> {
+        self.bgp_rib.lock().await.flowspec_push_snapshot()
+    }
+
     /// This instance's owning routing table name and current best-path
     /// snapshot, for `rib_push_client`.
     pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, crate::rib::Hops>) {
@@ -796,14 +807,20 @@ impl SessionManager {
     }
 
     /// Every received Flowspec route, for `BgpRequest::GetFlowspecRoutes` —
-    /// backs `nos-cli`'s `show bgp flowspec`.
-    pub async fn flowspec_route_summaries(&self) -> Vec<nos_proto::FlowspecRouteSummary> {
-        self.bgp_rib
-            .lock()
-            .await
-            .flowspec_routes()
+    /// backs `nos-cli`'s `show bgp flowspec`. `acld` is `nos-acld`'s
+    /// `ShowFlowspec` reply (`None`: unreachable), joined on this instance
+    /// and the flow text into each selected copy's `dataplane` (#562).
+    pub async fn flowspec_route_summaries(
+        &self,
+        acld: Option<&[nos_proto::FlowspecRuleStatus]>,
+    ) -> Vec<nos_proto::FlowspecRouteSummary> {
+        let rib = self.bgp_rib.lock().await;
+        rib.flowspec_routes()
             .into_iter()
             .map(|(peer, route)| nos_proto::FlowspecRouteSummary {
+                dataplane: rib.flowspec_selected(peer, route).then(|| {
+                    crate::acl_push_client::dataplane(&self.instance, &route.nlri.to_string(), acld)
+                }),
                 peer,
                 nlri: route.nlri.to_string(),
                 extended_communities: route

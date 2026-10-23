@@ -1227,6 +1227,12 @@ pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> S
                 r.actions.join(", ")
             }
         ));
+        if let Some(d) = &r.dataplane {
+            // The selected copy: what nos-acld made of it (#562).
+            let last = lines.last_mut().expect("just pushed");
+            last.push_str(" dataplane: ");
+            last.push_str(d);
+        }
     }
     lines.join("\n")
 }
@@ -2218,6 +2224,7 @@ mod tests {
             extended_communities: vec!["traffic-rate:0:0".to_string()],
             validity: "invalid:no-covering-unicast-route".to_string(),
             actions: vec!["discard".to_string()],
+            dataplane: None,
         };
         assert_eq!(
             render_bgp_flowspec("r1", std::slice::from_ref(&route)),
@@ -2226,9 +2233,16 @@ mod tests {
         let bare = FlowspecRouteSummary {
             validity: "valid".to_string(),
             actions: vec![],
-            ..route
+            ..route.clone()
         };
         assert!(render_bgp_flowspec("r1", &[bare]).ends_with("valid actions: none"));
+        let best = FlowspecRouteSummary {
+            dataplane: Some("installed".to_string()),
+            ..route
+        };
+        assert!(
+            render_bgp_flowspec("r1", &[best]).ends_with("actions: discard dataplane: installed")
+        );
     }
 
     #[test]

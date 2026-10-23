@@ -1807,6 +1807,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Filter the IP packets sent on this link.",
             "The name of an `acl`, with the same placement rules and caveats as `acl in`.",
         ),
+        Topic::InterfaceFlowspec => (
+            "Enforce BGP flowspec rules on the IP packets received on this link.",
+            "On or off, default off. The valid best flowspec routes of the BGP instance whose routing table owns this device (an interface uses its untagged subinterface's table) become tc filters on ingress (RFC 8955: inbound only). The commit is refused on a loopback, a port aggregate member (set it on the aggregate), a switching-profile port, on both an interface and its untagged subinterface, and on a device whose routing table no BGP instance uses. `show bgp flowspec` shows which rules are installed.",
+        ),
         Topic::InterfaceStpPortProfile => (
             "Attach a spanning-tree port profile.",
             "The name of a `stp-port-profile`. The commit is refused when it does not exist, and on an interface that is a member of a port aggregate (the spanning-tree port is the aggregate). Only an interface with a switching profile is a spanning-tree port; on another one the setting is kept but unused.",

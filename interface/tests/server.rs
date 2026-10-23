@@ -40,6 +40,7 @@ async fn sample_interfaces() -> Interfaces {
                 subinterfaces: vec![nos_proto::Subinterface {
                     acl_in: None,
                     acl_out: None,
+                    flowspec: false,
                     ospfv3_profile: None,
                     bfd_unsolicited: None,
                     tag: 0,

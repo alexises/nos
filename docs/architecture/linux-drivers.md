@@ -70,7 +70,7 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
 - Update: per priority whose content changed, delete it (by `ip` then `ipv6`: the kernel refuses a delete with the wrong protocol) and add the new filters. Not atomic across priorities; unchanged rules keep their counters.
 - Start: the first link snapshot also dumps each device's band; what a previous run left is rewritten or cleared by the next pass. Clean stop clears every band priority.
 - Log lines: `flowspec rules received instance= rules= installable= devices=`, `flowspec applied interface= rules=`, `flowspec rule unsupported instance= flow= reason=` (once per instance, flow and reason), `flowspec pending interface= reason="absent"`.
-- Read back: `GET /v1/flowspec` and the end of `show acl` list every rule with `unsupported` (the reason, or empty when installed) and packets/bytes summed over its devices.
+- Read back: `GET /v1/flowspec` and the end of `show acl` list every rule with `unsupported` (the reason, `not attached` when no device holds it, or empty when installed) and packets/bytes summed over its devices. `nos-bgpd` reads the same rows for `show bgp flowspec`'s `dataplane`.
 
 ### Feed rules by hand (test hook)
 
@@ -85,4 +85,4 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
    "actions": [{"RateBytes": 0.0}]}]}
 ```
 
-- Production pushes come from `nos-bgpd` as `AclRequest::PushFlowspec` (`Role::Bgpd` only, #562).
+- Production pushes come from `nos-bgpd` as `AclRequest::PushFlowspec` (`Role::Bgpd` only, #562) with `devices` empty: `nos-acld` adds, per instance, the devices of its own plan (`plan::flowspec_devices`: every `flowspec` interface, subinterface or port aggregate whose routing table that instance owns, an aggregate resolved through its bond like an ACL). A config change re-attaches; a rule no device holds shows `unsupported: not attached`.
