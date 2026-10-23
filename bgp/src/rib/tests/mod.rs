@@ -18,6 +18,7 @@ mod evpn;
 mod evpn_import;
 mod first_as;
 mod flowspec;
+mod flowspec_validation;
 mod gr;
 mod next_hop;
 mod outbox;

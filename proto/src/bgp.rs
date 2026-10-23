@@ -133,6 +133,13 @@ pub struct FlowspecRouteSummary {
     pub nlri: String,
     /// Extended communities rendered as `traffic-rate:0:0`, ...
     pub extended_communities: Vec<String>,
+    /// RFC 8955 section 6 validation: `valid`, or `invalid:<reason>` (for
+    /// example `invalid:no-covering-unicast-route`).
+    pub validity: String,
+    /// The traffic actions decoded from the extended communities, one text
+    /// each (`discard`, `redirect rt 65000:10`, `dscp 10`); a traffic-rate
+    /// shadowed by an earlier one is suffixed `(ignored)`.
+    pub actions: Vec<String>,
 }
 
 /// RFC 6811 origin validation state of a route, for `show bgp routes`.

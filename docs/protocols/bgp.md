@@ -328,25 +328,53 @@ Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Un
 
 ### Flowspec (RFC 8955, RFC 8956)
 
-Receive only for now: NOS learns Flowspec rules and shows them, but does not validate them (RFC 8955 section 6), apply policy to them, pick a best rule or enforce them in the dataplane.
+NOS learns Flowspec rules, validates them (RFC 8955 section 6) and shows the result. It does not yet apply policy to them, pick a best rule or enforce them in the dataplane.
 
 - Enable it per peer-group, like any address family: `set bgp instance r1 peer-group pg1 address-family ipv4-flowspec` (and `ipv6-flowspec`). The family is off unless configured, and negotiated only when the peer advertises it too (AFI 1 or 2, SAFI 133).
 - A rule is a list of components (destination, source, protocol, ports, ICMP, TCP flags, length, DSCP, fragment, flow label). The actions are the extended communities of the route, shown decoded: `traffic-rate:0:0` is "discard", `redirect:65000:10`, `traffic-marking:10`.
 - Flowspec has no next hop (RFC 8955 section 4). An empty or any other next hop is ignored.
 - `maximum-prefix ipv4-flowspec|ipv6-flowspec limit <n>` caps the rules held from a peer, like the other families.
 - A rule that cannot be parsed resets the session (RFC 7606 section 3(g)): an unparsable NLRI cannot be turned into a withdrawal.
+- A traffic-action community that cannot be decoded (a NaN rate) makes the UPDATE treat-as-withdraw (RFC 8955 section 10); the rules in it are dropped.
 - A rule for a family the session did not negotiate is ignored and logged (`flowspec routes for a family not negotiated, ignored`).
 - Graceful restart keeps a listed family's rules, marked stale, until End-of-RIB (SAFI 133). A route-refresh request for SAFI 133 is ignored.
+
+#### Validity
+
+Every received rule is `valid` or `invalid:<reason>`. An invalid rule stays in the Adj-RIB-In and is shown, but is never used by anything that consumes routes. A rule is valid when:
+
+- **(a)** it has a destination prefix (IPv6: with offset 0, RFC 8956 section 5);
+- **(b)** the unicast route with the longest prefix covering that destination, in the same address family, has the same originator (ORIGINATOR_ID, else the peer address). A locally originated route never matches;
+- **(c)** no more-specific unicast route comes from a neighbouring AS other than the one of that best match. Every received route counts, not only the best ones;
+- **eBGP only:** the leftmost AS of the AS_PATH is the peer's AS. An iBGP rule is accepted without this check.
+
+Reasons: `no-destination-prefix`, `ipv6-offset-not-zero`, `no-covering-unicast-route`, `originator-mismatch`, `more-specific-from-other-as`, `bad-neighbour-as`.
+
+- Rules are re-validated when the unicast routes they depend on change (announce, withdraw, best-path change, peer down), and only the rules whose destination overlaps the changed prefix. `flowspec validity changed peer=… family=… flow=… validity=…` is logged each time a state changes.
+- RFC 9117 (which relaxes rule (b) and the eBGP check, for route servers) is not implemented: this is RFC 8955 as written.
+- To accept rules without a destination prefix on one peer-group: `set bgp instance r1 peer-group pg1 flowspec-validation disable-dest-prefix-rule true` (REST: `"flowspec_validation": {"disable_dest_prefix_rule": true}`; changing it restarts the sessions). Such a rule skips (b) and (c), which need a destination. Nothing else is relaxed, and validation cannot be turned off.
+
+#### Actions
+
+The traffic actions are decoded from the route's extended communities and shown one per entry in `actions`:
+
+- `0x8006` traffic-rate (bytes/s) and `0x800c` traffic-rate (packets/s): a negative or -0 rate is 0, shown as `discard`. A NaN is malformed.
+- `0x8007` traffic-action: the sample and terminal bits.
+- `0x8008`, `0x8108`, `0x8208` redirect to a Route Target (2-octet AS, IPv4 address, 4-octet AS forms).
+- `0x8009` traffic-marking: the DSCP value.
+- The redirect to an IPv6 address (RFC 8956 section 6.1) travels in the IPv6-address-specific extended community attribute, which NOS does not parse yet, so it is not shown until the redistribution work (#560).
+- Interference (RFC 8955 section 7.7): when a route carries several traffic-rates, the first in attribute order wins and the others are shown with `(ignored)`.
+- Nothing is enforced yet; the actions are only decoded.
 
 To see the rules received, use `show bgp flowspec` (`GET /v1/bgp/flowspec`):
 
 ```
 edge-1> show bgp flowspec
 bgp instance r1:
-  from 10.0.0.2 dest 192.0.2.0/24 proto =6 dst-port =25 [traffic-rate:0:0]
+  from 10.0.0.2 dest 192.0.2.0/24 proto =6 dst-port =25 [traffic-rate:0:0] valid actions: discard
 ```
 
-The log has one line per change: `flowspec route learned peer=… family=… route=…` and `flowspec route withdrawn …`.
+The log has one line per change: `flowspec route learned peer=… family=… route=…`, `flowspec validity changed …` and `flowspec route withdrawn …`.
 
 ### Four-octet AS numbers (RFC 6793)
 
@@ -966,6 +994,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 |---|---|---|---|---|---|---|
 | name | `edit peer-group <g>` | `…/peer-group/<g>`, `"name"` | string, 1 to 64 characters | unique across all instances | Names the group, as referenced by peers | `show config` |
 | remote-as | `set bgp instance <i> peer-group <g> remote-as <n>` / `set remote-as <n>` | `…/remote-as`, number | 1 to 4294967294; required | not 0 or 4294967295 | The AS its peers must announce; equal to `asn` makes it iBGP | `show bgp brief` |
+| flowspec-validation | `… flowspec-validation disable-dest-prefix-rule <bool>` / `set flowspec-validation disable-dest-prefix-rule <bool>` | `…/flowspec-validation`, `{"disable_dest_prefix_rule":false}` | bool; default false | none | Accepts Flowspec rules without a destination prefix (RFC 8955 section 6 rule (a)); changing it restarts the sessions | `show bgp flowspec` |
 | address-family | `… address-family ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec` / `set address-family <af>`; `delete address-family <af>` | `…/address-family/<af>`, `"Ipv4Unicast"`, `"Ipv6Unicast"`, `"L2vpnEvpn"`, `"Ipv4Flowspec"`, `"Ipv6Flowspec"` | list; at least one required | not empty, no duplicates | Address families negotiated with the peer | `show config` |
 | source-address | `… source-address interface <if> [label <l>]` or `… source-address loopback [label <l>]` / `set source-address …`; `delete source-address` | `…/source-address`, `{"Interface":{"interface":"eth0","label":null}}` or `{"Loopback":{"label":null}}` | default: chosen by the kernel | none at commit; resolved when connecting | Local address of the session | `show log nos-bgpd[<i>]` |
 | hold-time | `… hold-time <s>` / `set hold-time <s>`; `delete hold-time` | `…/hold-time`, number or `null` | 0 to 65535 seconds; default 90 | 0 or ≥ 3 | Proposed hold time; the lower of both sides is used; 0 disables keepalives | `show bgp brief` (`hold-time`) |

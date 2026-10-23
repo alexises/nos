@@ -1963,7 +1963,11 @@ fn parse_update(
     let (nlri, nlri_path_ids) = decode_prefixes_v4(&body[pos..], with_ids_v4)?;
 
     let announcing = !nlri.is_empty() || !parsed.mp_reach.is_empty();
-    let attributes = if announcing && !parsed.withdraw {
+    // RFC 8955 section 10 / RFC 7606: an undecodable traffic-action community
+    // on a Flowspec announcement is treat-as-withdraw.
+    let bad_action = parsed.mp_reach.iter().any(|m| !m.flowspec.is_empty())
+        && crate::flowspec_action::decode_actions(&parsed.extended_communities).is_err();
+    let attributes = if announcing && !parsed.withdraw && !bad_action {
         // A missing mandatory attribute is treat-as-withdraw too (RFC 7606
         // §3(d)). NEXT_HOP is only mandatory with legacy NLRI: an MP-only
         // announcement carries its next-hop inside `MP_REACH_NLRI`.
@@ -3337,6 +3341,41 @@ mod tests {
             assert!(wire.windows(5).any(|w| w == needle), "next hop length 0");
             assert_eq!(decoded(&wire), BgpMessage::Update(update));
         }
+    }
+
+    #[test]
+    fn an_undecodable_action_community_is_treat_as_withdraw() {
+        let update = |ec: u64| UpdateMessage {
+            attributes: Some(PathAttributes {
+                next_hop: Ipv4Addr::UNSPECIFIED,
+                extended_communities: vec![ec],
+                ..attrs(vec![65001], Some(100))
+            }),
+            mp_reach: vec![MpReachNlri {
+                afi: AFI_IPV4,
+                safi: SAFI_FLOWSPEC,
+                next_hop: Ipv4Addr::UNSPECIFIED.into(),
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn: vec![],
+                flowspec: flow_rules(flowspec::Afi::V4),
+            }],
+            ..empty_update()
+        };
+        // A NaN traffic-rate (RFC 8955 section 10): the rules are withdrawn.
+        let bad = u64::from_be_bytes([0x80, 0x06, 0, 0, 0x7f, 0xc0, 0, 0]);
+        let BgpMessage::Update(u) = decoded(&encoded(BgpMessage::Update(update(bad)))) else {
+            panic!("an UPDATE");
+        };
+        assert!(u.attributes.is_none() && u.mp_reach.is_empty());
+        assert_eq!(u.mp_unreach[0].flowspec, flow_rules(flowspec::Afi::V4));
+        // The same rules with a sane rate stay announced.
+        let BgpMessage::Update(u) =
+            decoded(&encoded(BgpMessage::Update(update(0x8006_0000_0000_0000))))
+        else {
+            panic!("an UPDATE");
+        };
+        assert!(u.attributes.is_some() && u.mp_unreach.is_empty());
     }
 
     #[test]
