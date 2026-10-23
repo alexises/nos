@@ -43,6 +43,10 @@ pub enum Command {
     ShowLldpStatistics,
     /// `show version` — local, valid in any mode.
     ShowVersion,
+    /// `show acl` (every ACL) or `show acl <name>` (one): counters included.
+    ShowAcl {
+        name: Option<String>,
+    },
     /// `show spanning-tree` — the bridge and every port's role/state.
     ShowSpanningTree,
     /// `show spanning-tree instance <id>` — one MST instance (0: the CIST).

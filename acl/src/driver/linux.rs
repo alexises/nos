@@ -7,8 +7,8 @@ use std::io;
 use nos_tc::{dump, send, Request};
 
 use super::{
-    chain_requests, entry_delete, entry_request, live_from, Direction, Driver, ACL_CHAIN_A,
-    ACL_CHAIN_B,
+    chain_requests, counters_from, entry_delete, entry_request, live_from, Counter, Direction,
+    Driver, ACL_CHAIN_A, ACL_CHAIN_B,
 };
 use crate::compile::Compiled;
 
@@ -57,5 +57,9 @@ impl Driver for LinuxDriver {
         send(&entry_delete(ifindex, dir), &[ENOENT])?;
         self.flush(ifindex, dir, ACL_CHAIN_A)?;
         self.flush(ifindex, dir, ACL_CHAIN_B)
+    }
+
+    fn counters(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<Vec<Counter>> {
+        Ok(counters_from(&dump(ifindex, dir.hook(), chain)?))
     }
 }

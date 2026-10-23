@@ -10,13 +10,14 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::Json;
 use futures::{Stream, StreamExt};
 use nos_proto::{
-    BfdEvent, BfdRequest, BfdSessionView, BgpEvent, BgpRequest, Config, EvpnRouteSummary, FdbEvent,
-    FdbRequest, FdbTable, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpEvent,
-    LacpRequest, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent,
-    LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
-    Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
-    PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
-    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo,
+    AclEvent, AclRequest, AclStatus, BfdEvent, BfdRequest, BfdSessionView, BgpEvent, BgpRequest,
+    Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, InterfaceEvent, InterfaceRequest,
+    InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest,
+    LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest,
+    Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, PeerSummary,
+    PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent,
+    RibRequest, ServiceRef, StpEvent, StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary,
+    VersionInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -163,6 +164,34 @@ pub async fn lacp_one(
         .find(|a| a.aggregate == name)
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("no lacp aggregate '{name}'")))
+}
+
+async fn acls(d: &Daemons, name: Option<String>) -> ApiResult<Vec<AclStatus>> {
+    let AclEvent::Acls(v) = d
+        .service(ServiceRef::Acl, AclRequest::Show { name })
+        .await?;
+    Ok(v)
+}
+
+#[utoipa::path(get, path = "/v1/acl", tag = "show", summary = "Every ACL: attachments and per-rule packet and byte counters", responses((status = 200, body = Vec<AclStatus>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn acl_list(State(d): State<Daemons>) -> ApiResult<Json<Vec<AclStatus>>> {
+    Ok(Json(acls(&d, None).await?))
+}
+
+#[utoipa::path(get, path = "/v1/acl/{name}", tag = "show", summary = "One ACL with its counters", params(("name" = String, Path, description = "ACL name")), responses((status = 200, body = AclStatus), (status = 404, body = ErrorBody), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn acl_one(
+    State(d): State<Daemons>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<AclStatus>> {
+    one_acl(acls(&d, Some(name.clone())).await?, &name).map(Json)
+}
+
+/// The reply to a named query holds the ACL, or nothing when it is unknown.
+fn one_acl(found: Vec<AclStatus>, name: &str) -> ApiResult<AclStatus> {
+    found
+        .into_iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| ApiError::NotFound(format!("no acl '{name}'")))
 }
 
 #[utoipa::path(get, path = "/v1/lldp/neighbors", tag = "show", summary = "Every LLDP neighbor", responses((status = 200, body = Vec<LldpNeighbor>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
@@ -648,4 +677,33 @@ pub async fn ospfv3_database(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3D
         )
         .await,
     ))
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use nos_proto::schema::AclAction;
+
+    use super::*;
+
+    fn acl(name: &str) -> AclStatus {
+        AclStatus {
+            name: name.into(),
+            default_action: AclAction::Deny,
+            default_packets: 0,
+            default_bytes: 0,
+            levels: 0,
+            filters: 2,
+            attached: vec![],
+            rules: vec![],
+        }
+    }
+
+    #[test]
+    fn a_named_acl_is_found_or_is_a_404() {
+        assert_eq!(one_acl(vec![acl("EDGE")], "EDGE").unwrap().name, "EDGE");
+        assert!(matches!(
+            one_acl(vec![], "EDGE"),
+            Err(ApiError::NotFound(m)) if m == "no acl 'EDGE'"
+        ));
+    }
 }

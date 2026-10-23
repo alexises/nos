@@ -6,11 +6,16 @@ use nos_acl::driver::{Driver, LinuxDriver, NoopDriver};
 use nos_acl::engine::{self, Engine};
 use nos_acl::link_client::{self, LinkTable};
 use nos_acl::reconcile;
+use nos_acl::server;
 use nos_daemon::{bootstrap, watchdog};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::{info, warn};
+
+/// One fixed instance, like `nos-stpd`.
+const DEFAULT_LISTEN_SOCKET: &str = "/run/nos/acl.sock";
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum DriverKind {
@@ -30,6 +35,10 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 
+    /// Unix socket to listen on for `show acl` queries.
+    #[arg(long, default_value = DEFAULT_LISTEN_SOCKET)]
+    listen_socket: PathBuf,
+
     /// `linux` programs tc; `noop` leaves the kernel alone.
     #[arg(long, value_enum, default_value_t = DriverKind::Linux)]
     driver: DriverKind,
@@ -43,19 +52,29 @@ async fn main() -> anyhow::Result<()> {
     bootstrap::init_tracing(
         "nos-acld",
         args.log_socket.clone(),
-        identity,
+        identity.clone(),
         shutdown_rx.clone(),
     );
     info!(driver = ?args.driver, "nos-acld starting");
     match args.driver {
-        DriverKind::Linux => serve(args, LinuxDriver, shutdown_tx, shutdown_rx).await,
-        DriverKind::Noop => serve(args, NoopDriver::default(), shutdown_tx, shutdown_rx).await,
+        DriverKind::Linux => serve(args, LinuxDriver, identity, shutdown_tx, shutdown_rx).await,
+        DriverKind::Noop => {
+            serve(
+                args,
+                NoopDriver::default(),
+                identity,
+                shutdown_tx,
+                shutdown_rx,
+            )
+            .await
+        }
     }
 }
 
 async fn serve<D: Driver>(
     args: Args,
     driver: D,
+    identity: nos_pki::Identity,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -78,12 +97,11 @@ async fn serve<D: Driver>(
         links_tx,
         shutdown_rx.clone(),
     ));
-    let engine_task = tokio::spawn(engine::run(
-        Engine::new(driver),
-        plan_rx,
-        links_rx,
-        shutdown_rx,
-    ));
+    let engine = Arc::new(Mutex::new(Engine::new(driver)));
+    let server_task = server::start(&args.listen_socket, engine.clone(), &identity)
+        .inspect_err(|e| tracing::error!(error = %e, "failed to start acl IPC server"))
+        .context("starting acl IPC server")?;
+    let engine_task = tokio::spawn(engine::run(engine, plan_rx, links_rx, shutdown_rx));
 
     wait_for_shutdown_signal()
         .await
@@ -99,6 +117,7 @@ async fn serve<D: Driver>(
     if let Err(e) = engine_task.await {
         warn!(error = %e, task = "engine", "task ended abnormally");
     }
+    server_task.abort();
     info!("shutting down");
     Ok(())
 }
@@ -124,6 +143,7 @@ mod tests {
         Args::command().debug_assert();
         let args = Args::try_parse_from(["nos-acld"]).unwrap();
         assert!(matches!(args.driver, DriverKind::Linux));
+        assert_eq!(args.listen_socket, PathBuf::from(DEFAULT_LISTEN_SOCKET));
         let args = Args::try_parse_from(["nos-acld", "--driver", "noop"]).unwrap();
         assert!(matches!(args.driver, DriverKind::Noop));
     }

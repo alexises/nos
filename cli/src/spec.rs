@@ -34,6 +34,7 @@ pub enum ArgKind {
     InterfaceName,
     BroadcastDomainName,
     PortAggregateName,
+    AclName,
     /// An IPv4 or IPv6 address.
     IpAddr,
     /// A non-negative integer.
@@ -52,6 +53,7 @@ impl ArgKind {
             ArgKind::InterfaceName => "interfaces",
             ArgKind::BroadcastDomainName => "broadcast_domains",
             ArgKind::PortAggregateName => "port_aggregates",
+            ArgKind::AclName => "acls",
             _ => return None,
         })
     }
@@ -449,6 +451,26 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowLldpNeighbors { detail: true }),
+    cmd!(["show" "acl"],
+        Doc::Local {
+            summary: "Show every access list with its counters.",
+            detail: "Queries nos-acld (resolved via nos-watchdogd) for every ACL: where it is \
+                     attached, its default action and, per rule, the packets and bytes it \
+                     matched (summed over every device it is attached to). Rules the optimiser \
+                     dropped (shadowed by an earlier rule, or trailing and equal to the default) \
+                     are marked and stay at 0. Counters reset when the ACL is edited.",
+        },
+        Always,
+        Command::ShowAcl { name: None }),
+    cmd!(["show" "acl" (name: AclName)],
+        Doc::Local {
+            summary: "Show one access list with its counters.",
+            detail: "Same as show acl, for the named ACL only.",
+        },
+        Always,
+        |name| Command::ShowAcl {
+            name: Some(name.to_string()),
+        }),
     cmd!(["show" "version"],
         Doc::Local {
             summary: "Show the nos version and build revision.",

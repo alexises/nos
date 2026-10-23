@@ -187,6 +187,11 @@ struct Args {
     #[arg(long, default_value = "/run/nos/stp.sock")]
     stpd_listen_socket: PathBuf,
 
+    /// Unix socket nos-acld listens on. Also served out as the resolved
+    /// address for `ServiceRef::Acl` broker queries.
+    #[arg(long, default_value = "/run/nos/acl.sock")]
+    acld_listen_socket: PathBuf,
+
     /// Path to the nos-acld binary to supervise. Like nos-stpd, exactly one
     /// instance is always supervised — see `acl/CLAUDE.md`.
     #[arg(long, default_value = "/usr/local/bin/nos-acld")]
@@ -373,6 +378,7 @@ async fn main() -> anyhow::Result<()> {
             lldp: args.lldpd_listen_socket,
             bfd: args.bfdd_listen_socket,
             stp: args.stpd_listen_socket,
+            acl: args.acld_listen_socket,
         },
         pki.clone(),
     )
@@ -451,12 +457,11 @@ impl FixedSupervision<'_> {
                 Some(&args.stpd_listen_socket),
                 args.stpd_flags.clone(),
             ),
-            // No socket yet: `show acl` (#543) adds one.
             (
                 "nos-acld",
                 args.acld_bin.clone(),
                 Role::Acld,
-                None,
+                Some(&args.acld_listen_socket),
                 args.acld_flags.clone(),
             ),
         ];
@@ -665,6 +670,7 @@ mod tests {
         assert_eq!(a.configd_bin, PathBuf::from("/usr/local/bin/nos-configd"));
         assert_eq!(a.stpd_bin, PathBuf::from("/usr/local/bin/nos-stpd"));
         assert_eq!(a.stpd_listen_socket, PathBuf::from("/run/nos/stp.sock"));
+        assert_eq!(a.acld_listen_socket, PathBuf::from("/run/nos/acl.sock"));
         assert_eq!(a.acld_bin, PathBuf::from("/usr/local/bin/nos-acld"));
         assert_eq!(a.run_dir, PathBuf::from("/run/nos"));
         assert_eq!(a.log_socket, PathBuf::from(DEFAULT_LOG_SOCKET));
@@ -703,7 +709,7 @@ mod tests {
             fixed_args(Some(l), w, g, vec!["--driver".into(), "noop".into()]),
             [&base[..], &["--driver", "noop"]].concat()
         );
-        // nos-acld serves no socket yet (#543).
+        // A daemon without a socket gets none.
         assert_eq!(fixed_args(None, w, g, vec![]), base[2..]);
     }
 

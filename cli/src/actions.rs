@@ -18,8 +18,8 @@ use nos_proto::{
 use crate::session::{self, Mode, Resolved};
 use crate::spec::{self, Doc};
 use crate::{
-    bfd_client, bgp_client, client, fdb_client, format, interface_client, lacp_client, lldp_client,
-    log_client, ospf_client, ospfv3_client, rib_client, stp_client, watchdog_client,
+    acl_client, bfd_client, bgp_client, client, fdb_client, format, interface_client, lacp_client,
+    lldp_client, log_client, ospf_client, ospfv3_client, rib_client, stp_client, watchdog_client,
 };
 
 /// Per-session cache of operation documentation fetched from `nos-configd`,
@@ -254,6 +254,7 @@ pub async fn handle_action(
         | Resolved::ShowLacp { .. }
         | Resolved::ShowLldpNeighbors { .. }
         | Resolved::ShowLldpStatistics
+        | Resolved::ShowAcl { .. }
         | Resolved::ShowSpanningTree
         | Resolved::ShowSpanningTreeInstance { .. }
         | Resolved::ShowSpanningTreeMstConfig
@@ -333,6 +334,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowLldpStatistics => {
             show_lldp_statistics(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowAcl { name } => {
+            show_acl(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowSpanningTree => {
@@ -762,6 +767,28 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
                     format::render_stp_detail(&s, instance, domain.as_deref()),
             }
         ),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
+    let acl_socket =
+        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Acl).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("nos-acld is not running");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return;
+            }
+        };
+    match acl_client::show(&acl_socket, name).await {
+        Ok(acls) if acls.is_empty() && name.is_some() => {
+            println!("acl '{}' not found", name.unwrap_or_default());
+        }
+        Ok(acls) => println!("{}", format::render_acls(&acls)),
         Err(e) => eprintln!("error: {e}"),
     }
 }

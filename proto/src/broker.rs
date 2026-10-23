@@ -52,6 +52,8 @@ pub enum ServiceRef {
     Bfd,
     /// The single `nos-stpd` instance, resolved directly like `Bfd`.
     Stp,
+    /// The single `nos-acld` instance, resolved directly like `Stp`.
+    Acl,
 }
 
 impl ServiceRef {
@@ -71,6 +73,7 @@ impl ServiceRef {
             ServiceRef::FdbDomain(_) => Role::Fdbd,
             ServiceRef::Bfd => Role::Bfdd,
             ServiceRef::Stp => Role::Stpd,
+            ServiceRef::Acl => Role::Acld,
         }
     }
 
@@ -89,7 +92,8 @@ impl ServiceRef {
             | ServiceRef::Lacp
             | ServiceRef::Lldp
             | ServiceRef::Bfd
-            | ServiceRef::Stp => "",
+            | ServiceRef::Stp
+            | ServiceRef::Acl => "",
         }
     }
 }
@@ -376,6 +380,10 @@ mod tests {
         assert_eq!(
             (ServiceRef::Stp.role(), ServiceRef::Stp.instance()),
             (Role::Stpd, "")
+        );
+        assert_eq!(
+            (ServiceRef::Acl.role(), ServiceRef::Acl.instance()),
+            (Role::Acld, "")
         );
     }
 

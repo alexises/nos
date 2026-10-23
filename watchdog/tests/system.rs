@@ -114,6 +114,7 @@ impl Stack {
             .args(["--lacpd-listen-socket", &d("lacp.sock")])
             .args(["--lldpd-listen-socket", &d("lldp.sock")])
             .args(["--stpd-listen-socket", &d("stp.sock")])
+            .args(["--acld-listen-socket", &d("acl.sock")])
             .args(["--run-dir", &d("")])
             .arg(format!("--configd-arg=--listen={}", d("config.sock")))
             .arg(format!("--configd-arg=--config-file={}", d("config.yaml")))

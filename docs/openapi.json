@@ -33,6 +33,32 @@
         ],
         "type": "string"
       },
+      "AclAttachment": {
+        "description": "One device an ACL is installed on.",
+        "properties": {
+          "direction": {
+            "$ref": "#/components/schemas/AclDirection",
+            "description": "The direction it filters."
+          },
+          "interface": {
+            "description": "The kernel device name (`eth1`, `eth1.100`, `bond3`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "interface",
+          "direction"
+        ],
+        "type": "object"
+      },
+      "AclDirection": {
+        "description": "Which way an ACL filters on its device.",
+        "enum": [
+          "In",
+          "Out"
+        ],
+        "type": "string"
+      },
       "AclRule": {
         "description": "One match-and-act line of an `Acl`. A field left unset matches anything;\nall set fields must match.",
         "properties": {
@@ -108,6 +134,116 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "AclRuleStatus": {
+        "description": "One user rule's counters, summed over every filter it compiled to and\nevery device the ACL is attached to.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/AclAction",
+            "description": "What it does with a match."
+          },
+          "bytes": {
+            "description": "Bytes matched.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dropped": {
+            "description": "`shadowed` (an earlier rule matches everything it does) or `trailing`\n(last rules equal to the default action): the optimiser gave the rule\nno filter, so its counters stay 0. `None` when it is installed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "level": {
+            "description": "The priority level the rule's filters were packed into; `None` when\ndropped.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The rule's name.",
+            "type": "string"
+          },
+          "packets": {
+            "description": "Packets matched.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "action",
+          "packets",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "AclStatus": {
+        "description": "One ACL: its compile shape, attachments and counters.",
+        "properties": {
+          "attached": {
+            "description": "Every device it is installed on (empty: unattached, counters 0).",
+            "items": {
+              "$ref": "#/components/schemas/AclAttachment"
+            },
+            "type": "array"
+          },
+          "default_action": {
+            "$ref": "#/components/schemas/AclAction",
+            "description": "What a packet no rule matched gets."
+          },
+          "default_bytes": {
+            "description": "Bytes that hit the default action.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default_packets": {
+            "description": "Packets that hit the default action.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "filters": {
+            "description": "Kernel filters per attachment, the two default filters included.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "levels": {
+            "description": "Priority levels the compiled ACL uses.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "The ACL's name.",
+            "type": "string"
+          },
+          "rules": {
+            "description": "The rules, in order.",
+            "items": {
+              "$ref": "#/components/schemas/AclRuleStatus"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "default_action",
+          "default_packets",
+          "default_bytes",
+          "levels",
+          "filters",
+          "attached",
+          "rules"
         ],
         "type": "object"
       },
@@ -5793,6 +5929,92 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/acl": {
+      "get": {
+        "operationId": "acl_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AclStatus"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Every ACL: attachments and per-rule packet and byte counters",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/acl/{name}": {
+      "get": {
+        "operationId": "acl_one",
+        "parameters": [
+          {
+            "description": "ACL name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AclStatus"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "One ACL with its counters",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/bfd/reflector": {
       "get": {
         "operationId": "bfd_reflector",

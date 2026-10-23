@@ -21,6 +21,8 @@ clap        = { workspace = true }
 anyhow      = { workspace = true }
 
 [dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }
 ipnet    = { workspace = true }
 proptest = { workspace = true }
 

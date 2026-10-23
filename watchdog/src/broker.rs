@@ -34,6 +34,7 @@ pub struct Sockets {
     pub lldp: PathBuf,
     pub bfd: PathBuf,
     pub stp: PathBuf,
+    pub acl: PathBuf,
 }
 
 /// Everything one broker connection needs.
@@ -162,6 +163,7 @@ async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) ->
                     &s.lldp,
                     &s.bfd,
                     &s.stp,
+                    &s.acl,
                 )
                 .await;
             if let Some(path) = resolved {
