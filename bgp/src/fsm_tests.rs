@@ -149,6 +149,7 @@ fn remote(enhanced: bool, route_refresh: bool) -> RemoteInfo {
         negotiated_ipv4_unicast: true,
         negotiated_ipv6_unicast: true,
         negotiated_evpn: false,
+        negotiated_flowspec: [false; 2],
         add_path: [AddPathDir::default(); 2],
         four_octet_as: true,
         extended_message: false,

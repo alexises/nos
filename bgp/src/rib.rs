@@ -92,6 +92,7 @@ use tracing::{debug, info, warn};
 use crate::as_path::AsPath;
 use crate::damping::{Damping, CHANGE_PENALTY, WITHDRAW_PENALTY};
 use crate::evpn::EvpnNlri;
+use crate::flowspec::FlowSpec;
 use crate::gr::{Disconnect, PeerGr};
 use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
@@ -237,6 +238,20 @@ pub enum RouteOrigin {
     Local,
     Peer(IpAddr),
 }
+
+/// One received Flowspec (RFC 8955) route — `Adj-RIB-In` content, nothing
+/// derived. The whole attribute set is kept: validation (#559) and policy
+/// (#560) read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowspecRoute {
+    /// `Ipv4Flowspec` or `Ipv6Flowspec` (the same bytes differ per AFI).
+    pub family: AddressFamily,
+    pub nlri: FlowSpec,
+    pub attributes: message::PathAttributes,
+}
+
+/// A Flowspec Adj-RIB-In key: the NLRI itself, per family.
+pub(crate) type FlowspecKey = (AddressFamily, FlowSpec);
 
 /// One received EVPN route's attributes — `Adj-RIB-In` content, nothing derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,6 +545,11 @@ pub struct BgpRib {
     /// Peers with an EVPN import policy (`set_peer_evpn_import_policy`); a
     /// peer absent here accepts every EVPN route.
     evpn_import: HashMap<IpAddr, Arc<CompiledPolicy>>,
+    /// Received Flowspec routes per peer (receive-only, #558: no validation,
+    /// policy or best path yet).
+    flowspec_adj_rib_in: HashMap<IpAddr, HashMap<FlowspecKey, FlowspecRoute>>,
+    /// The Flowspec twin of `evpn_stale`.
+    flowspec_stale: HashMap<IpAddr, HashSet<FlowspecKey>>,
     /// RFC 7313: paths (prefix, path id) in a peer's Adj-RIB-In marked stale
     /// by a `BoRR` and not yet re-announced; purged by the matching `EoRR`.
     stale: HashMap<IpAddr, HashSet<(IpNet, u32)>>,
@@ -660,6 +680,8 @@ impl BgpRib {
             max_prefix_warned: HashSet::new(),
             evpn_adj_rib_in: HashMap::new(),
             evpn_import: HashMap::new(),
+            flowspec_adj_rib_in: HashMap::new(),
+            flowspec_stale: HashMap::new(),
             stale: HashMap::new(),
             evpn_stale: HashMap::new(),
             gr: HashMap::new(),
@@ -975,6 +997,17 @@ impl BgpRib {
         out
     }
 
+    /// Every received Flowspec route, ordered by peer then rule.
+    pub fn flowspec_routes(&self) -> Vec<(IpAddr, &FlowspecRoute)> {
+        let mut out: Vec<_> = self
+            .flowspec_adj_rib_in
+            .iter()
+            .flat_map(|(peer, t)| t.values().map(move |r| (*peer, r)))
+            .collect();
+        out.sort_by_cached_key(|(peer, r)| (*peer, r.family.to_string(), r.nlri.to_string()));
+        out
+    }
+
     /// Every IPv4/IPv6 unicast path held (each Adj-RIB-In path, all ADD-PATH
     /// ones, plus the locally redistributed routes) for `show bgp routes`,
     /// ordered by prefix then peer (local first).
@@ -1038,6 +1071,20 @@ impl BgpRib {
         [v4, v6, evpn]
     }
 
+    /// Flowspec routes held from `peer`, `[ipv4, ipv6]`.
+    fn accepted_flowspec(&self, peer: IpAddr) -> [u32; 2] {
+        let mut n = [0u32; 2];
+        for (family, _) in self
+            .flowspec_adj_rib_in
+            .get(&peer)
+            .into_iter()
+            .flat_map(HashMap::keys)
+        {
+            n[usize::from(*family == AddressFamily::Ipv6Flowspec)] += 1;
+        }
+        n
+    }
+
     /// RFC 4486 §4: the first address family whose accepted-prefix count from
     /// `peer` is over a hard (not `warning_only`) limit, with that count —
     /// the caller closes the session. Logs `maximum prefix limit exceeded`
@@ -1047,7 +1094,9 @@ impl BgpRib {
         peer: IpAddr,
     ) -> Option<(AddressFamily, nos_proto::BgpPrefixLimit, u32)> {
         let limits = *self.max_prefix.get(&peer)?;
-        let counts = self.accepted_prefixes(peer);
+        let [v4, v6, evpn] = self.accepted_prefixes(peer);
+        let [fs4, fs6] = self.accepted_flowspec(peer);
+        let counts = [v4, v6, evpn, fs4, fs6];
         let mut tripped = None;
         for (family, count) in AddressFamily::ALL.into_iter().zip(counts) {
             let Some(limit) = limits.get(family) else {
@@ -1169,7 +1218,13 @@ impl BgpRib {
         self.path_counts.remove(&peer);
         self.stale.remove(&peer);
         self.evpn_stale.remove(&peer);
+        self.flowspec_stale.remove(&peer);
         self.gr_deadline.remove(&peer);
+        if let Some(routes) = self.flowspec_adj_rib_in.remove(&peer) {
+            for r in routes.values() {
+                info!(peer = %peer, family = %r.family, route = %r.nlri, "flowspec route withdrawn");
+            }
+        }
         if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
             // mac_mobility's record of this route's (vni, mac) is
             // deliberately left alone (see its own doc comment): a future

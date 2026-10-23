@@ -44,8 +44,8 @@ const AFI_IPV6: u16 = 2;
 
 fn afi_of(family: AddressFamily) -> u16 {
     match family {
-        AddressFamily::Ipv4Unicast => AFI_IPV4,
-        AddressFamily::Ipv6Unicast => AFI_IPV6,
+        AddressFamily::Ipv4Unicast | AddressFamily::Ipv4Flowspec => AFI_IPV4,
+        AddressFamily::Ipv6Unicast | AddressFamily::Ipv6Flowspec => AFI_IPV6,
         AddressFamily::L2vpnEvpn => message::AFI_L2VPN,
     }
 }
@@ -55,7 +55,14 @@ fn safi_of(family: AddressFamily) -> u8 {
     match family {
         AddressFamily::Ipv4Unicast | AddressFamily::Ipv6Unicast => 1,
         AddressFamily::L2vpnEvpn => message::SAFI_EVPN,
+        AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => message::SAFI_FLOWSPEC,
     }
+}
+
+/// Unicast (SAFI 1) families: the only ones RFC 8950 Extended Next Hop and
+/// RFC 7911 ADD-PATH apply to here.
+fn is_unicast(family: AddressFamily) -> bool {
+    safi_of(family) == 1
 }
 
 fn afi_of_addr(addr: IpAddr) -> u16 {
@@ -93,8 +100,9 @@ fn build_mp_capabilities(
             safi: safi_of(af),
         });
         // RFC 8950 is about unicast NLRI carried with a cross-family
-        // next-hop; EVPN's next-hop family is independent of its NLRI.
-        if af != AddressFamily::L2vpnEvpn && afi != transport_afi {
+        // next-hop; EVPN's and Flowspec's next-hop family is independent of
+        // their NLRI.
+        if is_unicast(af) && afi != transport_afi {
             caps.push(message::Capability::ExtendedNextHop {
                 nlri_afi: afi,
                 nlri_safi: 1,
@@ -145,7 +153,11 @@ fn negotiate_address_families(
         .collect();
     let mp_bgp_negotiated = !peer_mp.is_empty();
 
-    let configured = |afi: u16| ctx.address_families.iter().any(|af| afi_of(*af) == afi);
+    let configured = |afi: u16| {
+        ctx.address_families
+            .iter()
+            .any(|af| is_unicast(*af) && afi_of(*af) == afi)
+    };
     let negotiated = |afi: u16| -> bool {
         if !configured(afi) {
             return false;
@@ -165,6 +177,23 @@ fn negotiate_address_families(
         negotiated(AFI_IPV6),
         evpn,
     )
+}
+
+/// Flowspec (RFC 8955/8956) per AFI, `[ipv4, ipv6]`: negotiated when both
+/// sides advertise the tuple. Like EVPN it needs no Extended Next Hop (the
+/// next hop is ignored) and has no legacy (non-MP) form.
+fn negotiate_flowspec(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2] {
+    let peer_has = |afi: u16| {
+        open.capabilities.iter().any(|c| {
+            matches!(c, message::Capability::MultiProtocol { afi: a, safi }
+                if *a == afi && *safi == message::SAFI_FLOWSPEC)
+        })
+    };
+    [
+        (AddressFamily::Ipv4Flowspec, AFI_IPV4),
+        (AddressFamily::Ipv6Flowspec, AFI_IPV6),
+    ]
+    .map(|(af, afi)| ctx.address_families.contains(&af) && peer_has(afi))
 }
 
 /// RFC 7911 §5, for one unicast family of one session: whether received
@@ -211,7 +240,10 @@ fn negotiate_add_path(open: &OpenMessage, ctx: &NegotiationContext) -> [AddPathD
     }
     let ours = mode.send_receive();
     let dir = |afi: u16| {
-        let configured = ctx.address_families.iter().any(|af| afi_of(*af) == afi);
+        let configured = ctx
+            .address_families
+            .iter()
+            .any(|af| is_unicast(*af) && afi_of(*af) == afi);
         let theirs = tuples
             .iter()
             .rev()
@@ -285,6 +317,8 @@ struct RemoteInfo {
     negotiated_ipv4_unicast: bool,
     negotiated_ipv6_unicast: bool,
     negotiated_evpn: bool,
+    /// Flowspec negotiated, `[ipv4, ipv6]` (`negotiate_flowspec`).
+    negotiated_flowspec: [bool; 2],
     /// RFC 7911 ADD-PATH per family, `[ipv4, ipv6]` (`negotiate_add_path`).
     add_path: [AddPathDir; 2],
     /// The peer sent the four-octet AS capability (RFC 6793); `false` means
@@ -340,6 +374,7 @@ enum Action {
         negotiated_ipv4_unicast: bool,
         negotiated_ipv6_unicast: bool,
         negotiated_evpn: bool,
+        negotiated_flowspec: [bool; 2],
         add_path: [AddPathDir; 2],
         four_octet_as: bool,
         extended_message: bool,
@@ -395,6 +430,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 negotiated_ipv4_unicast: remote.negotiated_ipv4_unicast,
                 negotiated_ipv6_unicast: remote.negotiated_ipv6_unicast,
                 negotiated_evpn: remote.negotiated_evpn,
+                negotiated_flowspec: remote.negotiated_flowspec,
                 add_path: remote.add_path,
                 four_octet_as: remote.four_octet_as,
                 extended_message: remote.extended_message,
@@ -494,6 +530,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
     };
     let (mp_bgp_negotiated, negotiated_ipv4_unicast, negotiated_ipv6_unicast, negotiated_evpn) =
         negotiate_address_families(open, ctx);
+    let negotiated_flowspec = negotiate_flowspec(open, ctx);
     let add_path = negotiate_add_path(open, ctx);
     let Ok(role) = negotiate_role(open, ctx) else {
         return reject(OpenMessageSubcode::RoleMismatch);
@@ -506,6 +543,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiated_ipv4_unicast,
         negotiated_ipv6_unicast,
         negotiated_evpn,
+        negotiated_flowspec,
         add_path,
         four_octet_as: message::four_octet_asn(open).is_some(),
         extended_message: open
@@ -705,6 +743,11 @@ async fn resend_loc_rib(
             peer = %peer.remote_address,
             "ignoring route refresh received before session established"
         );
+        return;
+    }
+    // Re-advertising Flowspec is #560; a refresh for it is not a unicast one.
+    if rr.safi == message::SAFI_FLOWSPEC {
+        debug!(peer = %peer.remote_address, "ignoring route-refresh for flowspec");
         return;
     }
     let Some(family) = family_of_afi(rr.afi) else {
@@ -979,7 +1022,7 @@ async fn build_open_message(
         let tuples = peer
             .address_families
             .iter()
-            .filter(|&&af| af != AddressFamily::L2vpnEvpn)
+            .filter(|&&af| is_unicast(af))
             .map(|&af| message::AddPathTuple {
                 afi: afi_of(af),
                 safi: 1,
@@ -1223,6 +1266,7 @@ async fn report_established(
         negotiated_ipv4_unicast,
         negotiated_ipv6_unicast,
         negotiated_evpn,
+        negotiated_flowspec,
         add_path,
         four_octet_as,
         extended_message,
@@ -1245,6 +1289,12 @@ async fn report_established(
     }
     if *negotiated_evpn {
         negotiated_afs.insert(AddressFamily::L2vpnEvpn);
+    }
+    if negotiated_flowspec[0] {
+        negotiated_afs.insert(AddressFamily::Ipv4Flowspec);
+    }
+    if negotiated_flowspec[1] {
+        negotiated_afs.insert(AddressFamily::Ipv6Flowspec);
     }
     // RFC 7911 §5: each direction on its own — the
     // decoder reads ids only where we receive them, the
@@ -1637,6 +1687,7 @@ pub async fn run(
 /// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` — never derived from the prefix's own
 /// family, since the same IPv4 prefix is encoded differently depending on
 /// what the destination peer negotiated.
+#[allow(clippy::too_many_lines, reason = "one arm per OutboundUpdate variant")]
 fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
     match update {
         OutboundUpdate::Announce(route) if route.use_mp => {
@@ -1669,6 +1720,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     nlri: vec![route.prefix],
                     nlri_path_ids: path_ids,
                     evpn: Vec::new(),
+                    flowspec: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
             })
@@ -1715,6 +1767,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     withdrawn: vec![prefix],
                     withdrawn_path_ids: path_ids,
                     evpn: Vec::new(),
+                    flowspec: Vec::new(),
                 }],
             })
         }
@@ -1757,6 +1810,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 nlri: Vec::new(),
                 nlri_path_ids: Vec::new(),
                 evpn: vec![route.nlri],
+                flowspec: Vec::new(),
             }],
             mp_unreach: Vec::new(),
         }),
@@ -1773,6 +1827,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 withdrawn: Vec::new(),
                 withdrawn_path_ids: Vec::new(),
                 evpn: vec![nlri],
+                flowspec: Vec::new(),
             }],
         }),
         OutboundUpdate::Withdraw(prefix, _, path_id) => {
@@ -2017,6 +2072,55 @@ mod tests {
     }
 
     #[test]
+    fn flowspec_capability_is_afi_safi_133_without_extended_next_hop() {
+        // Either AFI over either transport: no ENH tuple, never.
+        for transport in [AFI_IPV4, AFI_IPV6] {
+            let caps = build_mp_capabilities(
+                &[AddressFamily::Ipv4Flowspec, AddressFamily::Ipv6Flowspec],
+                transport,
+            );
+            assert_eq!(
+                caps,
+                vec![
+                    message::Capability::MultiProtocol { afi: 1, safi: 133 },
+                    message::Capability::MultiProtocol { afi: 2, safi: 133 },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn flowspec_negotiated_per_afi_only_when_both_sides_advertise_it() {
+        let ctx = ctx_with_afs(
+            vec![
+                AddressFamily::Ipv4Unicast,
+                AddressFamily::Ipv4Flowspec,
+                AddressFamily::Ipv6Flowspec,
+            ],
+            AFI_IPV4,
+        );
+        let peer = open_with_mp(&[(AFI_IPV4, 1), (AFI_IPV4, 133)]);
+        assert_eq!(negotiate_flowspec(&peer, &ctx), [true, false]);
+        // Unicast is untouched by a flowspec tuple, and flowspec alone does
+        // not enable unicast.
+        assert_eq!(
+            negotiate_address_families(&peer, &ctx),
+            (true, true, false, false)
+        );
+        let flowspec_only = ctx_with_afs(vec![AddressFamily::Ipv4Flowspec], AFI_IPV4);
+        assert_eq!(
+            negotiate_address_families(&peer, &flowspec_only),
+            (true, false, false, false)
+        );
+        // We never configured it.
+        let unicast_only = ctx_with_afs(vec![AddressFamily::Ipv4Unicast], AFI_IPV4);
+        assert_eq!(negotiate_flowspec(&peer, &unicast_only), [false, false]);
+        // IPv6 flowspec over an IPv4 transport needs no Extended Next Hop.
+        let v6 = open_with_mp(&[(AFI_IPV6, 133)]);
+        assert_eq!(negotiate_flowspec(&v6, &ctx), [false, true]);
+    }
+
+    #[test]
     fn valid_open_moves_to_open_confirm_and_arms_timers() {
         let (next, actions) = step(
             State::OpenSent,
@@ -2196,6 +2300,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
+            negotiated_flowspec: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2224,6 +2329,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
+            negotiated_flowspec: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2255,6 +2361,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
+            negotiated_flowspec: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2321,6 +2428,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
+            negotiated_flowspec: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2347,6 +2455,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
+            negotiated_flowspec: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,

@@ -2871,19 +2871,35 @@ fn evpn_flags() -> Vec<String> {
 /// (router-g) peering it over l2vpn-evpn, and waits for the session and
 /// gobgpd's gRPC API.
 async fn evpn_speaker(w: &mut World, watchdog_args: &[&str]) -> anyhow::Result<()> {
-    w.start(A, Some(evpn_flags()), watchdog_args).await?;
+    gobgp_speaker(w, evpn_flags(), &["l2vpn-evpn"], watchdog_args).await
+}
+
+/// `evpn_speaker` for any AFI-SAFI list (`afi_safis`: GoBGP's spelling, which
+/// is also the neighbor's `afi-safi-name`).
+async fn gobgp_speaker(
+    w: &mut World,
+    flags: Vec<String>,
+    afi_safis: &[&str],
+    watchdog_args: &[&str],
+) -> anyhow::Result<()> {
+    w.start(A, Some(flags), watchdog_args).await?;
 
     log("building/starting the GoBGP speaker (router-g)");
     w.dock
         .ensure_image(GOBGP_IMAGE, &gobgp_dockerfile())
         .await?;
-    let conf = format!(
+    let mut conf = format!(
         "[global.config]\n  as = {ASN_G}\n  router-id = \"{RID_G}\"\n\n\
          [[neighbors]]\n  [neighbors.config]\n    neighbor-address = \"{IP_A}\"\n    peer-as = {ASN_A}\n  \
          [neighbors.transport.config]\n    local-address = \"{IP_G}\"\n  \
-         [neighbors.timers.config]\n    connect-retry = 5\n  \
-         [[neighbors.afi-safis]]\n    [neighbors.afi-safis.config]\n      afi-safi-name = \"l2vpn-evpn\"\n"
+         [neighbors.timers.config]\n    connect-retry = 5\n"
     );
+    for n in afi_safis {
+        let _ = write!(
+            conf,
+            "  [[neighbors.afi-safis]]\n    [neighbors.afi-safis.config]\n      afi-safi-name = \"{n}\"\n"
+        );
+    }
     w.dock
         .start_plain(
             "router-g",
@@ -2907,6 +2923,95 @@ async fn evpn_speaker(w: &mut World, watchdog_args: &[&str]) -> anyhow::Result<(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     ready
+}
+
+/// router-a's flags for the flowspec phase: `evpn_flags` with Flowspec
+/// instead of EVPN.
+fn flowspec_flags() -> Vec<String> {
+    evpn_flags()
+        .into_iter()
+        .map(|f| match f.as_str() {
+            "--evpn" => "--flowspec".to_string(),
+            "pg-evpn" => "pg-flowspec".to_string(),
+            _ => f,
+        })
+        .collect()
+}
+
+/// RFC 8955/8956 Flowspec, receive side (#558). GoBGP originates one IPv4 and
+/// one IPv6 rule (destination, TCP, port 25, traffic-rate 0 = discard);
+/// router-a, with `address-family ipv4-flowspec`/`ipv6-flowspec` on its
+/// peer-group, must negotiate SAFI 133, decode both (the action community
+/// from another implementation's encoding), serve them on `show bgp
+/// flowspec` (`GET /v1/bgp/flowspec`) and drop them on an explicit
+/// withdrawal. Nothing is validated or enforced yet (#559, #560).
+pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
+    gobgp_speaker(
+        w,
+        flowspec_flags(),
+        &["ipv4-flowspec", "ipv6-flowspec"],
+        &[],
+    )
+    .await?;
+    let a = w.a()?;
+
+    let rules: [(&str, &[&str], &str); 2] = [
+        (
+            "ipv4-flowspec",
+            &["destination", "192.0.2.0/24"],
+            "dest 192.0.2.0/24",
+        ),
+        (
+            "ipv6-flowspec",
+            &["destination", "2001:db8:f::/48"],
+            "dest 2001:db8:f::/48",
+        ),
+    ];
+    let rule = |family: &str, dest: &[&str], verb: &'static str| {
+        let mut args = vec!["global", "rib", verb, "-a", family, "match"];
+        args.extend_from_slice(dest);
+        args.extend_from_slice(&["protocol", "tcp", "destination-port", "==25"]);
+        if verb == "add" {
+            args.extend_from_slice(&["then", "discard"]);
+        }
+        args.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    for (family, dest, _) in &rules {
+        gobgp_owned(w, rule(family, dest, "add")).await?;
+    }
+
+    let learned = |family: &str| format!("flowspec route learned peer={IP_G} family={family}");
+    let withdrawn = |family: &str| format!("flowspec route withdrawn peer={IP_G} family={family}");
+    for (family, ..) in &rules {
+        a.wait(&learned(family)).await?;
+    }
+
+    // `show bgp flowspec`, over REST: the components and the traffic-rate
+    // community, decoded from another implementation's encoding.
+    let show = || a.rest_expect(reqwest::Method::GET, "/v1/bgp/flowspec", None, 200);
+    let body = show().await?;
+    for want in [
+        "dest 192.0.2.0/24",
+        "dest 2001:db8:f::/48",
+        "proto =6",
+        "dst-port =25",
+        "traffic-rate:0:0",
+        IP_G,
+    ] {
+        if !body.contains(want) {
+            bail!("show bgp flowspec is missing {want}: {body}");
+        }
+    }
+
+    log("withdrawing the IPv4 rule explicitly");
+    let base = a.count(&withdrawn("ipv4-flowspec"));
+    gobgp_owned(w, rule(rules[0].0, rules[0].1, "del")).await?;
+    a.wait_new(&withdrawn("ipv4-flowspec"), base, 30).await?;
+    let body = show().await?;
+    if body.contains("dest 192.0.2.0/24") || !body.contains("dest 2001:db8:f::/48") {
+        bail!("expected only the IPv6 rule after the withdrawal: {body}");
+    }
+    Ok(())
 }
 
 /// RFC 7432 EVPN, receive side. No NOS router originates EVPN yet, so an

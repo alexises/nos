@@ -24,6 +24,7 @@ fn mp_update(p: &str, nh: &str) -> UpdateMessage {
         nlri: vec![prefix(p)],
         nlri_path_ids: vec![],
         evpn: vec![],
+        flowspec: Vec::new(),
     }];
     u
 }

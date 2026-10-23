@@ -32,6 +32,7 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
     match req {
         BgpRequest::GetSummary
         | BgpRequest::GetEvpnRoutes
+        | BgpRequest::GetFlowspecRoutes
         | BgpRequest::SendRouteRefresh { .. }
         | BgpRequest::ClearPeer { .. }
         | BgpRequest::GetRoutes
@@ -107,6 +108,12 @@ async fn handle_connection(
             }
             BgpRequest::GetEvpnRoutes => {
                 let event = BgpEvent::EvpnRoutes(sessions.evpn_route_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
+            BgpRequest::GetFlowspecRoutes => {
+                let event = BgpEvent::FlowspecRoutes(sessions.flowspec_route_summaries().await);
                 if writer.send(event).await.is_err() {
                     break;
                 }

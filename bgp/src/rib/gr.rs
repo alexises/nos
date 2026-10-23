@@ -281,10 +281,34 @@ impl BgpRib {
         count
     }
 
+    /// Purges `peer`'s stale Flowspec routes of `family`; returns how many.
+    fn purge_stale_flowspec(&mut self, peer: IpAddr, family: AddressFamily) -> usize {
+        let Some(set) = self.flowspec_stale.get_mut(&peer) else {
+            return 0;
+        };
+        let keys: Vec<_> = set.iter().filter(|(f, _)| *f == family).cloned().collect();
+        let mut count = 0;
+        for key in keys {
+            set.remove(&key);
+            if let Some(r) = self
+                .flowspec_adj_rib_in
+                .get_mut(&peer)
+                .and_then(|t| t.remove(&key))
+            {
+                count += 1;
+                info!(peer = %peer, family = %family, route = %r.nlri, "flowspec route withdrawn");
+            }
+        }
+        count
+    }
+
     /// Purges `peer`'s stale routes of `family`; returns how many.
     pub(super) fn purge_stale(&mut self, peer: IpAddr, family: AddressFamily) -> usize {
         match family {
             AddressFamily::L2vpnEvpn => self.purge_stale_evpn(peer),
+            AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => {
+                self.purge_stale_flowspec(peer, family)
+            }
             _ => self.end_refresh_in(peer, family),
         }
     }
@@ -298,7 +322,11 @@ impl BgpRib {
         });
         let evpn = family.is_none_or(|f| f == AddressFamily::L2vpnEvpn)
             && self.evpn_stale.get(&peer).is_some_and(|s| !s.is_empty());
-        ip || evpn
+        let flowspec = self
+            .flowspec_stale
+            .get(&peer)
+            .is_some_and(|s| s.iter().any(|(f, _)| family.is_none_or(|x| x == *f)));
+        ip || evpn || flowspec
     }
 
     /// `BgpGracefulRestart.stale_time`.
@@ -331,7 +359,8 @@ impl BgpRib {
     /// Routes from `peer` currently marked stale (`PeerSummary.stale_prefixes`).
     pub fn stale_count(&self, peer: IpAddr) -> u32 {
         let n = self.stale.get(&peer).map_or(0, HashSet::len)
-            + self.evpn_stale.get(&peer).map_or(0, HashSet::len);
+            + self.evpn_stale.get(&peer).map_or(0, HashSet::len)
+            + self.flowspec_stale.get(&peer).map_or(0, HashSet::len);
         u32::try_from(n).unwrap_or(u32::MAX)
     }
 
@@ -465,6 +494,18 @@ impl BgpRib {
             for EvpnRoute { nlri, .. } in routes.values() {
                 info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
+        }
+        if let Some(table) = self.flowspec_adj_rib_in.get_mut(&peer) {
+            let stale = self.flowspec_stale.entry(peer).or_default();
+            table.retain(|key, r| {
+                let keep = families.contains(&r.family);
+                if keep {
+                    stale.insert(key.clone());
+                } else {
+                    info!(peer = %peer, family = %r.family, route = %r.nlri, "flowspec route withdrawn");
+                }
+                keep
+            });
         }
         let now = Instant::now();
         self.gr_deadline

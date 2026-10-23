@@ -788,6 +788,27 @@ impl SessionManager {
             .collect()
     }
 
+    /// Every received Flowspec route, for `BgpRequest::GetFlowspecRoutes` —
+    /// backs `nos-cli`'s `show bgp flowspec`.
+    pub async fn flowspec_route_summaries(&self) -> Vec<nos_proto::FlowspecRouteSummary> {
+        self.bgp_rib
+            .lock()
+            .await
+            .flowspec_routes()
+            .into_iter()
+            .map(|(peer, route)| nos_proto::FlowspecRouteSummary {
+                peer,
+                nlri: route.nlri.to_string(),
+                extended_communities: route
+                    .attributes
+                    .extended_communities
+                    .iter()
+                    .map(|&c| crate::flowspec::format_action(c))
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Every unicast route held, for `BgpRequest::GetRoutes` (`show bgp routes`).
     pub async fn route_summaries(&self) -> Vec<nos_proto::BgpRouteSummary> {
         self.bgp_rib.lock().await.routes()

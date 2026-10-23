@@ -17,6 +17,7 @@ mod decision;
 mod evpn;
 mod evpn_import;
 mod first_as;
+mod flowspec;
 mod gr;
 mod next_hop;
 mod outbox;
@@ -231,6 +232,7 @@ fn evpn_reach(nlris: Vec<EvpnNlri>, as_path: Vec<u32>) -> UpdateMessage {
         nlri: vec![],
         nlri_path_ids: vec![],
         evpn: nlris,
+        flowspec: Vec::new(),
     }];
     u
 }
@@ -290,6 +292,7 @@ fn v6_update(nlri: Vec<&str>) -> UpdateMessage {
         nlri: nlri.into_iter().map(prefix).collect(),
         nlri_path_ids: vec![],
         evpn: vec![],
+        flowspec: Vec::new(),
     }];
     u
 }

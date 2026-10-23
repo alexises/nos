@@ -12,13 +12,15 @@ use nos_proto::AddressFamily;
 
 use crate::message::{CeaseSubcode, GrFamily, GracefulRestartCap};
 
-/// The three families this crate knows, as one bit each (`AddressFamily::ALL`
+/// The families this crate knows, as one bit each (`AddressFamily::ALL`
 /// order) — keeps `PeerGr` `Copy`, like `fsm::RemoteInfo`.
 fn bit(family: AddressFamily) -> u8 {
     match family {
         AddressFamily::Ipv4Unicast => 1,
         AddressFamily::Ipv6Unicast => 2,
         AddressFamily::L2vpnEvpn => 4,
+        AddressFamily::Ipv4Flowspec => 8,
+        AddressFamily::Ipv6Flowspec => 16,
     }
 }
 
@@ -28,6 +30,8 @@ pub fn afi_safi(family: AddressFamily) -> (u16, u8) {
         AddressFamily::Ipv4Unicast => (1, 1),
         AddressFamily::Ipv6Unicast => (2, 1),
         AddressFamily::L2vpnEvpn => (crate::message::AFI_L2VPN, crate::message::SAFI_EVPN),
+        AddressFamily::Ipv4Flowspec => (1, crate::message::SAFI_FLOWSPEC),
+        AddressFamily::Ipv6Flowspec => (2, crate::message::SAFI_FLOWSPEC),
     }
 }
 

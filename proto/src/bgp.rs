@@ -121,6 +121,20 @@ pub struct EvpnRouteSummary {
     pub extended_communities: Vec<String>,
 }
 
+/// One received Flowspec (RFC 8955) route, for `show bgp flowspec`. `nlri` is
+/// the component list rendered by `nos-bgpd`; nothing downstream interprets it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlowspecRouteSummary {
+    /// The advertising peer.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub peer: IpAddr,
+    /// The NLRI rendered as text (`dest 192.0.2.0/24 proto =6 dst-port =25`).
+    pub nlri: String,
+    /// Extended communities rendered as `traffic-rate:0:0`, ...
+    pub extended_communities: Vec<String>,
+}
+
 /// RFC 6811 origin validation state of a route, for `show bgp routes`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +297,8 @@ pub enum BgpRequest {
     },
     /// One-shot: every IPv4/IPv6 unicast route held (`show bgp routes`).
     GetRoutes,
+    /// One-shot: every Flowspec route received from any peer.
+    GetFlowspecRoutes,
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
@@ -304,4 +320,6 @@ pub enum BgpEvent {
     RpkiSummary(Vec<RpkiCacheStatus>),
     /// Reply to `GetRoutes`.
     Routes(Vec<BgpRouteSummary>),
+    /// Reply to `GetFlowspecRoutes`.
+    FlowspecRoutes(Vec<FlowspecRouteSummary>),
 }

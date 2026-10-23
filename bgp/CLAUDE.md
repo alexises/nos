@@ -114,6 +114,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162).
 - `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); best path does not apply (RFC 7432 §15 aside). `evpn_import_policy` (#502, `None` = accept all) gates Type-1/2/3/5 in `learn_evpn` before mobility (reject = withdraw, Type-4 exempt).
 - MAC mobility has **no withdraw**: a sequence number only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; otherwise PEs on one segment bump each other into a frozen duplicate.
+- Flowspec (#558): receive-only, internals page.
 - `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`).
 
 ## Backup path, multipath (#70)
@@ -145,4 +146,4 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE): run `tools/bench-bgp.s
 | `rib_client.rs`, `interface_client.rs` | One-shot queries via `nos_daemon::ipc::one_shot` |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 
-Tests: `bgp/tests/`, `reconcile_tests.rs`/`fsm_tests.rs` (fakes, #344); e2e phases in `docs/e2e-phases.md`.
+Tests: `bgp/tests/`, `reconcile_tests.rs`/`fsm_tests.rs` (fakes, #344).

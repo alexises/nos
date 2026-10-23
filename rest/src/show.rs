@@ -11,13 +11,13 @@ use axum::Json;
 use futures::{Stream, StreamExt};
 use nos_proto::{
     AclEvent, AclRequest, AclStatus, BfdEvent, BfdRequest, BfdSessionView, BgpEvent, BgpRequest,
-    Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, InterfaceEvent, InterfaceRequest,
-    InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest,
-    LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest,
-    Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, PeerSummary,
-    PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent,
-    RibRequest, ServiceRef, StpEvent, StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary,
-    VersionInfo,
+    Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, FlowspecRouteSummary, InterfaceEvent,
+    InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpLinkStats,
+    LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary,
+    OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request,
+    PeerSummary, PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, ReflectorView,
+    RibEvent, RibRequest, ServiceRef, StpEvent, StpInstance, StpMst, StpPortCounters, StpRequest,
+    StpSummary, VersionInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -373,6 +373,8 @@ pub async fn logs(
 /// Named so `#[utoipa::path]` can take them as a `body` (it cannot parse nested generics).
 pub type BgpSummaryReport = Vec<InstanceReport<Vec<PeerSummary>>>;
 pub type BgpEvpnReport = Vec<InstanceReport<Vec<EvpnRouteSummary>>>;
+/// `GET /v1/bgp/flowspec`.
+pub type BgpFlowspecReport = Vec<InstanceReport<Vec<FlowspecRouteSummary>>>;
 pub type BgpRoutesReport = Vec<InstanceReport<Vec<nos_proto::BgpRouteSummary>>>;
 pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
@@ -528,6 +530,30 @@ pub async fn bgp_evpn(State(d): State<Daemons>) -> ApiResult<Json<BgpEvpnReport>
             || BgpRequest::GetEvpnRoutes,
             |e| match e {
                 BgpEvent::EvpnRoutes(v) => Some(v),
+                _ => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/bgp/flowspec", tag = "show", summary = "Received Flowspec routes, per instance", responses((status = 200, body = BgpFlowspecReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_flowspec(State(d): State<Daemons>) -> ApiResult<Json<BgpFlowspecReport>> {
+    let names = d
+        .running_config()
+        .await?
+        .bgp_instances
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::BgpInstance,
+            || BgpRequest::GetFlowspecRoutes,
+            |e| match e {
+                BgpEvent::FlowspecRoutes(v) => Some(v),
                 _ => None,
             },
         )

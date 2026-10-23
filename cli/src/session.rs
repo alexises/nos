@@ -155,6 +155,8 @@ pub enum Resolved {
     /// `show bgp evpn` — data-plane, valid in any mode. Router-wide like
     /// `ShowBgpBrief`.
     ShowBgpEvpn,
+    /// `show bgp flowspec` — data-plane, valid in any mode, router-wide.
+    ShowBgpFlowspec,
     /// `show bgp rpki` — data-plane, valid in any mode, router-wide.
     ShowBgpRpki,
     /// `show bgp routes` — data-plane, valid in any mode, router-wide.
@@ -258,6 +260,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowBgpEvpn => Resolved::ShowBgpEvpn,
+        Command::ShowBgpFlowspec => Resolved::ShowBgpFlowspec,
         Command::ShowBgpRpki => Resolved::ShowBgpRpki,
         Command::ShowBgpRoutes => Resolved::ShowBgpRoutes,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
@@ -369,6 +372,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowLog { .. }
         | Command::ShowBgpBrief
         | Command::ShowBgpEvpn
+        | Command::ShowBgpFlowspec
         | Command::ShowBgpRpki
         | Command::ShowBgpRoutes
         | Command::ShowOspfNeigh

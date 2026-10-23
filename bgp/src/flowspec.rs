@@ -591,6 +591,26 @@ impl fmt::Display for FlowSpec {
     }
 }
 
+/// An RFC 8955 section 7 action community as text (`traffic-rate:0:0` is
+/// "discard"); anything else falls back to `evpn::format_ext_community`.
+pub fn format_action(c: u64) -> String {
+    let b = c.to_be_bytes();
+    match (b[0], b[1]) {
+        (0x80, 0x06) => format!(
+            "traffic-rate:{}:{}",
+            u16::from_be_bytes([b[2], b[3]]),
+            f32::from_be_bytes([b[4], b[5], b[6], b[7]])
+        ),
+        (0x80, 0x08) => format!(
+            "redirect:{}:{}",
+            u16::from_be_bytes([b[2], b[3]]),
+            u32::from_be_bytes([b[4], b[5], b[6], b[7]])
+        ),
+        (0x80, 0x09) => format!("traffic-marking:{}", b[7] & 0x3f),
+        _ => crate::evpn::format_ext_community(c),
+    }
+}
+
 impl fmt::Display for FlowSpecVpn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "rd {} {}", format_rd(&self.rd), self.flow)

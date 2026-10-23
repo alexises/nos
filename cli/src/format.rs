@@ -2,11 +2,12 @@ use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 
 use nos_proto::{
-    BgpSessionState, Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, InterfaceAddress,
-    InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry,
-    LogLevel, LsaSummary, NeighborSummary, OspfNeighborState, Ospfv3LsaSummary,
-    Ospfv3NeighborSummary, PeerSummary, PortAggregateLacpSummary, PortAggregateStatus,
-    PrefixRoutes, RouteSourceKind, SectionDiff, SubinterfaceStatus, TransactionSnapshot,
+    BgpSessionState, Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff,
+    FlowspecRouteSummary, InterfaceAddress, InterfaceStatus, LacpMuxState, LacpRate,
+    LacpReceiveState, LinkInterfaceState, LogEntry, LogLevel, LsaSummary, NeighborSummary,
+    OspfNeighborState, Ospfv3LsaSummary, Ospfv3NeighborSummary, PeerSummary,
+    PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RouteSourceKind, SectionDiff,
+    SubinterfaceStatus, TransactionSnapshot,
 };
 use time::OffsetDateTime;
 
@@ -1185,6 +1186,24 @@ pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
     lines.join("\n")
 }
 
+/// Render one BGP instance's received Flowspec rules, one line per rule —
+/// used for `show bgp flowspec`.
+pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> String {
+    if routes.is_empty() {
+        return format!("bgp instance {instance}: no flowspec routes");
+    }
+    let mut lines = vec![format!("bgp instance {instance}:")];
+    for r in routes {
+        lines.push(format!(
+            "  from {} {} [{}]",
+            r.peer,
+            r.nlri,
+            r.extended_communities.join(" ")
+        ));
+    }
+    lines.join("\n")
+}
+
 /// One BGP instance's unicast routes, one line per path — `show bgp routes`.
 pub fn render_bgp_routes(instance: &str, routes: &[nos_proto::BgpRouteSummary]) -> String {
     use nos_proto::RpkiValidationState as S;
@@ -2157,6 +2176,23 @@ mod tests {
         assert_eq!(
             render_bgp_evpn("r1", &[route]),
             "bgp instance r1:\n  from 10.0.0.2 next-hop 192.0.2.1 [3]:[65000:1]:[0]:[192.0.2.1] [RT:65000:10000 encap:8]"
+        );
+    }
+
+    #[test]
+    fn render_bgp_flowspec_lists_one_rule_per_line() {
+        assert_eq!(
+            render_bgp_flowspec("r1", &[]),
+            "bgp instance r1: no flowspec routes"
+        );
+        let route = FlowspecRouteSummary {
+            peer: "10.0.0.2".parse().unwrap(),
+            nlri: "dest 192.0.2.0/24 proto =6 dst-port =25".to_string(),
+            extended_communities: vec!["traffic-rate:0:0".to_string()],
+        };
+        assert_eq!(
+            render_bgp_flowspec("r1", &[route]),
+            "bgp instance r1:\n  from 10.0.0.2 dest 192.0.2.0/24 proto =6 dst-port =25 [traffic-rate:0:0]"
         );
     }
 

@@ -69,11 +69,12 @@ fn is_person(role: Role) -> bool {
 async fn only_people_get_the_show_queries_answered() {
     let (_tmp, path, _server) = start();
     for role in Role::ALL {
-        for query in 0..3 {
+        for query in 0..4 {
             let (mut r, mut w) = connect_as(&path, role).await;
             let req = match query {
                 0 => BgpRequest::GetSummary,
                 1 => BgpRequest::GetEvpnRoutes,
+                3 => BgpRequest::GetFlowspecRoutes,
                 _ => BgpRequest::GetRpkiSummary,
             };
             w.send(req).await.unwrap();
@@ -86,6 +87,7 @@ async fn only_people_get_the_show_queries_answered() {
                 Some(BgpEvent::Summary(v)) if query == 0 => v.is_empty(),
                 Some(BgpEvent::EvpnRoutes(v)) if query == 1 => v.is_empty(),
                 Some(BgpEvent::RpkiSummary(v)) if query == 2 => v.is_empty(),
+                Some(BgpEvent::FlowspecRoutes(v)) if query == 3 => v.is_empty(),
                 other => panic!("{role:?} query {query}: unexpected {other:?}"),
             };
             assert!(empty, "{role:?} query {query}: nothing is configured");
