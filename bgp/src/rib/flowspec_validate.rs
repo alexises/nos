@@ -7,8 +7,11 @@
 //! prefix (`uni_index`, rule (c)), so a unicast change only revisits the
 //! flows whose destination overlaps it, never the whole Flowspec table.
 //!
-//! RFC 9117 (which relaxes rule (b) and the eBGP first-AS check) is not
-//! implemented: this is RFC 8955 as written.
+//! The default procedure is RFC 9117 (rule (b.2): a flow with an empty or
+//! confederation-only `AS_PATH` skips the originator match; the eBGP check
+//! compares the flow's leftmost AS with the best-match route's, not the
+//! neighbour's). `flowspec-validation rfc8955-strict` restores RFC 8955 as
+//! written.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -32,8 +35,12 @@ pub enum InvalidReason {
     NoUnicastRoute,
     /// Rule (c): a more-specific route comes from another neighbouring AS.
     MoreSpecificFromOtherAs,
-    /// eBGP: the leftmost AS of the path is not the neighbour's.
+    /// RFC 8955 eBGP check (strict mode): the leftmost AS of the path is not
+    /// the neighbour's.
     BadNeighbourAs,
+    /// RFC 9117 eBGP check: the flow's leftmost AS differs from the
+    /// best-match unicast route's (or either has none).
+    LeftmostAsMismatch,
 }
 
 impl fmt::Display for InvalidReason {
@@ -45,6 +52,7 @@ impl fmt::Display for InvalidReason {
             Self::NoUnicastRoute => "no-covering-unicast-route",
             Self::MoreSpecificFromOtherAs => "more-specific-from-other-as",
             Self::BadNeighbourAs => "bad-neighbour-as",
+            Self::LeftmostAsMismatch => "leftmost-as-mismatch",
         })
     }
 }
@@ -70,6 +78,8 @@ pub struct Unicast {
     /// `ORIGINATOR_ID`, else the advertising peer; `None` for a local route.
     pub originator: Option<IpAddr>,
     pub neighbour_as: u32,
+    /// Leftmost AS of the route's `AS_PATH`; `None` for a local route.
+    pub leftmost_as: Option<u32>,
 }
 
 /// The flow side of a validation.
@@ -79,6 +89,8 @@ pub struct Flow {
     pub originator: IpAddr,
     /// eBGP only: `(peer AS, leftmost AS of the path)`.
     pub ebgp: Option<(u32, Option<u32>)>,
+    /// RFC 9117 (b.2): the flow's `AS_PATH` has no non-confederation segment.
+    pub local_domain: bool,
 }
 
 /// The first destination prefix component of a rule.
@@ -90,26 +102,32 @@ pub fn dest_of(f: &FlowSpec) -> Option<crate::flowspec::Prefix> {
     })
 }
 
-/// `relax_dest`: rule (a) is not enforced (peer-group knob); a flow without a
-/// usable destination prefix then skips (b) and (c), which need one.
-/// `best` is the longest-prefix-match lookup of one exact prefix in the
-/// Loc-RIB; `more_specific` the neighbouring ASes of every received unicast
-/// route strictly inside the given prefix.
+/// `mode.disable_dest_prefix_rule`: rule (a) is not enforced (peer-group
+/// knob); a flow without a usable destination prefix then skips (b) and (c),
+/// which need one, and (for eBGP) falls back to the RFC 8955 neighbour-AS
+/// check. `mode.rfc8955_strict` selects RFC 8955 as written instead of
+/// RFC 9117. `best` is the longest-prefix-match lookup of one exact prefix in
+/// the Loc-RIB; `more_specific` the neighbouring ASes of every received
+/// unicast route strictly inside the given prefix.
 pub fn validate(
     flow: &Flow,
-    relax_dest: bool,
+    mode: nos_proto::BgpFlowspecValidation,
     best: impl Fn(IpNet) -> Option<Unicast>,
     more_specific: impl Fn(IpNet) -> Vec<u32>,
 ) -> FlowValidity {
     use FlowValidity::{Invalid, Valid};
     use InvalidReason as R;
+    let (relax_dest, strict) = (mode.disable_dest_prefix_rule, mode.rfc8955_strict);
     let dest = match flow.dest {
         Some(p) if p.offset == 0 => Some(p.net.trunc()),
         Some(_) if !relax_dest => return Invalid(R::OffsetNotZero),
         None if !relax_dest => return Invalid(R::NoDestinationPrefix),
         _ => None,
     };
-    if let Some((peer_as, leftmost)) = flow.ebgp
+    // RFC 8955 §6 checks the neighbour AS up front; RFC 9117 only when there
+    // is no destination (hence no best match) to compare with.
+    if (strict || dest.is_none())
+        && let Some((peer_as, leftmost)) = flow.ebgp
         && leftmost != Some(peer_as)
     {
         return Invalid(R::BadNeighbourAs);
@@ -119,9 +137,20 @@ pub fn validate(
         let net = IpNet::new(dest.addr(), len).ok()?.trunc();
         best(net)
     }) else {
-        return Invalid(R::NoUnicastRoute);
+        // RFC 9117 central controller: nothing to compare with, skip (c).
+        return if !strict && flow.local_domain {
+            Valid
+        } else {
+            Invalid(R::NoUnicastRoute)
+        };
     };
-    if b.originator != Some(flow.originator) {
+    if !strict
+        && let Some((_, leftmost)) = flow.ebgp
+        && (leftmost.is_none() || leftmost != b.leftmost_as)
+    {
+        return Invalid(R::LeftmostAsMismatch);
+    }
+    if b.originator != Some(flow.originator) && (strict || !flow.local_domain) {
         return Invalid(R::OriginatorMismatch);
     }
     if more_specific(dest).iter().any(|a| *a != b.neighbour_as) {
@@ -272,14 +301,20 @@ impl BgpRib {
         let r = self.flowspec_adj_rib_in.get(&peer)?.get(k)?;
         let ibgp = r.learned_via_ibgp;
         let peer_as = self.peer_asns.get(&peer).copied().filter(|a| *a != 0);
+        let mode = self
+            .flowspec_validation
+            .get(&peer)
+            .copied()
+            .unwrap_or_default();
+        // RFC 9117 section 2: a confederation member counts as iBGP.
+        let ibgp = ibgp || (!mode.rfc8955_strict && self.confed_peers.contains(&peer));
+        let path = &r.attributes.as_path;
         let flow = Flow {
             dest: dest_of(&r.nlri),
             originator: r.attributes.originator_id.map_or(peer, IpAddr::V4),
-            ebgp: peer_as
-                .filter(|_| !ibgp)
-                .map(|a| (a, r.attributes.as_path.neighbor_as())),
+            ebgp: peer_as.filter(|_| !ibgp).map(|a| (a, path.neighbor_as())),
+            local_domain: path.segments().all(|(k, _)| k.is_confed()),
         };
-        let relax = self.flowspec_relax_dest.contains(&peer);
         let best = |net: IpNet| {
             let b = self.loc_rib.get(&net)?;
             Some(Unicast {
@@ -288,6 +323,7 @@ impl BgpRib {
                     RouteOrigin::Local => None,
                 },
                 neighbour_as: self.neighbour_as_of(b.origin, &b.as_path),
+                leftmost_as: b.as_path.neighbor_as(),
             })
         };
         let more_specific = |net: IpNet| {
@@ -300,7 +336,7 @@ impl BgpRib {
                 .flat_map(|(_, v)| v.iter().copied())
                 .collect()
         };
-        Some(validate(&flow, relax, best, more_specific))
+        Some(validate(&flow, mode, best, more_specific))
     }
 
     /// Re-validates one rule and logs when its state changed.

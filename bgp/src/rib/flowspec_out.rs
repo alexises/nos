@@ -103,12 +103,12 @@ pub(super) fn import_flow(
 }
 
 impl BgpRib {
-    /// `peer`'s Flowspec settings (`set_peer_flowspec_relax`,
+    /// `peer`'s Flowspec settings (`set_peer_flowspec_validation`,
     /// `set_peer_flowspec_policies`). Call before `peer_established`, after
     /// `set_peer_confed`.
     pub fn set_peer_flowspec(&mut self, peer: &crate::session::ResolvedPeer) {
         let addr = peer.remote_address;
-        self.set_peer_flowspec_relax(addr, peer.flowspec_relax_dest);
+        self.set_peer_flowspec_validation(addr, peer.flowspec_validation);
         self.set_peer_flowspec_policies(
             addr,
             peer.flowspec_import_policy.clone(),

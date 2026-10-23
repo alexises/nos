@@ -127,9 +127,9 @@ pub struct ResolvedPeer {
     /// The peer-group's `enforce_first_as` with its default (on) applied; a
     /// route-server client is exempt regardless (`BgpRib::set_peer_enforce_first_as`).
     pub enforce_first_as: bool,
-    /// The peer-group's `flowspec-validation disable-dest-prefix-rule`
-    /// (`BgpRib::set_peer_flowspec_relax`).
-    pub flowspec_relax_dest: bool,
+    /// The peer-group's `flowspec-validation` knobs
+    /// (`BgpRib::set_peer_flowspec_validation`).
+    pub flowspec_validation: nos_proto::BgpFlowspecValidation,
     /// RFC 7911 ADD-PATH mode with its default applied
     /// (`BgpPeerGroup::effective_add_path`); in the OPEN, so a change
     /// restarts the session (`diff_peers`).
@@ -1604,7 +1604,7 @@ mod tests {
             flowspec_import_policy: None,
             flowspec_export_policy: None,
             enforce_first_as: true,
-            flowspec_relax_dest: false,
+            flowspec_validation: nos_proto::BgpFlowspecValidation::default(),
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

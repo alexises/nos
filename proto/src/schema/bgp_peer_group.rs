@@ -655,7 +655,8 @@ pub struct BgpPeerGroup {
     pub flowspec_export_policy: Option<String>,
 }
 
-/// Knobs of the RFC 8955 §6 Flowspec validation procedure.
+/// Knobs of the Flowspec validation procedure (RFC 8955 §6 as updated by
+/// RFC 9117, which is the default).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpFlowspecValidation {
@@ -664,6 +665,12 @@ pub struct BgpFlowspecValidation {
     /// Rule (a) of RFC 8955 §6 is not enforced: a flow without a destination
     /// prefix is accepted (the unicast checks (b) and (c) then do not apply).
     pub disable_dest_prefix_rule: bool,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupFlowspecValidation)]
+    /// Validate as RFC 8955 §6 is written instead of RFC 9117: no (b.2)
+    /// exemption for flows with an empty or confederation-only `AS_PATH`, and
+    /// the eBGP check compares the flow's leftmost AS with the neighbour's.
+    pub rfc8955_strict: bool,
 }
 
 impl BgpPeerGroup {

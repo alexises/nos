@@ -178,7 +178,7 @@ fn resolve_peers(
             announce_rpki_state: group.announce_rpki_state,
             local_as: group.local_as,
             enforce_first_as: group.enforce_first_as.unwrap_or(true),
-            flowspec_relax_dest: group.flowspec_validation.disable_dest_prefix_rule,
+            flowspec_validation: group.flowspec_validation,
             add_path: group.effective_add_path(),
             add_path_send_count: group.effective_add_path_send_count(),
             role: group.role,

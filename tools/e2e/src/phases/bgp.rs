@@ -2889,12 +2889,17 @@ async fn gobgp_speaker(
 /// Builds/starts the GoBGP speaker (router-g) peering router-a over
 /// `afi_safis`, and waits for a router-a session and gobgpd's gRPC API.
 pub(super) async fn start_gobgp(w: &World, afi_safis: &[&str]) -> anyhow::Result<()> {
+    start_gobgp_as(w, afi_safis, ASN_G).await
+}
+
+/// `start_gobgp` with GoBGP in AS `asn` (`ASN_A` makes it an iBGP peer).
+async fn start_gobgp_as(w: &World, afi_safis: &[&str], asn: u32) -> anyhow::Result<()> {
     log("building/starting the GoBGP speaker (router-g)");
     w.dock
         .ensure_image(GOBGP_IMAGE, &gobgp_dockerfile())
         .await?;
     let mut conf = format!(
-        "[global.config]\n  as = {ASN_G}\n  router-id = \"{RID_G}\"\n\n\
+        "[global.config]\n  as = {asn}\n  router-id = \"{RID_G}\"\n\n\
          [[neighbors]]\n  [neighbors.config]\n    neighbor-address = \"{IP_A}\"\n    peer-as = {ASN_A}\n  \
          [neighbors.transport.config]\n    local-address = \"{IP_G}\"\n  \
          [neighbors.timers.config]\n    connect-retry = 5\n"
@@ -2953,6 +2958,8 @@ fn flowspec_flags() -> Vec<String> {
 /// route each rule is `invalid:no-covering-unicast-route`; GoBGP announcing a
 /// covering prefix flips it to `valid` (revalidation, logged as `flowspec
 /// validity changed`) and withdrawing that prefix flips it back.
+/// RFC 9117 (#572): an iBGP GoBGP flow with an empty AS_PATH is valid
+/// without a covering route; `rfc8955-strict` makes it invalid.
 /// Propagation (#560): router-a re-advertises the valid IPv4 rule (never the
 /// invalid IPv6 one) to router-b over eBGP; router-b's Flowspec import
 /// policy (matching the destination prefix) and router-a's Flowspec export
@@ -3096,7 +3103,78 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
     if body.contains("dest 192.0.2.0/24") || !body.contains("dest 2001:db8:f::/48") {
         bail!("expected only the IPv6 rule after the withdrawal: {body}");
     }
-    Ok(())
+    flowspec_rfc9117(w).await
+}
+
+/// RFC 9117 (#572), the default procedure: GoBGP turns iBGP and announces a
+/// flow with an empty AS_PATH and no covering unicast route. Rule (b.2)
+/// makes it valid; `rfc8955-strict` makes it `no-covering-unicast-route`.
+async fn flowspec_rfc9117(w: &World) -> anyhow::Result<()> {
+    log("RFC 9117: GoBGP as an iBGP controller, empty AS_PATH, no covering route");
+    w.dock.container_remove("router-g").await;
+    let a = w.a()?;
+    a.edit(|c| {
+        for g in c
+            .bgp_instances
+            .iter_mut()
+            .flat_map(|i| i.peer_groups.iter_mut())
+        {
+            if g.name == "pg-flowspec" {
+                g.remote_as = ASN_A;
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    start_gobgp_as(w, &["ipv4-unicast", "ipv4-flowspec"], ASN_A).await?;
+    let a = w.a()?;
+    let changed = |validity: &str| {
+        format!("flowspec validity changed peer={IP_G} family=ipv4-flowspec.*validity={validity}")
+    };
+    let base = a.count(&changed("valid"));
+    gobgp(
+        w,
+        &[
+            "global",
+            "rib",
+            "add",
+            "-a",
+            "ipv4-flowspec",
+            "match",
+            "destination",
+            "198.51.100.0/24",
+            "protocol",
+            "tcp",
+            "destination-port",
+            "==25",
+            "then",
+            "discard",
+        ],
+    )
+    .await?;
+    a.wait_new(&changed("valid"), base, 60).await?;
+
+    log("rfc8955-strict restores the no-covering-unicast-route result");
+    let (sessions, base) = (
+        a.count("bgp session established"),
+        a.count(&changed("invalid:no-covering-unicast-route")),
+    );
+    a.edit(|c| {
+        for g in c
+            .bgp_instances
+            .iter_mut()
+            .flat_map(|i| i.peer_groups.iter_mut())
+        {
+            if g.name == "pg-flowspec" {
+                g.flowspec_validation.rfc8955_strict = true;
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    reestablished(a, sessions).await?;
+    a.wait_new(&changed("invalid:no-covering-unicast-route"), base, 60)
+        .await
 }
 
 /// The #560 half of `flowspec`, run while router-a holds GoBGP's IPv4 rule
