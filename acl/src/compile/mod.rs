@@ -45,6 +45,8 @@ pub struct Compiled {
     pub shadowed: Vec<u32>,
     /// Trailing rules whose action is the default's: no filter, counter 0.
     pub trailing: Vec<u32>,
+    /// Name and action of every user rule, by index (`show acl`, #543).
+    pub rule_names: Vec<(String, AclAction)>,
 }
 
 impl Compiled {
@@ -90,6 +92,11 @@ pub fn compile_within(acl: &Acl, max_levels: usize) -> Result<Compiled, String> 
         default_action: acl.default_action,
         shadowed: p.shadowed,
         trailing: p.trailing,
+        rule_names: acl
+            .rules
+            .iter()
+            .map(|r| (r.name.clone(), r.action))
+            .collect(),
     })
 }
 

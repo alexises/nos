@@ -3,8 +3,9 @@
 //! `spawn_blocking` with the engine moved in and back out.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use nos_proto::{AclAttachment, AclDirection, AclStatus};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
@@ -12,6 +13,7 @@ use crate::compile::Compiled;
 use crate::driver::{idle, Direction, Driver};
 use crate::link_client::LinkTable;
 use crate::plan::{Device, Plan};
+use crate::status;
 
 type Key = (String, Direction);
 
@@ -20,12 +22,16 @@ type Key = (String, Direction);
 struct Installed {
     ifindex: u32,
     chain: u32,
+    /// The ACL's name; `None` with `acl`.
+    name: Option<String>,
     /// `None`: found live at start (a previous run's), contents unknown.
     acl: Option<Arc<Compiled>>,
 }
 
 pub struct Engine<D> {
     driver: D,
+    /// The compiled ACLs of the last plan, for `show acl`.
+    acls: BTreeMap<String, Arc<Compiled>>,
     installed: BTreeMap<Key, Installed>,
     /// Attachments whose device is absent, logged once until it appears.
     pending: BTreeSet<Key>,
@@ -56,6 +62,7 @@ impl<D: Driver> Engine<D> {
     pub fn new(driver: D) -> Self {
         Self {
             driver,
+            acls: BTreeMap::new(),
             installed: BTreeMap::new(),
             pending: BTreeSet::new(),
             swept: false,
@@ -80,6 +87,7 @@ impl<D: Driver> Engine<D> {
                         let at = Installed {
                             ifindex: l.ifindex,
                             chain,
+                            name: None,
                             acl: None,
                         };
                         self.installed.insert((l.name.clone(), dir), at);
@@ -96,6 +104,7 @@ impl<D: Driver> Engine<D> {
 
     /// One pass. Nothing happens until the link table is known.
     pub fn sync(&mut self, plan: &Plan, links: &LinkTable) {
+        self.acls.clone_from(&plan.acls);
         if !links.known {
             return;
         }
@@ -173,6 +182,7 @@ impl<D: Driver> Engine<D> {
         let at = Installed {
             ifindex,
             chain,
+            name: Some(name.to_string()),
             acl: Some(acl.clone()),
         };
         self.installed.insert(key.clone(), at);
@@ -189,6 +199,44 @@ impl<D: Driver> Engine<D> {
                 error!(interface = %key.0, direction = %key.1, error = %e, "acl not detached");
             }
         }
+    }
+
+    /// Every ACL (or the named one) with the counters of its live chains,
+    /// ordered by name. A device whose dump fails is skipped, not an error.
+    pub fn show(&mut self, only: Option<&str>) -> Vec<AclStatus> {
+        let mut out = Vec::new();
+        for (name, compiled) in &self.acls {
+            if only.is_some_and(|o| o != name) {
+                continue;
+            }
+            let mut attached = Vec::new();
+            for ((dev, dir), at) in &self.installed {
+                if at.name.as_deref() != Some(name) {
+                    continue;
+                }
+                match self.driver.counters(at.ifindex, *dir, at.chain) {
+                    Ok(counters) => {
+                        let direction = match dir {
+                            Direction::In => AclDirection::In,
+                            Direction::Out => AclDirection::Out,
+                        };
+                        let interface = dev.clone();
+                        attached.push((
+                            AclAttachment {
+                                interface,
+                                direction,
+                            },
+                            counters,
+                        ));
+                    }
+                    Err(e) => {
+                        warn!(interface = %dev, direction = %dir, error = %e, "could not read the acl counters");
+                    }
+                }
+            }
+            out.push(status::status(name, compiled, &attached));
+        }
+        out
     }
 
     /// Clean stop (SIGINT): every entry, then its chains.
@@ -208,24 +256,26 @@ impl<D: Driver> Engine<D> {
     }
 }
 
+/// The engine, shared with the `show acl` server: a pass and a counter read
+/// take the same lock, so a read never sees a chain a pass is replacing.
+pub type Shared<D> = Arc<Mutex<Engine<D>>>;
+
 /// Runs passes on every plan or link change until `shutdown`, then removes
-/// everything it installed; returns the engine (for tests).
+/// everything it installed.
 pub async fn run<D: Driver>(
-    mut engine: Engine<D>,
+    engine: Shared<D>,
     mut plan_rx: watch::Receiver<Option<Plan>>,
     mut links_rx: watch::Receiver<LinkTable>,
     mut shutdown: watch::Receiver<bool>,
-) -> Engine<D> {
+) {
     loop {
         let plan = plan_rx.borrow_and_update().clone();
         let links = links_rx.borrow_and_update().clone();
         if let Some(plan) = plan {
-            engine = tokio::task::spawn_blocking(move || {
-                engine.sync(&plan, &links);
-                engine
-            })
-            .await
-            .expect("acl pass panicked");
+            let engine = engine.clone();
+            tokio::task::spawn_blocking(move || engine.lock().unwrap().sync(&plan, &links))
+                .await
+                .expect("acl pass panicked");
         }
         tokio::select! {
             r = plan_rx.changed() => if r.is_err() { break },
@@ -233,14 +283,10 @@ pub async fn run<D: Driver>(
             _ = shutdown.changed() => break,
         }
     }
-    let engine = tokio::task::spawn_blocking(move || {
-        engine.shutdown();
-        engine
-    })
-    .await
-    .expect("acl shutdown panicked");
+    tokio::task::spawn_blocking(move || engine.lock().unwrap().shutdown())
+        .await
+        .expect("acl shutdown panicked");
     info!("acl engine stopped");
-    engine
 }
 
 #[cfg(test)]

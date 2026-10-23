@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use nos_proto::schema::{Acl, AclAction, AclRule};
 use nos_proto::LinkState;
@@ -244,19 +245,16 @@ async fn run_applies_changes_and_cleans_up_on_shutdown() {
     let (plan_tx, plan_rx) = watch::channel(None);
     let (links_tx, links_rx) = watch::channel(LinkTable::default());
     let (stop_tx, stop_rx) = watch::channel(false);
-    let task = tokio::spawn(run(
-        Engine::new(NoopDriver::default()),
-        plan_rx,
-        links_rx,
-        stop_rx,
-    ));
+    let engine = Arc::new(Mutex::new(Engine::new(NoopDriver::default())));
+    let task = tokio::spawn(run(engine.clone(), plan_rx, links_rx, stop_rx));
     plan_tx
         .send(Some(plan(&compiled(1), &[(eth("eth0"), In)])))
         .unwrap();
     links_tx.send(links(&[link("eth0", 4, None)])).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     stop_tx.send(true).unwrap();
-    let e = task.await.unwrap();
+    task.await.unwrap();
+    let e = engine.lock().unwrap();
     let calls = &e.driver().calls;
     assert!(calls.contains(&Call::Switch(4, In, A)), "{calls:?}");
     assert_eq!(calls.last(), Some(&Call::Detach(4, In)));
@@ -267,12 +265,79 @@ async fn run_stops_when_its_inputs_close() {
     let (plan_tx, plan_rx) = watch::channel(None);
     let (_links_tx, links_rx) = watch::channel(LinkTable::default());
     let (_stop_tx, stop_rx) = watch::channel(false);
-    let task = tokio::spawn(run(
-        Engine::new(NoopDriver::default()),
-        plan_rx,
-        links_rx,
-        stop_rx,
-    ));
+    let engine = Arc::new(Mutex::new(Engine::new(NoopDriver::default())));
+    let task = tokio::spawn(run(engine.clone(), plan_rx, links_rx, stop_rx));
     drop(plan_tx);
-    assert_eq!(task.await.unwrap().driver().calls, NONE);
+    task.await.unwrap();
+    assert_eq!(engine.lock().unwrap().driver().calls, NONE);
+}
+
+fn counts(e: &mut Engine<NoopDriver>, ifindex: u32, dir: Direction, c: &[(u32, u64)]) {
+    let v = c
+        .iter()
+        .map(|&(cookie, packets)| crate::driver::Counter {
+            cookie,
+            packets,
+            bytes: packets * 10,
+        })
+        .collect();
+    e.driver_mut().counts.insert((ifindex, dir), v);
+}
+
+#[test]
+fn show_sums_the_live_chains_and_lists_unattached_acls() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None), link("eth1", 5, None)]);
+    let acl = compiled(1);
+    let mut p = plan(&acl, &[(eth("eth0"), In), (eth("eth1"), Out)]);
+    p.acls.insert("U".into(), acl.clone());
+    e.sync(&p, &l);
+    counts(
+        &mut e,
+        4,
+        In,
+        &[(0, 3), (crate::compile::DEFAULT_COOKIE, 1)],
+    );
+    counts(&mut e, 5, Out, &[(0, 4)]);
+
+    let all = e.show(None);
+    assert_eq!(
+        all.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        ["E", "U"]
+    );
+    assert_eq!(all[0].rules[0].packets, 7);
+    assert_eq!(all[0].default_packets, 1);
+    assert_eq!(
+        all[0].attached,
+        [
+            AclAttachment {
+                interface: "eth0".into(),
+                direction: AclDirection::In
+            },
+            AclAttachment {
+                interface: "eth1".into(),
+                direction: AclDirection::Out
+            },
+        ]
+    );
+    assert_eq!(all[1].attached.len(), 0);
+    assert_eq!(all[1].rules[0].packets, 0);
+
+    assert_eq!(e.show(Some("U")).len(), 1);
+    assert_eq!(e.show(Some("nope")).len(), 0);
+
+    // A device whose dump fails is skipped.
+    e.driver_mut().fail_counters = true;
+    let s = &e.show(Some("E"))[0];
+    assert_eq!((s.attached.len(), s.rules[0].packets), (0, 0));
+}
+
+#[test]
+fn a_chain_adopted_from_a_previous_run_is_not_attributed() {
+    let mut driver = NoopDriver::default();
+    driver.live.insert((4, In), A);
+    let mut e = Engine::new(driver);
+    // No ACL attaches it: it is swept and detached, never shown.
+    e.sync(&plan(&compiled(1), &[]), &links(&[link("eth0", 4, None)]));
+    assert_eq!(e.show(None)[0].attached.len(), 0);
 }

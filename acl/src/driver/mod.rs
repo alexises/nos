@@ -89,6 +89,32 @@ pub trait Driver: Send + 'static {
     fn flush(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()>;
     /// Removes the entry filter, then both chains.
     fn detach(&mut self, ifindex: u32, dir: Direction) -> io::Result<()>;
+    /// The counters of `chain`'s filters, one per action cookie (`show acl`).
+    fn counters(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<Vec<Counter>>;
+}
+
+/// One filter's `gact` counters: the action cookie (a rule index, or
+/// [`DEFAULT_COOKIE`]) and what matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counter {
+    pub cookie: u32,
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+/// The `gact` rows of a chain dump. Read by kind, not position: a filter may
+/// carry a `sample` action (#544) whose counters are not the verdict's.
+pub fn counters_from(rows: &[FilterStats]) -> Vec<Counter> {
+    rows.iter()
+        .filter(|r| r.action == "gact")
+        .filter_map(|r| {
+            Some(Counter {
+                cookie: u32::from_be_bytes(<[u8; 4]>::try_from(r.cookie.as_slice()).ok()?),
+                packets: r.packets,
+                bytes: r.bytes,
+            })
+        })
+        .collect()
 }
 
 fn verdict(a: AclAction) -> Verdict {
@@ -237,6 +263,30 @@ mod tests {
                 (4, Protocol::Ipv6, act(Verdict::Shot, DEFAULT_COOKIE)),
             ]
         );
+    }
+
+    #[test]
+    fn counters_come_from_the_gact_rows_by_kind() {
+        let row = |action: &str, cookie: &[u8], packets| FilterStats {
+            action: action.into(),
+            cookie: cookie.to_vec(),
+            packets,
+            bytes: packets * 10,
+            ..Default::default()
+        };
+        let c = |cookie, packets| Counter {
+            cookie,
+            packets,
+            bytes: packets * 10,
+        };
+        let rows = [
+            row("sample", &[0, 0, 0, 1], 99),
+            row("gact", &[0, 0, 0, 1], 3),
+            row("gact", &DEFAULT_COOKIE.to_be_bytes(), 5),
+            row("gact", &[1, 2], 7),
+            row("gact", &[], 8),
+        ];
+        assert_eq!(counters_from(&rows), [c(1, 3), c(DEFAULT_COOKIE, 5)]);
     }
 
     #[test]

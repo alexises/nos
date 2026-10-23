@@ -115,6 +115,10 @@ pub enum Resolved {
     ShowLldpStatistics,
     /// `show version` — printed locally, no IPC.
     ShowVersion,
+    /// `show acl [<name>]` — data-plane, valid in any mode.
+    ShowAcl {
+        name: Option<String>,
+    },
     /// `show spanning-tree` — data-plane, valid in any mode.
     ShowSpanningTree,
     /// `show spanning-tree instance <id>` — data-plane, valid in any mode.
@@ -241,6 +245,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowLldpNeighbors { detail } => Resolved::ShowLldpNeighbors { detail },
         Command::ShowLldpStatistics => Resolved::ShowLldpStatistics,
         Command::ShowVersion => Resolved::ShowVersion,
+        Command::ShowAcl { name } => Resolved::ShowAcl { name },
         Command::ShowSpanningTree => Resolved::ShowSpanningTree,
         Command::ShowSpanningTreeInstance { id } => Resolved::ShowSpanningTreeInstance { id },
         Command::ShowSpanningTreeMstConfig => Resolved::ShowSpanningTreeMstConfig,
@@ -353,6 +358,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowLldpNeighbors { .. }
         | Command::ShowLldpStatistics
         | Command::ShowVersion
+        | Command::ShowAcl { .. }
         | Command::ShowSpanningTree
         | Command::ShowSpanningTreeInstance { .. }
         | Command::ShowSpanningTreeMstConfig

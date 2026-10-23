@@ -1,5 +1,8 @@
-//! `acl` (#541): `nos-acld` compiles an ACL to tc on router-a's `eth0`
-//! ingress; the BGP session from router-b is the signal.
+//! `acl` (#541, #543): `nos-acld` compiles an ACL to tc on router-a's `eth0`
+//! ingress; the BGP session from router-b is the signal, and `show acl`
+//! (`GET /v1/acl/EDGE`) reads the matching counters.
+
+use std::time::{Duration, Instant};
 
 use reqwest::Method;
 
@@ -60,6 +63,56 @@ async fn put_d_bgp(a: &Router, place: &str) -> anyhow::Result<()> {
         .map(drop)
 }
 
+/// One rule's entry in a `GET /v1/acl/<name>` body.
+fn rule_of<'a>(acl: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+    acl["rules"].as_array()?.iter().find(|r| r["name"] == name)
+}
+
+/// Polls `GET /v1/acl/EDGE` until `d-bgp` has counted a packet. Router-b
+/// keeps retrying its session, and every segment of it is denied.
+async fn wait_d_bgp_counted(a: &Router) -> anyhow::Result<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = a
+            .rest_expect(Method::GET, "/v1/acl/EDGE", None, 200)
+            .await?;
+        let acl: serde_json::Value = serde_json::from_str(&body)?;
+        if rule_of(&acl, "d-bgp").is_some_and(|r| r["packets"].as_u64() > Some(0)) {
+            return Ok(acl);
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "d-bgp never counted a packet: {body}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// `show acl`: attachments, counters of the live rule, the dropped rules at
+/// 0 and a 404 for an unknown name.
+async fn check_counters(a: &Router) -> anyhow::Result<()> {
+    let acl = wait_d_bgp_counted(a).await?;
+    anyhow::ensure!(
+        acl["attached"] == serde_json::json!([{"interface": "eth0", "direction": "In"}]),
+        "attached: {acl}"
+    );
+    let d = rule_of(&acl, "d-bgp").ok_or_else(|| anyhow::anyhow!("no d-bgp: {acl}"))?;
+    anyhow::ensure!(
+        d["bytes"].as_u64() > Some(0) && d["dropped"].is_null(),
+        "d-bgp: {d}"
+    );
+    // `p-bgp` is hidden by `d-bgp`, `p-icmp` equals the default: no filter.
+    for (name, why) in [("p-bgp", "shadowed"), ("p-icmp", "trailing")] {
+        let r = rule_of(&acl, name).ok_or_else(|| anyhow::anyhow!("no {name}: {acl}"))?;
+        anyhow::ensure!(r["dropped"] == why && r["packets"] == 0, "{name}: {r}");
+    }
+    let (status, _) = a.rest(Method::GET, "/v1/acl/NOPE", None).await?;
+    anyhow::ensure!(status == 404, "unknown acl: {status}");
+    let all = a.rest_expect(Method::GET, "/v1/acl", None, 200).await?;
+    anyhow::ensure!(all.contains("\"EDGE\""), "GET /v1/acl: {all}");
+    Ok(())
+}
+
 pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     // A hold-time change restarts the session (`diff_peers`).
@@ -88,11 +141,12 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(ATTACHED, attached, 30).await?;
     a.assert_quiet(ENDED, ended, 12).await?;
 
-    log("step 2: d-bgp inserted before p-bgp: the session drops");
+    log("step 2: d-bgp inserted before p-bgp: the session drops, show acl counts it");
     let (compiled, ended) = (a.count(COMPILED_2), a.count(ENDED));
     put_d_bgp(a, "before=p-bgp").await?;
     a.wait_new(COMPILED_2, compiled, 30).await?;
     a.wait_new(ENDED, ended, 60).await?;
+    check_counters(a).await?;
 
     log("step 3: d-bgp moved after p-bgp: the session comes back");
     let (est, compiled) = (a.count(ESTABLISHED), a.count(COMPILED_3));

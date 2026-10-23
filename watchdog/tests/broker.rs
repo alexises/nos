@@ -77,6 +77,7 @@ async fn env(users: Vec<User>) -> Env {
             lldp: PathBuf::from("/run/nos/lldp.sock"),
             bfd: PathBuf::from("/run/nos/bfd.sock"),
             stp: PathBuf::from("/run/nos/stp.sock"),
+            acl: PathBuf::from("/run/nos/acl.sock"),
         },
         pki.clone(),
     )

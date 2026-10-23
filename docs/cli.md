@@ -153,7 +153,7 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
   - `levels` lower than `rules` means rules were packed: rules that cannot match the same packet share one kernel priority, so a packet crosses fewer of them. Order still decides between rules that overlap.
   - `shadowed=N`: N rules can never match because one earlier rule matches everything they do. Reorder or delete them.
   - `trailing=N`: N last rules do what the default action does anyway; they are dropped on purpose, except a rule with `log`.
-  - A dropped or shadowed rule has no kernel filter, so it shows no hits in `show acl` (#543).
+  - A dropped or shadowed rule has no kernel filter, so `show acl` marks it and its counters stay 0.
   - A rule hidden only by several earlier rules together is not detected: it is kept (harmless).
 - **Updates are atomic per interface and direction:** a packet sees the old ACL or the new one, never a mix. An ACL attached to several interfaces switches them one after the other.
 - **If `nos-acld` stops:** a crash leaves the last ACL enforcing until it restarts; a clean stop removes the filters. An ACL the daemon cannot program keeps the previous one in place and logs an error.
@@ -281,6 +281,7 @@ These work in both modes. Only `clear` acts on anything, and it never changes co
 - `show interface [<name>]`: what is actually applied to each interface and subinterface: addresses, routing table, MTU.
 - `show port-aggregate [<name>]` and `show lacp [<name>]`: bonds, their members, and LACP negotiation state.
 - `show version`: the nos version and short git revision (`nos 0.1.0 (abc1234)`); the revision is `unknown` outside `make docker-build`. Answered by the shell itself, in any mode.
+- `show acl [<name>]`: where each ACL is attached, and per rule the packets and bytes it matched (summed over all its filters and devices), then the default action's. Use it to see what a deny hits or whether a rule is ever reached. Counters reset whenever the ACL is edited (including `move`) or `nos-acld` restarts, since each change installs a new chain.
 - `show lldp neighbors`: every LLDP neighbour heard, on every interface; `show lldp neighbors detail` adds its VLANs, link aggregation, maximum frame size and MAC/PHY fields. `show lldp statistics`: frames sent, received, in error and discarded, TLVs skipped, ageouts and table-full drops, per LLDP-enabled interface.
 - `show spanning-tree domain <bd>`: one Rapid-PVST+ tree (bridge id with the VLAN, root, every member port's role and state, `Compat` and `PVID-inconsistent` marks).
 - `show spanning-tree instance <id>` and `show spanning-tree mst-config`: one MST instance (0 is the CIST) with its VLANs, root and ports, and the MST region name, revision, digest and VLAN map.
@@ -382,6 +383,7 @@ Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate:
 | `set port-aggregate <name> lacp-system-priority <n>` / `set interface <name> lacp-port-priority <n>` (and `delete …`; generated from the schema like every field) | Sets the LACP Actor System/Port Priority `nos-lacpd` advertises (`SetLacpSystemPriority`/`SetLacpPortPriority`, default 32768); `show lacp` prints both sides' values |
 | `set port-aggregate <name> lacp-system-id <mac>` / `delete port-aggregate <name> lacp-system-id` (and the relative `set lacp-system-id …`/`delete lacp-system-id`) | Overrides the LACP Actor System ID `nos-lacpd` advertises (`SetLacpSystemId`/`ClearLacpSystemId`) so two PEs sharing an ESI can present one actor to the customer device |
 | `set port-aggregate <name> redundancy-mode all-active\|single-active` / `set redundancy-mode …` (relative, while navigated into an aggregate) | How the PEs sharing the aggregate's ESI divide the traffic (`PortAggregateOp::SetRedundancyMode`). Single-active (needs an `esi`) blocks the non-DF's bridge port outright instead of only refusing BUM; announced in the per-ES A-D route. Shown by `show config` only when single-active; `show fdb` marks the segment |
+| `show acl [<name>]` | Resolves `nos-acld` via the broker (`ServiceRef::Acl`), then `AclRequest::Show` (`acl_client.rs`) and `render_acls`: one header per ACL, one line per rule, a default line. "acl '<name>' not found" for an unknown name; works in any mode |
 | `show lldp neighbors` | Resolves `nos-lldpd`'s single instance via the watchdog broker (`ServiceRef::Lldp`), then `LldpRequest::GetNeighbors` — one line per neighbor heard on any interface: local interface, the neighbor's system name, chassis id, port id (with its port description if that differs), enabled capabilities, and seconds until its entry ages out. Reports "nos-lldpd is not running" rather than failing if the broker can't resolve it (works in any mode) |
 | `show lldp neighbors detail` | Same resolution and request as `show lldp neighbors`, rendered one block per neighbor (`render_lldp_neighbors_detail`): the summary fields, then — only when the neighbor sent them — `vlans`, `port-vlan-id`, `aggregation`, `max-frame-size`, `mac/phy` (autoneg, advertised bits, MAU type) |
 | `show version` | Prints `nos <VERSION> (<REVISION>)` from `nos_proto::version` — compile-time constants (`proto/build.rs` reads `NOS_BUILD_REV`), no IPC; works in any mode |
@@ -483,6 +485,7 @@ Full module table, before it was condensed in `cli/CLAUDE.md` (#263):
 | `log_client.rs` | IPC calls to the resolved `nos-logd` instance: `get_logs` (one-shot `LogRequest::GetLogs`) and `tail` (long-lived, like `client::subscribe` — sends `LogRequest::Tail` and returns the reader for the caller to loop on) |
 | `bgp_client.rs` | One-shot IPC call to a resolved `nos-bgpd` instance: `get_summary` (`BgpRequest::GetSummary`) |
 | `lacp_client.rs` | One-shot IPC call to the resolved `nos-lacpd` instance: `get_summary` (`LacpRequest::GetSummary`) |
+| `acl_client.rs` | One-shot IPC call to the resolved `nos-acld`: `show(name)` returns the `AclStatus` list (`AclRequest::Show`) |
 | `lldp_client.rs` | One-shot IPC call to the resolved `nos-lldpd` instance: `get_neighbors` (`LldpRequest::GetNeighbors`), `get_statistics` (`LldpRequest::GetStatistics`) |
 | `bfd_client.rs` | One-shot IPC call to the resolved `nos-bfdd`: `get_sessions` (`BfdRequest::GetSessions`), `get_reflector` (`BfdRequest::GetReflector`) |
 | `fdb_client.rs` | One-shot IPC call to a domain's resolved `nos-fdbd` instance: `get_table` (`FdbRequest::GetMacs`), connecting with `connect_role` like `rib_client.rs`. |

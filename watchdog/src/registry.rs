@@ -93,6 +93,7 @@ impl EndpointRegistry {
         lldp_socket: &Path,
         bfd_socket: &Path,
         stp_socket: &Path,
+        acl_socket: &Path,
     ) -> Option<PathBuf> {
         let (kind, name) = match service {
             ServiceRef::Config => return Some(config_socket.to_path_buf()),
@@ -102,6 +103,7 @@ impl EndpointRegistry {
             ServiceRef::Lldp => return Some(lldp_socket.to_path_buf()),
             ServiceRef::Bfd => return Some(bfd_socket.to_path_buf()),
             ServiceRef::Stp => return Some(stp_socket.to_path_buf()),
+            ServiceRef::Acl => return Some(acl_socket.to_path_buf()),
             ServiceRef::RibTable(name) => (EndpointKind::RibTable, name),
             ServiceRef::BgpInstance(name) => (EndpointKind::BgpInstance, name),
             ServiceRef::OspfInstance(name) => (EndpointKind::OspfInstance, name),
@@ -123,6 +125,7 @@ mod tests {
     const LLDP_SOCKET: &str = "/run/nos/lldp.sock";
     const BFD_SOCKET: &str = "/run/nos/bfd.sock";
     const STP_SOCKET: &str = "/run/nos/stp.sock";
+    const ACL_SOCKET: &str = "/run/nos/acl.sock";
 
     #[tokio::test]
     async fn config_always_resolves() {
@@ -134,6 +137,7 @@ mod tests {
         let lldp_socket = Path::new(LLDP_SOCKET);
         let bfd_socket = Path::new(BFD_SOCKET);
         let stp_socket = Path::new(STP_SOCKET);
+        let acl_socket = Path::new(ACL_SOCKET);
         assert_eq!(
             registry
                 .resolve(
@@ -144,7 +148,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             Some(config_socket.to_path_buf())
@@ -165,10 +170,33 @@ mod tests {
                     p(LACP_SOCKET),
                     p(LLDP_SOCKET),
                     p(BFD_SOCKET),
-                    p(STP_SOCKET)
+                    p(STP_SOCKET),
+                    p(ACL_SOCKET)
                 )
                 .await,
             Some(PathBuf::from(BFD_SOCKET))
+        );
+    }
+
+    #[tokio::test]
+    async fn acl_always_resolves() {
+        let registry = EndpointRegistry::default();
+        let p = |s| Path::new(s);
+        assert_eq!(
+            registry
+                .resolve(
+                    &ServiceRef::Acl,
+                    p(CONFIG_SOCKET),
+                    p(INTERFACES_SOCKET),
+                    p(LOG_SOCKET),
+                    p(LACP_SOCKET),
+                    p(LLDP_SOCKET),
+                    p(BFD_SOCKET),
+                    p(STP_SOCKET),
+                    p(ACL_SOCKET)
+                )
+                .await,
+            Some(PathBuf::from(ACL_SOCKET))
         );
     }
 
@@ -182,6 +210,7 @@ mod tests {
         let lldp_socket = Path::new(LLDP_SOCKET);
         let bfd_socket = Path::new(BFD_SOCKET);
         let stp_socket = Path::new(STP_SOCKET);
+        let acl_socket = Path::new(ACL_SOCKET);
         assert_eq!(
             registry
                 .resolve(
@@ -192,7 +221,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             Some(interfaces_socket.to_path_buf())
@@ -209,6 +239,7 @@ mod tests {
         let lldp_socket = Path::new(LLDP_SOCKET);
         let bfd_socket = Path::new(BFD_SOCKET);
         let stp_socket = Path::new(STP_SOCKET);
+        let acl_socket = Path::new(ACL_SOCKET);
         assert_eq!(
             registry
                 .resolve(
@@ -219,7 +250,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             Some(log_socket.to_path_buf())
@@ -236,6 +268,7 @@ mod tests {
         let lldp_socket = Path::new(LLDP_SOCKET);
         let bfd_socket = Path::new(BFD_SOCKET);
         let stp_socket = Path::new(STP_SOCKET);
+        let acl_socket = Path::new(ACL_SOCKET);
         assert_eq!(
             registry
                 .resolve(
@@ -246,7 +279,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             Some(lacp_socket.to_path_buf())
@@ -263,6 +297,7 @@ mod tests {
         let lldp_socket = Path::new(LLDP_SOCKET);
         let bfd_socket = Path::new(BFD_SOCKET);
         let stp_socket = Path::new(STP_SOCKET);
+        let acl_socket = Path::new(ACL_SOCKET);
         let service = ServiceRef::RibTable("rt1".to_string());
 
         assert_eq!(
@@ -275,7 +310,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             None
@@ -298,7 +334,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             Some(PathBuf::from("/run/nos/rib-rt1.sock"))
@@ -315,7 +352,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             None
@@ -332,6 +370,7 @@ mod tests {
         let lldp_socket = Path::new(LLDP_SOCKET);
         let bfd_socket = Path::new(BFD_SOCKET);
         let stp_socket = Path::new(STP_SOCKET);
+        let acl_socket = Path::new(ACL_SOCKET);
         let service = ServiceRef::BgpInstance("r1".to_string());
 
         assert_eq!(
@@ -344,7 +383,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             None
@@ -367,7 +407,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             Some(PathBuf::from("/run/nos/bgp-r1.sock"))
@@ -384,7 +425,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             None
@@ -401,6 +443,7 @@ mod tests {
         let lldp_socket = Path::new(LLDP_SOCKET);
         let bfd_socket = Path::new(BFD_SOCKET);
         let stp_socket = Path::new(STP_SOCKET);
+        let acl_socket = Path::new(ACL_SOCKET);
         let service = ServiceRef::OspfInstance("o1".to_string());
 
         assert_eq!(
@@ -413,7 +456,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             None
@@ -436,7 +480,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             Some(PathBuf::from("/run/nos/ospf-o1.sock"))
@@ -453,7 +498,8 @@ mod tests {
                     lacp_socket,
                     lldp_socket,
                     bfd_socket,
-                    stp_socket
+                    stp_socket,
+                    acl_socket
                 )
                 .await,
             None

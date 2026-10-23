@@ -388,6 +388,63 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
         .join("\n")
 }
 
+/// Render `nos-acld`'s ACLs and their counters, for `show acl`.
+pub fn render_acls(acls: &[nos_proto::AclStatus]) -> String {
+    use nos_proto::schema::AclAction;
+    use nos_proto::AclDirection;
+
+    if acls.is_empty() {
+        return "no acls".to_string();
+    }
+    let action = |a: AclAction| match a {
+        AclAction::Permit => "permit",
+        AclAction::Deny => "deny",
+    };
+    let mut out = Vec::new();
+    for a in acls {
+        let attached = if a.attached.is_empty() {
+            "not attached".to_string()
+        } else {
+            let at: Vec<_> = a
+                .attached
+                .iter()
+                .map(|t| {
+                    let dir = match t.direction {
+                        AclDirection::In => "in",
+                        AclDirection::Out => "out",
+                    };
+                    format!("{} {dir}", t.interface)
+                })
+                .collect();
+            format!("attached to {}", at.join(", "))
+        };
+        out.push(format!(
+            "acl {}: {attached}, {} levels, {} filters",
+            a.name, a.levels, a.filters
+        ));
+        for r in &a.rules {
+            let note = r
+                .dropped
+                .as_deref()
+                .map_or(String::new(), |d| format!(" ({d}, no filter)"));
+            out.push(format!(
+                "  {}: {}, packets {}, bytes {}{note}",
+                r.name,
+                action(r.action),
+                r.packets,
+                r.bytes
+            ));
+        }
+        out.push(format!(
+            "  default {}: packets {}, bytes {}",
+            action(a.default_action),
+            a.default_packets,
+            a.default_bytes
+        ));
+    }
+    out.join("\n")
+}
+
 /// Render `nos-lldpd`'s per-interface counters, for `show lldp statistics`.
 pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
     if stats.is_empty() {
@@ -2450,6 +2507,53 @@ mod tests {
             "eth1: tx 1, rx 2, rx errors 3, rx discarded 4, tlvs discarded 5, \
              tlvs unrecognized 6, ageouts 7, too many neighbors 8"
         );
+    }
+
+    #[test]
+    fn render_acls_empty_unattached_and_attached() {
+        use nos_proto::schema::AclAction;
+        use nos_proto::{AclAttachment, AclDirection, AclRuleStatus, AclStatus};
+
+        assert_eq!(render_acls(&[]), "no acls");
+        let rule = |name: &str, action, dropped: Option<&str>, packets| AclRuleStatus {
+            name: name.into(),
+            action,
+            dropped: dropped.map(Into::into),
+            level: None,
+            packets,
+            bytes: packets * 10,
+        };
+        let mut acl = AclStatus {
+            name: "EDGE".into(),
+            default_action: AclAction::Permit,
+            default_packets: 4,
+            default_bytes: 40,
+            levels: 2,
+            filters: 5,
+            attached: vec![],
+            rules: vec![
+                rule("d-bgp", AclAction::Deny, None, 3),
+                rule("dup", AclAction::Deny, Some("shadowed"), 0),
+            ],
+        };
+        assert_eq!(
+            render_acls(std::slice::from_ref(&acl)),
+            "acl EDGE: not attached, 2 levels, 5 filters\n  \
+             d-bgp: deny, packets 3, bytes 30\n  \
+             dup: deny, packets 0, bytes 0 (shadowed, no filter)\n  \
+             default permit: packets 4, bytes 40"
+        );
+        acl.attached = vec![
+            AclAttachment {
+                interface: "eth1".into(),
+                direction: AclDirection::In,
+            },
+            AclAttachment {
+                interface: "eth1".into(),
+                direction: AclDirection::Out,
+            },
+        ];
+        assert!(render_acls(&[acl]).starts_with("acl EDGE: attached to eth1 in, eth1 out, "));
     }
 
     #[test]

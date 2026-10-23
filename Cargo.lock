@@ -1716,6 +1716,7 @@ dependencies = [
  "nos-proto",
  "nos-tc",
  "proptest",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

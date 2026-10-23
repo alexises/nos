@@ -4,6 +4,7 @@
 // `#[derive(Cli)]` emits `::nos_proto::…` paths, which must resolve here too.
 extern crate self as nos_proto;
 
+pub mod acl;
 pub mod bfd;
 pub mod bgp;
 /// Watchdog endpoint broker: roles, service references and the watchdog wire types.
@@ -43,6 +44,7 @@ pub mod validators;
 pub mod version;
 pub use version::VersionInfo;
 
+pub use acl::{AclAttachment, AclDirection, AclEvent, AclRequest, AclRuleStatus, AclStatus};
 pub use bfd::{
     BfdDiag, BfdEvent, BfdRequest, BfdSessionKind, BfdSessionView, BfdState, ReflectorDiscards,
     ReflectorView, SessionKey,
