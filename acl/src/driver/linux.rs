@@ -4,11 +4,11 @@
 
 use std::io;
 
-use nos_tc::{dump, send, Request};
+use nos_tc::{dump, psample, send, Request};
 
 use super::{
-    chain_requests, counters_from, entry_delete, entry_request, live_from, Counter, Direction,
-    Driver, ACL_CHAIN_A, ACL_CHAIN_B,
+    chain_requests, check_log, counters_from, entry_delete, entry_request, live_from, Counter,
+    Direction, Driver, ACL_CHAIN_A, ACL_CHAIN_B,
 };
 use crate::compile::Compiled;
 
@@ -36,6 +36,11 @@ impl Driver for LinuxDriver {
         self.flush(ifindex, dir, chain)?;
         for req in chain_requests(ifindex, dir, chain, acl) {
             send(&req, &[])?;
+        }
+        // Checked after the install, whose `sample` action loaded psample;
+        // the idle chain is not live yet, the engine flushes it on `Err`.
+        if acl.logs() {
+            check_log(&psample()?)?;
         }
         Ok(())
     }

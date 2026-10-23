@@ -513,3 +513,45 @@ fn what_the_kernel_would_reject_is_refused_first() {
         assert_eq!(bad(keys, gact(Verdict::Ok)), io::ErrorKind::InvalidInput);
     }
 }
+
+#[test]
+fn sample_pipes_to_its_psample_group_with_the_cookie() {
+    let sample = Action {
+        kind: ActionKind::Sample {
+            rate: 1,
+            trunc: 128,
+            group: 0x4e_4f53,
+        },
+        cookie: 7u32.to_be_bytes().to_vec(),
+    };
+    let m = add(filter(
+        Protocol::Ip,
+        Kind::Flower(FlowerKeys::default()),
+        vec![sample, Action::new(ActionKind::Gact(Verdict::Shot))],
+    ));
+    let act = action_attrs(&m, 0);
+    assert_eq!(act[0], (TCA_ACT_KIND, b"sample\0".to_vec()));
+    let opts: Vec<_> = attrs(&act[1].1)
+        .into_iter()
+        .map(|(k, v)| (k, v.to_vec()))
+        .collect();
+    assert_eq!(opts[0].0, TCA_SAMPLE_PARMS);
+    assert_eq!(
+        i32::from_ne_bytes(opts[0].1[8..12].try_into().unwrap()),
+        TC_ACT_PIPE
+    );
+    assert_eq!(opts[1], (TCA_SAMPLE_RATE, 1u32.to_ne_bytes().to_vec()));
+    assert_eq!(
+        opts[2],
+        (TCA_SAMPLE_TRUNC_SIZE, 128u32.to_ne_bytes().to_vec())
+    );
+    assert_eq!(
+        opts[3],
+        (
+            TCA_SAMPLE_PSAMPLE_GROUP,
+            0x4e_4f53u32.to_ne_bytes().to_vec()
+        )
+    );
+    assert_eq!(act[2], (TCA_ACT_COOKIE, vec![0, 0, 0, 7]));
+    assert_eq!(action_attrs(&m, 1)[0].1, b"gact\0".to_vec());
+}

@@ -122,6 +122,14 @@ pub enum ActionKind {
         mask: u32,
         verdict: Verdict,
     },
+    /// `act_sample`: hands one in `rate` packets, cut to `trunc` bytes (0:
+    /// whole), to psample `group` with the action's cookie, then continues
+    /// (`pipe`) to the next action.
+    Sample {
+        rate: u32,
+        trunc: u32,
+        group: u32,
+    },
 }
 
 /// One action; a non-empty `cookie` (at most 16 bytes) is read back by
@@ -220,6 +228,7 @@ fn check(f: &Filter) -> io::Result<()> {
         }
         match a.kind {
             ActionKind::Gact(v) | ActionKind::Skbedit { verdict: v, .. } => check_verdict(v)?,
+            ActionKind::Sample { .. } => {}
         }
     }
     if let Kind::Flower(k) = &f.kind {
@@ -231,7 +240,7 @@ fn check(f: &Filter) -> io::Result<()> {
     Ok(())
 }
 
-fn nla(out: &mut Vec<u8>, kind: u16, payload: &[u8]) {
+pub(crate) fn nla(out: &mut Vec<u8>, kind: u16, payload: &[u8]) {
     let len = u16::try_from(4 + payload.len()).expect("a tc attribute is tiny");
     out.extend_from_slice(&len.to_ne_bytes());
     out.extend_from_slice(&kind.to_ne_bytes());
@@ -245,7 +254,7 @@ fn nested(out: &mut Vec<u8>, kind: u16, f: impl FnOnce(&mut Vec<u8>)) {
     nla(out, kind | NLA_F_NESTED, &inner);
 }
 
-fn cstr(s: &str) -> Vec<u8> {
+pub(crate) fn cstr(s: &str) -> Vec<u8> {
     let mut v = s.as_bytes().to_vec();
     v.push(0);
     v
@@ -264,6 +273,7 @@ fn action(tab: &mut Vec<u8>, index: u16, a: &Action) {
         let name = match a.kind {
             ActionKind::Gact(_) => "gact",
             ActionKind::Skbedit { .. } => "skbedit",
+            ActionKind::Sample { .. } => "sample",
         };
         nla(act, TCA_ACT_KIND, &cstr(name));
         nested(act, TCA_ACT_OPTIONS, |p| match a.kind {
@@ -276,6 +286,12 @@ fn action(tab: &mut Vec<u8>, index: u16, a: &Action) {
                 nla(p, TCA_SKBEDIT_PARMS, &tc_gen(verdict.code()));
                 nla(p, TCA_SKBEDIT_MARK, &mark.to_ne_bytes());
                 nla(p, TCA_SKBEDIT_MASK, &mask.to_ne_bytes());
+            }
+            ActionKind::Sample { rate, trunc, group } => {
+                nla(p, TCA_SAMPLE_PARMS, &tc_gen(TC_ACT_PIPE));
+                nla(p, TCA_SAMPLE_RATE, &rate.to_ne_bytes());
+                nla(p, TCA_SAMPLE_TRUNC_SIZE, &trunc.to_ne_bytes());
+                nla(p, TCA_SAMPLE_PSAMPLE_GROUP, &group.to_ne_bytes());
             }
         });
         if !a.cookie.is_empty() {

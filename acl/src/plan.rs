@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use nos_proto::schema::{Acl, Config, Subinterface};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::compile::{compile_within, Compiled, MAX_LEVELS};
 use crate::driver::Direction;
@@ -137,9 +137,6 @@ fn compile_logged(acl: &Acl, max_levels: usize) -> Option<Compiled> {
                 levels = c.levels.len(), shadowed = c.shadowed.len(),
                 trailing = c.trailing.len(), "compiled acl"
             );
-            for r in acl.rules.iter().filter(|r| r.log) {
-                warn!(acl = %acl.name, rule = %r.name, "acl log not supported yet");
-            }
             Some(c)
         }
         Err(e) => {

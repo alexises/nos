@@ -10,6 +10,7 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 - `engine.rs`: per (device, direction) holds `{ifindex, chain, name, compiled}`; a pass resolves devices (a bond through `LinkState.port_aggregate`, never by deriving `bond<id>`), detaches what is no longer wanted, installs what changed. Driver calls block: the engine is a `Shared<D>` (`Arc<Mutex<Engine>>`) and a pass runs on `spawn_blocking` under the lock.
 - `compile/` (pure): `compile(&Acl) -> Compiled { levels, default_action, rules, shadowed, trailing }` (the last two are rule indices = cookies, #543). `rule.rs` splits by family (prefix family, else `icmp` v4 / `icmpv6` v6, else both) and `established` into two filters (ACK, RST).
 - `server.rs` + `status.rs` (#543): `--listen-socket` (watchdog `--acld-listen-socket`, `ServiceRef::Acl`) serves `AclRequest::Show` to `User`/`Restd`. `Engine::show` dumps each installed chain (`Driver::counters`, `gact` rows by kind) under the same lock a pass takes; `status::status` (pure) sums per cookie across filters and devices, ignores stale cookies, marks dropped rules. Counters reset on any recompile (new chain; `ponytail:` carry-over left out). Every ACL of the last plan is listed, unattached ones at 0.
+- `logger/` (#544): `Logger` (pure: sample -> `acl log` line, token bucket per (ifindex, direction, rule), overrun throttle), `packet.rs` (frame -> 5-tuple), and a detached `acl-log` thread on psample, started by `engine::run` (Linux driver only) once a `log` rule is installed; it names samples via `Engine::log_target`.
 - `driver/`: `Driver` trait (`live_chain`, `install`, `switch`, `flush`, `detach`, `counters`), `noop.rs` (records calls, tests), `linux.rs` (only `nos-tc` calls; coverage-excluded). Request building (`chain_requests`, `entry_request`, `live_from`) is pure, in `driver/mod.rs`.
 
 ## Kernel layout (details: `docs/architecture/linux-drivers.md`)
@@ -30,13 +31,11 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 - Fail closed: a crash leaves filters enforcing; on start the first link snapshot is swept (chain-0 dump per device and hook) and what a previous run left is adopted, then replaced or detached. A refused install flushes the idle chain and keeps the old one live; retried on the next pass.
 - An attach point whose device is absent logs `acl pending interface= direction= acl= reason="absent"` once and applies when the link shows up. A device that disappears is dropped without driver calls (its qdisc went with it).
 - The untagged (tag 0) subinterface is its parent's device: the commit refuses both setting one direction (`schema::acl::one_per_device`).
-- `log` is not implemented (#544): one `warn!(acl, rule, "acl log not supported yet")` per compile.
+- `log`: `sample` (group `ACL_PSAMPLE_GROUP`, rate 1, `LOG_TRUNC`) then `gact`, one cookie. `LinuxDriver::install` refuses a `log` ACL when psample cannot pass the cookie (`check_log`, owner decision L2); egress samples carry `out` = device, ingress `in` = device and `out` = 0.
 - L4 keys never match non-first fragments (`ponytail:` in `compile/rule.rs`).
 
 ## Tests
 
 - Unit: compile shapes, plan resolution, engine with `NoopDriver` (attach, A/B alternation, pending device, sweep, refused install, shutdown), request bytes via `nos-tc` types.
 - Kernel: `unshare -Urn cargo test -p nos-acl --test kernel -- --ignored` (`tc` as the oracle; a foreign prio-1 filter survives).
-- e2e: `cargo run -p nos-e2e -- acl` (group `drivers`): attach, `?before=` drops BGP, `?after=` restores it, detach, `show acl` counters after the drop, packed `EDGE2`.
-
-Out of scope here: `log` (#544; its `sample` action will share the rule cookie, so `Driver::counters` keeps reading `gact` only).
+- e2e: `cargo run -p nos-e2e -- acl` (group `drivers`): attach, `?before=` drops BGP, `?after=` restores it, detach, `show acl` counters after the drop, `acl log` lines once `d-bgp` logs, packed `EDGE2`.

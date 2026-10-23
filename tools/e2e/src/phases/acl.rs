@@ -33,14 +33,19 @@ const COMPILED_3: &str = "compiled acl acl=EDGE rules=3 filters=2 levels=0 shado
 const COMPILED_5: &str = "compiled acl acl=EDGE2 rules=13 filters=14 levels=1 shadowed=1";
 const ATTACHED_5: &str = "acl attached interface=eth0 direction=in acl=EDGE2";
 const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
+/// Step 2b (#544): router-b's TCP from its address, denied and sampled on
+/// router-a's `eth0` ingress (`sport`/`dport` depend on who connects).
+const LOGGED: &str =
+    "acl log acl=EDGE rule=d-bgp interface=eth0 direction=in src=10.50.0.3 dst=10.50.0.2 proto=6";
 const DETACHED: &str = "acl detached interface=eth0 direction=in";
 /// Short enough that a blocked session drops within a wait; negotiated
 /// down on both sides (the lower hold time wins, RFC 4271 §4.2).
 const HOLD_TIME: &str = "9";
 
-/// `PUT`s rule `d-bgp` (deny every TCP segment from router-b) at `place`
-/// (`before=p-bgp`, `after=p-bgp`) in one REST transaction, then commits.
-async fn put_d_bgp(a: &Router, place: &str) -> anyhow::Result<()> {
+/// `PUT`s rule `d-bgp` (deny every TCP segment from router-b, `log` as
+/// given) at `place` (`before=p-bgp`, `after=p-bgp`) in one REST
+/// transaction, then commits.
+async fn put_d_bgp(a: &Router, place: &str, log: bool) -> anyhow::Result<()> {
     let tx = format!("/v1/transactions/{REST_TX}");
     let _ = a.rest(Method::DELETE, &tx, None).await;
     a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
@@ -50,6 +55,7 @@ async fn put_d_bgp(a: &Router, place: &str) -> anyhow::Result<()> {
         "action": "Deny",
         "protocol": "tcp",
         "source": format!("{IP_B}/32"),
+        "log": log,
     });
     a.rest_expect(
         Method::PUT,
@@ -143,14 +149,20 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
 
     log("step 2: d-bgp inserted before p-bgp: the session drops, show acl counts it");
     let (compiled, ended) = (a.count(COMPILED_2), a.count(ENDED));
-    put_d_bgp(a, "before=p-bgp").await?;
+    put_d_bgp(a, "before=p-bgp", false).await?;
     a.wait_new(COMPILED_2, compiled, 30).await?;
     a.wait_new(ENDED, ended, 60).await?;
     check_counters(a).await?;
 
+    log("step 2b: d-bgp logs: router-b's retries show as acl log lines");
+    let (compiled, logged) = (a.count(COMPILED_2), a.count(LOGGED));
+    put_d_bgp(a, "before=p-bgp", true).await?;
+    a.wait_new(COMPILED_2, compiled, 30).await?;
+    a.wait_new(LOGGED, logged, 30).await?;
+
     log("step 3: d-bgp moved after p-bgp: the session comes back");
     let (est, compiled) = (a.count(ESTABLISHED), a.count(COMPILED_3));
-    put_d_bgp(a, "after=p-bgp").await?;
+    put_d_bgp(a, "after=p-bgp", false).await?;
     a.wait_new(COMPILED_3, compiled, 30).await?;
     a.wait_new(ESTABLISHED, est, 60).await?;
 

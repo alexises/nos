@@ -91,6 +91,30 @@ pub const TCA_SKBEDIT_PARMS: u16 = 2;
 pub const TCA_SKBEDIT_MARK: u16 = 5;
 pub const TCA_SKBEDIT_MASK: u16 = 8;
 
+// include/uapi/linux/tc_act/tc_sample.h
+pub const TCA_SAMPLE_PARMS: u16 = 2;
+pub const TCA_SAMPLE_RATE: u16 = 3;
+pub const TCA_SAMPLE_TRUNC_SIZE: u16 = 4;
+pub const TCA_SAMPLE_PSAMPLE_GROUP: u16 = 5;
+
+// include/uapi/linux/genetlink.h
+pub const GENL_ID_CTRL: u16 = 16;
+pub const CTRL_CMD_GETFAMILY: u8 = 3;
+pub const CTRL_ATTR_FAMILY_ID: u16 = 1;
+pub const CTRL_ATTR_FAMILY_NAME: u16 = 2;
+pub const CTRL_ATTR_MAXATTR: u16 = 5;
+pub const CTRL_ATTR_MCAST_GROUPS: u16 = 7;
+pub const CTRL_ATTR_MCAST_GRP_NAME: u16 = 1;
+pub const CTRL_ATTR_MCAST_GRP_ID: u16 = 2;
+
+// include/uapi/linux/psample.h
+pub const PSAMPLE_CMD_SAMPLE: u8 = 0;
+pub const PSAMPLE_ATTR_IIFINDEX: u16 = 0;
+pub const PSAMPLE_ATTR_OIFINDEX: u16 = 1;
+pub const PSAMPLE_ATTR_SAMPLE_GROUP: u16 = 3;
+pub const PSAMPLE_ATTR_DATA: u16 = 6;
+pub const PSAMPLE_ATTR_USER_COOKIE: u16 = 15;
+
 // include/uapi/linux/gen_stats.h
 pub const TCA_STATS_BASIC: u16 = 1;
 pub const TCA_STATS_PKT64: u16 = 8;

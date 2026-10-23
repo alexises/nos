@@ -11,8 +11,8 @@ use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::process::Command;
 
 use nos_tc::{
-    dump, send, Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request, Verdict,
-    FLAG_IS_FRAGMENT,
+    dump, psample, send, Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request,
+    Sample, SampleSocket, Verdict, FLAG_IS_FRAGMENT,
 };
 
 const EEXIST: i32 = 17;
@@ -70,6 +70,13 @@ fn add(
 
 /// The raw reply to a hand-built dump request of `chain` at ingress, every
 /// received buffer concatenated: the source of `decode_tests.rs`'s fixture.
+fn hex(b: &[u8]) -> String {
+    b.iter().fold(String::new(), |mut s, x| {
+        write!(s, "{x:02x}").unwrap();
+        s
+    })
+}
+
 fn raw_dump(ifindex: u32, chain: u32) -> Vec<u8> {
     use netlink_sys::{protocols::NETLINK_ROUTE, Socket, SocketAddr};
     let mut req = Vec::new();
@@ -320,11 +327,7 @@ fn acl_chains_swap_count_and_flush() {
     }
     std::thread::sleep(std::time::Duration::from_millis(200));
     if std::env::var_os("NOS_TC_CAPTURE").is_some() {
-        let hex = raw_dump(v1, 1000).iter().fold(String::new(), |mut s, b| {
-            write!(s, "{b:02x}").unwrap();
-            s
-        });
-        println!("DUMP_REPLY {hex}");
+        println!("DUMP_REPLY {}", hex(&raw_dump(v1, 1000)));
     }
 
     add(
@@ -494,4 +497,154 @@ fn acl_chains_swap_count_and_flush() {
         &[ENOENT, EINVAL],
     )
     .unwrap();
+}
+
+/// The raw reply to a `CTRL_CMD_GETFAMILY` of `psample`: the source of
+/// `genl_tests.rs`'s fixture.
+fn raw_family() -> Vec<u8> {
+    use netlink_sys::{protocols::NETLINK_GENERIC, Socket, SocketAddr};
+    let mut req = Vec::new();
+    req.extend_from_slice(&32u32.to_ne_bytes());
+    req.extend_from_slice(&16u16.to_ne_bytes());
+    req.extend_from_slice(&1u16.to_ne_bytes());
+    req.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0]);
+    req.extend_from_slice(&12u16.to_ne_bytes());
+    req.extend_from_slice(&2u16.to_ne_bytes());
+    req.extend_from_slice(b"psample\0");
+    let mut s = Socket::new(NETLINK_GENERIC).unwrap();
+    s.bind_auto().unwrap();
+    s.connect(&SocketAddr::new(0, 0)).unwrap();
+    s.send(&req, 0).unwrap();
+    let mut buf = Vec::with_capacity(1 << 16);
+    s.recv(&mut buf, 0).unwrap();
+    buf
+}
+
+/// `act_sample` (#544): what psample reports for an egress and an ingress
+/// sample, whose action cookie names the filter.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn psample_reports_the_device_direction_and_cookie() {
+    const GROUP: u32 = 0x4e_4f53;
+    run(&["ip", "link", "set", "lo", "up"]);
+    run(&[
+        "ip",
+        "link",
+        "add",
+        "s0",
+        "address",
+        "02:00:00:00:01:01",
+        "type",
+        "veth",
+        "peer",
+        "name",
+        "s1",
+        "address",
+        "02:00:00:00:01:02",
+    ]);
+    run(&["ip", "link", "set", "s0", "up"]);
+    run(&["ip", "link", "set", "s1", "up"]);
+    run(&["ip", "addr", "add", "198.51.100.1/24", "dev", "s0"]);
+    run(&[
+        "ip",
+        "neigh",
+        "add",
+        "198.51.100.9",
+        "lladdr",
+        "02:00:00:00:01:02",
+        "dev",
+        "s0",
+        "nud",
+        "permanent",
+    ]);
+    let (s0, s1) = (idx("s0"), idx("s1"));
+    let udp = FlowerKeys {
+        ip_proto: Some(17),
+        dst_port: Some((6000, 6000)),
+        ..FlowerKeys::default()
+    };
+    for (ifindex, hook, cookie) in [(s0, Hook::Egress, 1u32), (s1, Hook::Ingress, 2)] {
+        send(&Request::Clsact { ifindex }, &[EEXIST]).unwrap();
+        let sample = Action {
+            kind: ActionKind::Sample {
+                rate: 1,
+                trunc: 128,
+                group: GROUP,
+            },
+            cookie: cookie.to_be_bytes().to_vec(),
+        };
+        let f = Filter {
+            ifindex,
+            hook,
+            chain: 0,
+            prio: 1,
+            protocol: Protocol::Ip,
+            handle: 1,
+            kind: Kind::Flower(udp.clone()),
+            actions: vec![sample, Action::new(ActionKind::Gact(Verdict::Ok))],
+            replace: false,
+        };
+        send(&Request::AddFilter(f), &[]).unwrap();
+    }
+    let shown = run(&["tc", "filter", "show", "dev", "s1", "ingress"]);
+    assert!(
+        shown.contains("sample rate 1/1 group 5132115 trunc_size 128"),
+        "{shown}"
+    );
+
+    let p = psample().unwrap();
+    println!("PSAMPLE {p:?}");
+    let capture = std::env::var_os("NOS_TC_CAPTURE").is_some().then(|| {
+        println!("FAMILY_REPLY {}", hex(&raw_family()));
+        let mut s = netlink_sys::Socket::new(netlink_sys::protocols::NETLINK_GENERIC).unwrap();
+        s.bind_auto().unwrap();
+        s.add_membership(p.group).unwrap();
+        s
+    });
+    let mut socket = SampleSocket::open(&p).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<Sample>();
+    std::thread::spawn(move || loop {
+        for s in socket.recv().unwrap() {
+            let _ = tx.send(s);
+        }
+    });
+    let sock = UdpSocket::bind("198.51.100.1:0").unwrap();
+    sock.send_to(b"psample", ("198.51.100.9", 6000)).unwrap();
+    let mut got: Vec<Sample> = (0..2)
+        .map(|_| rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap())
+        .collect();
+    got.sort_by_key(|s| s.cookie.clone());
+    for s in &got {
+        println!("SAMPLE {s:?} DATA {}", hex(&s.data));
+    }
+    if let Some(c) = capture {
+        let mut buf = Vec::with_capacity(1 << 16);
+        c.recv(&mut buf, 0).unwrap();
+        println!("SAMPLE_MSG {}", hex(&buf));
+    }
+    let (eg, ing) = (&got[0], &got[1]);
+    assert!(p.user_cookie, "{p:?}");
+    assert_eq!(
+        eg.cookie.as_deref(),
+        Some(&1u32.to_be_bytes()[..]),
+        "{eg:?}"
+    );
+    assert_eq!(
+        ing.cookie.as_deref(),
+        Some(&2u32.to_be_bytes()[..]),
+        "{ing:?}"
+    );
+    assert!(got.iter().all(|s| s.group == GROUP));
+    assert_eq!(eg.out_ifindex, s0, "egress: out = the device");
+    assert_eq!(
+        (ing.in_ifindex, ing.out_ifindex),
+        (s1, 0),
+        "ingress: in = the device, no out"
+    );
+    for s in &got {
+        // From the Ethernet header: destination MAC, then IPv4's ethertype.
+        assert_eq!(&s.data[..6], &[2, 0, 0, 0, 1, 2], "{s:?}");
+        assert_eq!(&s.data[12..14], &[8, 0], "{s:?}");
+        assert_eq!(s.data.len(), 14 + 20 + 8 + 7, "{s:?}");
+    }
 }

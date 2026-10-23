@@ -104,7 +104,7 @@ fn attach_replace_detach_leave_foreign_filters() {
     );
     assert_eq!(d.live_chain(i, Direction::In).unwrap(), Some(ACL_CHAIN_A));
 
-    let two = compile(&acl(vec![established, deny_bgp])).unwrap();
+    let two = compile(&acl(vec![established, deny_bgp.clone()])).unwrap();
     d.install(i, Direction::In, ACL_CHAIN_B, &two).unwrap();
     d.switch(i, Direction::In, ACL_CHAIN_B).unwrap();
     d.flush(i, Direction::In, ACL_CHAIN_A).unwrap();
@@ -120,10 +120,21 @@ fn attach_replace_detach_leave_foreign_filters() {
     // Flushing an empty chain again is fine.
     d.flush(i, Direction::In, ACL_CHAIN_A).unwrap();
 
-    // Egress is independent.
-    d.install(i, Direction::Out, ACL_CHAIN_A, &one).unwrap();
+    // Egress is independent. A `log` rule samples, then drops (#544); the
+    // install checks the kernel passes the cookie to psample.
+    let logged = compile(&acl(vec![AclRule {
+        log: true,
+        ..deny_bgp
+    }]))
+    .unwrap();
+    d.install(i, Direction::Out, ACL_CHAIN_A, &logged).unwrap();
     d.switch(i, Direction::Out, ACL_CHAIN_A).unwrap();
     assert!(show("acl0", "egress", 0).contains("goto chain 1000"));
+    let chain = show("acl0", "egress", ACL_CHAIN_A);
+    assert!(
+        chain.contains("sample rate 1/1 group 5132115 trunc_size 128") && chain.contains("drop"),
+        "{chain}"
+    );
     d.detach(i, Direction::Out).unwrap();
     assert_eq!(show("acl0", "egress", 0), "");
 

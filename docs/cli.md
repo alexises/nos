@@ -165,7 +165,11 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
   - A physical interface's ACL sees untagged frames only; attach to the subinterface for tagged traffic.
   - A rule with a port, `established` or ICMP match never matches non-first IP fragments.
   - `established` is stateless: it means TCP ACK or RST is set.
-  - `log` is accepted but not logged yet: `nos-acld` warns `acl log not supported yet`.
+- **Log what a rule matches:** `set acl EDGE rule d-bgp log`.
+  - Each matching packet gives `acl log acl=EDGE rule=d-bgp interface=eth0 direction=in src=.. dst=.. proto=6 sport=.. dport=.. suppressed=0` in `show log` (ICMP: `sport` is the type, `dport` the code; `-` when unknown).
+  - At most 10 lines per second per rule, interface and direction; the next line after a burst says how many were dropped (`suppressed=N`). Every matching packet is still copied to `nos-acld`, so a flood costs CPU. `acl log overrun overruns=N` means the kernel dropped samples.
+  - Needs Linux 6.11 or later (the kernel must name the rule in each sample). On an older kernel the ACL is not applied: `acl not applied, keeping the previous state ... error=acl log needs a kernel passing the psample cookie`. Remove `log` to apply it.
+  - A `log` rule is never dropped as trailing; a shadowed one never logs (it cannot match).
 
 ## Navigating: `edit`, `up`, `top`
 

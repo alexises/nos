@@ -124,9 +124,44 @@ fn verdict(a: AclAction) -> Verdict {
     }
 }
 
-/// The filters of `chain` for `acl`, levels then defaults.
+/// The psample group of every `log` rule's `sample` action ("NOS").
+pub const ACL_PSAMPLE_GROUP: u32 = 0x4e_4f53;
+/// Bytes of a logged packet handed to psample: Ethernet, IPv6 with a few
+/// extension headers and the L4 ports fit.
+pub const LOG_TRUNC: u32 = 128;
+
+/// A `log` rule needs the kernel to hand the action cookie to psample
+/// (Linux 6.11): without it a sample does not name its rule, so the ACL is
+/// refused at attach (owner decision L2 of #544), not logged half-blind.
+pub fn check_log(p: &nos_tc::Psample) -> io::Result<()> {
+    if p.user_cookie {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "acl log needs a kernel passing the psample cookie (Linux 6.11)",
+        ))
+    }
+}
+
+/// The filters of `chain` for `acl`, levels then defaults. A `log` rule's
+/// filters sample every packet (rate 1, the daemon rate-limits the lines)
+/// before the verdict, with the same cookie.
 pub fn chain_requests(ifindex: u32, dir: Direction, chain: u32, acl: &Compiled) -> Vec<Request> {
-    let filter = |level, protocol, keys, action, cookie: u32| {
+    let filter = |level, protocol, keys, action, cookie: u32, log: bool| {
+        let cookie = cookie.to_be_bytes().to_vec();
+        let sample = log.then(|| Action {
+            kind: ActionKind::Sample {
+                rate: 1,
+                trunc: LOG_TRUNC,
+                group: ACL_PSAMPLE_GROUP,
+            },
+            cookie: cookie.clone(),
+        });
+        let gact = Action {
+            kind: ActionKind::Gact(verdict(action)),
+            cookie,
+        };
         Request::AddFilter(Filter {
             ifindex,
             hook: dir.hook(),
@@ -135,10 +170,7 @@ pub fn chain_requests(ifindex: u32, dir: Direction, chain: u32, acl: &Compiled) 
             protocol,
             handle: 0,
             kind: Kind::Flower(keys),
-            actions: vec![Action {
-                kind: ActionKind::Gact(verdict(action)),
-                cookie: cookie.to_be_bytes().to_vec(),
-            }],
+            actions: sample.into_iter().chain([gact]).collect(),
             replace: false,
         })
     };
@@ -149,7 +181,7 @@ pub fn chain_requests(ifindex: u32, dir: Direction, chain: u32, acl: &Compiled) 
         .flat_map(|(i, l)| {
             l.filters
                 .iter()
-                .map(move |f| filter(i, f.protocol, f.keys.clone(), f.action, f.rule))
+                .map(move |f| filter(i, f.protocol, f.keys.clone(), f.action, f.rule, f.log))
         })
         .collect();
     for p in [Protocol::Ip, Protocol::Ipv6] {
@@ -160,6 +192,7 @@ pub fn chain_requests(ifindex: u32, dir: Direction, chain: u32, acl: &Compiled) 
             keys,
             acl.default_action,
             DEFAULT_COOKIE,
+            false,
         ));
     }
     v
@@ -263,6 +296,53 @@ mod tests {
                 (4, Protocol::Ipv6, act(Verdict::Shot, DEFAULT_COOKIE)),
             ]
         );
+    }
+
+    #[test]
+    fn a_log_rule_samples_then_decides_with_one_cookie() {
+        let acl = Acl {
+            rules: vec![AclRule {
+                name: "l".into(),
+                action: AclAction::Deny,
+                destination: Some("192.0.2.0/24".parse().unwrap()),
+                log: true,
+                ..Default::default()
+            }],
+            default_action: AclAction::Permit,
+            ..Default::default()
+        };
+        let reqs = chain_requests(9, Direction::In, ACL_CHAIN_A, &compile(&acl).unwrap());
+        let acts: Vec<Vec<Action>> = reqs
+            .iter()
+            .map(|r| match r {
+                Request::AddFilter(f) => f.actions.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let sample = Action {
+            kind: ActionKind::Sample {
+                rate: 1,
+                trunc: LOG_TRUNC,
+                group: ACL_PSAMPLE_GROUP,
+            },
+            cookie: vec![0; 4],
+        };
+        let gact = |v, c: u32| Action {
+            kind: ActionKind::Gact(v),
+            cookie: c.to_be_bytes().to_vec(),
+        };
+        assert_eq!(acts[0], [sample, gact(Verdict::Shot, 0)]);
+        // The defaults never sample.
+        assert_eq!(acts[1], [gact(Verdict::Ok, DEFAULT_COOKIE)]);
+        assert_eq!(acts.len(), 3);
+        let p = |user_cookie| nos_tc::Psample {
+            family: 30,
+            group: 9,
+            user_cookie,
+        };
+        assert!(check_log(&p(true)).is_ok());
+        let e = check_log(&p(false)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Unsupported);
     }
 
     #[test]
