@@ -15,6 +15,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show port-aggregate` / `show port-aggregate <name>` | `GET /v1/port-aggregates` / `GET /v1/port-aggregates/{name}` |
 | `show lacp` / `show lacp <name>` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
 | `show acl` / `show acl <name>` | `GET /v1/acl` / `GET /v1/acl/{name}` |
+| `show acl` (flowspec rules, at the end) | `GET /v1/flowspec` |
 | `show lldp neighbors` / `show lldp neighbors detail` | `GET /v1/lldp/neighbors` |
 | `show lldp statistics` | `GET /v1/lldp/statistics` |
 | `show version` | `GET /v1/version` |

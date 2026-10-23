@@ -1,12 +1,14 @@
 //! `acl` (#541, #543): `nos-acld` compiles an ACL to tc on router-a's `eth0`
 //! ingress; the BGP session from router-b is the signal, and `show acl`
-//! (`GET /v1/acl/EDGE`) reads the matching counters.
+//! (`GET /v1/acl/EDGE`) reads the matching counters. Step 6 (#561) feeds
+//! flowspec rules through `nos-acld --flowspec-file`.
 
 use std::time::{Duration, Instant};
 
 use reqwest::Method;
 
 use crate::consts::*;
+use crate::docker::Dock;
 use crate::router::{log, Router};
 use crate::world::World;
 
@@ -38,6 +40,13 @@ const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
 const LOGGED: &str =
     "acl log acl=EDGE rule=d-bgp interface=eth0 direction=in src=10.50.0.3 dst=10.50.0.2 proto=6";
 const DETACHED: &str = "acl detached interface=eth0 direction=in";
+/// Step 6: the snapshot `nos-acld` reads, and what it logs. Rule 0 drops
+/// router-b's TCP (prio 10); rule 1 (packet length) has no flower key.
+const FS_RECEIVED: &str = "flowspec rules received instance=e2e rules=2 installable=1 devices=1";
+const FS_APPLIED: &str = "flowspec applied interface=eth0 rules=1";
+const FS_UNSUPPORTED: &str =
+    "flowspec rule unsupported instance=e2e flow=len =64 reason=packet length: no flower key";
+const FS_CLEARED: &str = "flowspec applied interface=eth0 rules=0";
 /// Short enough that a blocked session drops within a wait; negotiated
 /// down on both sides (the lower hold time wins, RFC 4271 §4.2).
 const HOLD_TIME: &str = "9";
@@ -116,6 +125,100 @@ async fn check_counters(a: &Router) -> anyhow::Result<()> {
     anyhow::ensure!(status == 404, "unknown acl: {status}");
     let all = a.rest_expect(Method::GET, "/v1/acl", None, 200).await?;
     anyhow::ensure!(all.contains("\"EDGE\""), "GET /v1/acl: {all}");
+    Ok(())
+}
+
+/// Writes router-a's flowspec file: instance `e2e` on `eth0`, `rules`.
+async fn write_flowspec(dock: &Dock, a: &Router, rules: serde_json::Value) -> anyhow::Result<()> {
+    let set = serde_json::json!({ "instance": "e2e", "devices": ["eth0"], "rules": rules });
+    dock.upload(
+        a.name(),
+        FLOWSPEC_DIR,
+        FLOWSPEC_FILE,
+        set.to_string().as_bytes(),
+    )
+    .await
+}
+
+/// Polls `GET /v1/flowspec` until rule 0 has counted a packet.
+async fn wait_flowspec_counted(a: &Router) -> anyhow::Result<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = a
+            .rest_expect(Method::GET, "/v1/flowspec", None, 200)
+            .await?;
+        let rows: serde_json::Value = serde_json::from_str(&body)?;
+        if rows[0]["packets"].as_u64() > Some(0) {
+            return Ok(rows);
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "flowspec rule 0 never counted a packet: {body}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Step 6 (#561): a flowspec drop of router-b's TCP ends the session and
+/// counts; a packet-length rule is unsupported, logged once; an empty
+/// snapshot clears both and the session comes back.
+async fn flowspec(dock: &Dock, a: &Router) -> anyhow::Result<()> {
+    let num = |value: u64| serde_json::json!([{"and": false, "lt": false, "gt": false, "eq": true, "value": value}]);
+    let rules = serde_json::json!([
+        {
+            "flow": format!("src {IP_B}/32 proto =6"),
+            "ipv6": false,
+            "components": [
+                {"Source": {"prefix": format!("{IP_B}/32"), "offset": 0}},
+                {"Protocol": num(6)},
+            ],
+            "actions": [{"RateBytes": 0.0}],
+        },
+        {
+            "flow": "len =64",
+            "ipv6": false,
+            "components": [{"PacketLen": num(64)}],
+            "actions": [{"RateBytes": 0.0}],
+        },
+    ]);
+    let (received, applied, unsupported, ended) = (
+        a.count(FS_RECEIVED),
+        a.count(FS_APPLIED),
+        a.count(FS_UNSUPPORTED),
+        a.count(ENDED),
+    );
+    write_flowspec(dock, a, rules).await?;
+    a.wait_new(FS_RECEIVED, received, 30).await?;
+    a.wait_new(FS_APPLIED, applied, 30).await?;
+    a.wait_new(FS_UNSUPPORTED, unsupported, 30).await?;
+    a.wait_new(ENDED, ended, 60).await?;
+    let rows = wait_flowspec_counted(a).await?;
+    anyhow::ensure!(
+        rows.as_array().map(Vec::len) == Some(2)
+            && rows[0]["unsupported"].is_null()
+            && rows[0]["bytes"].as_u64() > Some(0)
+            && rows[0]["actions"] == serde_json::json!(["rate 0 bytes/s"])
+            && rows[1]["unsupported"] == "packet length: no flower key"
+            && rows[1]["packets"] == 0,
+        "GET /v1/flowspec: {rows}"
+    );
+    anyhow::ensure!(
+        a.count(FS_UNSUPPORTED) == unsupported + 1,
+        "the unsupported rule logged more than once"
+    );
+
+    log("step 6b: an empty flowspec snapshot clears the rules: the session comes back");
+    let (est, cleared) = (a.count(ESTABLISHED), a.count(FS_CLEARED));
+    write_flowspec(dock, a, serde_json::json!([])).await?;
+    a.wait_new(FS_CLEARED, cleared, 30).await?;
+    a.wait_new(ESTABLISHED, est, 60).await?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/flowspec", None, 200)
+        .await?;
+    anyhow::ensure!(
+        body.trim() == "[]",
+        "GET /v1/flowspec after clearing: {body}"
+    );
     Ok(())
 }
 
@@ -200,6 +303,9 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let detached = a.count(DETACHED);
     a.provision(&["--acl-in", "eth0="]).await?;
     a.wait_new(DETACHED, detached, 30).await?;
+
+    log("step 6: flowspec (#561): a drop rule ends the session, show counts it");
+    flowspec(&w.dock, a).await?;
 
     // Leave the default hold time to the phases after this one.
     let est = a.count(ESTABLISHED);

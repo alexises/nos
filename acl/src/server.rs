@@ -1,6 +1,6 @@
-//! Binds `--listen-socket` and serves `AclRequest::Show` from the engine's
-//! live state: backs `show acl` and `GET /v1/acl`. Mirrors `nos-lldp`'s
-//! `server.rs`.
+//! Binds `--listen-socket` and serves `AclRequest::Show`/`ShowFlowspec` from
+//! the engine's live state (`show acl`, `GET /v1/acl`, `GET /v1/flowspec`)
+//! and `PushFlowspec` from `nos-bgpd`. Mirrors `nos-lldp`'s `server.rs`.
 
 use std::path::Path;
 
@@ -24,11 +24,31 @@ pub fn start<D: Driver>(
     Ok(tokio::spawn(accept_loop(listener, engine)))
 }
 
-/// Every request is a read-only query: for people, and `Restd` on their
-/// behalf.
+/// Queries are for people, and `Restd` on their behalf; flow rules come
+/// from `nos-bgpd` only.
 pub fn allowed(role: Role, request: &AclRequest) -> bool {
     match request {
-        AclRequest::Show { .. } => matches!(role, Role::User | Role::Restd),
+        AclRequest::Show { .. } | AclRequest::ShowFlowspec => {
+            matches!(role, Role::User | Role::Restd)
+        }
+        AclRequest::PushFlowspec(_) => role == Role::Bgpd,
+    }
+}
+
+/// Runs `request` under the engine lock (counters are a blocking netlink
+/// dump, a push a blocking install).
+fn answer<D: Driver>(engine: &Shared<D>, request: AclRequest) -> AclEvent {
+    let mut engine = engine.lock().unwrap();
+    match request {
+        AclRequest::Show { name } => {
+            trace!(?name, "serving acl query");
+            AclEvent::Acls(engine.show(name.as_deref()))
+        }
+        AclRequest::ShowFlowspec => AclEvent::Flowspec(engine.show_flowspec()),
+        AclRequest::PushFlowspec(set) => {
+            engine.push_flowspec(set);
+            AclEvent::Ack
+        }
     }
 }
 
@@ -70,16 +90,11 @@ async fn handle_connection<D: Driver>(stream: Stream, role: Role, peer: &str, en
             warn!(role = role.as_str(), name = %peer, "acl query refused: this role may not send it");
             break;
         }
-        let AclRequest::Show { name } = request;
-        trace!(?name, "serving acl query");
         let engine = engine.clone();
-        // Counters are a blocking netlink dump taken under the engine lock.
-        let Ok(acls) =
-            tokio::task::spawn_blocking(move || engine.lock().unwrap().show(name.as_deref())).await
-        else {
+        let Ok(event) = tokio::task::spawn_blocking(move || answer(&engine, request)).await else {
             break;
         };
-        if writer.send(AclEvent::Acls(acls)).await.is_err() {
+        if writer.send(event).await.is_err() {
             break;
         }
     }
@@ -96,15 +111,69 @@ mod tests {
     use crate::driver::NoopDriver;
     use crate::engine::Engine;
 
+    fn push() -> AclRequest {
+        AclRequest::PushFlowspec(nos_proto::FlowspecSet {
+            instance: "b1".into(),
+            devices: vec![],
+            rules: vec![],
+        })
+    }
+
     #[test]
-    fn only_people_may_query() {
+    fn only_people_may_query_and_only_bgp_push() {
         for role in Role::ALL {
+            let people = matches!(role, Role::User | Role::Restd);
             assert_eq!(
                 allowed(role, &AclRequest::Show { name: None }),
-                matches!(role, Role::User | Role::Restd),
+                people,
                 "{role:?}"
             );
+            assert_eq!(allowed(role, &AclRequest::ShowFlowspec), people, "{role:?}");
+            assert_eq!(allowed(role, &push()), role == Role::Bgpd, "{role:?}");
         }
+    }
+
+    /// `nos-bgpd` pushes and gets an ack; a person reads the rules back.
+    #[tokio::test]
+    async fn bgp_pushes_and_people_read_flowspec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("acl.sock");
+        let engine = Arc::new(Mutex::new(Engine::new(NoopDriver::default())));
+        let id = nos_pki::testing::shared().identity("acld", "");
+        let _server = start(&path, engine, &id).unwrap();
+        let ask = |role: Role, req: AclRequest| {
+            let path = path.clone();
+            async move {
+                let id = nos_pki::testing::shared().identity(role.as_str(), "x");
+                let s = id.connect(&path, &PeerId::new("acld", "")).await.unwrap();
+                let (r, w) = tokio::io::split(s);
+                let mut r = FramedRead::new(r, IpcCodec::<AclEvent>::default());
+                let mut w = FramedWrite::new(w, IpcCodec::<AclRequest>::default());
+                w.send(req).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), r.next())
+                    .await
+                    .unwrap()
+                    .map(Result::unwrap)
+            }
+        };
+        let rule = nos_proto::FlowRule {
+            flow: "f".into(),
+            ipv6: false,
+            components: vec![],
+            actions: vec![],
+        };
+        let AclRequest::PushFlowspec(mut set) = push() else {
+            unreachable!()
+        };
+        set.rules.push(rule);
+        let ack = ask(Role::Bgpd, AclRequest::PushFlowspec(set)).await;
+        assert!(matches!(ack, Some(AclEvent::Ack)), "{ack:?}");
+        let Some(AclEvent::Flowspec(rows)) = ask(Role::User, AclRequest::ShowFlowspec).await else {
+            panic!("no flowspec reply");
+        };
+        assert_eq!((rows.len(), rows[0].flow.as_str()), (1, "f"));
+        // A person may not push.
+        assert!(ask(Role::User, push()).await.is_none());
     }
 
     /// A refused role has the connection closed with no frame; an allowed

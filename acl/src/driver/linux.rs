@@ -2,15 +2,18 @@
 //! `driver/linux.rs`; the requests themselves are built and tested in
 //! `driver/mod.rs`, and `tests/kernel.rs` plus the `acl` e2e phase run this.
 
+use std::collections::BTreeMap;
 use std::io;
 
-use nos_tc::{dump, psample, send, Request};
+use nos_tc::{dump, psample, send, Hook, Protocol, Request};
 
 use super::{
-    chain_requests, check_log, counters_from, entry_delete, entry_request, live_from, Counter,
-    Direction, Driver, ACL_CHAIN_A, ACL_CHAIN_B,
+    chain_requests, check_log, counters_from, entry_delete, entry_request, exit_request,
+    flowspec_counters_from, flowspec_delete, flowspec_prios_from, flowspec_requests, live_from,
+    Counter, Direction, Driver, ACL_CHAIN_A, ACL_CHAIN_B,
 };
 use crate::compile::Compiled;
+use crate::flowspec::{Lowered, EXIT_CHAIN};
 
 const EEXIST: i32 = 17;
 const ENOENT: i32 = 2;
@@ -46,7 +49,8 @@ impl Driver for LinuxDriver {
     }
 
     fn switch(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()> {
-        send(&entry_request(ifindex, dir, chain), &[])
+        send(&entry_request(ifindex, dir, chain), &[])?;
+        send(&exit_request(ifindex, dir, chain), &[])
     }
 
     fn flush(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()> {
@@ -60,11 +64,47 @@ impl Driver for LinuxDriver {
 
     fn detach(&mut self, ifindex: u32, dir: Direction) -> io::Result<()> {
         send(&entry_delete(ifindex, dir), &[ENOENT])?;
+        self.flush(ifindex, dir, EXIT_CHAIN)?;
         self.flush(ifindex, dir, ACL_CHAIN_A)?;
         self.flush(ifindex, dir, ACL_CHAIN_B)
     }
 
     fn counters(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<Vec<Counter>> {
         Ok(counters_from(&dump(ifindex, dir.hook(), chain)?))
+    }
+
+    fn flowspec_set(
+        &mut self,
+        ifindex: u32,
+        prio: u16,
+        rule: Option<(u32, &Lowered)>,
+    ) -> io::Result<()> {
+        let clear = |prio| {
+            for p in [Protocol::Ip, Protocol::Ipv6] {
+                send(&flowspec_delete(ifindex, prio, p), &[ENOENT, EINVAL])?;
+            }
+            Ok::<(), io::Error>(())
+        };
+        send(&Request::Clsact { ifindex }, &[EEXIST])?;
+        clear(prio)?;
+        let Some((cookie, rule)) = rule else {
+            return Ok(());
+        };
+        for req in flowspec_requests(ifindex, prio, cookie, rule) {
+            if let Err(e) = send(&req, &[]) {
+                // Never leave half a rule installed.
+                let _ = clear(prio);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn flowspec_prios(&mut self, ifindex: u32) -> io::Result<Vec<u16>> {
+        Ok(flowspec_prios_from(&dump(ifindex, Hook::Ingress, 0)?))
+    }
+
+    fn flowspec_counters(&mut self, ifindex: u32) -> io::Result<BTreeMap<u16, (u64, u64)>> {
+        Ok(flowspec_counters_from(&dump(ifindex, Hook::Ingress, 0)?))
     }
 }

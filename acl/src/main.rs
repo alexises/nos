@@ -4,6 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use nos_acl::driver::{Driver, LinuxDriver, NoopDriver};
 use nos_acl::engine::{self, Engine};
+use nos_acl::flowspec_file;
 use nos_acl::link_client::{self, LinkTable};
 use nos_acl::reconcile;
 use nos_acl::server;
@@ -42,6 +43,11 @@ struct Args {
     /// `linux` programs tc; `noop` leaves the kernel alone.
     #[arg(long, value_enum, default_value_t = DriverKind::Linux)]
     driver: DriverKind,
+
+    /// Test hook: a JSON flowspec snapshot applied as if `nos-bgpd` pushed
+    /// it, re-read when it changes (`docs/architecture/linux-drivers.md`).
+    #[arg(long, hide = true)]
+    flowspec_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -105,6 +111,10 @@ async fn serve<D: Driver>(
     let server_task = server::start(&args.listen_socket, engine.clone(), &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start acl IPC server"))
         .context("starting acl IPC server")?;
+    let file_task = args
+        .flowspec_file
+        .clone()
+        .map(|p| tokio::spawn(flowspec_file::run(p, engine.clone(), shutdown_rx.clone())));
     let engine_task = tokio::spawn(engine::run(engine, plan_rx, links_rx, shutdown_rx, log));
 
     wait_for_shutdown_signal()
@@ -112,7 +122,11 @@ async fn serve<D: Driver>(
         .context("waiting for shutdown signal")?;
     info!("shutdown signal received");
     let _ = shutdown_tx.send(true);
-    for (name, task) in [("reconcile", reconcile_task), ("link_client", link_task)] {
+    let tasks = [("reconcile", reconcile_task), ("link_client", link_task)];
+    for (name, task) in tasks
+        .into_iter()
+        .chain(file_task.map(|t| ("flowspec_file", t)))
+    {
         if let Err(e) = task.await {
             warn!(error = %e, task = name, "task ended abnormally");
         }
@@ -150,5 +164,8 @@ mod tests {
         assert_eq!(args.listen_socket, PathBuf::from(DEFAULT_LISTEN_SOCKET));
         let args = Args::try_parse_from(["nos-acld", "--driver", "noop"]).unwrap();
         assert!(matches!(args.driver, DriverKind::Noop));
+        assert_eq!(args.flowspec_file, None);
+        let args = Args::try_parse_from(["nos-acld", "--flowspec-file", "/x.json"]).unwrap();
+        assert_eq!(args.flowspec_file, Some(PathBuf::from("/x.json")));
     }
 }

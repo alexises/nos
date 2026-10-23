@@ -38,6 +38,10 @@ pub struct Engine<D> {
     pending: BTreeSet<Key>,
     /// The first known link table was checked for a previous run's entries.
     swept: bool,
+    /// The last link table a pass saw, for flowspec pushes between passes.
+    links: LinkTable,
+    /// Flowspec rules per pushing instance, and what each device holds.
+    fs: flowspec_src::State,
 }
 
 /// The kernel name of `device`; while its bond is unknown, `Err` with a
@@ -67,6 +71,8 @@ impl<D: Driver> Engine<D> {
             installed: BTreeMap::new(),
             pending: BTreeSet::new(),
             swept: false,
+            links: LinkTable::default(),
+            fs: flowspec_src::State::default(),
         }
     }
 
@@ -99,6 +105,7 @@ impl<D: Driver> Engine<D> {
                     }
                 }
             }
+            self.sweep_flowspec(&l.name, l.ifindex);
         }
         self.swept = true;
     }
@@ -106,6 +113,7 @@ impl<D: Driver> Engine<D> {
     /// One pass. Nothing happens until the link table is known.
     pub fn sync(&mut self, plan: &Plan, links: &LinkTable) {
         self.acls.clone_from(&plan.acls);
+        self.links.clone_from(links);
         if !links.known {
             return;
         }
@@ -152,6 +160,7 @@ impl<D: Driver> Engine<D> {
                 self.apply(&key, ifindex, name, acl);
             }
         }
+        self.apply_flowspec();
     }
 
     fn apply(&mut self, key: &Key, ifindex: u32, name: &str, acl: &Arc<Compiled>) {
@@ -274,6 +283,7 @@ impl<D: Driver> Engine<D> {
         for key in keys {
             self.detach(&key);
         }
+        self.clear_flowspec();
     }
 
     /// The chains every (device, direction) points at, for tests and logs.
@@ -323,6 +333,9 @@ pub async fn run<D: Driver>(
         .expect("acl shutdown panicked");
     info!("acl engine stopped");
 }
+
+#[path = "engine_flowspec.rs"]
+mod flowspec_src;
 
 #[cfg(test)]
 #[path = "engine_tests.rs"]

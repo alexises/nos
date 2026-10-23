@@ -26,7 +26,7 @@ A leaf crate (only `netlink-sys`, no NOS dependencies, like `nos-l2-socket`): th
 | `nos-fdbd` | VXLAN ingress | 1, 2 | `flower enc_src_ip` + `skbedit mark` (peers, catch-all) |
 | `nos-fdbd` | segment port egress | 1, 2 | `fw` + `gact drop` (local bias, DF) |
 | `nos-interfaced` | bridge port ingress | 1 | `flower dst_mac` + `gact drop`, protocol 802.2 |
-| `nos-acld` flowspec (#561, part B) | ingress/egress | 10..99 | one flower prio per rule and protocol, directly in chain 0 (a `goto chain` miss would skip the ACL) |
+| `nos-acld` flowspec (#561, part B) | ingress | 10..99 | one flower prio per rule, directly in chain 0 (a `goto chain` miss would skip the ACL); a stopping rule jumps to chain 999, which jumps to the live ACL chain |
 | `nos-acld` (#541) | ingress/egress | 100 | keyless flower `goto chain` 1000/1001 |
 
 - Nobody deletes the `clsact` qdisc: every owner only ensures it.

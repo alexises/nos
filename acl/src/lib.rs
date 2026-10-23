@@ -4,6 +4,8 @@
 pub mod compile;
 pub mod driver;
 pub mod engine;
+pub mod flowspec;
+pub mod flowspec_file;
 pub mod link_client;
 pub mod logger;
 pub mod plan;

@@ -56,3 +56,33 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
 - Start: the first link snapshot is swept (a chain-0 dump per device and hook); a previous run's entries are adopted, then replaced or removed (fail closed across a crash).
 - Clean stop (SIGINT): entry first, then both chains. A device that disappears takes its filters with it; one that is not there yet is applied when `nos-interfaced`'s link stream shows it.
 - A bond is found through `LinkState.port_aggregate`, which `nos-interfaced` stamps on its `bond<id>`; `nos-acld` never derives the name.
+
+## Flowspec rules (`nos-acld`, #561)
+
+`nos-acld` also installs BGP Flow Specification rules on ingress, beside the ACL. A rule reaches it as a `FlowRule` (`nos_proto::acl`, a data-only mirror of `nos-bgp`'s decoded NLRI and actions), in a per-instance snapshot `FlowspecSet { instance, devices, rules }`.
+
+- Layout (decision A, settled by the #563 spike): directly in chain 0, one priority per rule in the band 10..99 (`flowspec::PRIO_FIRST..=PRIO_LAST`), in snapshot order. Per device the instances stack in name order. A `goto chain` entry is not used, because a miss inside its target would end classification and skip the ACL at 100.
+- One rule = one family = one priority. Its filters (the alternatives a numeric expression or a type-4 port expands to) share the priority and the actions. Each filter's first action carries the rule index as cookie, so a dump counts each filter once.
+- Caps: 90 rules per device (the band; the rest are `unsupported: rule cap`), 64 filters per rule.
+- Lowering (`acl/src/flowspec.rs`, pure): prefixes (IPv6 offset 0 only), protocol, ports (`!=`/`<`/`>` expanded to ranges; ports imply TCP or UDP), ICMP type/code, TCP flags when expressible as flags/mask, DSCP (`ip_tos`), fragment `IsF`/`FF` (flower's `is_fragment`/`firstfrag`). Refused, never approximated: packet length, flow label (no flower key on 7.2), fragment `DF`/`LF`, IPv6 prefix offset, redirects (sent as `FlowRuleAction::Unsupported`), an expression that matches nothing.
+- Actions, in order: `sample` (psample group `0x465350`, nothing reads it yet), DSCP `pedit` (IPv4 adds `csum`), then rate 0 `gact drop`, or rate > 0 `police` (bytes or packets per second, burst one second of rate, at least 16 KiB for bytes; the packet bucket starts empty), then the verdict.
+- Verdict: the RFC 8955 T bit set means later rules also apply: `Verdict::Unspec`. Clear (the default): `goto chain 999` (`flowspec::EXIT_CHAIN`), whose one filter jumps to the live ACL chain, so a rate-limited or marked packet still meets the ACL. `Driver::switch` keeps that filter in step with the ACL entry; without an ACL the chain is empty and the packet passes.
+- Update: per priority whose content changed, delete it (by `ip` then `ipv6`: the kernel refuses a delete with the wrong protocol) and add the new filters. Not atomic across priorities; unchanged rules keep their counters.
+- Start: the first link snapshot also dumps each device's band; what a previous run left is rewritten or cleared by the next pass. Clean stop clears every band priority.
+- Log lines: `flowspec rules received instance= rules= installable= devices=`, `flowspec applied interface= rules=`, `flowspec rule unsupported instance= flow= reason=` (once per instance, flow and reason), `flowspec pending interface= reason="absent"`.
+- Read back: `GET /v1/flowspec` and the end of `show acl` list every rule with `unsupported` (the reason, or empty when installed) and packets/bytes summed over its devices.
+
+### Feed rules by hand (test hook)
+
+- `nos-acld --flowspec-file <path>` (hidden; through the watchdog: `--acld-arg=--flowspec-file=<path>`) reads a JSON `FlowspecSet` every second and applies it when the content changes. A missing file clears what it applied.
+- Example, drop TCP from 10.50.0.3:
+
+```json
+{"instance": "e2e", "devices": ["eth0"], "rules": [
+  {"flow": "src 10.50.0.3/32 proto =6", "ipv6": false,
+   "components": [{"Source": {"prefix": "10.50.0.3/32", "offset": 0}},
+                  {"Protocol": [{"and": false, "lt": false, "gt": false, "eq": true, "value": 6}]}],
+   "actions": [{"RateBytes": 0.0}]}]}
+```
+
+- Production pushes come from `nos-bgpd` as `AclRequest::PushFlowspec` (`Role::Bgpd` only, #562).

@@ -6,6 +6,7 @@ use std::io;
 
 use super::{Counter, Direction, Driver};
 use crate::compile::Compiled;
+use crate::flowspec::Lowered;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
@@ -13,6 +14,8 @@ pub enum Call {
     Switch(u32, Direction, u32),
     Flush(u32, Direction, u32),
     Detach(u32, Direction),
+    /// `(ifindex, prio, cookie)`; `None` clears the priority.
+    Flowspec(u32, u16, Option<u32>),
 }
 
 #[derive(Debug, Default)]
@@ -24,8 +27,14 @@ pub struct NoopDriver {
     pub fail_install: bool,
     /// What `counters` reports per (ifindex, direction), whatever the chain.
     pub counts: BTreeMap<(u32, Direction), Vec<Counter>>,
-    /// Makes `counters` fail (the device vanished).
+    /// Makes `counters` and `flowspec_counters` fail (the device vanished).
     pub fail_counters: bool,
+    /// Flowspec priority -> cookie per ifindex; `flowspec_set` keeps it.
+    pub flowspec: BTreeMap<u32, BTreeMap<u16, u32>>,
+    /// Makes the next `flowspec_set` with a rule fail.
+    pub fail_flowspec: bool,
+    /// What `flowspec_counters` reports per ifindex.
+    pub flowspec_counts: BTreeMap<u32, BTreeMap<u16, (u64, u64)>>,
 }
 
 impl Driver for NoopDriver {
@@ -71,6 +80,44 @@ impl Driver for NoopDriver {
         Ok(self
             .counts
             .get(&(ifindex, dir))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn flowspec_set(
+        &mut self,
+        ifindex: u32,
+        prio: u16,
+        rule: Option<(u32, &Lowered)>,
+    ) -> io::Result<()> {
+        let cookie = rule.map(|r| r.0);
+        self.calls.push(Call::Flowspec(ifindex, prio, cookie));
+        let held = self.flowspec.entry(ifindex).or_default();
+        held.remove(&prio);
+        if let Some(c) = cookie {
+            if std::mem::take(&mut self.fail_flowspec) {
+                return Err(io::Error::other("refused"));
+            }
+            held.insert(prio, c);
+        }
+        Ok(())
+    }
+
+    fn flowspec_prios(&mut self, ifindex: u32) -> io::Result<Vec<u16>> {
+        Ok(self
+            .flowspec
+            .get(&ifindex)
+            .map(|m| m.keys().copied().collect())
+            .unwrap_or_default())
+    }
+
+    fn flowspec_counters(&mut self, ifindex: u32) -> io::Result<BTreeMap<u16, (u64, u64)>> {
+        if self.fail_counters {
+            return Err(io::Error::other("gone"));
+        }
+        Ok(self
+            .flowspec_counts
+            .get(&ifindex)
             .cloned()
             .unwrap_or_default())
     }

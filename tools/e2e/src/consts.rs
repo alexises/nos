@@ -470,6 +470,10 @@ pub const REST_PORT: u16 = 8080;
 /// Not assigned to any interface, so binding it fails with EADDRNOTAVAIL.
 pub const REST_ABSENT_ADDRESS: &str = "10.50.0.77";
 pub const REST_TX: &str = "rest-e2e";
+/// Where every router's `nos-acld --flowspec-file` looks (#561): the data
+/// volume, writable by the harness through `bollard`.
+pub const FLOWSPEC_DIR: &str = "/var/lib/nos";
+pub const FLOWSPEC_FILE: &str = "flowspec.json";
 
 /// The `syslog` phase's collector (syslog-ng, an independent RFC 5424
 /// receiver) on the shared network.
