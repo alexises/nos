@@ -276,7 +276,8 @@ pub const V6_LABEL: &str = "v6";
 /// not on, served by four PEs GoBGP plays (fake VTEPs). The MAC's own PE is
 /// the first; once it loses its per-ES A-D the other three are the backup
 /// candidates, ordered .22 .23 .24: 10100 % 3 == 2 elects .24, where the
-/// lowest-address fallback picks .22.
+/// lowest-address fallback picks .22. Only .24 sends a Type-4 (a real FRR),
+/// so with the Type-4 held the backup is .24, and without it .22.
 pub const ESI4: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:cc"];
 pub const ESI4_PES: [(&str, &str); 4] = [
     ("10.50.0.21", "65010:21"),
@@ -284,6 +285,9 @@ pub const ESI4_PES: [(&str, &str); 4] = [
     ("10.50.0.23", "65010:23"),
     ("10.50.0.24", "65010:24"),
 ];
+/// The AS of the FRR PE (`router-f`) that originates ESI4's Type-4 with its
+/// ES-Import RT, which GoBGP's CLI can't set.
+pub const ESI4_FRR_ASN: u32 = 65024;
 pub const ESI4_MAC: (&str, &str) = ("aa:bb:cc:00:00:06", "192.0.2.36");
 pub const ASN_B: u32 = 65002;
 /// Only `route-server` (router-b and router-c must be in distinct ASes from

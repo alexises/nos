@@ -189,16 +189,14 @@ enum Installed {
 /// The A-D index of `received`: only routes carrying one of our import Route
 /// Targets count (a per-ES route carries the RTs of the EVIs on the segment),
 /// and never our own. A per-EVI route also has to name this domain's VNI.
-/// Type-4s carry only an ES-Import RT: one counts only for a segment we are
-/// attached to and when it carries that segment's ES-Import RT (RFC 7432 §7.6).
+/// Type-4s carry only an ES-Import RT: one counts, for any segment, when it
+/// carries that segment's ES-Import RT (RFC 7432 §7.6); it only feeds the
+/// single-active `backup_pe` (`plan_df` reads Type-4s itself, by exact ESI).
 fn ad_index(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Ads {
     let mut out = Ads::new();
     for route in received.values() {
         if let EvpnKey::EthernetSegment { esi, origin, .. } = &route.key {
-            if *origin != r.vtep
-                && r.es_ports.iter().any(|p| p.esi == *esi)
-                && route.ext_communities.contains(&es_import_rt(esi))
-            {
+            if *origin != r.vtep && route.ext_communities.contains(&es_import_rt(esi)) {
                 out.entry(*esi).or_default().es_pes.insert(*origin);
             }
             continue;
@@ -2054,26 +2052,78 @@ mod tests {
     }
 
     #[test]
-    fn type4_counts_only_for_our_segment_with_its_es_import_rt() {
+    fn type4_counts_for_any_esi_with_its_es_import_rt_and_never_our_own() {
         let other: Esi = [9; 10];
         let mut received = HashMap::new();
         for route in [
             es_route(ESI, "192.0.2.20"),
             es_route(other, "192.0.2.21"),
+            // Not its ESI's ES-Import RT.
             EvpnRoute {
                 ext_communities: vec![1],
                 ..es_route(ESI, "192.0.2.22")
             },
+            // Our own.
+            es_route(ESI, VTEP),
         ] {
             received.insert(route.key.clone(), route);
         }
-        let ads = ad_index(&ready_with_segment(), &received);
-        assert_eq!(ads.len(), 1);
-        assert_eq!(
-            ads[&ESI].es_pes,
-            BTreeSet::from(["192.0.2.20".parse::<IpAddr>().unwrap()])
-        );
-        assert!(ad_index(&ready(), &received).is_empty());
+        let pes = |ads: &Ads, e: Esi| {
+            ads[&e]
+                .es_pes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        // Attached or not, the same.
+        for r in [ready_with_segment(), ready()] {
+            let ads = ad_index(&r, &received);
+            assert_eq!(ads.len(), 2);
+            assert_eq!(pes(&ads, ESI), ["192.0.2.20"]);
+            assert_eq!(pes(&ads, other), ["192.0.2.21"]);
+        }
+    }
+
+    #[test]
+    fn a_remote_single_active_segment_backup_follows_its_type4s_without_an_attachment() {
+        // No `es_ports`: the segment is not ours. Backups .22 .23 .24 and VNI
+        // 10100 % 3 == 2: the elected one is .24, not the lowest (.22).
+        let r = ready();
+        let mut received = HashMap::new();
+        let mut routes = Vec::new();
+        for pe in ["192.0.2.22", "192.0.2.23", "192.0.2.24"] {
+            routes.push(es_route(ESI, pe));
+            routes.push(es_ad(ESI, pe));
+            routes.push(evi_ad(ESI, pe));
+        }
+        for route in routes {
+            received.insert(route.key.clone(), route);
+        }
+        let mut ads = ad_index(&r, &received);
+        ads.get_mut(&ESI).unwrap().single_active = true;
+        let mut route = mac_route(1, 10100, RT, REMOTE);
+        route.esi = ESI;
+        let backup = |ads: &Ads| match want_ads(&r, &route, ads)[..] {
+            [Installed::Mac { vtep, .. }] => vtep.to_string(),
+            ref other => panic!("{other:?}"),
+        };
+        // The primary (REMOTE) has lost its per-ES A-D.
+        assert_eq!(backup(&ads), "192.0.2.24");
+        // Without the Type-4s it is the lowest address.
+        received.retain(|k, _| !matches!(k, EvpnKey::EthernetSegment { .. }));
+        let mut ads = ad_index(&r, &received);
+        ads.get_mut(&ESI).unwrap().single_active = true;
+        assert_eq!(backup(&ads), "192.0.2.22");
+    }
+
+    #[test]
+    fn a_foreign_type4_does_not_change_an_attached_segments_election() {
+        let base = vec![es_route(ESI, REMOTE), evi_ad(ESI, REMOTE)];
+        let mut with_foreign = base.clone();
+        with_foreign.push(es_route([9; 10], "192.0.2.50"));
+        let a = plan_one(DfAlgorithm::Modulo, base);
+        let b = plan_one(DfAlgorithm::Modulo, with_foreign);
+        assert_eq!((a.df, a.pes), (b.df, b.pes));
     }
 
     /// The remote MACs `calls` shows as installed (`set`) minus removed (`del`).

@@ -4278,7 +4278,9 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
 /// on, a MAC whose own PE loses its per-ES A-D moves to the PE the segment
 /// elects as DF among the remaining ones (by their Type-4s), not to the
 /// lowest address — and to the lowest address once no Type-4 is held. Read
-/// back from the real kernel FDB (see `consts::ESI4_PES`).
+/// back from the real kernel FDB (see `consts::ESI4_PES`). GoBGP can't send a
+/// Type-4 with the ES-Import RT `nos-fdbd` requires, so the one Type-4 comes
+/// from a real FRR (`router-f`, see `start_frr_segment`).
 async fn single_active_backup(w: &World) -> anyhow::Result<()> {
     let a = w.a()?;
     log("single-active backup: the MAC moves to the segment's elected DF, not the lowest address");
@@ -4292,15 +4294,6 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
                 }
             })
             .collect()
-    };
-    let type4 = |verb: &'static str, (origin, rd): (&str, &str)| {
-        let mut v = strings(&["global", "rib", verb, "-a", "evpn", "esi", origin, "esi"]);
-        v.extend(strings(&ESI4));
-        v.extend(strings(&["rd", rd]));
-        if verb == "add" {
-            v.extend(strings(&["rt", EVPN_RT_IMPORT, "encap", "vxlan"]));
-        }
-        v
     };
     let mac = ESI4_MAC.0;
     let at = |pe: &str| format!("remote mac installed domain={EVPN_DOMAIN} mac={mac} vtep={pe}");
@@ -4316,23 +4309,22 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
     for pe in ESI4_PES {
         gobgp_owned(w, single(gobgp_ad("add", &ESI4, true, pe))).await?;
         gobgp_owned(w, gobgp_ad("add", &ESI4, false, pe)).await?;
-        gobgp_owned(w, type4("add", pe)).await?;
     }
     gobgp_owned(w, gobgp_macadv("add", &ESI4, ESI4_MAC, p1)).await?;
     a.wait_new(&at(p1.0), base, 30).await?;
     in_kernel(p1.0).await?;
 
-    log("its PE loses its per-ES A-D: the backup is the DF of the other three (.24)");
+    log("its PE loses its per-ES A-D: the backup is the PE whose Type-4 (with the ES-Import RT) is held (.24)");
+    start_frr_segment(w).await?;
     let base = a.count(&at(p4.0));
     gobgp_owned(w, gobgp_ad("del", &ESI4, true, p1)).await?;
     a.wait_new(&at(p4.0), base, 30).await?;
     in_kernel(p4.0).await?;
 
-    log("their Type-4s withdrawn: the lowest address (.22)");
+    log("its Type-4 withdrawn: the lowest address (.22)");
     let base = a.count(&at(p2.0));
-    for pe in &ESI4_PES[1..] {
-        gobgp_owned(w, type4("del", *pe)).await?;
-    }
+    w.dock.container_remove("router-f").await;
+    gobgp_owned(w, strings(&["neighbor", "del", p4.0])).await?;
     a.wait_new(&at(p2.0), base, 30).await?;
     in_kernel(p2.0).await?;
 
@@ -4343,8 +4335,68 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
     for pe in &ESI4_PES[1..] {
         gobgp_owned(w, gobgp_ad("del", &ESI4, true, *pe)).await?;
     }
-    gobgp_owned(w, type4("del", p1)).await?;
     Ok(())
+}
+
+/// Starts FRR (`router-f`) at the fourth `ESI4` PE's address as a PE on the
+/// segment: a bond with `evpn mh es-id` makes it originate the Type-4 with the
+/// ES-Import RT. It peers GoBGP, which relays the route to router-a; a
+/// route-map strips FRR's DF Election community, which GoBGP can't decode and
+/// would treat the whole UPDATE as a withdraw. Returns once GoBGP holds it.
+async fn start_frr_segment(w: &World) -> anyhow::Result<()> {
+    let (vtep, _) = ESI4_PES[3];
+    let esi = format!("00:{}", ESI4[1]);
+    let conf = format!(
+        "frr defaults traditional\nhostname router-f\n!\n\
+         bgp extcommunity-list expanded NODF permit DF\n\
+         route-map NODF permit 10\n set extended-comm-list NODF delete\nexit\n\
+         interface bond1\n evpn mh es-id {esi}\nexit\n\
+         router bgp {ESI4_FRR_ASN}\n bgp router-id {vtep}\n no bgp ebgp-requires-policy\n \
+         neighbor {IP_G} remote-as {ASN_G}\n address-family l2vpn evpn\n  \
+         neighbor {IP_G} activate\n  neighbor {IP_G} route-map NODF out\n  \
+         advertise-all-vni\n exit-address-family\nexit\n"
+    );
+    // A bond with an up member is the segment's port; the VXLAN device on its
+    // bridge makes zebra's EVPN run.
+    let setup = format!(
+        "sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons && \
+         ip link add br0 type bridge && \
+         ip link add vx{EVPN_VNI} type vxlan id {EVPN_VNI} local {vtep} dstport 4789 nolearning && \
+         ip link set vx{EVPN_VNI} master br0 && ip link add d1 type dummy && \
+         ip link add bond1 type bond mode 802.3ad && ip link set d1 master bond1 && \
+         ip link set bond1 master br0 && \
+         ip link set d1 up && ip link set bond1 up && ip link set br0 up && \
+         ip link set vx{EVPN_VNI} up && exec /usr/lib/frr/docker-start"
+    );
+    w.dock.ensure_pulled(FRR_IMAGE).await?;
+    w.dock
+        .start_plain_caps(
+            "router-f",
+            FRR_IMAGE,
+            NET,
+            vtep,
+            &["sh", "-c", &setup],
+            ("/etc/frr", "frr.conf", conf.as_bytes()),
+            &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
+        )
+        .await?;
+    gobgp_owned(
+        w,
+        strings(&[
+            "neighbor",
+            "add",
+            vtep,
+            "as",
+            &ESI4_FRR_ASN.to_string(),
+            "family",
+            "l2vpn-evpn",
+        ]),
+    )
+    .await?;
+    gobgp_evpn_rib(w, "learned FRR's Type-4", |rib| {
+        rib.contains("es-import rt: 11:22:33:44:55:66")
+    })
+    .await
 }
 
 /// GoBGP arguments to add/delete one PE's A-D route for `esi`: per-ES (MAX-ET,
