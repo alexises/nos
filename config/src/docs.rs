@@ -1737,7 +1737,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::Acl => (
             "Create or delete an access list.",
-            "A named, ordered list of rules. The first rule that matches a packet decides; a packet no rule matches gets `default-action` (`deny` unless set). `edit` creates it; `delete` removes it, and the commit is refused while an interface or port aggregate still attaches it. Attach it with `acl in <name>` / `acl out <name>` on an interface, a subinterface or a port aggregate. Nothing reads it yet, so attaching one has no effect on traffic.",
+            "A named, ordered list of rules. The first rule that matches a packet decides; a packet no rule matches gets `default-action` (`deny` unless set). `edit` creates it; `delete` removes it, and the commit is refused while an interface or port aggregate still attaches it. Attach it with `acl in <name>` / `acl out <name>` on an interface, a subinterface or a port aggregate. `nos-acld` programs every attached ACL into the kernel (tc) a moment after the commit.",
         ),
         Topic::AclDefaultAction => (
             "Set what happens when no rule matches.",
@@ -1785,11 +1785,11 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::AclRuleLog => (
             "Log the packets the rule matches.",
-            "Declared only: no log is produced yet. `delete log` turns it off.",
+            "Not logged yet: the rule filters as usual and `nos-acld` warns `acl log not supported yet`. `delete log` turns it off.",
         ),
         Topic::InterfaceAclIn => (
             "Filter the IP packets received on this link.",
-            "The name of an `acl`. The commit is refused when it does not exist, and on a loopback, a port aggregate member (attach it to the aggregate) or a switching-profile port. The ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first, and `icmpv6` on IPv6 (the default deny drops Neighbor Discovery). A physical interface sees untagged frames only; attach to the subinterface for tagged traffic.",
+            "The name of an `acl`. The commit is refused when it does not exist, on a loopback, a port aggregate member (attach it to the aggregate) or a switching-profile port, and when the interface and its untagged subinterface (one device) both set one. The ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first, and `icmpv6` on IPv6 (the default deny drops Neighbor Discovery). A physical interface sees untagged frames only; attach to the subinterface for tagged traffic.",
         ),
         Topic::InterfaceAclOut => (
             "Filter the IP packets sent on this link.",

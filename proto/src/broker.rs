@@ -134,13 +134,15 @@ pub enum Role {
     Bfdd,
     /// `nos-stpd`.
     Stpd,
+    /// `nos-acld`.
+    Acld,
     /// A person, authenticated by login; the certificate's name is the username.
     User,
 }
 
 impl Role {
     /// Every role, in declaration order.
-    pub const ALL: [Role; 15] = [
+    pub const ALL: [Role; 16] = [
         Role::Watchdog,
         Role::Configd,
         Role::Logd,
@@ -155,6 +157,7 @@ impl Role {
         Role::Restd,
         Role::Bfdd,
         Role::Stpd,
+        Role::Acld,
         Role::User,
     ];
 
@@ -175,6 +178,7 @@ impl Role {
             Role::Restd => "restd",
             Role::Bfdd => "bfdd",
             Role::Stpd => "stpd",
+            Role::Acld => "acld",
             Role::User => "user",
         }
     }

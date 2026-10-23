@@ -101,8 +101,8 @@ pub struct Subinterface {
     #[cli(topic = InterfaceBfdUnsolicited, words = "bfd-unsolicited")]
     pub bfd_unsolicited: Option<String>,
 
-    /// Names an `Acl` filtering IP packets arriving on this subinterface. Inert until
-    /// `nos-acld`; the placement rules are `acl::valid_acl_references`.
+    /// Names an `Acl` filtering IP packets arriving on this subinterface; the
+    /// placement rules are `acl::valid_acl_references`.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = InterfaceAclIn, words = "acl in")]
@@ -258,8 +258,8 @@ pub struct Interface {
     #[cli(topic = InterfaceStpPortProfile, words = "stp-port-profile")]
     pub stp_port_profile: Option<String>,
 
-    /// Names an `Acl` filtering IP packets arriving on this link. Inert until
-    /// `nos-acld`; the placement rules are `acl::valid_acl_references`.
+    /// Names an `Acl` filtering IP packets arriving on this link; the placement
+    /// rules are `acl::valid_acl_references`.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = InterfaceAclIn, words = "acl in")]

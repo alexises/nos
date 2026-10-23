@@ -181,6 +181,7 @@ fn table(links: &[(&str, u32, bool)]) -> LinkTable {
                     ifindex: *i,
                     admin_up: *up,
                     carrier: *up,
+                    port_aggregate: None,
                 })
                 .collect(),
         },
@@ -1235,6 +1236,7 @@ async fn run_resyncs_on_a_link_change_only_when_the_signature_moves() {
             ifindex: 9,
             admin_up: true,
             carrier: true,
+            port_aggregate: None,
         },
     );
     link_tx.send(unrelated).unwrap();

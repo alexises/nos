@@ -13,6 +13,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
+mod acl;
+pub use acl::{any as acl_flags, apply_acl};
+
 use anyhow::{bail, Context};
 use clap::Parser;
 
@@ -914,6 +917,29 @@ pub struct Args {
     /// Detach [`STP_PROT_PROFILE`] from `--stp-profile-interface`.
     #[arg(long)]
     pub stp_profile_detach: bool,
+
+    /// `--peer-group`'s hold time in seconds (`BgpPeerGroupOp::SetHoldTime`).
+    #[arg(long)]
+    pub hold_time: Option<u16>,
+
+    /// Clears `--peer-group`'s hold time back to the default.
+    #[arg(long, conflicts_with = "hold_time")]
+    pub no_hold_time: bool,
+
+    /// An ACL rule (#541), created or replaced:
+    /// `ACL,RULE,permit|deny,PROTO,SRC,DST,DPORT[,before=RULE]`, `any` for an
+    /// unset field. Repeatable, applied in order. `nos-e2e` only.
+    #[arg(long)]
+    pub acl_rule: Vec<String>,
+
+    /// An ACL's default action, `ACL=permit|deny`. Repeatable.
+    #[arg(long)]
+    pub acl_default: Vec<String>,
+
+    /// `IFACE=ACL` attaches `acl in` on an interface; `IFACE=` detaches it.
+    /// Repeatable.
+    #[arg(long)]
+    pub acl_in: Vec<String>,
 
     /// `spanning-tree region` as `NAME:REVISION` (MSTP, #321).
     #[arg(long)]
@@ -2156,6 +2182,7 @@ fn apply_igp_bfd(args: &Args, config: &mut nos_proto::Config) {
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     apply_stp(args, config);
+    apply_acl(args, config);
     for i in config
         .bgp_instances
         .iter_mut()
@@ -2256,6 +2283,7 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     reason = "thin linear list of ConfigOps, one block per independent flag; a test fixture, not logic"
 )]
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
+    acl::check(args)?;
     let link = args.link_interface.as_ref().unwrap_or(&args.interface);
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
         name: args.interface.clone(),
@@ -2653,6 +2681,19 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::StaticRoute(StaticRouteOp::Delete {
             instance: args.static_routing_instance.clone(),
             subnet,
+        }));
+    }
+
+    if let Some(hold_time) = args.hold_time {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetHoldTime {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            hold_time,
+        }));
+    } else if args.no_hold_time {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearHoldTime {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
         }));
     }
 

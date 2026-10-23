@@ -187,6 +187,15 @@ struct Args {
     #[arg(long, default_value = "/run/nos/stp.sock")]
     stpd_listen_socket: PathBuf,
 
+    /// Path to the nos-acld binary to supervise. Like nos-stpd, exactly one
+    /// instance is always supervised — see `acl/CLAUDE.md`.
+    #[arg(long, default_value = "/usr/local/bin/nos-acld")]
+    acld_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-acld.
+    #[arg(long = "acld-arg", allow_hyphen_values = true)]
+    acld_flags: Vec<String>,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -309,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
         .chain(std::iter::once(args.log_socket.display().to_string()))
         .chain(std::iter::once("--watchdog-socket".to_string()))
         .chain(std::iter::once(args.listen_socket.display().to_string()))
-        .chain(args.logd_flags)
+        .chain(args.logd_flags.iter().cloned())
         .collect();
     let child_gid = args.child_gid;
     if let Some(gid) = child_gid {
@@ -318,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
         let me = std::fs::metadata("/proc/self").context("reading our own ids")?;
         nos_watchdog::uids::ensure_state_dirs(&args.state_dir, (me.uid(), me.gid()), gid)?;
     }
-    let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin, logd_args)
+    let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin.clone(), logd_args)
         .with_identity(pki.clone(), Role::Logd, "")
         .with_role_uid(child_gid);
     tasks.push(tokio::spawn(supervise_one(
@@ -329,9 +338,9 @@ async fn main() -> anyhow::Result<()> {
 
     let configd_args = std::iter::once("--log-socket".to_string())
         .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.configd_flags)
+        .chain(args.configd_flags.iter().cloned())
         .collect();
-    let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin, configd_args)
+    let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin.clone(), configd_args)
         .with_identity(pki.clone(), Role::Configd, "")
         .with_role_uid(child_gid);
     tasks.push(tokio::spawn(supervise_one(
@@ -351,41 +360,7 @@ async fn main() -> anyhow::Result<()> {
         watchdog_socket: &args.listen_socket,
         log_socket: &args.log_socket,
     };
-    tasks.push(sup.spawn(
-        "nos-interfaced",
-        args.interfaced_bin,
-        Role::Interfaced,
-        &args.interfaced_listen_socket,
-        args.interfaced_flags,
-    ));
-    tasks.push(sup.spawn(
-        "nos-lacpd",
-        args.lacpd_bin,
-        Role::Lacpd,
-        &args.lacpd_listen_socket,
-        args.lacpd_flags,
-    ));
-    tasks.push(sup.spawn(
-        "nos-lldpd",
-        args.lldpd_bin,
-        Role::Lldpd,
-        &args.lldpd_listen_socket,
-        args.lldpd_flags,
-    ));
-    tasks.push(sup.spawn(
-        "nos-bfdd",
-        args.bfdd_bin,
-        Role::Bfdd,
-        &args.bfdd_listen_socket,
-        args.bfdd_flags,
-    ));
-    tasks.push(sup.spawn(
-        "nos-stpd",
-        args.stpd_bin,
-        Role::Stpd,
-        &args.stpd_listen_socket,
-        args.stpd_flags,
-    ));
+    tasks.extend(sup.spawn_all(&args));
 
     let broker_task = broker::start(
         &args.listen_socket,
@@ -426,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// What every fixed daemon (`nos-interfaced`, `nos-lacpd`, `nos-lldpd`,
-/// `nos-bfdd`, `nos-stpd`) is spawned with besides its own binary, role and
+/// `nos-bfdd`, `nos-stpd`, `nos-acld`) is spawned with besides its own binary, role and
 /// socket; split out of `main` for length (#425).
 struct FixedSupervision<'a> {
     pki: &'a Arc<Pki>,
@@ -438,12 +413,67 @@ struct FixedSupervision<'a> {
 }
 
 impl FixedSupervision<'_> {
+    /// Every fixed daemon, each under its own supervisor.
+    fn spawn_all(&self, args: &Args) -> Vec<tokio::task::JoinHandle<()>> {
+        let fixed = [
+            (
+                "nos-interfaced",
+                args.interfaced_bin.clone(),
+                Role::Interfaced,
+                Some(&args.interfaced_listen_socket),
+                args.interfaced_flags.clone(),
+            ),
+            (
+                "nos-lacpd",
+                args.lacpd_bin.clone(),
+                Role::Lacpd,
+                Some(&args.lacpd_listen_socket),
+                args.lacpd_flags.clone(),
+            ),
+            (
+                "nos-lldpd",
+                args.lldpd_bin.clone(),
+                Role::Lldpd,
+                Some(&args.lldpd_listen_socket),
+                args.lldpd_flags.clone(),
+            ),
+            (
+                "nos-bfdd",
+                args.bfdd_bin.clone(),
+                Role::Bfdd,
+                Some(&args.bfdd_listen_socket),
+                args.bfdd_flags.clone(),
+            ),
+            (
+                "nos-stpd",
+                args.stpd_bin.clone(),
+                Role::Stpd,
+                Some(&args.stpd_listen_socket),
+                args.stpd_flags.clone(),
+            ),
+            // No socket yet: `show acl` (#543) adds one.
+            (
+                "nos-acld",
+                args.acld_bin.clone(),
+                Role::Acld,
+                None,
+                args.acld_flags.clone(),
+            ),
+        ];
+        fixed
+            .into_iter()
+            .map(|(name, bin, role, listen, flags)| {
+                self.spawn(name, bin, role, listen.map(PathBuf::as_path), flags)
+            })
+            .collect()
+    }
+
     fn spawn(
         &self,
         name: &'static str,
         bin: PathBuf,
         role: Role,
-        listen: &Path,
+        listen: Option<&Path>,
         flags: Vec<String>,
     ) -> tokio::task::JoinHandle<()> {
         let args = fixed_args(listen, self.watchdog_socket, self.log_socket, flags);
@@ -455,17 +485,25 @@ impl FixedSupervision<'_> {
 }
 
 /// The argument vector of a single fixed daemon (`nos-interfaced`,
-/// `nos-lacpd`, `nos-lldpd`, `nos-bfdd`, `nos-stpd`): its own listen socket,
-/// the broker and log sockets, then the operator's pass-through flags.
-fn fixed_args(listen: &Path, watchdog: &Path, log: &Path, extra: Vec<String>) -> Vec<String> {
-    let mut v = vec![
-        "--listen-socket".to_string(),
-        listen.display().to_string(),
+/// `nos-lacpd`, `nos-lldpd`, `nos-bfdd`, `nos-stpd`, `nos-acld`): its own
+/// listen socket if it serves one, the broker and log sockets, then the
+/// operator's pass-through flags.
+fn fixed_args(
+    listen: Option<&Path>,
+    watchdog: &Path,
+    log: &Path,
+    extra: Vec<String>,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    if let Some(listen) = listen {
+        v.extend(["--listen-socket".to_string(), listen.display().to_string()]);
+    }
+    v.extend([
         "--watchdog-socket".to_string(),
         watchdog.display().to_string(),
         "--log-socket".to_string(),
         log.display().to_string(),
-    ];
+    ]);
     v.extend(extra);
     v
 }
@@ -627,6 +665,7 @@ mod tests {
         assert_eq!(a.configd_bin, PathBuf::from("/usr/local/bin/nos-configd"));
         assert_eq!(a.stpd_bin, PathBuf::from("/usr/local/bin/nos-stpd"));
         assert_eq!(a.stpd_listen_socket, PathBuf::from("/run/nos/stp.sock"));
+        assert_eq!(a.acld_bin, PathBuf::from("/usr/local/bin/nos-acld"));
         assert_eq!(a.run_dir, PathBuf::from("/run/nos"));
         assert_eq!(a.log_socket, PathBuf::from(DEFAULT_LOG_SOCKET));
         assert_eq!(a.listen_socket, PathBuf::from(DEFAULT_WATCHDOG_SOCKET));
@@ -659,11 +698,13 @@ mod tests {
             "--log-socket",
             "/g.sock",
         ];
-        assert_eq!(fixed_args(l, w, g, vec![]), base);
+        assert_eq!(fixed_args(Some(l), w, g, vec![]), base);
         assert_eq!(
-            fixed_args(l, w, g, vec!["--driver".into(), "noop".into()]),
+            fixed_args(Some(l), w, g, vec!["--driver".into(), "noop".into()]),
             [&base[..], &["--driver", "noop"]].concat()
         );
+        // nos-acld serves no socket yet (#543).
+        assert_eq!(fixed_args(None, w, g, vec![]), base[2..]);
     }
 
     #[test]

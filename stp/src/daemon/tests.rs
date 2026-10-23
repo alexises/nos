@@ -187,6 +187,7 @@ fn table(links: &[(&str, bool)]) -> LinkTable {
                         ifindex: 1,
                         admin_up: true,
                         carrier: up,
+                        port_aggregate: None,
                     },
                 )
             })

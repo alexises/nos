@@ -30,3 +30,16 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
 - Delete by priority (`DelFilter`, `handle` 0 for all of it) or by chain (`FlushChain`), never the whole hook.
 - Calls block: run them on `spawn_blocking`.
 - Check by hand in a throwaway namespace: `unshare -Urn`, then `tc filter show dev <dev> ingress` (add `chain <n>`, `-s` for counters).
+
+## Access lists (`nos-acld`, #541)
+
+`nos-acld` (`acl/`) owns its chain-0 priority and two chains on every device with an `acl in`/`acl out`:
+
+- `acl in` is the `clsact` ingress hook, `acl out` the egress hook (no ifb). Egress sees forwarded and locally generated packets; on a bond it runs before the slave is chosen.
+- Chain 0, priority 100 (`ACL_PRIO`), handle 1: one keyless flower filter, `gact goto chain <live>`, whose action cookie holds the live chain number. `nos-fdbd`/`nos-interfaced` filters (priorities 1, 2) run first, so their drop wins.
+- The ACL itself is in chain 1000 or 1001 (`ACL_CHAIN_A`/`ACL_CHAIN_B`): user rule `i` at priorities `2i+1` (protocol `ip`) and `2i+2` (`ipv6`), since the kernel allows one protocol per priority; then one keyless default filter per family. Permit is `gact ok`, deny `gact drop`; each action's cookie is the rule's index (`u32::MAX` for the defaults), for `show acl`'s counters (#543).
+- Non-IP frames (ARP, LACP, LLDP, STP) match nothing in the chain and pass.
+- Update: fill the idle chain, replace the entry (`NLM_F_REPLACE`, one RCU swap), flush the old chain. Atomic per (device, direction) only.
+- Start: the first link snapshot is swept (a chain-0 dump per device and hook); a previous run's entries are adopted, then replaced or removed (fail closed across a crash).
+- Clean stop (SIGINT): entry first, then both chains. A device that disappears takes its filters with it; one that is not there yet is applied when `nos-interfaced`'s link stream shows it.
+- A bond is found through `LinkState.port_aggregate`, which `nos-interfaced` stamps on its `bond<id>`; `nos-acld` never derives the name.

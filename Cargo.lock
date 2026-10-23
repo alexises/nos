@@ -1704,6 +1704,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-acl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "nos-daemon",
+ "nos-pki",
+ "nos-proto",
+ "nos-tc",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "nos-bfd"
 version = "0.1.0"
 dependencies = [

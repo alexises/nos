@@ -34,47 +34,87 @@ pub struct LinkWatch {
 
 pub struct LinkHub {
     observed: bool,
-    inner: Mutex<BTreeMap<String, LinkState>>,
+    inner: Mutex<Table>,
     tx: broadcast::Sender<LinkEvent>,
 }
 
-impl LinkHub {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            observed: true,
-            inner: Mutex::new(BTreeMap::new()),
-            tx: broadcast::channel(capacity).0,
-        }
-    }
+#[derive(Default)]
+struct Table {
+    links: BTreeMap<String, LinkState>,
+    /// Bond kernel name -> its `PortAggregate` config name, stamped on every
+    /// `LinkState` of that name (`LinkState::port_aggregate`).
+    aggregates: BTreeMap<String, String>,
+}
 
-    pub fn upsert(&self, link: LinkState) {
-        let mut table = self.inner.lock().unwrap();
-        if table.get(&link.name) == Some(&link) {
-            return;
+impl Table {
+    /// Stores `link` (its `port_aggregate` stamped) and returns the events.
+    fn upsert(&mut self, mut link: LinkState) -> Vec<LinkEvent> {
+        link.port_aggregate = self.aggregates.get(&link.name).cloned();
+        if self.links.get(&link.name) == Some(&link) {
+            return Vec::new();
         }
         // A rename arrives as RTM_NEWLINK only: drop the old name.
-        let stale: Vec<String> = table
+        let stale: Vec<String> = self
+            .links
             .values()
             .filter(|l| l.ifindex == link.ifindex && l.name != link.name)
             .map(|l| l.name.clone())
             .collect();
+        let mut events = Vec::new();
         for old in stale {
-            table.remove(&old);
+            self.links.remove(&old);
             debug!(name = %old, "link removed");
-            let _ = self.tx.send(LinkEvent::Removed(old));
+            events.push(LinkEvent::Removed(old));
         }
         debug!(
             name = %link.name, ifindex = link.ifindex,
             admin_up = link.admin_up, carrier = link.carrier,
             "link state changed"
         );
-        table.insert(link.name.clone(), link.clone());
-        let _ = self.tx.send(LinkEvent::Changed(link));
+        self.links.insert(link.name.clone(), link.clone());
+        events.push(LinkEvent::Changed(link));
+        events
+    }
+}
+
+impl LinkHub {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            observed: true,
+            inner: Mutex::new(Table::default()),
+            tx: broadcast::channel(capacity).0,
+        }
+    }
+
+    fn send(&self, events: Vec<LinkEvent>) {
+        for e in events {
+            let _ = self.tx.send(e);
+        }
+    }
+
+    pub fn upsert(&self, link: LinkState) {
+        let mut table = self.inner.lock().unwrap();
+        let events = table.upsert(link);
+        self.send(events);
+    }
+
+    /// Names (or, with `None`, forgets) the aggregate whose bond is `bond`;
+    /// a link already known under that name is re-sent with it.
+    pub fn set_port_aggregate(&self, bond: &str, aggregate: Option<&str>) {
+        let mut table = self.inner.lock().unwrap();
+        match aggregate {
+            Some(a) => table.aggregates.insert(bond.to_string(), a.to_string()),
+            None => table.aggregates.remove(bond),
+        };
+        if let Some(link) = table.links.get(bond).cloned() {
+            let events = table.upsert(link);
+            self.send(events);
+        }
     }
 
     pub fn remove(&self, name: &str) {
         let mut table = self.inner.lock().unwrap();
-        if table.remove(name).is_some() {
+        if table.links.remove(name).is_some() {
             debug!(name = %name, "link removed");
             let _ = self.tx.send(LinkEvent::Removed(name.to_string()));
         }
@@ -86,6 +126,7 @@ impl LinkHub {
         let gone: Vec<String> = {
             let table = self.inner.lock().unwrap();
             table
+                .links
                 .keys()
                 .filter(|k| !keep.contains(k))
                 .cloned()
@@ -103,7 +144,7 @@ impl LinkHub {
         let table = self.inner.lock().unwrap();
         LinkWatch {
             observed: self.observed,
-            links: table.values().cloned().collect(),
+            links: table.links.values().cloned().collect(),
             rx: Some(self.tx.subscribe()),
         }
     }
@@ -133,6 +174,7 @@ pub fn link_state(msg: &LinkMessage) -> Option<LinkState> {
         admin_up: msg.header.flags.contains(LinkFlags::Up),
         carrier: msg.header.flags.contains(LinkFlags::LowerUp)
             && matches!(oper, State::Up | State::Unknown),
+        port_aggregate: None,
     })
 }
 
@@ -171,6 +213,7 @@ mod tests {
             ifindex,
             admin_up: up,
             carrier: up,
+            port_aggregate: None,
         }
     }
 
@@ -231,6 +274,29 @@ mod tests {
             LinkEvent::Changed(l("new", 3, true))
         );
         assert_eq!(hub.watch().links, vec![l("new", 3, true)]);
+    }
+
+    #[test]
+    fn a_bond_carries_its_aggregate_name() {
+        let hub = LinkHub::new(16);
+        hub.set_port_aggregate("bond1", Some("agg"));
+        let mut rx = hub.watch().rx.unwrap();
+        hub.upsert(l("bond1", 4, true));
+        let named = LinkState {
+            port_aggregate: Some("agg".into()),
+            ..l("bond1", 4, true)
+        };
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Changed(named.clone()));
+        // Re-sent without it once forgotten; a name never seen is a no-op.
+        hub.set_port_aggregate("bond1", None);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            LinkEvent::Changed(l("bond1", 4, true))
+        );
+        hub.set_port_aggregate("bond2", Some("other"));
+        hub.set_port_aggregate("bond1", Some("agg"));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Changed(named));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

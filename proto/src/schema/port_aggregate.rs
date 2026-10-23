@@ -207,8 +207,8 @@ pub struct PortAggregate {
     #[cli(topic = PortAggregateStpPortProfile, words = "stp-port-profile")]
     pub stp_port_profile: Option<String>,
 
-    /// Names an `Acl` filtering IP packets arriving on this bond. Inert until
-    /// `nos-acld`; the placement rules are `acl::valid_acl_references`.
+    /// Names an `Acl` filtering IP packets arriving on this bond; the placement
+    /// rules are `acl::valid_acl_references`.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = InterfaceAclIn, words = "acl in")]

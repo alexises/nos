@@ -163,6 +163,9 @@ pub struct LinkState {
     /// `IFF_LOWER_UP` and an operational state of up/unknown (a dummy or
     /// bridge device reports unknown).
     pub carrier: bool,
+    /// The `PortAggregate` this device is the bond of (its config name; the
+    /// kernel name is `nos-interfaced`'s own `bond<id>`), `None` otherwise.
+    pub port_aggregate: Option<String>,
 }
 
 impl LinkState {
@@ -313,6 +316,7 @@ mod tests {
             ifindex: 2,
             admin_up,
             carrier,
+            port_aggregate: None,
         }
     }
 

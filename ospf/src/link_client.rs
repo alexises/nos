@@ -117,6 +117,7 @@ mod tests {
             ifindex,
             admin_up,
             carrier,
+            port_aggregate: None,
         }
     }
 

@@ -56,6 +56,7 @@ fn link(name: &str, up: bool) -> LinkState {
         ifindex: 2,
         admin_up: up,
         carrier: up,
+        port_aggregate: None,
     }
 }
 

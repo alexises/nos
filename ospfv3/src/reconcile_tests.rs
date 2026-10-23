@@ -198,6 +198,7 @@ fn table(links: &[(&str, u32, bool)]) -> LinkTable {
                     ifindex: *i,
                     admin_up: *up,
                     carrier: *up,
+                    port_aggregate: None,
                 })
                 .collect(),
         },

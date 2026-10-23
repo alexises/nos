@@ -123,6 +123,9 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .context("--config-socket is required")?;
     let ops = build_ops(args)?;
+    if nos_provision::acl_flags(args) {
+        bail!("--acl-* flags are applied by nos-e2e only, not over the config socket");
+    }
 
     log_in(&cli).await?;
     let stream = nos_pki::connect(&config_socket, Role::Configd, "")

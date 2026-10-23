@@ -1108,6 +1108,8 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             &desired.name,
         )?;
         let ifname = port_aggregate_registry::port_aggregate_ifname(bond_id);
+        // Before the bond exists, so its first link event already names it.
+        self.links.set_port_aggregate(&ifname, Some(&desired.name));
         let link = if let Some(link) = self.find_link(&ifname).await? {
             link
         } else {
@@ -1174,6 +1176,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             self.handle.link().del(link.header.index).execute().await?;
             info!(port_aggregate = %name, bond = %ifname, "deleted port aggregate bond");
         }
+        self.links.set_port_aggregate(&ifname, None);
         Ok(())
     }
 

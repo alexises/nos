@@ -48,7 +48,8 @@ pub fn start(
 /// plus `GetBroadcastDomain` per SVI). The LACP member push rewrites kernel
 /// bond membership, so it is `nos-lacpd`'s alone (and the micro-BFD Up set
 /// push `nos-bfdd`'s alone, and the bridge-port state/flush writes `nos-stpd`'s,
-/// which also gets the link stream for carrier events). No wildcard arm: a new
+/// which also gets the link stream for carrier events, as does `nos-acld`
+/// for device existence). No wildcard arm: a new
 /// request must be classified.
 fn allowed(role: Role, req: &InterfaceRequest) -> bool {
     match req {
@@ -71,7 +72,7 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
         InterfaceRequest::PushLacpMembers(_) => role == Role::Lacpd,
         InterfaceRequest::PushBfdMembers(_) => role == Role::Bfdd,
         InterfaceRequest::SubscribeLinks => {
-            matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd)
+            matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd | Role::Acld)
         }
         InterfaceRequest::SetStpPortStates(_)
         | InterfaceRequest::FlushFdb { .. }
@@ -419,11 +420,11 @@ mod authz_tests {
     }
 
     #[test]
-    fn only_the_routing_daemons_and_stpd_may_subscribe_to_links() {
+    fn only_the_routing_daemons_stpd_and_acld_may_subscribe_to_links() {
         for role in Role::ALL {
             assert_eq!(
                 allowed(role, &InterfaceRequest::SubscribeLinks),
-                matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd),
+                matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd | Role::Acld),
                 "{role:?} subscribe"
             );
         }
@@ -461,6 +462,7 @@ mod stream_tests {
             ifindex: 1,
             admin_up: up,
             carrier: up,
+            port_aggregate: None,
         }
     }
 

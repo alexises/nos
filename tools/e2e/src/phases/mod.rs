@@ -1,5 +1,6 @@
 //! Every phase, by its command-line name, and the CI groups that chain them.
 
+mod acl;
 mod bfd;
 mod bfd_auth;
 mod bfd_echo;
@@ -78,6 +79,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "routed-subinterface" => drivers::routed_subinterface(w).await,
         "source-address" => drivers::source_address(w).await,
         "rest" => drivers::rest(w).await,
+        "acl" => acl::acl(w).await,
         "syslog" => drivers::syslog(w).await,
         "ospf" => ospf::ospf_phase(w).await,
         "ospf-p2mp" => ospf::ospf_p2mp(w).await,
@@ -158,6 +160,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "source-address",
             "rest",
             "syslog",
+            "acl",
         ],
         "rpl" => &[
             "up",
@@ -277,6 +280,7 @@ pub const ALL: &[&str] = &[
     "source-address",
     "rest",
     "syslog",
+    "acl",
     "policy",
     "redistribute-policy",
     "communities",

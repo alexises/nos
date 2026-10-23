@@ -139,14 +139,18 @@ Most lists are unordered, but where order matters (the first match wins) you pla
 
 ## Access lists
 
-An access list (`acl`) is an ordered list of permit/deny rules; the first rule that matches decides. This release only stores and validates them: nothing filters traffic until `nos-acld` ships (#541).
+An access list (`acl`) is an ordered list of permit/deny rules; the first rule that matches decides. `nos-acld` programs every attached ACL into the kernel (tc) a moment after the commit.
 
 - **Build one:**
   - `set acl EDGE default-action permit` (the default is `deny`)
   - `set acl EDGE rule p-bgp action permit`, then `set acl EDGE rule p-bgp protocol tcp` and `set acl EDGE rule p-bgp destination-port 179`
 - **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `log`. An unset field matches anything.
 - **Order:** a new rule is appended. `set acl EDGE rule d-bgp before p-bgp` inserts it, `move acl EDGE rule d-bgp after p-bgp` reorders it (see [Ordering list elements](#ordering-list-elements-first-last-before-after-move)). Rule names are required and unique within the ACL.
-- **Attach:** `set interface eth0 acl in EDGE` and `acl out EDGE`; the same on a subinterface (`eth0.100`) and on a port aggregate. The commit is refused for an unknown ACL, on a `loopback-*`, on a port aggregate member (attach it to the aggregate) and on a switching-profile port.
+- **Attach:** `set interface eth0 acl in EDGE` and `acl out EDGE`; the same on a subinterface (`eth0.100`) and on a port aggregate. The commit is refused for an unknown ACL, on a `loopback-*`, on a port aggregate member (attach it to the aggregate), on a switching-profile port, and when an interface and its untagged subinterface (one kernel device) both set one for the same direction.
+- **Directions:** `acl in` filters what the link receives, `acl out` what it sends, the router's own packets included.
+- **Check it applied:** `show log` (or `GET /v1/logs`) has `compiled acl acl=EDGE rules=.. filters=..` once per change and `acl attached interface=eth0 direction=in acl=EDGE`; `acl detached interface=eth0 direction=in` when you remove it. A device that does not exist yet (a port aggregate's bond being created) logs `acl pending ... reason="absent"` and gets its ACL when it appears.
+- **Updates are atomic per interface and direction:** a packet sees the old ACL or the new one, never a mix. An ACL attached to several interfaces switches them one after the other.
+- **If `nos-acld` stops:** a crash leaves the last ACL enforcing until it restarts; a clean stop removes the filters. An ACL the daemon cannot program keeps the previous one in place and logs an error.
 - **Families:** a rule with an IPv4 prefix matches only IPv4, an IPv6 prefix only IPv6, no prefix both. `source` and `destination` must be in the same family; `icmp` is IPv4 and `icmpv6` IPv6.
 - **Caveats:**
   - An interface ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first.
@@ -155,6 +159,7 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
   - A physical interface's ACL sees untagged frames only; attach to the subinterface for tagged traffic.
   - A rule with a port, `established` or ICMP match never matches non-first IP fragments.
   - `established` is stateless: it means TCP ACK or RST is set.
+  - `log` is accepted but not logged yet: `nos-acld` warns `acl log not supported yet`.
 
 ## Navigating: `edit`, `up`, `top`
 
