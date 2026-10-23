@@ -123,6 +123,9 @@ pub struct ResolvedPeer {
     /// The peer-group's `enforce_first_as` with its default (on) applied; a
     /// route-server client is exempt regardless (`BgpRib::set_peer_enforce_first_as`).
     pub enforce_first_as: bool,
+    /// The peer-group's `flowspec-validation disable-dest-prefix-rule`
+    /// (`BgpRib::set_peer_flowspec_relax`).
+    pub flowspec_relax_dest: bool,
     /// RFC 7911 ADD-PATH mode with its default applied
     /// (`BgpPeerGroup::effective_add_path`); in the OPEN, so a change
     /// restarts the session (`diff_peers`).
@@ -805,6 +808,10 @@ impl SessionManager {
                     .iter()
                     .map(|&c| crate::flowspec::format_action(c))
                     .collect(),
+                validity: route
+                    .validity
+                    .map_or_else(|| "unknown".to_string(), |v| v.to_string()),
+                actions: crate::flowspec_action::describe(&route.attributes.extended_communities),
             })
             .collect()
     }
@@ -1571,6 +1578,7 @@ mod tests {
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             evpn_import_policy: None,
             enforce_first_as: true,
+            flowspec_relax_dest: false,
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

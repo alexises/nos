@@ -778,6 +778,16 @@
         ],
         "type": "object"
       },
+      "BgpFlowspecValidation": {
+        "description": "Knobs of the RFC 8955 §6 Flowspec validation procedure.",
+        "properties": {
+          "disable_dest_prefix_rule": {
+            "description": "Rule (a) of RFC 8955 §6 is not enforced: a flow without a destination\nprefix is accepted (the unicast checks (b) and (c) then do not apply).",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "BgpGracefulRestart": {
         "description": "RFC 4724 / RFC 8538 graceful restart of one BGP instance. `Default` is\non, with every timer at its default.",
         "properties": {
@@ -1113,6 +1123,10 @@
               "string",
               "null"
             ]
+          },
+          "flowspec_validation": {
+            "$ref": "#/components/schemas/BgpFlowspecValidation",
+            "description": "RFC 8955 §6 Flowspec validation tuning. Validation itself cannot be\nswitched off."
           },
           "hold_time": {
             "description": "`None` defaults to `HOLD_TIME_DEFAULT` (90s). `Some(0)` disables both\nthe hold timer and keepalives entirely; otherwise must be `>=\nHOLD_TIME_FLOOR` (RFC 4271 §6.2). The value actually used by a\nsession is `min(this, the peer's own proposed hold time)`.",
@@ -17972,6 +17986,258 @@
           }
         },
         "summary": "Set: The `export-policy` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/flowspec-validation": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `flowspec-validation` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpFlowspecValidation",
+                  "description": "RFC 8955 §6 Flowspec validation tuning. Validation itself cannot be\nswitched off."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `flowspec-validation` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BgpFlowspecValidation",
+                "description": "RFC 8955 §6 Flowspec validation tuning. Validation itself cannot be\nswitched off."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpFlowspecValidation",
+                  "description": "RFC 8955 §6 Flowspec validation tuning. Validation itself cannot be\nswitched off."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `flowspec-validation` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/flowspec-validation/disable-dest-prefix-rule": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `disable-dest-prefix-rule` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Rule (a) of RFC 8955 §6 is not enforced: a flow without a destination\nprefix is accepted (the unicast checks (b) and (c) then do not apply).",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `disable-dest-prefix-rule` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Rule (a) of RFC 8955 §6 is not enforced: a flow without a destination\nprefix is accepted (the unicast checks (b) and (c) then do not apply).",
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Rule (a) of RFC 8955 §6 is not enforced: a flow without a destination\nprefix is accepted (the unicast checks (b) and (c) then do not apply).",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `disable-dest-prefix-rule` setting.",
         "tags": [
           "transactions"
         ]

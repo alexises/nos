@@ -523,6 +523,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Require the first AS of a received AS_PATH to be the peer's AS.",
             "On by default for eBGP (RFC 4271 section 6.3): an UPDATE whose AS_PATH does not start with the peer's AS is treated as a withdraw and logged. Set to false to accept such paths. A route-server-client peer-group is always exempt. iBGP and confederation peers are never checked.",
         ),
+        Topic::BgpPeerGroupFlowspecValidation => (
+            "Tune the RFC 8955 section 6 validation of received Flowspec rules.",
+            "Every received rule is validated and `show bgp flowspec` prints the result; an invalid rule stays visible but is never used. `disable-dest-prefix-rule` stops requiring a destination prefix component (rule (a)); such a rule skips the unicast checks, which need a destination. Validation itself cannot be disabled. Changing it restarts the peer-group's sessions.",
+        ),
         Topic::BgpPeerGroupShutdown => (
             "Administratively shut every peer in a peer-group.",
             concat!(

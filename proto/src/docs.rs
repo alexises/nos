@@ -133,6 +133,8 @@ topics! {
     BgpPeerGroupEvpnImportPolicy,
     /// `BgpPeerGroup.enforce_first_as`
     BgpPeerGroupEnforceFirstAs,
+    /// `BgpPeerGroup.flowspec_validation`
+    BgpPeerGroupFlowspecValidation,
     /// `BgpPeerGroup.shutdown`
     BgpPeerGroupShutdown,
     /// `BgpInstance.peers`

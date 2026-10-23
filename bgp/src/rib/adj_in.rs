@@ -106,25 +106,36 @@ pub(super) fn learn_evpn(
 }
 
 /// Stores one `MP_REACH_NLRI` batch's Flowspec rules in a peer's Flowspec
-/// Adj-RIB-In, logging only rules that are new or changed. No policy, no
-/// validation (#559/#560).
+/// Adj-RIB-In, logging only rules that are new or changed, and returns their
+/// keys for validation (which needs the unicast RIB, so the caller runs it).
+/// A re-announcement keeps the rule's validity until it is re-validated.
 pub(super) fn learn_flowspec(
     table: &mut HashMap<FlowspecKey, FlowspecRoute>,
     from: IpAddr,
     family: AddressFamily,
     mp: &message::MpReachNlri,
     attributes: &message::PathAttributes,
-) {
+    learned_via_ibgp: bool,
+) -> Vec<FlowspecKey> {
+    let mut keys = Vec::with_capacity(mp.flowspec.len());
     for nlri in &mp.flowspec {
-        let route = FlowspecRoute {
+        let k = (family, nlri.clone());
+        let mut route = FlowspecRoute {
             family,
             nlri: nlri.clone(),
             attributes: attributes.clone(),
+            learned_via_ibgp,
+            validity: None,
         };
-        if table.insert((family, nlri.clone()), route.clone()) != Some(route) {
+        if let Some(old) = table.get(&k) {
+            route.validity = old.validity;
+        }
+        if table.insert(k.clone(), route.clone()) != Some(route) {
             info!(peer = %from, family = %family, route = %nlri, "flowspec route learned");
         }
+        keys.push(k);
     }
+    keys
 }
 
 /// The Flowspec family of an MP batch's AFI.
@@ -573,6 +584,7 @@ impl BgpRib {
             update,
         } = *rx;
         let mut evpn_recheck: Vec<(u32, [u8; 6])> = Vec::new();
+        let mut flow_keys: Vec<FlowspecKey> = Vec::new();
         let table = self.adj_rib_in.entry(from).or_default();
         let counts = self.path_counts.entry(from).or_default();
         // This UPDATE adds at most this many entries — reserving
@@ -693,14 +705,21 @@ impl BgpRib {
                 {
                     warn!(peer = %from, family = %family, "flowspec routes for a family not negotiated, ignored");
                 } else {
-                    learn_flowspec(
+                    flow_keys.extend(learn_flowspec(
                         self.flowspec_adj_rib_in.entry(from).or_default(),
                         from,
                         family,
                         mp,
                         attrs,
-                    );
+                        remote_is_ibgp || from_confed,
+                    ));
                 }
+            }
+        }
+        if !flow_keys.is_empty() {
+            self.enable_flow_indexes();
+            for k in flow_keys {
+                self.track_flow(from, &k);
             }
         }
         for (vni, mac) in evpn_recheck {

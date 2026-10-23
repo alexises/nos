@@ -631,6 +631,24 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupEnforceFirstAs)]
     pub enforce_first_as: Option<bool>,
+
+    /// RFC 8955 §6 Flowspec validation tuning. Validation itself cannot be
+    /// switched off.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupFlowspecValidation)]
+    pub flowspec_validation: BgpFlowspecValidation,
+}
+
+/// Knobs of the RFC 8955 §6 Flowspec validation procedure.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct BgpFlowspecValidation {
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupFlowspecValidation)]
+    /// Rule (a) of RFC 8955 §6 is not enforced: a flow without a destination
+    /// prefix is accepted (the unicast checks (b) and (c) then do not apply).
+    pub disable_dest_prefix_rule: bool,
 }
 
 impl BgpPeerGroup {
@@ -951,6 +969,7 @@ mod tests {
             export_policy: None,
             evpn_import_policy: None,
             enforce_first_as: None,
+            flowspec_validation: BgpFlowspecValidation::default(),
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,

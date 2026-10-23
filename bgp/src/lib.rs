@@ -7,6 +7,7 @@ pub mod damping;
 pub mod evpn;
 pub mod fdb_push_client;
 pub mod flowspec;
+pub mod flowspec_action;
 pub mod fsm;
 pub mod gr;
 pub mod igp_client;

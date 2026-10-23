@@ -101,6 +101,7 @@ mod adj_in;
 mod aggregate;
 mod decision;
 mod evpn_out;
+mod flowspec_validate;
 mod gr;
 mod outbox;
 mod shared;
@@ -116,6 +117,7 @@ use decision::{
     best_path, build_advertisement, decision_cmp, igp_lookup, multipath_next_hops, origin_rank,
     otc_leak, redistributed_route, runner_up_next_hop, Candidate,
 };
+pub use flowspec_validate::{FlowValidity, InvalidReason};
 
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
 /// "Execution model". A plain function, not an adapter trait: there is
@@ -248,6 +250,21 @@ pub struct FlowspecRoute {
     pub family: AddressFamily,
     pub nlri: FlowSpec,
     pub attributes: message::PathAttributes,
+    /// Learned over iBGP or from a confederation member (RFC 8955 section 6
+    /// assumes those validated: no first-AS check).
+    pub learned_via_ibgp: bool,
+    /// RFC 8955 section 6 state; `None` only between learning and the first
+    /// validation, which follows at once.
+    pub validity: Option<FlowValidity>,
+}
+
+impl FlowspecRoute {
+    /// Valid, so eligible for what later consumes routes (#560): an invalid
+    /// route stays in the Adj-RIB-In for `show`, nothing more.
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        self.validity == Some(FlowValidity::Valid)
+    }
 }
 
 /// A Flowspec Adj-RIB-In key: the NLRI itself, per family.
@@ -550,6 +567,10 @@ pub struct BgpRib {
     flowspec_adj_rib_in: HashMap<IpAddr, HashMap<FlowspecKey, FlowspecRoute>>,
     /// The Flowspec twin of `evpn_stale`.
     flowspec_stale: HashMap<IpAddr, HashSet<FlowspecKey>>,
+    /// Peers whose peer-group relaxes rule (a) (`set_peer_flowspec_relax`).
+    flowspec_relax_dest: HashSet<IpAddr>,
+    /// Derived indexes for incremental Flowspec revalidation.
+    flow_ix: flowspec_validate::FlowIndexes,
     /// RFC 7313: paths (prefix, path id) in a peer's Adj-RIB-In marked stale
     /// by a `BoRR` and not yet re-announced; purged by the matching `EoRR`.
     stale: HashMap<IpAddr, HashSet<(IpNet, u32)>>,
@@ -682,6 +703,8 @@ impl BgpRib {
             evpn_import: HashMap::new(),
             flowspec_adj_rib_in: HashMap::new(),
             flowspec_stale: HashMap::new(),
+            flowspec_relax_dest: HashSet::new(),
+            flow_ix: flowspec_validate::FlowIndexes::default(),
             stale: HashMap::new(),
             evpn_stale: HashMap::new(),
             gr: HashMap::new(),
@@ -832,6 +855,16 @@ impl BgpRib {
             self.first_as_peers.insert(peer);
         } else {
             self.first_as_peers.remove(&peer);
+        }
+    }
+
+    /// Records whether `peer`'s peer-group relaxes RFC 8955 rule (a) (a flow
+    /// need not carry a destination prefix). Call before `peer_established`.
+    pub fn set_peer_flowspec_relax(&mut self, peer: IpAddr, relax: bool) {
+        if relax {
+            self.flowspec_relax_dest.insert(peer);
+        } else {
+            self.flowspec_relax_dest.remove(&peer);
         }
     }
 
@@ -1381,6 +1414,13 @@ impl BgpRib {
     /// winner actually changed, pushes `Announce`/`Withdraw` to every
     /// registered peer as appropriate.
     fn recompute_and_propagate(&mut self, prefix: IpNet) {
+        self.recompute_prefix(prefix);
+        // Every unicast change funnels through here, `unchanged` or not
+        // (rule (c) reads non-best paths too).
+        self.revalidate_around(prefix);
+    }
+
+    fn recompute_prefix(&mut self, prefix: IpNet) {
         // Runs independently of the single-elected-best-path logic below —
         // an ADD-PATH peer's view covers more than the one instance-wide
         // winner, so a change to a non-winning path must still be reflected

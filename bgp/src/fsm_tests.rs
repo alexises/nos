@@ -53,6 +53,7 @@ fn rpeer() -> ResolvedPeer {
         export_policy: accept,
         evpn_import_policy: None,
         enforce_first_as: true,
+        flowspec_relax_dest: false,
         shutdown: None,
         maximum_prefix: BgpMaximumPrefix::default(),
         announce_rpki_state: false,

@@ -1195,10 +1195,16 @@ pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> S
     let mut lines = vec![format!("bgp instance {instance}:")];
     for r in routes {
         lines.push(format!(
-            "  from {} {} [{}]",
+            "  from {} {} [{}] {} actions: {}",
             r.peer,
             r.nlri,
-            r.extended_communities.join(" ")
+            r.extended_communities.join(" "),
+            r.validity,
+            if r.actions.is_empty() {
+                "none".to_string()
+            } else {
+                r.actions.join(", ")
+            }
         ));
     }
     lines.join("\n")
@@ -2189,11 +2195,19 @@ mod tests {
             peer: "10.0.0.2".parse().unwrap(),
             nlri: "dest 192.0.2.0/24 proto =6 dst-port =25".to_string(),
             extended_communities: vec!["traffic-rate:0:0".to_string()],
+            validity: "invalid:no-covering-unicast-route".to_string(),
+            actions: vec!["discard".to_string()],
         };
         assert_eq!(
-            render_bgp_flowspec("r1", &[route]),
-            "bgp instance r1:\n  from 10.0.0.2 dest 192.0.2.0/24 proto =6 dst-port =25 [traffic-rate:0:0]"
+            render_bgp_flowspec("r1", std::slice::from_ref(&route)),
+            "bgp instance r1:\n  from 10.0.0.2 dest 192.0.2.0/24 proto =6 dst-port =25 [traffic-rate:0:0] invalid:no-covering-unicast-route actions: discard"
         );
+        let bare = FlowspecRouteSummary {
+            validity: "valid".to_string(),
+            actions: vec![],
+            ..route
+        };
+        assert!(render_bgp_flowspec("r1", &[bare]).ends_with("valid actions: none"));
     }
 
     #[test]

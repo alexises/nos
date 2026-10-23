@@ -1373,6 +1373,7 @@ async fn report_established(
         peer.remote_address,
         slot.peer.enforce_first_as && !slot.peer.route_server_client,
     );
+    rib.set_peer_flowspec_relax(peer.remote_address, slot.peer.flowspec_relax_dest);
     rib.set_peer_add_path_send_count(peer.remote_address, slot.peer.add_path_send_count);
     rib.set_peer_rpki_state(
         peer.remote_address,

@@ -2944,12 +2944,16 @@ fn flowspec_flags() -> Vec<String> {
 /// peer-group, must negotiate SAFI 133, decode both (the action community
 /// from another implementation's encoding), serve them on `show bgp
 /// flowspec` (`GET /v1/bgp/flowspec`) and drop them on an explicit
-/// withdrawal. Nothing is validated or enforced yet (#559, #560).
+/// withdrawal. RFC 8955 section 6 validation (#559): with no covering unicast
+/// route each rule is `invalid:no-covering-unicast-route`; GoBGP announcing a
+/// covering prefix flips it to `valid` (revalidation, logged as `flowspec
+/// validity changed`) and withdrawing that prefix flips it back. Nothing is
+/// enforced yet (#560).
 pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
     gobgp_speaker(
         w,
         flowspec_flags(),
-        &["ipv4-flowspec", "ipv6-flowspec"],
+        &["ipv4-unicast", "ipv4-flowspec", "ipv6-flowspec"],
         &[],
     )
     .await?;
@@ -3002,6 +3006,42 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
             bail!("show bgp flowspec is missing {want}: {body}");
         }
     }
+
+    // RFC 8955 section 6: no unicast route covers either destination yet.
+    let changed = |family: &str, validity: &str| {
+        format!("flowspec validity changed peer={IP_G} family={family}.*validity={validity}")
+    };
+    for (family, ..) in &rules {
+        a.wait(&changed(family, "invalid:no-covering-unicast-route"))
+            .await?;
+    }
+    let body = show().await?;
+    for want in ["invalid:no-covering-unicast-route", "discard"] {
+        if !body.contains(want) {
+            bail!("show bgp flowspec is missing {want}: {body}");
+        }
+    }
+
+    // The sender also announces a covering unicast prefix: the IPv4 rule turns
+    // valid. IPv4 only: the session is IPv4 and the lab network gives no
+    // router an IPv6 address, so an IPv6 unicast next hop would stay
+    // unresolvable and never reach the Loc-RIB (IPv6 is covered by unit
+    // tests); the IPv6 rule stays invalid.
+    let (family, prefix) = ("ipv4", "192.0.0.0/16");
+    let base = a.count(&changed("ipv4-flowspec", "valid"));
+    gobgp(w, &["global", "rib", "add", "-a", family, prefix]).await?;
+    a.wait_new(&changed("ipv4-flowspec", "valid"), base, 30)
+        .await?;
+    let body = show().await?;
+    if !body.contains("\"validity\":\"valid\"") || !body.contains("invalid:") {
+        bail!("expected the IPv4 rule valid and the IPv6 one invalid: {body}");
+    }
+
+    // Withdrawing the covering prefix revalidates it again.
+    let invalid = changed("ipv4-flowspec", "invalid:no-covering-unicast-route");
+    let base = a.count(&invalid);
+    gobgp(w, &["global", "rib", "del", "-a", family, prefix]).await?;
+    a.wait_new(&invalid, base, 30).await?;
 
     log("withdrawing the IPv4 rule explicitly");
     let base = a.count(&withdrawn("ipv4-flowspec"));
