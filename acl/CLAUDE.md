@@ -5,18 +5,24 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 ## Flow
 
 - `reconcile.rs`: `SubscribeDiff` on `Acls`/`Interfaces`/`PortAggregates` is only a trigger; every diff (and a 10 s tick) re-fetches the config into a `plan::Plan`.
-- `plan.rs` (pure): `Compiler` compiles each ACL once per change (logs `compiled acl acl= rules= filters= levels= shadowed=`, the e2e anchor); a failed compile keeps the last good one (fail closed). `attachments` lists every attach point as a `Device` (`Kernel(name)` or `Aggregate { name, tag }`).
+- `plan.rs` (pure): `Compiler` compiles each ACL once per change (logs `compiled acl acl= rules= filters= levels= shadowed= trailing=`, the e2e anchor); a failed compile keeps the last good one (fail closed). `attachments` lists every attach point as a `Device` (`Kernel(name)` or `Aggregate { name, tag }`).
 - `link_client.rs`: `nos-interfaced`'s `SubscribeLinks` stream, reimplemented per crate. Until a snapshot with `observed: true` arrives nothing is applied (a `noop` interfaced never gives one).
 - `engine.rs`: per (device, direction) holds `{ifindex, chain, compiled}`; a pass resolves devices (a bond through `LinkState.port_aggregate`, never by deriving `bond<id>`), detaches what is no longer wanted, installs what changed. Driver calls block: a pass runs on `spawn_blocking`, the engine moved in and out.
-- `compile/` (pure): `compile(&Acl) -> Compiled { levels, default_action, rules, shadowed }`; one rule = one level today. `rule.rs` splits by family (prefix family, else `icmp` v4 / `icmpv6` v6, else both) and `established` into two filters (ACK, RST).
+- `compile/` (pure): `compile(&Acl) -> Compiled { levels, default_action, rules, shadowed, trailing }` (the last two are rule indices = cookies, #543). `rule.rs` splits by family (prefix family, else `icmp` v4 / `icmpv6` v6, else both) and `established` into two filters (ACK, RST).
 - `driver/`: `Driver` trait (`live_chain`, `install`, `switch`, `flush`, `detach`), `noop.rs` (records calls, tests), `linux.rs` (only `nos-tc` calls; coverage-excluded). Request building (`chain_requests`, `entry_request`, `live_from`) is pure, in `driver/mod.rs`.
 
 ## Kernel layout (details: `docs/architecture/linux-drivers.md`)
 
 - Chain 0, prio `ACL_PRIO` 100, handle 1: keyless flower `goto chain` 1000/1001; its gact cookie is the live chain (read back on start).
-- Rule `i`: prios `2i+1` (`ip`) and `2i+2` (`ipv6`): the kernel refuses two protocols at one prio. Defaults: one keyless filter per family after the rules. Cookies: rule index, `u32::MAX` for defaults (#543 reads them).
+- Level `l`: prios `2l+1` (`ip`) and `2l+2` (`ipv6`) (the kernel refuses two protocols at one prio); a level holds every filter of the rules packed there. Defaults: one keyless filter per family after the rules. Cookies: user rule index (not the level), `u32::MAX` for defaults (#543 reads them).
 - Update = install idle chain, replace entry (`NLM_F_REPLACE`), flush old. Flush tolerates `ENOENT`/`EINVAL`.
 - Never delete the `clsact` qdisc; stay off other owners' priorities (`tc/CLAUDE.md`).
+
+## Optimiser (`compile/optimize.rs`, `keys.rs`)
+
+- Passes, in order: split rules into filters (`rule.rs`) -> drop shadowed (all filters of a rule inside filters of ONE earlier kept rule) -> pop trailing rules whose action is the default's (never a `log` rule) -> pack: level = 1 + max level of earlier kept rules that overlap, else 0.
+- Invariant: overlap may over-approximate (costs levels), never under-approximate; contains may under-approximate (a shadowed rule is kept). `tests/equivalence.rs` (proptest: naive first-match vs flower evaluation of the levels) guards it.
+- `ponytail:` ceilings: O(n^2) pair tests; single-rule shadow cover (no union); no cross-rule prefix merge (counters stay per rule). Levels beyond `MAX_LEVELS` fail the compile (previous ACL stays).
 
 ## Rules that bite
 
@@ -31,6 +37,6 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 
 - Unit: compile shapes, plan resolution, engine with `NoopDriver` (attach, A/B alternation, pending device, sweep, refused install, shutdown), request bytes via `nos-tc` types.
 - Kernel: `unshare -Urn cargo test -p nos-acl --test kernel -- --ignored` (`tc` as the oracle; a foreign prio-1 filter survives).
-- e2e: `cargo run -p nos-e2e -- acl` (group `drivers`): attach, `?before=` drops BGP, `?after=` restores it, detach.
+- e2e: `cargo run -p nos-e2e -- acl` (group `drivers`): attach, `?before=` drops BGP, `?after=` restores it, detach, packed `EDGE2`.
 
-Out of scope here: optimiser (#542), `show acl` and counters (#543), `log` (#544).
+Out of scope here: `show acl` and counters (#543), `log` (#544).

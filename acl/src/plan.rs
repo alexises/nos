@@ -7,7 +7,7 @@ use std::sync::Arc;
 use nos_proto::schema::{Acl, Config, Subinterface};
 use tracing::{error, info, warn};
 
-use crate::compile::{compile, Compiled};
+use crate::compile::{compile_within, Compiled, MAX_LEVELS};
 use crate::driver::Direction;
 
 /// An attach point's kernel device, before the link table resolves it.
@@ -87,9 +87,18 @@ pub fn attachments(cfg: &Config) -> Vec<Attachment> {
 
 /// Compiles each ACL once per change; a failed compile keeps the last good
 /// one (fail closed: the kernel keeps enforcing it).
-#[derive(Default)]
 pub struct Compiler {
     cache: HashMap<String, (Acl, Option<Arc<Compiled>>)>,
+    max_levels: usize,
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self {
+            cache: HashMap::new(),
+            max_levels: MAX_LEVELS,
+        }
+    }
 }
 
 impl Compiler {
@@ -103,7 +112,7 @@ impl Compiler {
                 Some((seen, compiled)) if seen == acl => compiled.clone(),
                 _ => {
                     let last = previous.and_then(|(_, c)| c.clone());
-                    let compiled = compile_logged(acl).map(Arc::new).or(last);
+                    let compiled = compile_logged(acl, self.max_levels).map(Arc::new).or(last);
                     self.cache
                         .insert(acl.name.clone(), (acl.clone(), compiled.clone()));
                     compiled
@@ -120,12 +129,13 @@ impl Compiler {
     }
 }
 
-fn compile_logged(acl: &Acl) -> Option<Compiled> {
-    match compile(acl) {
+fn compile_logged(acl: &Acl, max_levels: usize) -> Option<Compiled> {
+    match compile_within(acl, max_levels) {
         Ok(c) => {
             info!(
                 acl = %acl.name, rules = c.rules, filters = c.filters(),
-                levels = c.levels.len(), shadowed = c.shadowed, "compiled acl"
+                levels = c.levels.len(), shadowed = c.shadowed.len(),
+                trailing = c.trailing.len(), "compiled acl"
             );
             for r in acl.rules.iter().filter(|r| r.log) {
                 warn!(acl = %acl.name, rule = %r.name, "acl log not supported yet");
@@ -141,10 +151,9 @@ fn compile_logged(acl: &Acl) -> Option<Compiled> {
 
 #[cfg(test)]
 mod tests {
-    use nos_proto::schema::{AclAction, AclRule, Interface, PortAggregate};
+    use nos_proto::schema::{AclAction, AclRule, Interface, PortAggregate, PortRange};
 
     use super::*;
-    use crate::compile::MAX_LEVELS;
 
     fn sub(tag: u16, acl_in: Option<&str>, acl_out: Option<&str>) -> Subinterface {
         Subinterface {
@@ -198,17 +207,29 @@ mod tests {
         );
     }
 
-    fn acl(rules: usize) -> Acl {
+    /// `rules` denies that each overlap every earlier one without being
+    /// inside it: `rules` levels.
+    fn acl(rules: u16) -> Acl {
         Acl {
             name: "A".into(),
             default_action: AclAction::Permit,
-            rules: vec![AclRule::default(); rules],
+            rules: (0..rules)
+                .map(|i| AclRule {
+                    name: format!("r{i}"),
+                    action: AclAction::Deny,
+                    destination_port: Some(PortRange { start: 0, end: i }),
+                    ..Default::default()
+                })
+                .collect(),
         }
     }
 
     #[test]
     fn compiles_once_per_change_and_keeps_the_last_good_one() {
-        let mut c = Compiler::default();
+        let mut c = Compiler {
+            max_levels: 4,
+            ..Compiler::default()
+        };
         let mut cfg = Config {
             acls: vec![acl(1)],
             ..Default::default()
@@ -218,7 +239,7 @@ mod tests {
             Arc::ptr_eq(&first, &c.plan(&cfg).acls["A"]),
             "recompiled unchanged"
         );
-        cfg.acls[0] = acl(MAX_LEVELS + 1);
+        cfg.acls[0] = acl(5);
         assert!(
             Arc::ptr_eq(&first, &c.plan(&cfg).acls["A"]),
             "failure must keep the last"
@@ -227,7 +248,7 @@ mod tests {
         assert_eq!(c.plan(&cfg).acls["A"].rules, 2);
         cfg.acls.clear();
         assert!(c.plan(&cfg).acls.is_empty());
-        cfg.acls = vec![acl(MAX_LEVELS + 1)];
+        cfg.acls = vec![acl(5)];
         assert!(c.plan(&cfg).acls.is_empty(), "nothing good to keep");
         cfg.acls[0].rules = vec![AclRule {
             log: true,
