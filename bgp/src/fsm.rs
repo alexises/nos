@@ -64,8 +64,8 @@ fn safi_of(family: AddressFamily) -> u8 {
     }
 }
 
-/// VPNv4/VPNv6 are configurable but not yet negotiated (codec: #577): they are
-/// never advertised in OPEN nor GR and never reach `negotiated_afs`.
+/// VPNv4/VPNv6 are negotiated (#577) but not yet in Graceful Restart or
+/// Route Refresh (#578): `gr.rs` filters them out.
 pub(crate) fn is_vpn(family: AddressFamily) -> bool {
     matches!(
         family,
@@ -107,7 +107,7 @@ fn build_mp_capabilities(
     transport_afi: u16,
 ) -> Vec<message::Capability> {
     let mut caps = Vec::new();
-    for &af in address_families.iter().filter(|af| !is_vpn(**af)) {
+    for &af in address_families {
         let afi = afi_of(af);
         caps.push(message::Capability::MultiProtocol {
             afi,
@@ -193,21 +193,48 @@ fn negotiate_address_families(
     )
 }
 
-/// Flowspec (RFC 8955/8956) per AFI, `[ipv4, ipv6]`: negotiated when both
-/// sides advertise the tuple. Like EVPN it needs no Extended Next Hop (the
-/// next hop is ignored) and has no legacy (non-MP) form.
-fn negotiate_flowspec(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2] {
+/// A non-unicast SAFI per AFI, `[ipv4, ipv6]`: negotiated when both sides
+/// advertise the tuple. Like EVPN it needs no Extended Next Hop (its next-hop
+/// family is independent of the transport) and has no legacy (non-MP) form.
+fn negotiate_safi(
+    open: &OpenMessage,
+    ctx: &NegotiationContext,
+    safi: u8,
+    families: [AddressFamily; 2],
+) -> [bool; 2] {
     let peer_has = |afi: u16| {
         open.capabilities.iter().any(|c| {
-            matches!(c, message::Capability::MultiProtocol { afi: a, safi }
-                if *a == afi && *safi == message::SAFI_FLOWSPEC)
+            matches!(c, message::Capability::MultiProtocol { afi: a, safi: s }
+                if *a == afi && *s == safi)
         })
     };
-    [
-        (AddressFamily::Ipv4Flowspec, AFI_IPV4),
-        (AddressFamily::Ipv6Flowspec, AFI_IPV6),
-    ]
-    .map(|(af, afi)| ctx.address_families.contains(&af) && peer_has(afi))
+    [AFI_IPV4, AFI_IPV6]
+        .into_iter()
+        .zip(families)
+        .map(|(afi, af)| ctx.address_families.contains(&af) && peer_has(afi))
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("two AFIs")
+}
+
+/// Flowspec (RFC 8955/8956) per AFI, `[ipv4, ipv6]`.
+fn negotiate_flowspec(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2] {
+    negotiate_safi(
+        open,
+        ctx,
+        message::SAFI_FLOWSPEC,
+        [AddressFamily::Ipv4Flowspec, AddressFamily::Ipv6Flowspec],
+    )
+}
+
+/// VPNv4/VPNv6 (RFC 4364/4659) per AFI, `[vpnv4, vpnv6]`.
+fn negotiate_vpn(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2] {
+    negotiate_safi(
+        open,
+        ctx,
+        message::SAFI_VPN,
+        [AddressFamily::Vpnv4Unicast, AddressFamily::Vpnv6Unicast],
+    )
 }
 
 /// RFC 7911 §5, for one unicast family of one session: whether received
@@ -333,6 +360,8 @@ struct RemoteInfo {
     negotiated_evpn: bool,
     /// Flowspec negotiated, `[ipv4, ipv6]` (`negotiate_flowspec`).
     negotiated_flowspec: [bool; 2],
+    /// VPNv4/VPNv6 negotiated, `[vpnv4, vpnv6]` (`negotiate_vpn`).
+    negotiated_vpn: [bool; 2],
     /// RFC 7911 ADD-PATH per family, `[ipv4, ipv6]` (`negotiate_add_path`).
     add_path: [AddPathDir; 2],
     /// The peer sent the four-octet AS capability (RFC 6793); `false` means
@@ -389,6 +418,7 @@ enum Action {
         negotiated_ipv6_unicast: bool,
         negotiated_evpn: bool,
         negotiated_flowspec: [bool; 2],
+        negotiated_vpn: [bool; 2],
         add_path: [AddPathDir; 2],
         four_octet_as: bool,
         extended_message: bool,
@@ -445,6 +475,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 negotiated_ipv6_unicast: remote.negotiated_ipv6_unicast,
                 negotiated_evpn: remote.negotiated_evpn,
                 negotiated_flowspec: remote.negotiated_flowspec,
+                negotiated_vpn: remote.negotiated_vpn,
                 add_path: remote.add_path,
                 four_octet_as: remote.four_octet_as,
                 extended_message: remote.extended_message,
@@ -545,6 +576,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
     let (mp_bgp_negotiated, negotiated_ipv4_unicast, negotiated_ipv6_unicast, negotiated_evpn) =
         negotiate_address_families(open, ctx);
     let negotiated_flowspec = negotiate_flowspec(open, ctx);
+    let vpn_afs = negotiate_vpn(open, ctx);
     let add_path = negotiate_add_path(open, ctx);
     let Ok(role) = negotiate_role(open, ctx) else {
         return reject(OpenMessageSubcode::RoleMismatch);
@@ -558,6 +590,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiated_ipv6_unicast,
         negotiated_evpn,
         negotiated_flowspec,
+        negotiated_vpn: vpn_afs,
         add_path,
         four_octet_as: message::four_octet_asn(open).is_some(),
         extended_message: open
@@ -1255,6 +1288,10 @@ async fn collision_override(
 
 /// `Action::ReportEstablished`: applies the negotiated capabilities to the
 /// codec, registers the peer with the RIB and publishes the status.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear setup sequence per negotiated capability"
+)]
 async fn report_established(
     cx: &SessionCtx<'_>,
     reader: &mut SessionReader,
@@ -1283,6 +1320,7 @@ async fn report_established(
         negotiated_ipv6_unicast,
         negotiated_evpn,
         negotiated_flowspec,
+        negotiated_vpn,
         add_path,
         four_octet_as,
         extended_message,
@@ -1306,12 +1344,18 @@ async fn report_established(
     if *negotiated_evpn {
         negotiated_afs.insert(AddressFamily::L2vpnEvpn);
     }
-    if negotiated_flowspec[0] {
-        negotiated_afs.insert(AddressFamily::Ipv4Flowspec);
-    }
-    if negotiated_flowspec[1] {
-        negotiated_afs.insert(AddressFamily::Ipv6Flowspec);
-    }
+    let non_unicast = [
+        (negotiated_flowspec[0], AddressFamily::Ipv4Flowspec),
+        (negotiated_flowspec[1], AddressFamily::Ipv6Flowspec),
+        (negotiated_vpn[0], AddressFamily::Vpnv4Unicast),
+        (negotiated_vpn[1], AddressFamily::Vpnv6Unicast),
+    ];
+    negotiated_afs.extend(
+        non_unicast
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, af)| af),
+    );
     // RFC 7911 §5: each direction on its own — the
     // decoder reads ids only where we receive them, the
     // encoder (and the RIB) sends them only where we send.
@@ -1729,6 +1773,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     nlri_path_ids: path_ids,
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
+                    vpn: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
             })
@@ -1765,6 +1810,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 nlri_path_ids: Vec::new(),
                 evpn: Vec::new(),
                 flowspec: vec![f.nlri],
+                vpn: Vec::new(),
             }],
             mp_unreach: Vec::new(),
         }),
@@ -1783,6 +1829,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     withdrawn_path_ids: Vec::new(),
                     evpn: Vec::new(),
                     flowspec: vec![nlri],
+                    vpn: Vec::new(),
                 }],
             })
         }
@@ -1802,6 +1849,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     withdrawn_path_ids: path_ids,
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
+                    vpn: Vec::new(),
                 }],
             })
         }
@@ -1846,6 +1894,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 nlri_path_ids: Vec::new(),
                 evpn: vec![route.nlri],
                 flowspec: Vec::new(),
+                vpn: Vec::new(),
             }],
             mp_unreach: Vec::new(),
         }),
@@ -1863,6 +1912,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 withdrawn_path_ids: Vec::new(),
                 evpn: vec![nlri],
                 flowspec: Vec::new(),
+                vpn: Vec::new(),
             }],
         }),
         OutboundUpdate::Withdraw(prefix, _, path_id) => {
@@ -2121,29 +2171,57 @@ mod tests {
     }
 
     #[test]
-    fn vpn_families_are_configurable_but_not_yet_advertised() {
+    fn vpn_capability_is_afi_safi_128_without_extended_next_hop() {
         let vpn = [AddressFamily::Vpnv4Unicast, AddressFamily::Vpnv6Unicast];
-        assert_eq!(build_mp_capabilities(&vpn, AFI_IPV4), vec![]);
-        assert_eq!(
-            (afi_of(vpn[0]), safi_of(vpn[0])),
-            (AFI_IPV4, message::SAFI_VPN)
-        );
-        assert_eq!(
-            (afi_of(vpn[1]), safi_of(vpn[1])),
-            (AFI_IPV6, message::SAFI_VPN)
-        );
+        for transport in [AFI_IPV4, AFI_IPV6] {
+            assert_eq!(
+                build_mp_capabilities(&vpn, transport),
+                vec![
+                    message::Capability::MultiProtocol { afi: 1, safi: 128 },
+                    message::Capability::MultiProtocol { afi: 2, safi: 128 },
+                ]
+            );
+        }
         assert!(!is_unicast(vpn[0]) && !is_unicast(vpn[1]));
+        // Graceful Restart still skips them (#578).
         let cap = crate::gr::our_cap(60, &vpn, false, false);
         assert_eq!(cap.families.len(), 0);
-        let mut theirs = cap;
-        theirs.families = vec![message::GrFamily {
-            afi: 1,
-            safi: message::SAFI_VPN,
-            forwarding: true,
-        }];
-        assert_eq!(crate::gr::PeerGr::from_cap(&theirs).families().len(), 0);
         assert_eq!(crate::gr::afi_safi(vpn[0]), (1, 128));
         assert_eq!(crate::gr::afi_safi(vpn[1]), (2, 128));
+    }
+
+    #[test]
+    fn vpn_negotiated_per_afi_only_when_both_sides_advertise_it() {
+        let ctx = ctx_with_afs(
+            vec![
+                AddressFamily::Ipv4Unicast,
+                AddressFamily::Vpnv4Unicast,
+                AddressFamily::Vpnv6Unicast,
+            ],
+            AFI_IPV4,
+        );
+        let peer = open_with_mp(&[(AFI_IPV4, 1), (AFI_IPV4, 128)]);
+        assert_eq!(negotiate_vpn(&peer, &ctx), [true, false]);
+        // Unicast is untouched by a VPN tuple.
+        assert_eq!(
+            negotiate_address_families(&peer, &ctx),
+            (true, true, false, false)
+        );
+        // Peer lacks it, or we never configured it.
+        let plain = open_with_mp(&[(AFI_IPV4, 1)]);
+        assert_eq!(negotiate_vpn(&plain, &ctx), [false, false]);
+        let unicast_only = ctx_with_afs(vec![AddressFamily::Ipv4Unicast], AFI_IPV4);
+        assert_eq!(negotiate_vpn(&peer, &unicast_only), [false, false]);
+        // VPNv6 over an IPv4 transport needs no Extended Next Hop.
+        let v6 = open_with_mp(&[(AFI_IPV6, 128), (AFI_IPV4, 128)]);
+        assert_eq!(negotiate_vpn(&v6, &ctx), [true, true]);
+        // A VPN-only session negotiates no unicast.
+        let vpn_only = ctx_with_afs(vec![AddressFamily::Vpnv4Unicast], AFI_IPV6);
+        assert_eq!(
+            negotiate_address_families(&peer, &vpn_only),
+            (true, false, false, false)
+        );
+        assert_eq!(negotiate_vpn(&peer, &vpn_only), [true, false]);
     }
 
     #[test]
@@ -2388,6 +2466,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
+            negotiated_vpn: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2417,6 +2496,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
+            negotiated_vpn: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2449,6 +2529,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
+            negotiated_vpn: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2516,6 +2597,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
+            negotiated_vpn: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2543,6 +2625,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
+            negotiated_vpn: [false; 2],
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,

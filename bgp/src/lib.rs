@@ -27,3 +27,4 @@ pub mod server;
 pub mod session;
 pub mod status;
 pub mod tcp;
+pub mod vpn;

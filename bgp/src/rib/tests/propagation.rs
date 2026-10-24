@@ -995,6 +995,7 @@ fn prefix_counters_match_a_recount_through_every_mutation() {
             withdrawn_path_ids: vec![],
             evpn: vec![],
             flowspec: Vec::new(),
+            vpn: Vec::new(),
         }],
         ..empty_update()
     };

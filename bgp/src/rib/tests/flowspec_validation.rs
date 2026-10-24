@@ -70,6 +70,7 @@ fn flow_update(peer_asn: u32, originator: Option<&str>, rules: Vec<FlowSpec>) ->
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: rules,
+        vpn: Vec::new(),
     }];
     u
 }
@@ -230,6 +231,7 @@ fn a_unicast_change_only_revisits_overlapping_flows() {
             withdrawn_path_ids: vec![],
             evpn: vec![],
             flowspec: vec![flow_elsewhere()],
+            vpn: Vec::new(),
         }];
         u
     });
@@ -353,6 +355,7 @@ fn index_compaction_drops_withdrawn_rules() {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: rules,
+        vpn: Vec::new(),
     }];
     feed(&mut rib, P1, &u);
     feed(

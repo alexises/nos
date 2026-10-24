@@ -68,6 +68,9 @@ of re-auditing the codebase. Update this file as items are implemented.
 - AS_PATH never preserves SET vs SEQUENCE (decode flattens, encode always
   emits SEQUENCE) — affects best-path fidelity and blocks confederation
   support later.
+- VPNv4/VPNv6 (SAFI 128): the Multiple Labels capability (RFC 8277 code 8,
+  label stacks) and ADD-PATH for SAFI 128 are not implemented; one label per
+  route, no Path Identifier.
 - ADD-PATH is send-only from this NOS's perspective: `adj_rib_in` still
   stores at most one path per peer per prefix, so a route-server-client that
   itself sends more than one path for the same prefix only ever contributes

@@ -28,6 +28,7 @@ fn reach(afi: u16, rules: Vec<FlowSpec>) -> UpdateMessage {
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: rules,
+        vpn: Vec::new(),
     }];
     u
 }
@@ -42,6 +43,7 @@ fn unreach(afi: u16, rules: Vec<FlowSpec>) -> UpdateMessage {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: rules,
+        vpn: Vec::new(),
     }];
     u
 }
