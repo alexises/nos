@@ -2,11 +2,11 @@
 
 BGP-4 implementation for NOS (binary `nos-bgpd`, one process per `BgpInstance`, dynamically spawned by `nos-watchdog` — see `docs/architecture/supervision.md`).
 
-Details: behaviour and config in `docs/protocols/bgp.md`, `docs/protocols/evpn-vxlan.md`, `docs/protocols/routing-policy.md`; how it is built (functions, log lines, `ponytail:` ceilings, per-feature walk-throughs) in `docs/protocols/bgp-internals.md`; e2e phases in `docs/e2e-phases.md`. This file keeps only the rules to respect when editing the crate.
+Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}.md`; how it is built (functions, log lines, `ponytail:` ceilings, walk-throughs) in `docs/protocols/bgp-internals.md`; e2e phases in `docs/e2e-phases.md`. This file keeps only the rules to respect when editing the crate.
 
 ## Scope
 
-`nos-bgpd` resolves its peers and VRF from `nos-configd`, runs the RFC 4271 FSM over VRF-scoped TCP, keeps the RIBs, and pushes best routes to the owning `nos-ribd` and EVPN routes to/from `nos-fdbd`/`nos-ribd`. `bgp/TODO.md` lists what is open.
+`nos-bgpd` resolves its peers and VRF from `nos-configd`, runs the RFC 4271 FSM over VRF-scoped TCP, keeps the RIBs, and pushes best routes to `nos-ribd` and EVPN routes to/from `nos-fdbd`/`nos-ribd`. `bgp/TODO.md` lists what is open.
 
 ## VRF resolution
 
@@ -103,7 +103,7 @@ Route-server candidates (`rs_candidates`) are never filtered by feasibility or a
 
 - The codec's rx set (reader `add_path_afis`) and tx set (writer) differ; encoding writes an id whenever the update has one, so the RIB must never hand a tx session an id-less NLRI.
 - `propagate_add_path` runs first in `recompute_and_propagate`, before the "best unchanged" return (a non-best path can change the top N), and beside `fan_out` in `aggregate.rs`.
-- A path keeps its id while selected; an entering path takes the lowest freed id, else `add_path_next_id` (monotonic per (peer, prefix), `ponytail:` never recycled). Step 10 compares `(peer, path id)`.
+- A path keeps its id while selected; an entering path takes the lowest freed id, else `add_path_next_id` (monotonic per (peer, prefix), never recycled). Step 10 compares `(peer, path id)`.
 
 ## Communities
 
@@ -114,7 +114,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162).
 - `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); best path does not apply (RFC 7432 §15 aside). `evpn_import_policy` (#502, `None` = accept all) gates Type-1/2/3/5 in `learn_evpn` before mobility (reject = withdraw, Type-4 exempt).
 - MAC mobility has **no withdraw**: a sequence number only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; otherwise PEs on one segment bump each other into a frozen duplicate.
-- Flowspec: internals page.
+- Flowspec, VPN (SAFI 128 never consults ADD-PATH): internals page.
 - `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`).
 
 ## Backup path, multipath (#70)
@@ -140,7 +140,7 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE): run `tools/bench-bgp.s
 | `main.rs`, `reconcile.rs` | Startup, resync on diffs + 10s tick (`classify_vrf`, `restart_check`) |
 | `session.rs`, `tcp.rs`, `collision.rs` | `SessionManager`, `diff_peers`, `ao_delta`; VRF-scoped sockets; `PeerSlot` |
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
-| `message.rs`, `evpn.rs`, `flowspec*.rs`, `as_path.rs` | Wire codecs (`BgpCodec`) |
+| `message.rs`, `evpn.rs`, `flowspec*.rs`, `vpn/`, `as_path.rs` | Wire codecs (`BgpCodec`) |
 | `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `shared` (`SharedRib`), `tests/` |
 | `rib_push_client.rs`, `fdb_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); a `nos-ribd` restart goes unnoticed until the next change |
 | `rib_client.rs`, `interface_client.rs` | One-shot queries via `nos_daemon::ipc::one_shot` |

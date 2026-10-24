@@ -84,6 +84,7 @@ fn flow_update(
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![rule()],
+        vpn: Vec::new(),
     }];
     u
 }
@@ -207,6 +208,7 @@ fn a_withdrawn_flow_is_withdrawn_downstream() {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![rule()],
+        vpn: Vec::new(),
     }];
     feed(&mut rib, SRC, false, "2.2.2.1", &u);
     assert!(withdrawn(&mut ebgp));
