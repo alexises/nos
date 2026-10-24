@@ -36,7 +36,7 @@ impl RibDriver for NoopRibDriver {
         debug!(
             table = %table_name,
             prefixes = best_routes.len(),
-            labelled = best_routes.values().filter(|e| !e.mpls_labels.is_empty()).count(),
+            labelled = best_routes.values().flat_map(|e| &e.next_hops).filter(|h| !h.labels.is_empty()).count(),
             "would install routes into a kernel VRF/table (noop driver — no OS effect)"
         );
         Ok(())

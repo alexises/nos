@@ -4455,11 +4455,14 @@
             "type": "array"
           },
           "mpls_labels": {
-            "description": "The MPLS label stack a `Vpn` candidate is forwarded with (RFC 4364\nsection 4.3.4), outermost first; empty for every other source.",
+            "description": "The MPLS label stack each of `gateways` is forwarded with (RFC 4364\nsection 4.3.4), outermost first, in `gateways` order; every stack is\nempty for a source other than `Vpn`.",
             "items": {
-              "format": "int32",
-              "minimum": 0,
-              "type": "integer"
+              "items": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
             },
             "type": "array"
           },
@@ -4468,15 +4471,11 @@
             "description": "Protocol that produced the route."
           },
           "vpn": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/VpnRouteInfo",
-                "description": "Set on a `Vpn` candidate."
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "description": "The PE and RD each of `gateways` came from, in `gateways` order, on a\n`Vpn` candidate; empty otherwise.",
+            "items": {
+              "$ref": "#/components/schemas/VpnRouteInfo"
+            },
+            "type": "array"
           }
         },
         "required": [

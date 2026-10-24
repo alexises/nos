@@ -5,10 +5,14 @@
 //! it counts toward `COVERAGE_MIN`.
 
 use std::io::ErrorKind;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+use netlink_packet_core::{Emitable as _, NlaBuffer, ParseableParametrized as _};
+use nos_proto::NextHop;
 use rtnetlink::packet_route::route::{
-    MplsLabel, RouteAddress, RouteAttribute, RouteLwTunnelEncap, RouteMessage, RouteMplsIpTunnel,
+    MplsLabel, RouteAddress, RouteAttribute, RouteLwEnCapType, RouteLwTunnelEncap, RouteMessage,
+    RouteMplsIpTunnel,
 };
 use rtnetlink::RouteMessageBuilder;
 
@@ -77,21 +81,73 @@ pub fn pop_route_of(route: &RouteMessage) -> Option<(u32, Option<u32>)> {
     Some((label, oif))
 }
 
-/// The labels an IP route pushes (`RTA_ENCAP` of type MPLS), empty without.
-pub fn labels_of(route: &RouteMessage) -> Vec<u32> {
-    route
-        .attributes
+/// The labels a route or one of its `RTA_MULTIPATH` next hops pushes
+/// (`RTA_ENCAP` of type MPLS in `attrs`), empty without. `netlink-packet-route`
+/// decodes a next hop's encap with the route-level `RTA_ENCAP_TYPE`, which a
+/// multipath route has none of, so a dumped hop's MPLS encap arrives as an
+/// opaque `Other` attribute: it is re-emitted and decoded as MPLS here.
+pub fn labels_of(attrs: &[RouteAttribute]) -> Vec<u32> {
+    let mpls = attrs
+        .iter()
+        .any(|a| matches!(a, RouteAttribute::EncapType(RouteLwEnCapType::Mpls)));
+    attrs
         .iter()
         .find_map(|a| match a {
             RouteAttribute::Encap(encaps) => encaps.iter().find_map(|e| match e {
-                RouteLwTunnelEncap::Mpls(RouteMplsIpTunnel::Destination(l)) => {
-                    Some(l.iter().map(|l| l.label).collect())
+                RouteLwTunnelEncap::Mpls(RouteMplsIpTunnel::Destination(l)) => Some(l.clone()),
+                RouteLwTunnelEncap::Other(nla) if mpls => {
+                    let mut buf = vec![0; nla.buffer_len()];
+                    nla.emit(&mut buf);
+                    match RouteLwTunnelEncap::parse_with_param(
+                        &NlaBuffer::new(&buf),
+                        RouteLwEnCapType::Mpls,
+                    ) {
+                        Ok(RouteLwTunnelEncap::Mpls(RouteMplsIpTunnel::Destination(l))) => Some(l),
+                        _ => None,
+                    }
                 }
                 _ => None,
             }),
             _ => None,
         })
+        .map(|l| l.iter().map(|l| l.label).collect())
         .unwrap_or_default()
+}
+
+/// The `RTA_ENCAP_TYPE` + `RTA_ENCAP` pushing `labels`, for one
+/// `RTA_MULTIPATH` next hop (`RouteNextHopBuilder` has no MPLS helper; a
+/// single-hop route uses `RouteMessageBuilder::output_mpls`). Empty for none.
+pub fn hop_encap(labels: &[u32]) -> Vec<RouteAttribute> {
+    if labels.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        RouteAttribute::EncapType(RouteLwEnCapType::Mpls),
+        RouteAttribute::Encap(vec![RouteLwTunnelEncap::Mpls(
+            RouteMplsIpTunnel::Destination(stack(labels)),
+        )]),
+    ]
+}
+
+/// A labelled route's hops, each given the device it leaves `onlink` over
+/// (`devs`, in hop order: its own ifindex, or the underlay lookup's), and
+/// the gateways of the hops dropped for having none.
+pub fn onlink_hops(hops: Vec<NextHop>, devs: &[Option<u32>]) -> (Vec<NextHop>, Vec<IpAddr>) {
+    let mut unresolved = Vec::new();
+    let kept = hops
+        .into_iter()
+        .zip(devs)
+        .filter_map(|(mut hop, dev)| {
+            if let Some(dev) = dev {
+                hop.interface_id = Some(*dev);
+                Some(hop)
+            } else {
+                unresolved.push(hop.gateway);
+                None
+            }
+        })
+        .collect();
+    (kept, unresolved)
 }
 
 /// The `net.mpls` sysctls, under `root` (`/proc/sys`, a tempdir in tests).
@@ -193,7 +249,7 @@ mod tests {
         let m = pop_route_msg(1000, 7);
         assert_eq!(m.header.destination_prefix_length, 20);
         assert_eq!(pop_route_of(&m), Some((1000, Some(7))));
-        assert_eq!(labels_of(&m), [] as [u32; 0]);
+        assert_eq!(labels_of(&m.attributes), [] as [u32; 0]);
         assert_eq!(pop_route_of(&RouteMessage::default()), None);
     }
 
@@ -210,8 +266,61 @@ mod tests {
                 .unwrap()
                 .output_mpls(stack(&[2000]))
                 .build();
-            assert_eq!(labels_of(&m), vec![2000]);
+            assert_eq!(labels_of(&m.attributes), vec![2000]);
         }
+    }
+
+    /// A next hop's encap read back both ways: as built, and as a dump
+    /// decodes it without a route-level encap type (`Other`).
+    #[test]
+    fn hop_encap_reads_back_typed_and_opaque() {
+        assert_eq!(
+            hop_encap(&[]),
+            [] as [netlink_packet_route::route::RouteAttribute; 0]
+        );
+        let attrs = hop_encap(&[300, 16]);
+        assert_eq!(labels_of(&attrs), vec![300, 16]);
+        let RouteAttribute::Encap(encaps) = &attrs[1] else {
+            panic!("{attrs:?}");
+        };
+        let mut buf = vec![0; encaps[0].buffer_len()];
+        encaps[0].emit(&mut buf);
+        let opaque =
+            RouteLwTunnelEncap::parse_with_param(&NlaBuffer::new(&buf), RouteLwEnCapType::None)
+                .unwrap();
+        assert!(matches!(opaque, RouteLwTunnelEncap::Other(_)));
+        let dumped = vec![
+            attrs[0].clone(),
+            RouteAttribute::Encap(vec![opaque.clone()]),
+        ];
+        assert_eq!(labels_of(&dumped), vec![300, 16]);
+        // Without RTA_ENCAP_TYPE=MPLS an opaque encap is not ours to read.
+        assert_eq!(
+            labels_of(&[RouteAttribute::Encap(vec![opaque])]),
+            [] as [u32; 0]
+        );
+    }
+
+    #[test]
+    fn unresolved_hops_are_dropped_and_named() {
+        let hop = |gw: &str, labels: Vec<u32>| NextHop {
+            gateway: gw.parse().unwrap(),
+            interface_id: None,
+            labels,
+        };
+        let hops = vec![hop("10.0.0.2", vec![100]), hop("10.0.0.3", vec![200])];
+        let (kept, unresolved) = onlink_hops(hops.clone(), &[None, Some(4)]);
+        assert_eq!(unresolved, vec!["10.0.0.2".parse::<IpAddr>().unwrap()]);
+        assert_eq!(
+            kept,
+            vec![NextHop {
+                interface_id: Some(4),
+                ..hops[1].clone()
+            }]
+        );
+        let (kept, unresolved) = onlink_hops(hops, &[None, None]);
+        assert_eq!(kept, [] as [nos_proto::NextHop; 0]);
+        assert_eq!(unresolved.len(), 2);
     }
 
     fn tree(platform: &str, inputs: &[(&str, &str)]) -> tempfile::TempDir {

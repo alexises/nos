@@ -39,6 +39,32 @@ pub struct VpnRouteInfo {
     pub rd: String,
 }
 
+/// One next hop of a route: a gateway, the local kernel interface it leaves
+/// over when known, and the MPLS label stack pushed toward it (outermost
+/// first; empty for a plain IP hop). `nos-ribd`'s `RibEntry` and its Linux
+/// driver carry one per hop, so two hops to the same gateway with different
+/// labels stay distinct (#594).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NextHop {
+    /// The gateway.
+    pub gateway: IpAddr,
+    /// The ifindex it is reachable over, when the source knows it.
+    pub interface_id: Option<u32>,
+    /// The label stack pushed toward `gateway`.
+    pub labels: Vec<u32>,
+}
+
+impl From<(IpAddr, Option<u32>)> for NextHop {
+    /// An unlabelled hop.
+    fn from((gateway, interface_id): (IpAddr, Option<u32>)) -> Self {
+        Self {
+            gateway,
+            interface_id,
+            labels: Vec::new(),
+        }
+    }
+}
+
 /// What an `Evpn`-sourced candidate is reached through: the remote VTEP (its
 /// one gateway), the remote PE's Router's MAC and the L3 VNI.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -78,13 +104,15 @@ pub struct RouteEntry {
     /// (IP-in-IP) to, not a neighbor.
     #[serde(default)]
     pub backup_tunnel: bool,
-    /// The MPLS label stack a `Vpn` candidate is forwarded with (RFC 4364
-    /// section 4.3.4), outermost first; empty for every other source.
+    /// The MPLS label stack each of `gateways` is forwarded with (RFC 4364
+    /// section 4.3.4), outermost first, in `gateways` order; every stack is
+    /// empty for a source other than `Vpn`.
     #[serde(default)]
-    pub mpls_labels: Vec<u32>,
-    /// Set on a `Vpn` candidate.
+    pub mpls_labels: Vec<Vec<u32>>,
+    /// The PE and RD each of `gateways` came from, in `gateways` order, on a
+    /// `Vpn` candidate; empty otherwise.
     #[serde(default)]
-    pub vpn: Option<VpnRouteInfo>,
+    pub vpn: Vec<VpnRouteInfo>,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -194,20 +222,31 @@ pub enum OspfRouteUpdate {
     Remove(IpNet),
 }
 
+/// One path of a `VpnRoute`: a received VPN route's PE, RD and label stack,
+/// with the PE resolved in the underlay table (`ResolveNextHop`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnPath {
+    /// The remote PE: the VPN route's BGP next hop.
+    pub pe_next_hop: IpAddr,
+    /// `asn:nn` or `a.b.c.d:nn`.
+    pub rd: String,
+    /// The PE's gateway in the underlay table.
+    pub gateway: IpAddr,
+    /// The ifindex `gateway` leaves over, when known.
+    pub interface_id: Option<u32>,
+    /// The received label stack, outermost first.
+    pub labels: Vec<u32>,
+}
+
 /// One VPN route imported into a customer table by the underlay `nos-bgpd`
-/// (RFC 4364 section 4.3.2): the best path per prefix among every received
-/// VPN route whose Route Targets match the table's import set, RD stripped.
+/// (RFC 4364 section 4.3.2), RD stripped: every selected path among the
+/// received VPN routes whose Route Targets match the table's import set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnRoute {
     /// The customer prefix.
     pub prefix: IpNet,
-    /// The PE next hop resolved in the underlay table (`ResolveNextHop`):
-    /// gateway and, when known, the ifindex it leaves over. Never empty.
-    pub next_hops: Vec<(IpAddr, Option<u32>)>,
-    /// The received label stack.
-    pub mpls_labels: Vec<u32>,
-    /// The PE and RD the route came from.
-    pub vpn: VpnRouteInfo,
+    /// One next hop each, never empty, sorted by PE then labels.
+    pub paths: Vec<VpnPath>,
 }
 
 /// `PushVpnRoutes`' payload: `Full` on connect, then `Add`/`Remove`, like
