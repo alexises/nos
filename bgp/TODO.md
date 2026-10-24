@@ -54,7 +54,7 @@ of re-auditing the codebase. Update this file as items are implemented.
   on SAFI 128 and a per-CE Site of Origin (one per VRF today). A reflected
   VPN best path has no next-hop feasibility check, is not re-run on an IGP
   cost change, and reflected routes keep their next hop (next-hop-self needs
-  a local label); one label per route, single best path per VRF prefix.
+  a local label); one label per route.
 - **EVPN** (AFI 25 / SAFI 70): received routes are stored per peer and
   pushed to `nos-fdbd`; local MACs pushed by `nos-fdbd` are originated as
   Type-2/Type-3 (see `docs/protocols/bgp-internals.md`'s "EVPN" and `docs/protocols/evpn-vxlan.md` "Implementation notes"). Still

@@ -207,18 +207,8 @@ pub(super) fn multipath_next_hops(
     let Some(best_hop) = best.next_hop else {
         return Vec::new();
     };
-    let mut ties: Vec<&Candidate> = candidates
-        .iter()
-        .filter(|(r, _)| {
-            r.next_hop.is_some()
-                && !matches!(r.origin, RouteOrigin::Local)
-                && neighboring_as(r) == neighboring_as(best)
-                && multipath_cmp(r, best, igp).is_eq()
-        })
-        .collect();
-    ties.sort_by(|a, b| decision_cmp(b, a, igp));
     let mut hops = vec![best_hop];
-    for (r, _) in ties {
+    for r in multipath_ties(candidates, best, igp, usize::MAX) {
         if hops.len() >= max {
             break;
         }
@@ -229,6 +219,30 @@ pub(super) fn multipath_next_hops(
     }
     hops.sort_unstable();
     hops
+}
+
+/// The candidates eligible to share `best`'s multipath set (decision order,
+/// not deduplicated by next hop, so a caller may keep two paths to one next
+/// hop that differ otherwise): peer-learned, tying on steps 1-7 and from the
+/// same neighbouring AS. `best` itself is among them, first (it wins every
+/// decision). Shared by unicast and VPN import.
+pub(super) fn multipath_ties<'a>(
+    candidates: &'a [Candidate],
+    best: &RibRoute,
+    igp: &HashMap<IpNet, u32>,
+    max: usize,
+) -> Vec<&'a RibRoute> {
+    let mut ties: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|(r, _)| {
+            r.next_hop.is_some()
+                && !matches!(r.origin, RouteOrigin::Local)
+                && neighboring_as(r) == neighboring_as(best)
+                && multipath_cmp(r, best, igp).is_eq()
+        })
+        .collect();
+    ties.sort_by(|a, b| decision_cmp(b, a, igp));
+    ties.into_iter().map(|(r, _)| r).take(max).collect()
 }
 
 /// RFC 9234 §5 ingress rules 1 and 2: is a route with `otc` a leak from a

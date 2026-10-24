@@ -3742,6 +3742,136 @@ pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// router-c as `vpn-multipath` runs it: in router-b's AS, so a sees the same
+/// neighbouring AS on both paths (the multipath eligibility rule).
+const C_IN_AS_B: Id = Id { asn: ASN_B, ..C };
+
+/// `vpn-multipath` (#595): VPN import multipath for real. router-a imports
+/// `L3_SUBNET_B` into `VPN_TABLE` from router-b and router-c (one AS, one RT,
+/// two RDs, labels 3001 and 3002) with `maximum-paths 2`: its `nos-ribd`
+/// installs ONE labelled route with both next hops and both labels, and the
+/// CE behind a pings the host behind b and c. router-c then unsets `vpn`: the
+/// route is replaced by one with router-b's hop alone (the driver removes the
+/// two-hop route and installs the new one in the same pass), and the ping
+/// still passes.
+pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
+    const LABEL_B: &str = "3001";
+    const LABEL_C: &str = "3002";
+    const RD_C: &str = "65000:300";
+    w.start(A, Some(dp_base(A)), &[]).await?;
+    w.start(B, Some(dp_base(B)), &[]).await?;
+    w.start(C_IN_AS_B, Some(dp_base(C_IN_AS_B)), &[]).await?;
+    mpls_ready(w, &["router-a", "router-b", "router-c"]).await?;
+
+    log("a CE host behind router-a, a host behind both router-b and router-c");
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:bookworm-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    for net in [NET_L3_A, NET_L3_B] {
+        if !w.dock.network_exists(net).await {
+            let subnet = if net == NET_L3_A {
+                L3_SUBNET_A
+            } else {
+                L3_SUBNET_B
+            };
+            w.dock.network_create(net, &[subnet], false).await?;
+        }
+    }
+    let gw_c = "198.18.2.3";
+    w.dock
+        .network_connect_ip(NET_L3_A, "router-a", L3_GW_A)
+        .await?;
+    w.dock
+        .network_connect_ip(NET_L3_B, "router-b", L3_GW_B)
+        .await?;
+    w.dock
+        .network_connect_ip(NET_L3_B, "router-c", gw_c)
+        .await?;
+    for (host, net, ip, other, gw) in [
+        (CE_HOST, NET_L3_A, L3_HOST_IP_A, L3_SUBNET_B, L3_GW_A),
+        (H_HOST, NET_L3_B, L3_HOST_IP_B, L3_SUBNET_A, L3_GW_B),
+    ] {
+        w.dock.start_host(host, HOST_IMAGE, net).await?;
+        host_sh(
+            w,
+            host,
+            &format!(
+                "set -e; ip addr flush dev eth0; ip addr add {ip}/24 dev eth0; \
+                 ip route add {other} via {gw}"
+            ),
+        )
+        .await?;
+    }
+
+    log("router-a peers router-b and router-c (one AS) with maximum-paths 2; all three export their VRF");
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let pe_a = |group: &str, peer: &str| {
+        let mut flags = dp_pe(
+            A,
+            VPN_RD_A,
+            &format!("{L3_GW_A}/24"),
+            &["--maximum-paths", "2"],
+        );
+        let at = flags
+            .iter()
+            .position(|x| x == "--peer")
+            .expect("base flags");
+        flags[at + 1] = peer.to_string();
+        flags.extend(strings(&["--peer-group", group]));
+        flags
+    };
+    a.provision_flags(&pe_a("pg1", IP_B)).await?;
+    a.provision_flags(&pe_a("pg-c", IP_C)).await?;
+    b.provision_flags(&dp_pe(
+        B,
+        VPN_RD_B,
+        &format!("{L3_GW_B}/24"),
+        &["--vpn-label", LABEL_B],
+    ))
+    .await?;
+    c.provision_flags(&dp_pe(
+        C_IN_AS_B,
+        RD_C,
+        &format!("{gw_c}/24"),
+        &["--vpn-label", LABEL_C],
+    ))
+    .await?;
+
+    log("router-a installs ONE labelled route with both next hops and both labels");
+    let both = format!(
+        "installed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{LABEL_B}\\], \\[{LABEL_C}\\]\\] gateway={IP_B},{IP_C} interfaces="
+    );
+    a.wait(&both).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+
+    log("router-c unsets vpn: the route shrinks to router-b's hop");
+    let single = format!(
+        "installed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{LABEL_B}\\]\\] gateway={IP_B} interfaces="
+    );
+    let removed = format!(
+        "removed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{LABEL_B}\\], \\[{LABEL_C}\\]\\]"
+    );
+    let (base_single, base_removed) = (a.count(&single), a.count(&removed));
+    let mut clear = dp_base(C_IN_AS_B);
+    clear.extend(strings(&["--vpn-table", VPN_TABLE, "--vpn-clear"]));
+    c.provision_flags(&clear).await?;
+    a.wait_new(&single, base_single, 60).await?;
+    a.wait_new(&removed, base_removed, 10).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+
+    w.dock.network_disconnect(NET_L3_B, "router-c").await;
+    vpn_dp_teardown(w).await;
+    w.remove(C).await;
+    Ok(())
+}
+
 /// The `Log` pattern of a label's AF_MPLS pop route install.
 fn dp_pop(label: u32) -> String {
     format!("installed mpls pop route table={VPN_TABLE} vrf=.* label={label}")

@@ -115,7 +115,7 @@ pub use flowspec_out::AdvertisedFlowspec;
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
 pub use shared::{RibGuard, SharedRib};
-pub use vpn_import::{SooSkip, VpnImport, VpnImports};
+pub use vpn_import::{SooSkip, VpnImport, VpnImportPath, VpnImports};
 pub use vpn_out::AdvertisedVpn;
 
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};

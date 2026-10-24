@@ -398,7 +398,7 @@ Limits:
 
 - One VPN label per route (no label stacks, so no LDP or segment-routing transport).
 - No RT-constrained distribution (RFC 4684), no inter-AS options (RFC 4364 section 10), no carrier's carrier, no ADD-PATH on SAFI 128, no per-prefix labels, one Site of Origin per table (not per CE).
-- One path per VRF prefix: `nos-bgpd` does not load-balance VPN routes yet (#595).
+- Load-balancing a VPN route over several PEs: see [Multipath](#multipath).
 
 ### Flowspec (RFC 8955, RFC 8956)
 
@@ -556,6 +556,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '4' $B/v1/transactions/t9/bgp-i
 
 - A path joins the best one only if it ties with it on every step of [Best path](#best-path) up to the IGP cost to the next hop, and comes from the same neighbouring AS (the first AS in its path). Paths with equal-length AS paths from different ASes do not join.
 - Ties are picked in best-path order (oldest eBGP route, BGP identifier, peer address), up to `n`. Two paths with the same next hop count once.
+- The same knob load-balances VPN routes imported into a VRF (#595): the paths tying on the rules above join the best one whatever their RD, up to `n`, and `nos-ribd` installs one route with a labelled next hop per path (each keeps its own VPN label). The neighbouring AS must match, so two PEs behind one eBGP neighbour AS qualify, a PE in another AS does not. The same PE under two RDs with different labels counts twice; the same PE and label under two RDs once. A PE that stops resolving or becomes infeasible leaves the set and the route stays on the others. Which VPN path is re-advertised is unchanged (the single best).
 - Only the best path is advertised to peers. Multipath changes what this router installs, not what it sends.
 - The backup route (see [Best path](#best-path)) is the best path whose next hop is none of the installed ones.
 - Redistributed routes never join: they win best path on their own and are not installed.
