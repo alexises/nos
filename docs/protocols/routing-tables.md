@@ -287,7 +287,20 @@ Connected routes are listed in `show route` and used by BGP to check next hops, 
 - A static, BGP or OSPF route for a connected prefix is still listed in `show route`, below the connected route, but it is not installed.
 - If the address is removed, the connected route goes away and the next candidate is installed.
 
-`vpn` routes are VPN routes the `vpn bgp-instance` imported into this table by Route Target ([BGP, Import VPN routes into a VRF](bgp.md#import-vpn-routes-into-a-vrf)). They are listed in `show route` but not installed for forwarding yet (#581); a `vpn` winner leaves its prefix uninstalled.
+`vpn` routes are VPN routes the `vpn bgp-instance` imported into this table by Route Target ([BGP, Import VPN routes into a VRF](bgp.md#import-vpn-routes-into-a-vrf)). A `vpn` winner is installed as an MPLS route: it pushes the received label and leaves over the underlay interface toward the PE. See "Prepare a router as an L3VPN PE" below.
+
+### Prepare a router as an L3VPN PE
+
+NOS programs the MPLS routes itself; the host must provide the rest.
+
+- Load the kernel modules `mpls_router` and `mpls_iptunnel` on the host. Without `mpls_router`, `nos-ribd` logs `MPLS is not available` and the table exports nothing (`mpls label not programmed, vpn export withheld`).
+- `net.mpls.platform_labels` must be above the largest label in use (allocated labels start at 1000). NOS raises it when it can, but never lowers it.
+- `net.mpls.conf.<interface>.input=1` on every interface facing another PE (the interfaces of the `vpn bgp-instance`'s table). NOS sets it when it can and warns once per interface when it cannot. Never set it on a CE-facing interface: a CE could then inject labelled packets into any VRF.
+- `net.ipv4.ip_forward=1` (and `net.ipv6.conf.all.forwarding=1` for IPv6 customers). NOS does not set it.
+- In Docker, `/proc/sys` is read-only: set these with `--sysctl` (or `sysctls:` in compose), since NOS can only read them there.
+- The PEs must be directly connected or reach each other through the underlay IGP. Only the VPN label is pushed (no transport label), so the link to the next PE must be MPLS-enabled end to end.
+- If pings die after the label is popped, check `rp_filter` on the CE-facing interface: strict reverse-path filtering (`1`) drops traffic whose source is reached through the core. Use loose (`2`) or off.
+- Check it: `ip -f mpls route` lists `<label> dev <vrf device>`, and `ip route show vrf <vrf device>` lists the remote CE subnet as `encap mpls <label> via <PE> dev <core interface> onlink`.
 
 ### What a routing table needs
 

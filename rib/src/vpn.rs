@@ -19,6 +19,8 @@ pub struct VrfExport {
     pub export: Vec<u64>,
     /// The underlay instance, `vpn.bgp_instance` (never `table.bgp_instance`).
     pub bgp_instance: String,
+    /// That instance's routing table: where MPLS arrives and leaves.
+    pub underlay: Option<String>,
     pub label: u32,
 }
 
@@ -61,6 +63,11 @@ pub fn resolve<E>(
             .filter_map(|r| parse_rt(r))
             .collect(),
         bgp_instance: bgp_instance.clone(),
+        underlay: cfg
+            .bgp_instances
+            .iter()
+            .find(|i| &i.name == bgp_instance)
+            .and_then(|i| i.routing_table.clone()),
         label,
     }))
 }
@@ -126,6 +133,7 @@ mod tests {
         assert_eq!(got.rd, parse_rd("65000:1").unwrap());
         assert_eq!(got.export, vec![parse_rt("65000:1").unwrap()]);
         assert_eq!(got.bgp_instance, "core");
+        assert_eq!(got.underlay, None, "no such instance in the config");
         let got: R = resolve(&cfg(None, Some("65000:1")), "red", |reserved| {
             assert!(reserved.contains(&1000));
             Ok(1001)
@@ -173,6 +181,7 @@ mod tests {
             rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
             export: vec![7],
             bgp_instance: "core".into(),
+            underlay: None,
             label: 1000,
         };
         let mut out = originated(&best, &vrf);

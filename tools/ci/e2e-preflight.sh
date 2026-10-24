@@ -11,16 +11,18 @@ IMAGE=${IMAGE:-nos:local}
 SUDO=
 [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
-# On ubuntu-24.04 azure runners vrf.ko ships in linux-modules-extra, which
-# the runner image doesn't install.
-if ! $SUDO modprobe vrf 2>/dev/null; then
+# On ubuntu-24.04 azure runners vrf.ko (and the MPLS modules) ship in
+# linux-modules-extra, which the runner image doesn't install.
+if ! $SUDO modprobe -a vrf mpls_router mpls_iptunnel 2>/dev/null; then
     $SUDO apt-get install -y "linux-modules-extra-$(uname -r)" || true
 fi
 # vrf..ipip: rtnetlink drivers. cls_flower..sch_ingress: EVPN local bias
 # (nos-fdbd, tc: flower/skbedit mark, fw/gact drop, clsact) and the STP BPDU
 # trap (nos-interfaced: flower + gact drop on ingress). act_sample/psample:
 # ACL `log` (nos-acld, #544); the acl phase's log step cannot pass without them.
-mods="vrf dummy bonding vxlan 8021q bridge ipip cls_flower cls_fw act_skbedit act_gact sch_ingress act_sample psample"
+# mpls_router/mpls_iptunnel: the L3VPN data plane (nos-ribd, vpn-dataplane);
+# /proc/sys/net/mpls exists only in netns created after mpls_router loads.
+mods="vrf dummy bonding vxlan 8021q bridge ipip cls_flower cls_fw act_skbedit act_gact sch_ingress act_sample psample mpls_router mpls_iptunnel"
 # -a: without it every name after the first is a parameter of the first module.
 # shellcheck disable=SC2086
 $SUDO modprobe -a $mods || true
@@ -36,7 +38,7 @@ if [ -n "$missing" ]; then
     echo "kernel modules missing on $(uname -r):$missing" >&2
     exit 1
 fi
-lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge|ipip|cls_|act_|sch_ingress|psample' || true
+lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge|ipip|cls_|act_|sch_ingress|psample|mpls' || true
 uname -r
 
 # `docker cp` to a host path writes as the caller, who can't set the

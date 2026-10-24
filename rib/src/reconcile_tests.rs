@@ -31,6 +31,9 @@ struct Rec {
     l3: Mutex<Vec<Option<u32>>>,
     teardowns: AtomicUsize,
     rmac: Mutex<Option<Mac>>,
+    /// Each `sync_mpls`: label, underlay, and how many `apply`s preceded it.
+    mpls: Mutex<Vec<MplsCall>>,
+    fail_mpls: AtomicBool,
     fail_apply: AtomicBool,
     fail_tunnel: AtomicBool,
     fail_l3: AtomicBool,
@@ -42,6 +45,9 @@ impl Rec {
         self.applies.lock().unwrap().last().cloned()
     }
 }
+
+/// One `sync_mpls`: label, underlay, and how many `apply`s preceded it.
+type MplsCall = (Option<u32>, Option<String>, usize);
 
 fn err() -> DriverError {
     DriverError::Other("boom".into())
@@ -98,6 +104,22 @@ impl RibDriver for Rec {
             return Err(err());
         }
         Ok(*self.rmac.lock().unwrap())
+    }
+    async fn sync_mpls(
+        &self,
+        _table: &str,
+        m: Option<&crate::driver::Mpls>,
+    ) -> Result<(), DriverError> {
+        let applies = self.applies.lock().unwrap().len();
+        self.mpls.lock().unwrap().push((
+            m.map(|m| m.label),
+            m.and_then(|m| m.underlay.clone()),
+            applies,
+        ));
+        if self.fail_mpls.load(Ordering::SeqCst) {
+            return Err(err());
+        }
+        Ok(())
     }
 }
 
@@ -518,6 +540,44 @@ async fn vpn_set_then_unset_exports_then_withdraws_with_a_stable_label() {
     e.configd().set_config(vpn_cfg(Some(77)));
     e.resync().await;
     assert!(e.vpn_rx.borrow().routes.iter().all(|r| r.labels == [77]));
+}
+
+/// #581: the label is programmed (with its underlay) before the routes are
+/// applied, a label change reaches the driver, and `vpn` unset removes it.
+#[tokio::test]
+async fn the_mpls_label_is_synced_before_the_routes_and_removed_with_vpn() {
+    let mut cfg = vpn_cfg(None);
+    cfg.bgp_instances = vec![bgp_instance("rt1")];
+    cfg.bgp_instances[0].name = "core".into();
+    let e = Env::ready(cfg.clone());
+    e.resync().await;
+    let rt1 = Some("rt1".to_string());
+    assert_eq!(*e.rec.mpls.lock().unwrap(), [(Some(1000), rt1.clone(), 0)]);
+    assert_eq!(e.rec.applies.lock().unwrap().len(), 1);
+    cfg.routing_tables[0].vpn.label = Some(2000);
+    e.configd().set_config(cfg);
+    e.resync().await;
+    assert_eq!(e.rec.mpls.lock().unwrap()[1], (Some(2000), rt1, 1));
+    assert!(e.vpn_rx.borrow().routes.iter().all(|r| r.labels == [2000]));
+    e.configd().set_config(base_cfg());
+    e.resync().await;
+    assert_eq!(e.rec.mpls.lock().unwrap()[2], (None, None, 2));
+}
+
+/// #581 decision 1: a label the kernel cannot pop is not advertised.
+#[tokio::test]
+async fn an_unprogrammable_label_withholds_the_export() {
+    let e = Env::ready(vpn_cfg(None));
+    e.rec.fail_mpls.store(true, Ordering::SeqCst);
+    e.resync().await;
+    assert_eq!(*e.vpn_rx.borrow(), VpnTarget::default());
+    assert_eq!(e.rib.read().await.vpn_label, Some(1000), "still shown");
+    e.rec.fail_mpls.store(false, Ordering::SeqCst);
+    e.resync().await;
+    assert!(
+        !e.vpn_rx.borrow().routes.is_empty(),
+        "exported once programmed"
+    );
 }
 
 #[tokio::test]

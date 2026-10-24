@@ -3549,6 +3549,191 @@ async fn vrf_routes(a: &Router) -> anyhow::Result<String> {
         .await
 }
 
+/// `vpn-dataplane` (#581): RFC 4364 forwarding for real. router-a and
+/// router-b are two PEs over one VPNv4 session on the shared network (the
+/// MPLS core link, PEs adjacent, so the VPN label is the only one), each with
+/// a CE host on its own network behind `eth1`, in `VPN_TABLE`. Each `nos-ribd`
+/// installs its label's AF_MPLS pop route into the VRF and the other PE's
+/// subnet as a labelled route (`encap mpls <label> via <PE> dev eth0
+/// onlink`); the CEs ping each other across the MPLS link but not the core.
+/// A label change re-programs both sides; unsetting `vpn` removes them.
+pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
+    let base = |id: Id| {
+        let mut f = id.base_flags();
+        f.push("--vpn".into());
+        f
+    };
+    w.start(A, Some(base(A)), &[]).await?;
+    w.start(B, Some(base(B)), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    b.established().await?;
+
+    // The operator's part (docker mounts /proc/sys read-only, so nos-ribd only
+    // reads these): label space, MPLS input on the core link, forwarding.
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    for router in ["router-a", "router-b"] {
+        netns(
+            w,
+            router,
+            &[
+                "sh",
+                "-c",
+                "echo 1048575 > /proc/sys/net/mpls/platform_labels; \
+                 echo 1 > /proc/sys/net/mpls/conf/eth0/input; \
+                 echo 1 > /proc/sys/net/ipv4/ip_forward",
+            ],
+        )
+        .await?;
+    }
+
+    log("a CE host behind each PE, each on its own network and subnet");
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:bookworm-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    let sites = [
+        (
+            NET_L3_A,
+            L3_SUBNET_A,
+            "router-a",
+            L3_GW_A,
+            CE_HOST,
+            L3_HOST_IP_A,
+            L3_SUBNET_B,
+        ),
+        (
+            NET_L3_B,
+            L3_SUBNET_B,
+            "router-b",
+            L3_GW_B,
+            H_HOST,
+            L3_HOST_IP_B,
+            L3_SUBNET_A,
+        ),
+    ];
+    for (net, subnet, router, gw, host, ip, other) in sites {
+        if !w.dock.network_exists(net).await {
+            w.dock.network_create(net, &[subnet], false).await?;
+        }
+        w.dock.network_connect_ip(net, router, gw).await?;
+        w.dock.start_host(host, HOST_IMAGE, net).await?;
+        host_sh(
+            w,
+            host,
+            &format!(
+                "set -e; ip addr flush dev eth0; ip addr add {ip}/24 dev eth0; \
+                 ip route add {other} via {gw}"
+            ),
+        )
+        .await?;
+    }
+
+    log("each PE's VRF gets vpn and its CE-facing eth1");
+    let pe = |id: Id, rd: &str, gw: &str, extra: &[&str]| {
+        let mut f = base(id);
+        f.extend(strings(&[
+            "--vpn-table",
+            VPN_TABLE,
+            "--vpn-rd",
+            rd,
+            "--vpn-rt-export",
+            VPN_RT,
+            "--vpn-rt-import",
+            VPN_RT,
+            // `--l3vni-interface` only puts eth1 in the table here: no L3 VNI.
+            "--l3vni-table",
+            VPN_TABLE,
+            "--l3vni-interface",
+            "eth1",
+            "--l3vni-address",
+            &format!("{gw}/24"),
+        ]));
+        f.extend(strings(extra));
+        f
+    };
+    a.provision_flags(&pe(A, VPN_RD_A, L3_GW_A, &[])).await?;
+    b.provision_flags(&pe(B, VPN_RD_B, L3_GW_B, &[])).await?;
+    let pop =
+        |label: u32| format!("installed mpls pop route table={VPN_TABLE} vrf=.* label={label}");
+    let labelled = |prefix: &str, label: u32, pe: &str| {
+        format!("installed labelled route prefix={prefix} labels=\\[{label}\\] gateway={pe} interface=Some(")
+    };
+    a.wait(&pop(VPN_LABEL)).await?;
+    b.wait(&pop(VPN_LABEL)).await?;
+    a.wait(&labelled(L3_SUBNET_B, VPN_LABEL, IP_B)).await?;
+    b.wait(&labelled(L3_SUBNET_A, VPN_LABEL, IP_A)).await?;
+
+    log("the CEs ping each other across the MPLS link");
+    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+
+    log("the VRF does not reach the core: a CE cannot ping router-b's underlay address");
+    host_sh(w, CE_HOST, &format!("ip route add {IP_B}/32 via {L3_GW_A}")).await?;
+    let (code, out) = w
+        .dock
+        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", IP_B])
+        .await?;
+    if code == 0 {
+        bail!("{CE_HOST} reached {IP_B} through {VPN_TABLE}: {out}");
+    }
+    host_sh(w, CE_HOST, &format!("ip route del {IP_B}/32")).await?;
+
+    log("router-b's label changes to 2000: both PEs re-program it");
+    let new_label = 2000;
+    let removed_pop =
+        |label: u32| format!("removed mpls pop route table={VPN_TABLE} vrf=.* label={label}");
+    let (base_rm, base_a) = (
+        b.count(&removed_pop(VPN_LABEL)),
+        a.count(&labelled(L3_SUBNET_B, new_label, IP_B)),
+    );
+    b.provision_flags(&pe(
+        B,
+        VPN_RD_B,
+        L3_GW_B,
+        &["--vpn-label", &new_label.to_string()],
+    ))
+    .await?;
+    b.wait_new(&removed_pop(VPN_LABEL), base_rm, 60).await?;
+    b.wait(&pop(new_label)).await?;
+    a.wait_new(&labelled(L3_SUBNET_B, new_label, IP_B), base_a, 60)
+        .await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+
+    log("router-b's vpn unset: its pop route and router-a's labelled route go");
+    let gone = format!("removed labelled route prefix={L3_SUBNET_B} labels=\\[{new_label}\\]");
+    let (base_rm, base_gone) = (b.count(&removed_pop(new_label)), a.count(&gone));
+    let clear = {
+        let mut f = base(B);
+        f.extend(strings(&["--vpn-table", VPN_TABLE, "--vpn-clear"]));
+        f
+    };
+    b.provision_flags(&clear).await?;
+    b.wait_new(&removed_pop(new_label), base_rm, 60).await?;
+    a.wait_new(&gone, base_gone, 60).await?;
+    let (code, _) = w
+        .dock
+        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", L3_HOST_IP_B])
+        .await?;
+    if code == 0 {
+        bail!("{CE_HOST} still reaches {L3_HOST_IP_B} after router-b's vpn was unset");
+    }
+
+    for host in [CE_HOST, H_HOST] {
+        w.dock.container_remove(host).await;
+    }
+    for (net, router) in [(NET_L3_A, "router-a"), (NET_L3_B, "router-b")] {
+        w.dock.network_disconnect(net, router).await;
+        w.dock.network_remove(net).await;
+    }
+    Ok(())
+}
+
 /// `vpn`'s VRF import part (#579), with GoBGP holding 10.10.0.0/24 under
 /// RDs 65001:1/65001:2 (labels 100/200) and 2001:db8:10::/48 (label 300),
 /// all with RT 65000:1; `flags(rt)` is router-a's provisioning importing `rt`.

@@ -21,6 +21,17 @@ Because `nos-interfaced` needs to enslave an interface into the VRF device that 
 
 `nos-interfaced` also owns spanning-tree port safety (#326): while `spanning-tree mode` is not `disabled`, every bridge port is written DISABLED (the only blocking state a `BR_NO_STP` bridge keeps) and gets an ingress `flower`+`gact drop` BPDU trap, until `nos-stpd` pushes a state with `SetStpPortStates`. Details and kernel findings: [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326).
 
+## MPLS (L3VPN, `nos-ribd`, #581)
+
+- `RibDriver::sync_mpls(table, Some(Mpls { label, underlay }))` installs the AF_MPLS route `<label> dev <vrf>` (pop, then an IP lookup in the VRF; one route serves IPv4 and IPv6). Each call dumps the AF_MPLS routes, deletes any other label pointing at this VRF first (a changed `vpn.label`, a previous run), then adds ours with `NLM_F_REPLACE` if missing. `None` and `teardown` delete it. Logs: `installed mpls pop route` / `removed mpls pop route` with `table`, `vrf`, `label`.
+- Labels below 16 are refused (RFC 3032 reserved), as defence in depth behind config validation.
+- Ingress: a `Vpn` route is `RTA_ENCAP_TYPE=MPLS` pushing its labels, `via <gw> dev <if> onlink` in the customer table. The gateway and ifindex come from `nos-bgpd`'s resolution in the underlay table; without an ifindex the driver asks the kernel (`RTM_GETROUTE` with `RTA_OIF` = the underlay VRF, `ip route get <gw> vrf <underlay>`). Logs: `installed labelled route` / `removed labelled route` with `prefix`, `labels`, `gateway`.
+- Sysctls are `/proc/sys` file reads and writes (`driver/mpls.rs`, no external command, #228), each read first and written only when not already enough:
+  - `net.mpls.platform_labels`: grown to the next multiple of 1024 above the label, never shrunk (that would delete routes). A failure is an `Err`, so the export is withheld.
+  - `net.mpls.conf.<if>.input=1` on every interface enslaved to the underlay VRF. A failure is a one-time `warn!` per interface (a loopback faces no PE).
+- `/proc/sys/net/mpls` missing means `mpls_router` is not loaded: the error says so. It only appears in network namespaces created after the module loads.
+- Docker mounts `/proc/sys` read-only: the driver can only read, so the operator (or the e2e helper, `vpn-dataplane`) sets the values.
+
 ## tc filters (`nos-tc`)
 
 Several daemons put filters on the same device's `clsact` qdisc, all through the `nos-tc` crate (hand-encoded netlink: `netlink-packet-route` has no `gact`/`skbedit`/`fw`):
