@@ -64,8 +64,7 @@ fn safi_of(family: AddressFamily) -> u8 {
     }
 }
 
-/// VPNv4/VPNv6 are negotiated (#577) but not yet in Graceful Restart or
-/// Route Refresh (#578): `gr.rs` filters them out.
+/// VPNv4/VPNv6 (SAFI 128).
 pub(crate) fn is_vpn(family: AddressFamily) -> bool {
     matches!(
         family,
@@ -792,9 +791,9 @@ async fn resend_loc_rib(
         );
         return;
     }
-    // A Flowspec refresh names its own family (resent by `resend_all`); any
-    // other SAFI keeps meaning unicast of its AFI.
-    let family = if rr.safi == message::SAFI_FLOWSPEC {
+    // A Flowspec or VPN refresh names its own family (resent by
+    // `resend_all`); any other SAFI keeps meaning unicast of its AFI.
+    let family = if matches!(rr.safi, message::SAFI_FLOWSPEC | message::SAFI_VPN) {
         gr::family_of(rr.afi, rr.safi)
     } else {
         family_of_afi(rr.afi)
@@ -866,16 +865,18 @@ async fn send_route_refresh(
         );
         return;
     }
-    let afis = [
-        remote.negotiated_ipv4_unicast.then_some(AFI_IPV4),
-        remote.negotiated_ipv6_unicast.then_some(AFI_IPV6),
+    let families = [
+        remote.negotiated_ipv4_unicast.then_some((AFI_IPV4, 1)),
+        remote.negotiated_ipv6_unicast.then_some((AFI_IPV6, 1)),
+        remote.negotiated_vpn[0].then_some((AFI_IPV4, message::SAFI_VPN)),
+        remote.negotiated_vpn[1].then_some((AFI_IPV6, message::SAFI_VPN)),
     ];
-    for afi in afis.into_iter().flatten() {
+    for (afi, safi) in families.into_iter().flatten() {
         let _ = writer
             .send(BgpMessage::RouteRefresh(RouteRefreshMessage {
                 afi,
                 subtype: message::REFRESH_REQUEST,
-                safi: 1,
+                safi,
             }))
             .await;
     }
@@ -1356,6 +1357,11 @@ async fn report_established(
             .filter(|(on, _)| *on)
             .map(|(_, af)| af),
     );
+    info!(
+        peer = %peer.remote_address,
+        families = ?AddressFamily::ALL.into_iter().filter(|f| negotiated_afs.contains(f)).map(|f| f.as_str()).collect::<Vec<_>>(),
+        "address families negotiated"
+    );
     // RFC 7911 §5: each direction on its own — the
     // decoder reads ids only where we receive them, the
     // encoder (and the RIB) sends them only where we send.
@@ -1833,6 +1839,53 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 }],
             })
         }
+        OutboundUpdate::AnnounceVpn(v) => {
+            let ((rd, prefix), labels) = (v.key, v.labels);
+            let next_hop = v.route.next_hop;
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                attributes: Some(advertised_attributes(
+                    v.route,
+                    Ipv4Addr::UNSPECIFIED,
+                    Vec::new(),
+                )),
+                mp_reach: vec![message::MpReachNlri {
+                    afi: afi_of_ipnet(prefix),
+                    safi: message::SAFI_VPN,
+                    next_hop,
+                    nlri: Vec::new(),
+                    nlri_path_ids: Vec::new(),
+                    evpn: Vec::new(),
+                    flowspec: Vec::new(),
+                    vpn: vec![crate::vpn::VpnNlri { labels, rd, prefix }],
+                }],
+                mp_unreach: Vec::new(),
+            })
+        }
+        OutboundUpdate::WithdrawVpn((rd, prefix)) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            attributes: None,
+            mp_reach: Vec::new(),
+            mp_unreach: vec![message::MpUnreachNlri {
+                afi: afi_of_ipnet(prefix),
+                safi: message::SAFI_VPN,
+                withdrawn: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                evpn: Vec::new(),
+                flowspec: Vec::new(),
+                vpn: vec![crate::vpn::VpnNlri {
+                    labels: Vec::new(),
+                    rd,
+                    prefix,
+                }],
+            }],
+        }),
         OutboundUpdate::Withdraw(prefix, use_mp, path_id) if use_mp => {
             let path_ids = path_id.map_or_else(Vec::new, |id| vec![id]);
             BgpMessage::Update(message::UpdateMessage {
@@ -2183,9 +2236,14 @@ mod tests {
             );
         }
         assert!(!is_unicast(vpn[0]) && !is_unicast(vpn[1]));
-        // Graceful Restart still skips them (#578).
+        // Graceful Restart lists them (#578).
         let cap = crate::gr::our_cap(60, &vpn, false, false);
-        assert_eq!(cap.families.len(), 0);
+        assert_eq!(cap.families.len(), 2);
+        assert_eq!(
+            PeerGr::from_cap(&cap).families(),
+            vpn.to_vec(),
+            "and recognises them back"
+        );
         assert_eq!(crate::gr::afi_safi(vpn[0]), (1, 128));
         assert_eq!(crate::gr::afi_safi(vpn[1]), (2, 128));
     }

@@ -3262,6 +3262,114 @@ async fn flowspec_propagation(
     b.wait_new(&learned, base, 60).await
 }
 
+/// RFC 4364/4659 VPN-IPv4/VPN-IPv6 (SAFI 128), receive side (#578). GoBGP
+/// announces labelled VPN routes to router-a, whose peer-group has
+/// `address-family vpnv4`/`vpnv6`: router-a must negotiate AFI 1/2 SAFI 128,
+/// decode the label, RD and Route Target from another implementation's
+/// encoding, keep one prefix under two RDs as two routes, serve them on
+/// `show bgp vpnv4|vpnv6` (`GET /v1/bgp/vpnv4|vpnv6`, `?rd=` filtered), and
+/// drop them on an explicit withdrawal and when the session goes away.
+pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
+    let flags: Vec<String> = evpn_flags()
+        .into_iter()
+        .map(|f| match f.as_str() {
+            "--evpn" => "--vpn".to_string(),
+            "pg-evpn" => "pg-vpn".to_string(),
+            _ => f,
+        })
+        .collect();
+    gobgp_speaker(w, flags, &["l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"], &[]).await?;
+    let a = w.a()?;
+    a.wait(&format!(
+        "address families negotiated peer={IP_G} families=\\[.*\"vpnv4\", \"vpnv6\"\\]"
+    ))
+    .await?;
+
+    // (family, prefix, label, rd); GoBGP sends an AFI 2 next hop IPv4-mapped.
+    let routes = [
+        ("vpnv4", "10.10.0.0/24", "100", "65001:1"),
+        ("vpnv4", "10.10.0.0/24", "200", "65001:2"),
+        ("vpnv6", "2001:db8:10::/48", "300", "65001:1"),
+    ];
+    let rib = |verb: &'static str, (family, prefix, label, rd): (&str, &str, &str, &str)| {
+        let mut v = vec![
+            "global", "rib", verb, "-a", family, prefix, "label", label, "rd", rd,
+        ];
+        if verb == "add" {
+            v.extend(["rt", "65000:1"]);
+        }
+        v.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    for r in routes {
+        gobgp_owned(w, rib("add", r)).await?;
+    }
+    for (family, prefix, label, rd) in routes {
+        a.wait(&format!(
+            "vpn route learned peer={IP_G} family={family} rd={rd} prefix={prefix} labels=\\[{label}\\] next_hop={IP_G}"
+        ))
+        .await?;
+    }
+
+    let show = |q: &str| {
+        let path = format!("/v1/bgp/{q}");
+        async move { a.rest_expect(Method::GET, &path, None, 200).await }
+    };
+    let body = show("vpnv4").await?;
+    for want in [
+        "\"rd\":\"65001:1\"",
+        "\"rd\":\"65001:2\"",
+        "\"labels\":[100]",
+        "\"labels\":[200]",
+        "RT:65000:1",
+        "\"best\":true",
+    ] {
+        if !body.contains(want) {
+            bail!("show bgp vpnv4 is missing {want}: {body}");
+        }
+    }
+    if body.matches("10.10.0.0/24").count() != 2 {
+        bail!("one prefix under two RDs must be two routes: {body}");
+    }
+    let body = show("vpnv4?rd=65001:2").await?;
+    if !body.contains("\"labels\":[200]") || body.contains("\"labels\":[100]") {
+        bail!("show bgp vpnv4 rd 65001:2 is not filtered: {body}");
+    }
+    let body = show("vpnv6").await?;
+    if !body.contains("2001:db8:10::/48") || !body.contains("\"labels\":[300]") {
+        bail!("show bgp vpnv6 is missing GoBGP's route: {body}");
+    }
+
+    log("withdrawing the second RD's route explicitly");
+    let withdrawn = |family: &str, rd: &str, prefix: &str| {
+        format!("vpn route withdrawn peer={IP_G} family={family} rd={rd} prefix={prefix}")
+    };
+    let gone = withdrawn("vpnv4", "65001:2", "10.10.0.0/24");
+    let base = a.count(&gone);
+    gobgp_owned(w, rib("del", routes[1])).await?;
+    a.wait_new(&gone, base, 30).await?;
+    let body = show("vpnv4").await?;
+    if body.contains("65001:2") || !body.contains("65001:1") {
+        bail!("expected only RD 65001:1 after the withdrawal: {body}");
+    }
+
+    log("removing the speaker: its remaining VPN routes must go with the session");
+    let (v4, v6) = (
+        withdrawn("vpnv4", "65001:1", "10.10.0.0/24"),
+        withdrawn("vpnv6", "65001:1", "2001:db8:10::/48"),
+    );
+    let (b4, b6) = (a.count(&v4), a.count(&v6));
+    w.dock.container_remove("router-g").await;
+    a.wait_new(&v4, b4, 60).await?;
+    a.wait_new(&v6, b6, 60).await?;
+    for q in ["vpnv4", "vpnv6"] {
+        let body = show(q).await?;
+        if body.contains("\"prefix\"") {
+            bail!("VPN routes outlived their session: {body}");
+        }
+    }
+    Ok(())
+}
+
 /// RFC 7432 EVPN, receive side. No NOS router originates EVPN yet, so an
 /// independent implementation does: GoBGP announces one MAC/IP (Type 2) and
 /// one Inclusive Multicast (Type 3) route, with a Route Target and the VXLAN

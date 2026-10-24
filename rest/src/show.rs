@@ -386,6 +386,8 @@ pub type BgpSummaryReport = Vec<InstanceReport<Vec<PeerSummary>>>;
 pub type BgpEvpnReport = Vec<InstanceReport<Vec<EvpnRouteSummary>>>;
 /// `GET /v1/bgp/flowspec`.
 pub type BgpFlowspecReport = Vec<InstanceReport<Vec<FlowspecRouteSummary>>>;
+/// `GET /v1/bgp/vpnv4` and `/v1/bgp/vpnv6`.
+pub type BgpVpnReport = Vec<InstanceReport<Vec<nos_proto::VpnRouteSummary>>>;
 pub type BgpRoutesReport = Vec<InstanceReport<Vec<nos_proto::BgpRouteSummary>>>;
 pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
@@ -565,6 +567,64 @@ pub async fn bgp_flowspec(State(d): State<Daemons>) -> ApiResult<Json<BgpFlowspe
             || BgpRequest::GetFlowspecRoutes,
             |e| match e {
                 BgpEvent::FlowspecRoutes(v) => Some(v),
+                _ => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct RdQuery {
+    rd: Option<String>,
+}
+
+#[utoipa::path(get, path = "/v1/bgp/vpnv4", tag = "show", summary = "Received VPN-IPv4 routes (SAFI 128), per instance, optionally of one Route Distinguisher", params(("rd" = Option<String>, Query, description = "only routes with this Route Distinguisher (65001:1)")), responses((status = 200, body = BgpVpnReport), (status = 400, body = ErrorBody, description = "rd is not a Route Distinguisher"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_vpnv4(
+    State(d): State<Daemons>,
+    Query(q): Query<RdQuery>,
+) -> ApiResult<Json<BgpVpnReport>> {
+    bgp_vpn(&d, nos_proto::AddressFamily::Vpnv4Unicast, q.rd).await
+}
+
+#[utoipa::path(get, path = "/v1/bgp/vpnv6", tag = "show", summary = "Received VPN-IPv6 routes (SAFI 128), per instance, optionally of one Route Distinguisher", params(("rd" = Option<String>, Query, description = "only routes with this Route Distinguisher (65001:1)")), responses((status = 200, body = BgpVpnReport), (status = 400, body = ErrorBody, description = "rd is not a Route Distinguisher"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_vpnv6(
+    State(d): State<Daemons>,
+    Query(q): Query<RdQuery>,
+) -> ApiResult<Json<BgpVpnReport>> {
+    bgp_vpn(&d, nos_proto::AddressFamily::Vpnv6Unicast, q.rd).await
+}
+
+async fn bgp_vpn(
+    d: &Daemons,
+    family: nos_proto::AddressFamily,
+    rd: Option<String>,
+) -> ApiResult<Json<BgpVpnReport>> {
+    if let Some(rd) = rd.as_deref()
+        && nos_proto::evpn_id::parse_rd(rd).is_none()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "rd '{rd}' is not a Route Distinguisher"
+        )));
+    }
+    let names = d
+        .running_config()
+        .await?
+        .bgp_instances
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    Ok(Json(
+        per_instance(
+            d,
+            names,
+            ServiceRef::BgpInstance,
+            || BgpRequest::GetVpnRoutes {
+                family,
+                rd: rd.clone(),
+            },
+            |e| match e {
+                BgpEvent::VpnRoutes(v) => Some(v),
                 _ => None,
             },
         )

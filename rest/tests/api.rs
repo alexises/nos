@@ -1238,6 +1238,56 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
 }
 
 #[tokio::test]
+async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let bgpd = dir.path().join("bgp.sock");
+    serve(&bgpd, ("bgpd", "r1"), |req: BgpRequest| match req {
+        BgpRequest::GetVpnRoutes { family, rd } => {
+            BgpEvent::VpnRoutes(vec![nos_proto::VpnRouteSummary {
+                peer: "192.0.2.1".parse().unwrap(),
+                rd: rd.unwrap_or_default(),
+                prefix: family.to_string(),
+                labels: vec![100],
+                next_hop: "192.0.2.1".parse().unwrap(),
+                route_targets: vec!["RT:65000:1".into()],
+                as_path: "65001".into(),
+                local_pref: 100,
+                best: true,
+            }])
+        }
+        _ => BgpEvent::PeerNotFound,
+    });
+    let f = fixture(vec![(ServiceRef::BgpInstance("r1".into()), bgpd)]).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/v1?base=current", None).await;
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/v1/bgp-instance/r1",
+        Some(bgp_instance("r1", 1)),
+    )
+    .await;
+    send(app, Method::POST, "/v1/transactions/v1/commit", None).await;
+
+    let (s, v) = send(app, Method::GET, "/v1/bgp/vpnv4?rd=65001:1", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let r = &v[0]["result"][0];
+    assert_eq!(
+        (&v[0]["instance"], &r["rd"], &r["prefix"], &r["labels"]),
+        (
+            &json!("r1"),
+            &json!("65001:1"),
+            &json!("vpnv4"),
+            &json!([100])
+        )
+    );
+    let (_, v) = send(app, Method::GET, "/v1/bgp/vpnv6", None).await;
+    assert_eq!(v[0]["result"][0]["prefix"], json!("vpnv6"));
+    let (s, _) = send(app, Method::GET, "/v1/bgp/vpnv4?rd=nope", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn clear_bgp_peer_maps_the_daemons_reply_to_a_status() {
     let dir = tempfile::tempdir().unwrap();
     let bgpd = dir.path().join("bgp.sock");

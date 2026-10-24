@@ -267,6 +267,7 @@ pub async fn handle_action(
         | Resolved::ShowBgpEvpn
         | Resolved::ShowBgpFlowspec
         | Resolved::ShowBgpRpki
+        | Resolved::ShowBgpVpn { .. }
         | Resolved::ShowBgpRoutes
         | Resolved::ShowOspfNeigh
         | Resolved::ShowOspfDatabase
@@ -395,6 +396,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowBgpRpki => {
             show_bgp_rpki(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowBgpVpn { family, rd } => {
+            show_bgp_vpn(socket, watchdog_socket, family, rd.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowOspfNeigh => {
@@ -995,6 +1000,47 @@ async fn show_bgp_flowspec(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_flowspec_routes(&bgp_socket).await {
                 Ok(routes) => println!("{}", format::render_bgp_flowspec(&instance.name, &routes)),
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show bgp vpnv4|vpnv6 [rd <rd>]` — same shape as `show_bgp_evpn`.
+async fn show_bgp_vpn(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    family: nos_proto::AddressFamily,
+    rd: Option<&str>,
+) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    if cfg.bgp_instances.is_empty() {
+        println!("no bgp instances configured");
+        return;
+    }
+
+    for instance in &cfg.bgp_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::BgpInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(bgp_socket)) => match bgp_client::get_vpn_routes(&bgp_socket, family, rd).await
+            {
+                Ok(routes) => println!(
+                    "{}",
+                    format::render_bgp_vpn(&instance.name, family, &routes)
+                ),
                 Err(e) => eprintln!("error: {e}"),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),

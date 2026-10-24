@@ -14,6 +14,11 @@ pub use nlri::{
 
 use ipnet::IpNet;
 
+/// A VPN route's identity (RFC 4364 section 4.3.5): routes with different
+/// RDs never compete, so the decision key is the full (RD, NLRI). Generic so
+/// VPN Flowspec (#574) keys `VpnKey<FlowSpec>` the same way.
+pub type VpnKey<T> = (Rd, T);
+
 /// One labelled VPN route (RFC 4364 section 4.3.4): the label stack, the
 /// Route Distinguisher and the customer prefix. `labels` is empty for a
 /// withdrawal (RFC 8277 section 2.4: the label field there is a fixed

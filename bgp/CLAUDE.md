@@ -39,7 +39,7 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 
 - `fsm::step` is the pure transition core, unit-tested; `fsm::run` owns the framed socket and timers. `UPDATE`/`ROUTE_REFRESH` bypass `step` (handled in `run`'s read branch, only once `Established`).
 - Send to a peer only via `OutboxTx::send` (bounded, coalescing, #395).
-- Every well-formed inbound message resets the hold timer (RFC 4271 §4.4), centrally in the read branch.
+- Every well-formed inbound message resets the hold timer (RFC 4271 §4.4), in the read branch.
 - Hold/keepalive/connect-retry defaults and floors live in `nos_proto` (`nos-config` validates the same rules); OPEN check order: internals page.
 - The `PeerSlot` command channel is polled only while `Established`, so one task contends for it.
 - 4-octet AS: `AS_TRANS` without capability 65 is a bad peer AS; a peer without it gets `BgpCodec::two_octet_as` (`AS4_PATH` merge). RFC 9072 OPEN is emitted only above 255 bytes.
@@ -54,7 +54,7 @@ All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; t
 
 ## Damping
 
-Penalty is keyed by (peer, prefix) in `damping::Damping`; an identical re-announcement is no change (keeps `received_at`, no re-propagation, #160).
+Penalty keyed by (peer, prefix) (`damping::Damping`); an identical re-announcement is no change (keeps `received_at`, #160).
 
 ## Collision resolution
 
@@ -114,7 +114,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162).
 - `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); best path does not apply (RFC 7432 §15 aside). `evpn_import_policy` (#502, `None` = accept all) gates Type-1/2/3/5 in `learn_evpn` before mobility (reject = withdraw, Type-4 exempt).
 - MAC mobility has **no withdraw**: a sequence number only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; otherwise PEs on one segment bump each other into a frozen duplicate.
-- Flowspec, VPN (SAFI 128 never consults ADD-PATH): internals page.
+- Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH): internals page.
 - `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`).
 
 ## Backup path, multipath (#70)
@@ -141,7 +141,7 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE): run `tools/bench-bgp.s
 | `session.rs`, `tcp.rs`, `collision.rs` | `SessionManager`, `diff_peers`, `ao_delta`; VRF-scoped sockets; `PeerSlot` |
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
 | `message.rs`, `evpn.rs`, `flowspec*.rs`, `vpn/`, `as_path.rs` | Wire codecs (`BgpCodec`) |
-| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `shared` (`SharedRib`), `tests/` |
+| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `vpn_out`, `shared` (`SharedRib`), `tests/` |
 | `rib_push_client.rs`, `fdb_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); a `nos-ribd` restart goes unnoticed until the next change |
 | `rib_client.rs`, `interface_client.rs` | One-shot queries via `nos_daemon::ipc::one_shot` |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |

@@ -40,6 +40,7 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
         BgpRequest::GetSummary
         | BgpRequest::GetEvpnRoutes
         | BgpRequest::GetFlowspecRoutes
+        | BgpRequest::GetVpnRoutes { .. }
         | BgpRequest::SendRouteRefresh { .. }
         | BgpRequest::ClearPeer { .. }
         | BgpRequest::GetRoutes
@@ -119,6 +120,13 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                 let event = BgpEvent::FlowspecRoutes(
                     sessions.flowspec_route_summaries(acld.as_deref()).await,
                 );
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
+            BgpRequest::GetVpnRoutes { family, rd } => {
+                let event =
+                    BgpEvent::VpnRoutes(sessions.vpn_route_summaries(family, rd.as_deref()).await);
                 if writer.send(event).await.is_err() {
                     break;
                 }
@@ -237,6 +245,17 @@ mod authz_tests {
                 allowed(role, &BgpRequest::GetEvpnRoutes),
                 matches!(role, Role::User | Role::Restd),
                 "{role:?} evpn routes"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::GetVpnRoutes {
+                        family: nos_proto::AddressFamily::Vpnv4Unicast,
+                        rd: None
+                    }
+                ),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} vpn routes"
             );
         }
     }

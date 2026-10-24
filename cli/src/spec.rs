@@ -750,6 +750,60 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowBgpRoutes),
+    cmd!(["show" "bgp" "vpnv4"],
+        Doc::Local {
+            summary: "Show every vpnv4 route received from BGP peers, across every instance.",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for the VPN-IPv4 (RFC 4364, AFI 1 / SAFI 128) paths its peers sent, one line \
+                     each: `>` for the best path of its (RD, prefix), RD, prefix, label stack, \
+                     next hop (the egress PE), peer and Route Targets. Every path is held \
+                     whatever its Route Targets. Only peers whose peer-group has \
+                     `address-family vpnv4` exchange them. An instance whose nos-bgpd isn't \
+                     running is reported individually rather than aborting the whole command.",
+        },
+        Always,
+        Command::ShowBgpVpn {
+            family: nos_proto::AddressFamily::Vpnv4Unicast,
+            rd: None,
+        }),
+    cmd!(["show" "bgp" "vpnv4" "rd" (rd: Plain)],
+        Doc::Local {
+            summary: "Show the vpnv4 routes of one Route Distinguisher.",
+            detail: "Same as show bgp vpnv4, for the paths whose Route Distinguisher is <rd> \
+                     (`65001:1`, `192.0.2.1:7`, `4200000000:9`).",
+        },
+        Always,
+        |rd| Command::ShowBgpVpn {
+            family: nos_proto::AddressFamily::Vpnv4Unicast,
+            rd: Some(rd.to_string()),
+        }),
+    cmd!(["show" "bgp" "vpnv6"],
+        Doc::Local {
+            summary: "Show every vpnv6 route received from BGP peers, across every instance.",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for the VPN-IPv6 (RFC 4659, AFI 2 / SAFI 128) paths its peers sent, one line \
+                     each: `>` for the best path of its (RD, prefix), RD, prefix, label stack, \
+                     next hop (the egress PE), peer and Route Targets. Every path is held \
+                     whatever its Route Targets. Only peers whose peer-group has \
+                     `address-family vpnv6` exchange them. An instance whose nos-bgpd isn't \
+                     running is reported individually rather than aborting the whole command.",
+        },
+        Always,
+        Command::ShowBgpVpn {
+            family: nos_proto::AddressFamily::Vpnv6Unicast,
+            rd: None,
+        }),
+    cmd!(["show" "bgp" "vpnv6" "rd" (rd: Plain)],
+        Doc::Local {
+            summary: "Show the vpnv6 routes of one Route Distinguisher.",
+            detail: "Same as show bgp vpnv6, for the paths whose Route Distinguisher is <rd> \
+                     (`65001:1`, `192.0.2.1:7`, `4200000000:9`).",
+        },
+        Always,
+        |rd| Command::ShowBgpVpn {
+            family: nos_proto::AddressFamily::Vpnv6Unicast,
+            rd: Some(rd.to_string()),
+        }),
     cmd!(["show" "ospf" "neigh"],
         Doc::Local {
             summary: "Show a one-line-per-neighbor OSPF adjacency summary across every instance.",

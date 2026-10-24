@@ -6446,6 +6446,110 @@
         ]
       }
     },
+    "/v1/bgp/vpnv4": {
+      "get": {
+        "operationId": "bgp_vpnv4",
+        "parameters": [
+          {
+            "description": "only routes with this Route Distinguisher (65001:1)",
+            "in": "query",
+            "name": "rd",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rd is not a Route Distinguisher"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Received VPN-IPv4 routes (SAFI 128), per instance, optionally of one Route Distinguisher",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/bgp/vpnv6": {
+      "get": {
+        "operationId": "bgp_vpnv6",
+        "parameters": [
+          {
+            "description": "only routes with this Route Distinguisher (65001:1)",
+            "in": "query",
+            "name": "rd",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rd is not a Route Distinguisher"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Received VPN-IPv6 routes (SAFI 128), per instance, optionally of one Route Distinguisher",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/bgp/{instance}/peer/{peer}/clear": {
       "post": {
         "operationId": "bgp_clear_peer",

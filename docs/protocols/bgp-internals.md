@@ -316,16 +316,25 @@ The reverse feed is `fdb_push_client.rs`: a change-driven feed (like `rib_push_c
 
 ### VPN-IPv4/IPv6 wire format (RFC 4364, RFC 4659, RFC 8277, #577)
 
-Codec and negotiation only; storing, advertising and showing VPN routes is #578-#580.
 - `vpn/nlri.rs` is the SAFI 128 codec; `MpReachNlri.vpn`/`MpUnreachNlri.vpn` hold `VpnNlri { labels, rd, prefix }` (`nlri`/`withdrawn` stay empty).
 - NLRI layout: `length(bits) | labels (3 octets: label<<4 | S) | RD(8) | prefix`. The stack ends at the first S=1 (RFC 8277 section 2.3); a length that cannot hold labels + RD, a missing S=1, a prefix longer than the AFI allows, short octets, trailing bytes or an AFI other than 1/2 are `MalformedUpdate`, a session reset (RFC 7606 section 3(j): treat-as-withdraw needs a parsed NLRI). A wrong next-hop length resets too (section 7.11).
 - Single label: the encoder always sends one label with S=1, so the Multiple Labels capability (code 8) is not advertised; the decoder still accepts a longer stack (`ponytail:` ceiling, `bgp/TODO.md`).
 - Withdrawals: the label field is the fixed Compatibility value 0x800000 on send and ignored on receive (0x000000 and a real label decode the same), so `labels` is empty after decoding. Treat-as-withdraw of an announcement (bad ORIGIN, missing mandatory attribute) moves `vpn` into an unreach batch with labels cleared.
 - Next hop: 8 zero octets (RD; a non-zero one is ignored) then the address: 12 (IPv4), 24 (IPv6), 48 (global + RD + link-local, link-local dropped); 4/16/32 without an RD are tolerated. On AFI 2 an IPv4-mapped address decodes to IPv4 and an IPv4 next hop is sent mapped (RFC 4659 section 3.2.1.2).
 - ADD-PATH: `add_path_afis` is keyed by AFI only, so the SAFI 128 branches never consult it (a Path Identifier never precedes these NLRI); `vpn_decode_never_consults_add_path` guards it.
-- Negotiation: `fsm::negotiate_safi` is shared with Flowspec (`negotiate_vpn` returns `[vpnv4, vpnv6]`, `RemoteInfo.negotiated_vpn`). `build_mp_capabilities` emits `MultiProtocol{1|2, 128}` and no Extended Next Hop. Graceful Restart and Route Refresh still skip these families (`fsm::is_vpn`, #578).
+- Negotiation: `fsm::negotiate_safi` is shared with Flowspec (`negotiate_vpn` returns `[vpnv4, vpnv6]`, `RemoteInfo.negotiated_vpn`). `build_mp_capabilities` emits `MultiProtocol{1|2, 128}` and no Extended Next Hop. `fsm::is_vpn` names them.
 - `split_update` halves `vpn` lists like the others.
 - `vpn/ext_comm.rs`: `route_targets`/`sites_of_origin`/`is_route_target` over the `u64` extended communities (types 0x00/0x01/0x02), `rt(type, admin, assigned)` builds one; rendering stays `format_ext_community`.
+- One UPDATE carries at most one `MP_REACH_NLRI` and one `MP_UNREACH_NLRI` (RFC 7606 section 3(g): a repeat resets the session). `UpdateMessage.mp_reach` is a `Vec`, and the encoder writes one attribute per entry, so build a single batch per UPDATE: every `OutboundUpdate` does.
+
+### VPN Adj-RIB-In, selection and reflection (#578)
+
+- Storage: `BgpRib.vpn_adj_rib_in: peer -> VpnKey<IpNet> -> VpnRoute { labels, route: RibRoute }`. `VpnKey<T> = (Rd, T)` lives in `vpn/mod.rs` (#574 uses `VpnKey<FlowSpec>`). The family follows the prefix (`rib::vpn_out::vpn_family`). Routes are held whatever their RTs: RFC 4364 section 4.3.5, different RDs never compete, so the key is the full (RD, prefix).
+- Learning (`vpn_out::learn_vpn`, called at the end of `learn_announced`): the shared `base_route` plus the batch next hop goes through the peer-group `import_policy` (`apply_policy`, `this.prefix` = the customer prefix); reject drops a held copy. A batch of a family the session did not negotiate is ignored with a `warn!`. Withdrawals, treat-as-withdraw (the martian next-hop check covers `vpn` batches) and the RFC 4456 loop checks go through `drop_vpn`.
+- Selection: `select_vpn(k)` runs `best_path` over every peer's copy (`vpn_loc`), no feasibility filter, `ponytail:` peer paths only until #580. Re-advertisement: `sync_vpn_to` diffs against `vpn_adj_rib_out` and calls `build_advertisement(.., Some((family, export_policy)))` (split horizon, RR, eBGP prepend, export policy, no OTC/RFC 8097 step), then forces the received next hop back (`ponytail:` next-hop-self needs a local label, #580/#581). `OutboundUpdate::{AnnounceVpn(AdvertisedVpn), WithdrawVpn(VpnKey)}`; lost ones are re-sent from the outbox backlog (`Backlog.vpns`, batched).
+- GR and refresh: `gr::family_of`/`our_cap` include (1,128)/(2,128). `vpn_stale` is the twin of `stale`: `retain_as_stale` marks retained families, `begin_refresh_in` marks one family (`mark_vpn_stale`), `end_refresh_in`/`purge_stale` purge it (`purge_stale_vpn`); `resend_all` of a VPN family is `resend_vpn`; `send_route_refresh` asks for each negotiated VPN family too. Max-prefix counts them (`accepted_count`, scanned only for a limited family).
+- Show: `BgpRequest::GetVpnRoutes { family, rd }` -> `BgpEvent::VpnRoutes(Vec<VpnRouteSummary>)` (`user`/`restd`), sorted by peer, RD, prefix; `best` is the selected copy.
+- Logs (e2e anchors): `address families negotiated peer=… families=[…]`; `vpn route learned peer=… family=vpnv4 rd=65001:1 prefix=… labels=[100] next_hop=…`; `vpn route withdrawn …`, `vpn route rejected by import policy …`, `vpn route advertised …`, `vpn route advertisement withdrawn …` (peer, family, rd, prefix).
 
 ### Backup path
 

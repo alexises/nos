@@ -153,6 +153,7 @@ All are `GET`, and each returns the same data as the matching shell command, as 
 - `/v1/bfd/reflector`: the Seamless BFD reflector (`discriminators` as 32-bit numbers, `received`, `replied`, and `discarded` with a counter per reason); `nos-bfdd` not running is `503`.
 - `/v1/bfd/sessions[?peer=<ip>]`: every BFD session (`state`, `diag`, discriminators, `tx_interval_us`, `detection_time_us`, and a `key` with `table` and `peer`; a micro-BFD session of a port aggregate has `key.aggregate` and `key.interface` (the member) and an empty `table`); an unparseable `peer` is `400`, `nos-bfdd` not running is `503`.
 - `/v1/bgp/summary`, `/v1/bgp/evpn` and `/v1/bgp/rpki`: BGP peers, received EVPN routes and RPKI cache sessions, per instance.
+- `/v1/bgp/vpnv4` and `/v1/bgp/vpnv6` (`?rd=65001:1` for one Route Distinguisher, `400` if it is not one): received VPN routes per instance, each with `rd`, `prefix`, `labels`, `next_hop`, `route_targets` and `best`.
 - `/v1/ospf/neighbors`, `/v1/ospf/database`, and the same under `/v1/ospfv3/`: neighbours and LSDB, per instance.
 - `/v1/fdb/{domain}`: a broadcast domain's MAC table and flood list.
 - `/v1/logs?source=&limit=`: log entries, optionally from one source and only the last `limit`. `/v1/logs/follow` does the same, then streams new entries (see [below](#following-the-log-server-sent-events)).

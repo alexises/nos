@@ -55,7 +55,7 @@ pub use bfd::{
 pub use bgp::{
     BgpEvent, BgpRequest, BgpRouteSummary, BgpSessionState, EvpnRouteSummary, FlowspecRouteSummary,
     GrSummary, PeerSummary, RedistributeUpdate, RedistributedRoute, RpkiCacheStatus,
-    RpkiSessionState, RpkiValidationState,
+    RpkiSessionState, RpkiValidationState, VpnRouteSummary,
 };
 pub use broker::{
     Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED,

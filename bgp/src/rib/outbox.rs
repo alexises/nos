@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{info, warn};
 
 use super::{build_advertisement, family_of, message, BgpRib, FlowspecKey, OutboundUpdate};
+use crate::vpn::VpnKey;
 
 /// Queued updates per peer. Steady state needs far less; a full-table dump
 /// overflows it by design and is handled by the backlog.
@@ -43,13 +44,19 @@ pub(super) struct Backlog {
     evpn_lost: bool,
     /// Flowspec rules whose latest update was dropped.
     flows: HashSet<FlowspecKey>,
+    /// VPN keys whose latest update was dropped.
+    vpns: HashSet<VpnKey<IpNet>>,
     /// Prefixes re-sent so far in this overflow episode (for the log).
     drained: usize,
 }
 
 impl Backlog {
     fn is_empty(&self) -> bool {
-        self.dirty.is_empty() && self.flows.is_empty() && self.markers.is_empty() && !self.evpn_lost
+        self.dirty.is_empty()
+            && self.flows.is_empty()
+            && self.vpns.is_empty()
+            && self.markers.is_empty()
+            && !self.evpn_lost
     }
 
     fn push(&mut self, update: OutboundUpdate) {
@@ -72,6 +79,12 @@ impl Backlog {
             OutboundUpdate::WithdrawFlowspec(family, nlri) => {
                 self.flows.insert((family, nlri));
             }
+            OutboundUpdate::AnnounceVpn(adv) => {
+                self.vpns.insert(adv.key);
+            }
+            OutboundUpdate::WithdrawVpn(key) => {
+                self.vpns.insert(key);
+            }
             marker @ (OutboundUpdate::RefreshMarker { .. } | OutboundUpdate::EndOfRib(_)) => {
                 if !self.markers.contains(&marker) {
                     self.markers.push(marker);
@@ -84,6 +97,7 @@ impl Backlog {
     fn merge(&mut self, newer: Backlog) {
         self.dirty.extend(newer.dirty);
         self.flows.extend(newer.flows);
+        self.vpns.extend(newer.vpns);
         for (prefix, ids) in newer.lost_ids {
             self.lost_ids.entry(prefix).or_default().extend(ids);
         }
@@ -225,7 +239,14 @@ impl BgpRib {
         for k in std::mem::take(&mut backlog.flows) {
             self.sync_flow_to(peer, &k, true);
         }
-        if backlog.dirty.is_empty() {
+        // Batched like `dirty`: a reflector's VPN table can be a full one.
+        let vpns: Vec<_> = backlog.vpns.iter().take(DRAIN_BATCH).copied().collect();
+        for k in &vpns {
+            backlog.vpns.remove(k);
+            self.sync_vpn_to(peer, k, true);
+        }
+        backlog.drained += vpns.len();
+        if backlog.dirty.is_empty() && backlog.vpns.is_empty() {
             for m in trail {
                 tx.send(m);
             }

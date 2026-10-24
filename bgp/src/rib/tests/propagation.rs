@@ -411,7 +411,9 @@ fn peer_disconnected_withdraws_every_route_it_contributed() {
         | OutboundUpdate::RefreshMarker { .. }
         | OutboundUpdate::EndOfRib(_)
         | OutboundUpdate::AnnounceFlowspec(_)
-        | OutboundUpdate::WithdrawFlowspec(..) => String::new(),
+        | OutboundUpdate::WithdrawFlowspec(..)
+        | OutboundUpdate::AnnounceVpn(_)
+        | OutboundUpdate::WithdrawVpn(_) => String::new(),
     });
     assert_eq!(
         updates,
