@@ -182,6 +182,34 @@ pub struct RoutingTableEvpn {
     pub bgp_instance: Option<String>,
 }
 
+/// A VRF's L3VPN identity (RFC 4364 VPNv4/VPNv6): the RD and route targets
+/// of the routes this table exports into / imports from the VPN address
+/// families of `bgp_instance` (the underlay instance, never the table's
+/// own), plus an optional static MPLS label. Unset (all default) means the
+/// table is not a VPN; any field requires the others, see `valid_table_vpn`.
+/// No daemon consumes it yet (later sub-issues of #573).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct RoutingTableVpn {
+    /// Route Distinguisher prepended to every exported prefix.
+    #[cli(topic = RoutingTableVpnRd)]
+    pub rd: Option<String>,
+    /// A received VPN route must carry one of these to be imported.
+    #[serde(default)]
+    #[cli(topic = RoutingTableVpnRouteTarget, words = "route-target import")]
+    pub route_targets_import: Vec<String>,
+    /// Attached to every VPN route this table exports.
+    #[serde(default)]
+    #[cli(topic = RoutingTableVpnRouteTarget, words = "route-target export")]
+    pub route_targets_export: Vec<String>,
+    /// The underlay BGP instance the VPN routes are exchanged over.
+    #[cli(topic = RoutingTableVpnBgpInstance)]
+    pub bgp_instance: Option<String>,
+    /// Static MPLS label (16-1048575) for this VRF's exported routes.
+    #[cli(topic = RoutingTableVpnLabel)]
+    pub label: Option<u32>,
+}
+
 /// A named routing table, optionally associated with one BGP instance and
 /// one static routing instance. The reference lives only on the table —
 /// `BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)
@@ -249,6 +277,14 @@ pub struct RoutingTable {
     #[garde(skip)]
     #[cli(topic = RoutingTableEvpn)]
     pub evpn: RoutingTableEvpn,
+
+    /// L3VPN identity (RD, route targets, underlay instance, label).
+    /// `serde(default)` like `evpn`; `#[garde(skip)]`: checked by
+    /// `valid_table_vpn` (it needs the other tables).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = RoutingTableVpn)]
+    pub vpn: RoutingTableVpn,
 }
 
 /// If set, `bgp_instance` must name an existing `BgpInstance` (cf.
@@ -375,6 +411,7 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) ->
     }
     for table in tables {
         valid_table_evpn(table, ctx)?;
+        valid_table_vpn(table, ctx)?;
     }
     Ok(())
 }
@@ -466,6 +503,53 @@ fn valid_redistribute_rule(
     Ok(())
 }
 
+/// A table's `vpn` (RFC 4364): unset when default; otherwise an RD, at least
+/// one export RT, an existing underlay `bgp_instance` that isn't the table's
+/// own, a label in the MPLS unicast range (16-1048575, RFC 3032) used by no
+/// other table, and an RD (compared as 8 bytes) used by no other table's
+/// `vpn.rd` or `evpn.rd` (an RD names one VRF, section 4.2; EVPN Type-5 shares
+/// the namespace on the wire).
+fn valid_table_vpn(table: &RoutingTable, ctx: &Config) -> garde::Result {
+    let err = |m: &str| Err(garde::Error::new(m.to_string()));
+    let v = &table.vpn;
+    if *v == RoutingTableVpn::default() {
+        return Ok(());
+    }
+    let Some(rd) = v.rd.as_deref().and_then(crate::evpn_id::parse_rd) else {
+        return err("vpn needs an rd, asn:nn or a.b.c.d:nn");
+    };
+    let mut rts = v.route_targets_import.iter().chain(&v.route_targets_export);
+    if rts.any(|r| crate::evpn_id::parse_rt(r).is_none()) {
+        return err("vpn route-target must be asn:nn or a.b.c.d:nn");
+    }
+    if v.route_targets_export.is_empty() {
+        return err("vpn needs at least one export route-target");
+    }
+    let Some(instance) = &v.bgp_instance else {
+        return err("vpn needs a bgp-instance");
+    };
+    if !ctx.bgp_instances.iter().any(|i| &i.name == instance) {
+        return err("vpn bgp-instance does not exist");
+    }
+    if table.bgp_instance.as_ref() == Some(instance) {
+        return err("vpn bgp-instance must be the underlay's, not this table's own");
+    }
+    let others = || ctx.routing_tables.iter().filter(|t| t.name != table.name);
+    if let Some(label) = v.label {
+        if !(16..=0x000f_ffff).contains(&label) {
+            return err("vpn label must be between 16 and 1048575");
+        }
+        if others().any(|t| t.vpn.label == Some(label)) {
+            return err("vpn label is already used by another routing table");
+        }
+    }
+    let rd_of = |s: &Option<String>| s.as_deref().and_then(crate::evpn_id::parse_rd);
+    if others().any(|t| rd_of(&t.vpn.rd) == Some(rd) || rd_of(&t.evpn.rd) == Some(rd)) {
+        return err("vpn rd is already used by another routing table");
+    }
+    Ok(())
+}
+
 /// A table's `evpn`: nothing but an L3 VNI turns it on, and with one it
 /// needs well-formed RD/RTs (an RD and an export RT at least: every best route
 /// is originated), a VTEP source, and an existing underlay `bgp_instance`
@@ -549,6 +633,7 @@ mod tests {
         RoutingTable {
             rest_api: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
+            vpn: RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
@@ -1006,6 +1091,107 @@ mod tests {
             ..Default::default()
         }];
         assert!(with_domain.validate_with(&with_domain).is_err());
+    }
+
+    fn vpn() -> RoutingTableVpn {
+        RoutingTableVpn {
+            rd: Some("65000:1".to_string()),
+            route_targets_import: vec!["65000:1".to_string()],
+            route_targets_export: vec!["65000:1".to_string()],
+            bgp_instance: Some("r1".to_string()),
+            label: Some(100),
+        }
+    }
+
+    #[test]
+    fn vpn_table_validation() {
+        let red = |v: RoutingTableVpn| {
+            let mut t = table("red", None, None);
+            t.vpn = v;
+            t
+        };
+        let cfg = config_with(
+            vec![table("rt1", Some("r1"), None), red(vpn())],
+            vec![instance("r1")],
+            vec![],
+        );
+        cfg.validate_with(&cfg).unwrap();
+
+        // Unset passes; an export-only spoke (no import RT, no label) passes.
+        let mut spoke = vpn();
+        spoke.route_targets_import.clear();
+        spoke.label = None;
+        for v in [RoutingTableVpn::default(), spoke] {
+            let mut ok = cfg.clone();
+            ok.routing_tables[1] = red(v);
+            ok.validate_with(&ok).unwrap();
+        }
+
+        for mutate in [
+            (|v: &mut RoutingTableVpn| v.rd = Some("junk".to_string())) as fn(&mut RoutingTableVpn),
+            |v| v.rd = None,
+            |v| v.route_targets_import = vec!["65000".to_string()],
+            |v| v.route_targets_export.clear(),
+            |v| v.bgp_instance = None,
+            |v| v.bgp_instance = Some("nope".to_string()),
+            |v| v.label = Some(0),
+            |v| v.label = Some(15),
+            |v| v.label = Some(1_048_576),
+        ] {
+            let mut v = vpn();
+            mutate(&mut v);
+            let mut bad = cfg.clone();
+            bad.routing_tables[1] = red(v);
+            assert!(bad.validate_with(&bad).is_err());
+        }
+        for l in [16, 1_048_575] {
+            let mut ok = cfg.clone();
+            ok.routing_tables[1].vpn.label = Some(l);
+            ok.validate_with(&ok).unwrap();
+        }
+
+        // The table's own instance can't be its underlay.
+        let mut own = cfg.clone();
+        own.routing_tables[0].vpn = vpn();
+        own.routing_tables.pop();
+        assert!(own.validate_with(&own).is_err());
+
+        // Label / RD collisions with another table (RD compared as bytes).
+        let other = |rd: &str, label: u32| {
+            let mut t = red(RoutingTableVpn {
+                rd: Some(rd.to_string()),
+                label: Some(label),
+                ..vpn()
+            });
+            t.name = "blue".to_string();
+            t
+        };
+        for (rd, label) in [("65000:2", 100), ("65000:1", 101)] {
+            let mut bad = cfg.clone();
+            bad.routing_tables.push(other(rd, label));
+            assert!(bad.validate_with(&bad).is_err(), "{rd} {label}");
+        }
+        let mut fine = cfg.clone();
+        fine.routing_tables.push(other("65000:2", 101));
+        fine.validate_with(&fine).unwrap();
+
+        // Same RD as another table's evpn.rd collides; as its own does not.
+        let mut with_evpn = fine.clone();
+        with_evpn.routing_tables[0].evpn.rd = Some("65000:2".to_string());
+        assert!(with_evpn.validate_with(&with_evpn).is_err());
+        let mut same = cfg.clone();
+        same.routing_tables[1].evpn = RoutingTableEvpn {
+            rd: Some("65000:1".to_string()),
+            ..evpn()
+        };
+        same.validate_with(&same).unwrap();
+    }
+
+    #[test]
+    fn vpn_postcard_round_trip() {
+        let v = vpn();
+        let bytes = postcard::to_allocvec(&v).unwrap();
+        assert_eq!(postcard::from_bytes::<RoutingTableVpn>(&bytes).unwrap(), v);
     }
 
     #[test]

@@ -14,6 +14,14 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 
 - `RoutingTable.evpn: RoutingTableEvpn` (`l3_vni`/`rd`/`route_targets_import`/`route_targets_export`/`vtep_source`/`bgp_instance`, every one optional; `#[serde(default)]`) makes the table an EVPN IP-VRF acted on by its `nos-ribd`: a plain struct rather than an `Option<…>` so the CLI reaches each field on its own (an optional struct is set in one line, which can't hold its lists), validated by `routing_table::valid_table_evpn` (wired on `Config.routing_tables`): nothing but an `l3_vni` turns it on, which then needs an RD, an export RT, a `vtep_source` and an existing `bgp_instance` that isn't the table's own, and an L3 VNI no other table or `BroadcastDomain.vni` uses.
 
+## L3VPN on a routing table
+
+- `RoutingTable.vpn: RoutingTableVpn` (`rd`/`route_targets_import`/`route_targets_export`/`bgp_instance`/`label`; `#[serde(default)]`) is the table's RFC 4364 VPN identity. Same plain-struct shape as `evpn`. Configuration only for now: no daemon reads it yet (later sub-issues of #573).
+- `routing_table::valid_table_vpn` (wired on `Config.routing_tables`): an all-default `vpn` is off. Otherwise it needs an `rd`, every RT valid (`asn:nn` or `a.b.c.d:nn`), at least one export RT (import may be empty, an export-only spoke), and an existing `bgp_instance` that isn't the table's own.
+- `label` is optional, 16-1048575 (0-15 are reserved by RFC 3032) and used by no other table.
+- The RD is compared as its 8 encoded bytes against every other table's `vpn.rd` and `evpn.rd` (an RD names one VRF, RFC 4364 section 4.2; EVPN Type-5 shares the namespace). A table may reuse its own `evpn.rd` as `vpn.rd`.
+- `AddressFamily` gained `Vpnv4Unicast` (CLI `vpnv4`, AFI 1 / SAFI 128) and `Vpnv6Unicast` (`vpnv6`, AFI 2 / SAFI 128), appended after `Ipv6Flowspec` (postcard indexes by position). `BgpMaximumPrefix` gained `vpnv4`/`vpnv6`. `nos-bgpd` accepts the families but neither advertises nor negotiates them yet.
+
 ## `redistribute`: a list keyed by `to`
 
 - `RoutingTable.redistribute: Vec<Redistribute>` is a list keyed by `to` (`#[cli(key)]`, `"to"` in `config_path::ELEMENT_KEYS`, whose element lookup is case-insensitive because the enum serialises as `Ospf`): one rule per target, so static routes can feed BGP, OSPF and OSPFv3 at once (`valid_redistribute_rules` refuses a duplicate target). `RoutingTableOp::SetRedistribute` upserts by `to`, `ClearRedistribute { name, to }` removes one rule. A `config.yaml` written when the field was an `Option` (null or one object) still loads: `deserialize_redistribute` accepts null/object/list in human-readable formats only, postcard being not self-describing. The CLI form is `set routing-table <t> redistribute <target>` then `policy`/`metric`/`metric-type` one per line (the old `from static to <target>` is not a key-token rewrite the derive can express).

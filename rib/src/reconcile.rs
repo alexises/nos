@@ -672,6 +672,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -694,6 +695,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -727,6 +729,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -764,6 +767,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -816,6 +820,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -839,6 +844,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -876,6 +882,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: Some("o3".into()),
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -913,6 +920,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -951,6 +959,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: Some("v3".into()),
             name: "rt1".into(),
             bgp_instance: None,
@@ -988,6 +997,7 @@ mod tests {
         let table = RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),

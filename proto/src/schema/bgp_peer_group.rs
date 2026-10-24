@@ -31,16 +31,24 @@ pub enum AddressFamily {
     #[cli(words = "ipv6-flowspec")]
     /// RFC 8956 IPv6 Flowspec (AFI 2 / SAFI 133).
     Ipv6Flowspec,
+    #[cli(words = "vpnv4")]
+    /// RFC 4364 VPN-IPv4 unicast (AFI 1 / SAFI 128).
+    Vpnv4Unicast,
+    #[cli(words = "vpnv6")]
+    /// RFC 4659 VPN-IPv6 unicast (AFI 2 / SAFI 128).
+    Vpnv6Unicast,
 }
 
 impl AddressFamily {
     /// Every variant, in declaration order.
-    pub const ALL: [AddressFamily; 5] = [
+    pub const ALL: [AddressFamily; 7] = [
         AddressFamily::Ipv4Unicast,
         AddressFamily::Ipv6Unicast,
         AddressFamily::L2vpnEvpn,
         AddressFamily::Ipv4Flowspec,
         AddressFamily::Ipv6Flowspec,
+        AddressFamily::Vpnv4Unicast,
+        AddressFamily::Vpnv6Unicast,
     ];
 
     /// The CLI spelling of the family.
@@ -51,6 +59,8 @@ impl AddressFamily {
             AddressFamily::L2vpnEvpn => "l2vpn-evpn",
             AddressFamily::Ipv4Flowspec => "ipv4-flowspec",
             AddressFamily::Ipv6Flowspec => "ipv6-flowspec",
+            AddressFamily::Vpnv4Unicast => "vpnv4",
+            AddressFamily::Vpnv6Unicast => "vpnv6",
         }
     }
 }
@@ -374,6 +384,14 @@ pub struct BgpMaximumPrefix {
     #[cli(topic = BgpPeerGroupMaximumPrefix)]
     /// Limit for IPv6 Flowspec; `None` is unlimited.
     pub ipv6_flowspec: Option<BgpPrefixLimit>,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    /// Limit for VPN-IPv4; `None` is unlimited.
+    pub vpnv4: Option<BgpPrefixLimit>,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    /// Limit for VPN-IPv6; `None` is unlimited.
+    pub vpnv6: Option<BgpPrefixLimit>,
 }
 
 impl BgpMaximumPrefix {
@@ -385,6 +403,8 @@ impl BgpMaximumPrefix {
             AddressFamily::L2vpnEvpn => self.l2vpn_evpn,
             AddressFamily::Ipv4Flowspec => self.ipv4_flowspec,
             AddressFamily::Ipv6Flowspec => self.ipv6_flowspec,
+            AddressFamily::Vpnv4Unicast => self.vpnv4,
+            AddressFamily::Vpnv6Unicast => self.vpnv6,
         }
     }
 
@@ -396,6 +416,8 @@ impl BgpMaximumPrefix {
             AddressFamily::L2vpnEvpn => &mut self.l2vpn_evpn,
             AddressFamily::Ipv4Flowspec => &mut self.ipv4_flowspec,
             AddressFamily::Ipv6Flowspec => &mut self.ipv6_flowspec,
+            AddressFamily::Vpnv4Unicast => &mut self.vpnv4,
+            AddressFamily::Vpnv6Unicast => &mut self.vpnv6,
         }
     }
 }
@@ -1524,6 +1546,38 @@ mod tests {
     }
 
     #[test]
+    fn vpn_families_are_appended_and_round_trip() {
+        use AddressFamily::*;
+        // postcard indexes by position: existing variants must never move.
+        for (i, f) in [
+            (0u8, Ipv4Unicast),
+            (1, Ipv6Unicast),
+            (2, L2vpnEvpn),
+            (3, Ipv4Flowspec),
+            (4, Ipv6Flowspec),
+            (5, Vpnv4Unicast),
+            (6, Vpnv6Unicast),
+        ] {
+            let bytes = postcard::to_allocvec(&f).unwrap();
+            assert_eq!(bytes, [i]);
+            assert_eq!(postcard::from_bytes::<AddressFamily>(&bytes).unwrap(), f);
+        }
+        let mut mp = BgpMaximumPrefix::default();
+        let limit = BgpPrefixLimit {
+            limit: 7,
+            warning_only: false,
+            restart_interval: 0,
+        };
+        *mp.slot_mut(Vpnv4Unicast) = Some(limit);
+        assert_eq!(
+            (mp.get(Vpnv4Unicast), mp.get(Vpnv6Unicast)),
+            (Some(limit), None)
+        );
+        *mp.slot_mut(Vpnv6Unicast) = Some(limit);
+        assert_eq!(mp.vpnv6, Some(limit));
+    }
+
+    #[test]
     fn display_words_for_family_role_and_source_address() {
         let fam = AddressFamily::ALL.map(|f| f.to_string());
         assert_eq!(
@@ -1533,7 +1587,9 @@ mod tests {
                 "ipv6",
                 "l2vpn-evpn",
                 "ipv4-flowspec",
-                "ipv6-flowspec"
+                "ipv6-flowspec",
+                "vpnv4",
+                "vpnv6"
             ]
         );
         let roles = [

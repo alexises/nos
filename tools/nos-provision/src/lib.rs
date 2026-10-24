@@ -803,6 +803,35 @@ pub struct Args {
     #[arg(long)]
     pub l3vni_clear: bool,
 
+    /// L3VPN: the routing table (ensured) `--vpn-*` apply to.
+    #[arg(long, default_value = "vrf-red")]
+    pub vpn_table: String,
+
+    /// Route Distinguisher of `--vpn-table` (`RoutingTableOp::SetVpn`); also
+    /// needs `--vpn-rt-export`.
+    #[arg(long)]
+    pub vpn_rd: Option<String>,
+
+    /// Import Route Target of `--vpn-table` (repeatable).
+    #[arg(long)]
+    pub vpn_rt_import: Vec<String>,
+
+    /// Export Route Target of `--vpn-table` (repeatable).
+    #[arg(long)]
+    pub vpn_rt_export: Vec<String>,
+
+    /// Underlay instance of `--vpn-table`; defaults to `--bgp-instance`.
+    #[arg(long)]
+    pub vpn_bgp_instance: Option<String>,
+
+    /// Static MPLS label of `--vpn-table`.
+    #[arg(long)]
+    pub vpn_label: Option<u32>,
+
+    /// Clears `--vpn-table`'s VPN config (`RoutingTableOp::ClearVpn`).
+    #[arg(long)]
+    pub vpn_clear: bool,
+
     /// If set, undoes the EVPN config of `--broadcast-domain`: clears
     /// redistribute, vtep-source, rd and vni (in that order, so validation
     /// passes) and removes any route target named by `--evpn-rt-import`/
@@ -1428,7 +1457,7 @@ fn parse_family(s: &str) -> Result<AddressFamily, String> {
     AddressFamily::ALL
         .into_iter()
         .find(|af| af.as_str() == s)
-        .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn, ipv4-flowspec, ipv6-flowspec)"))
+        .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn, ipv4-flowspec, ipv6-flowspec, vpnv4, vpnv6)"))
 }
 
 fn parse_add_path(s: &str) -> Result<nos_proto::BgpAddPath, String> {
@@ -1634,6 +1663,38 @@ fn l3vni_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
     Ok(ops)
+}
+
+/// The `--vpn-*` flags -> ops on `--vpn-table`.
+fn vpn_ops(args: &Args) -> Vec<ConfigOp> {
+    let name = || args.vpn_table.clone();
+    let op = |o| ConfigOp::RoutingTable(o);
+    if args.vpn_clear {
+        return vec![
+            op(RoutingTableOp::Ensure { name: name() }),
+            op(RoutingTableOp::ClearVpn { name: name() }),
+        ];
+    }
+    let Some(rd) = &args.vpn_rd else {
+        return Vec::new();
+    };
+    vec![
+        op(RoutingTableOp::Ensure { name: name() }),
+        op(RoutingTableOp::SetVpn {
+            name: name(),
+            vpn: nos_proto::RoutingTableVpn {
+                rd: Some(rd.clone()),
+                route_targets_import: args.vpn_rt_import.clone(),
+                route_targets_export: args.vpn_rt_export.clone(),
+                bgp_instance: Some(
+                    args.vpn_bgp_instance
+                        .clone()
+                        .unwrap_or_else(|| args.bgp_instance.clone()),
+                ),
+                label: args.vpn_label,
+            },
+        }),
+    ]
 }
 
 /// `<transit-area>:<router-id>`, as `--ospf-virtual-link`/`--ospf-clear-virtual-link` take it.
@@ -3025,6 +3086,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 
     ops.extend(evpn_ops(args)?);
     ops.extend(l3vni_ops(args)?);
+    ops.extend(vpn_ops(args));
     // After `--l3vni*`, which ensures the table.
     if let (Some(_), Some(table)) = (
         args.broadcast_domain_svi_address,
@@ -5619,6 +5681,7 @@ mod tests {
         assert!(parse_ospf_area_type("bogus").unwrap_err().contains("bogus"));
 
         assert!(parse_family("ipv6").is_ok());
+        assert!(parse_family("vpnv4").is_ok() && parse_family("vpnv6").is_ok());
         assert!(parse_family("ipx").is_err());
         for s in ["receive", "send", "both"] {
             assert_eq!(parse_add_path(s).unwrap().as_str(), s);
@@ -6152,6 +6215,36 @@ mod tests {
         }
         let via_iface = ops(&["--evpn-rd", "1:1", "--evpn-vtep-source-interface", "lo1"]).unwrap();
         shows(&via_iface, "lo1");
+    }
+
+    #[test]
+    fn vpn_flags() {
+        let o = ops(&[
+            "--vpn-rd",
+            "65000:1",
+            "--vpn-rt-import",
+            "65000:1",
+            "--vpn-rt-export",
+            "65000:1",
+            "--vpn-rt-export",
+            "65000:2",
+            "--vpn-label",
+            "100",
+        ])
+        .unwrap();
+        for m in [
+            "Ensure { name: \"vrf-red\" }",
+            "SetVpn",
+            "65000:2",
+            "label: Some(100)",
+        ] {
+            shows(&o, m);
+        }
+        shows(
+            &ops(&["--vpn-clear", "--vpn-table", "blue"]).unwrap(),
+            "ClearVpn { name: \"blue\" }",
+        );
+        assert!(!format!("{:?}", ops(&[]).unwrap()).contains("Vpn"));
     }
 
     #[test]

@@ -92,6 +92,9 @@ pub(crate) const AFI_IPV6: u16 = 2;
 /// RFC 7432 EVPN: AFI L2VPN (25) / SAFI EVPN (70).
 pub(crate) const AFI_L2VPN: u16 = 25;
 pub(crate) const SAFI_EVPN: u8 = 70;
+/// RFC 4364 MPLS-labelled VPN unicast (VPNv4/VPNv6): SAFI 128. Only the
+/// identifiers exist so far; negotiation and the codec are #577.
+pub(crate) const SAFI_VPN: u8 = 128;
 /// RFC 8955 Flow Specification: SAFI 133, and 134 with a Route Distinguisher.
 pub(crate) const SAFI_FLOWSPEC: u8 = 133;
 #[allow(dead_code, reason = "wired by #558")]

@@ -44,8 +44,12 @@ const AFI_IPV6: u16 = 2;
 
 fn afi_of(family: AddressFamily) -> u16 {
     match family {
-        AddressFamily::Ipv4Unicast | AddressFamily::Ipv4Flowspec => AFI_IPV4,
-        AddressFamily::Ipv6Unicast | AddressFamily::Ipv6Flowspec => AFI_IPV6,
+        AddressFamily::Ipv4Unicast | AddressFamily::Ipv4Flowspec | AddressFamily::Vpnv4Unicast => {
+            AFI_IPV4
+        }
+        AddressFamily::Ipv6Unicast | AddressFamily::Ipv6Flowspec | AddressFamily::Vpnv6Unicast => {
+            AFI_IPV6
+        }
         AddressFamily::L2vpnEvpn => message::AFI_L2VPN,
     }
 }
@@ -56,7 +60,17 @@ fn safi_of(family: AddressFamily) -> u8 {
         AddressFamily::Ipv4Unicast | AddressFamily::Ipv6Unicast => 1,
         AddressFamily::L2vpnEvpn => message::SAFI_EVPN,
         AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => message::SAFI_FLOWSPEC,
+        AddressFamily::Vpnv4Unicast | AddressFamily::Vpnv6Unicast => message::SAFI_VPN,
     }
+}
+
+/// VPNv4/VPNv6 are configurable but not yet negotiated (codec: #577): they are
+/// never advertised in OPEN nor GR and never reach `negotiated_afs`.
+pub(crate) fn is_vpn(family: AddressFamily) -> bool {
+    matches!(
+        family,
+        AddressFamily::Vpnv4Unicast | AddressFamily::Vpnv6Unicast
+    )
 }
 
 /// Unicast (SAFI 1) families: the only ones RFC 8950 Extended Next Hop and
@@ -93,7 +107,7 @@ fn build_mp_capabilities(
     transport_afi: u16,
 ) -> Vec<message::Capability> {
     let mut caps = Vec::new();
-    for &af in address_families {
+    for &af in address_families.iter().filter(|af| !is_vpn(**af)) {
         let afi = afi_of(af);
         caps.push(message::Capability::MultiProtocol {
             afi,
@@ -2104,6 +2118,32 @@ mod tests {
         assert_eq!(negotiate_add_path(&fine, &add_path_ctx(None)), none);
         let full = AddPathDir { rx: true, tx: true };
         assert_eq!(negotiate_add_path(&fine, &add_path_ctx(both)), [full, full]);
+    }
+
+    #[test]
+    fn vpn_families_are_configurable_but_not_yet_advertised() {
+        let vpn = [AddressFamily::Vpnv4Unicast, AddressFamily::Vpnv6Unicast];
+        assert_eq!(build_mp_capabilities(&vpn, AFI_IPV4), vec![]);
+        assert_eq!(
+            (afi_of(vpn[0]), safi_of(vpn[0])),
+            (AFI_IPV4, message::SAFI_VPN)
+        );
+        assert_eq!(
+            (afi_of(vpn[1]), safi_of(vpn[1])),
+            (AFI_IPV6, message::SAFI_VPN)
+        );
+        assert!(!is_unicast(vpn[0]) && !is_unicast(vpn[1]));
+        let cap = crate::gr::our_cap(60, &vpn, false, false);
+        assert_eq!(cap.families.len(), 0);
+        let mut theirs = cap;
+        theirs.families = vec![message::GrFamily {
+            afi: 1,
+            safi: message::SAFI_VPN,
+            forwarding: true,
+        }];
+        assert_eq!(crate::gr::PeerGr::from_cap(&theirs).families().len(), 0);
+        assert_eq!(crate::gr::afi_safi(vpn[0]), (1, 128));
+        assert_eq!(crate::gr::afi_safi(vpn[1]), (2, 128));
     }
 
     #[test]
