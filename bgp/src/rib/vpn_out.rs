@@ -7,6 +7,10 @@
 //! rules (split horizon, RFC 4456 reflection, eBGP prepend, export policy).
 //! Labels and RD pass through unchanged. Everything is per key: a change to
 //! one path re-selects that key only.
+//!
+//! VRF export (#580): `nos-ribd` pushes each VRF's routes (`apply_vpn_prefixes`)
+//! as `Local` candidates of the same selection, advertised next-hop-self
+//! with the VRF's own label (RFC 4364 section 4.3.2).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -15,9 +19,11 @@ use ipnet::IpNet;
 use nos_proto::AddressFamily;
 use nos_rpl::CompiledPolicy;
 
+use nos_proto::{VpnPrefix, VpnPrefixUpdate};
+
 use super::{
-    apply_policy, best_path, build_advertisement, info, message, warn, AdvertisedRoute, BgpRib,
-    Candidate, OutboundUpdate, RibRoute, RouteOrigin, VpnRoute,
+    apply_policy, best_path, build_advertisement, decision, info, message, warn, AdvertisedRoute,
+    BgpRib, Candidate, OutboundUpdate, RibRoute, RouteOrigin, VpnRoute,
 };
 use crate::vpn::{format_rd, VpnKey};
 
@@ -134,19 +140,22 @@ impl BgpRib {
         removed
     }
 
-    /// Re-decides `k`'s best path among every peer's copy and, when it
-    /// changed, propagates it.
-    // ponytail: peer paths only (#580 adds local VRF sources), no
-    // next-hop feasibility, and an IGP cost change does not re-select.
+    /// Re-decides `k`'s best path among every peer's copy and the local VRF
+    /// export of it and, when it changed, propagates it.
+    // ponytail: no next-hop feasibility, and an IGP cost change does not
+    // re-select.
     pub(super) fn select_vpn(&mut self, k: &VpnKey<IpNet>) {
+        let local = self.local_vpn(k).cloned();
         let candidates: Vec<Candidate> = self
             .vpn_adj_rib_in
             .values()
-            .filter_map(|t| Some((t.get(k)?.route.clone(), 0)))
+            .filter_map(|t| t.get(k))
+            .chain(local.as_ref())
+            .map(|r| (r.route.clone(), 0))
             .collect();
         let new = best_path(&candidates, &self.igp).and_then(|b| match b.origin {
-            RouteOrigin::Peer(p) => Some((p, self.vpn_adj_rib_in.get(&p)?.get(k)?.clone())),
-            RouteOrigin::Local => None,
+            RouteOrigin::Peer(p) => Some((b.origin, self.vpn_adj_rib_in.get(&p)?.get(k)?.clone())),
+            RouteOrigin::Local => Some((b.origin, local.clone()?)),
         });
         if self.vpn_loc.get(k) == new.as_ref() {
             return;
@@ -161,6 +170,57 @@ impl BgpRib {
         let peers: Vec<IpAddr> = self.peer_outboxes.keys().copied().collect();
         for peer in peers {
             self.sync_vpn_to(peer, k, false);
+        }
+    }
+
+    /// The local export of `k`: the first table (by name) holding it, as two
+    /// VRFs sharing an RD is a misconfiguration.
+    fn local_vpn(&self, k: &VpnKey<IpNet>) -> Option<&VpnRoute> {
+        let mut tables: Vec<&String> = self.vpn_local.keys().collect();
+        tables.sort();
+        tables.into_iter().find_map(|t| self.vpn_local[t].get(k))
+    }
+
+    /// Applies one `RedistributeVpnPrefixes` push from `table`'s `nos-ribd`
+    /// and re-selects every key it touched.
+    pub fn apply_vpn_prefixes(&mut self, table: &str, update: VpnPrefixUpdate) {
+        let local = |r: VpnPrefix| {
+            let mut route = decision::redistributed_route();
+            route.extended_communities = r.ext_communities;
+            (
+                (r.rd, r.prefix),
+                VpnRoute {
+                    labels: r.labels,
+                    route,
+                },
+            )
+        };
+        let slot = self.vpn_local.entry(table.to_string()).or_default();
+        let touched: Vec<VpnKey<IpNet>> = match update {
+            VpnPrefixUpdate::Full(routes) => {
+                let new: HashMap<_, _> = routes.into_iter().map(local).collect();
+                let old = std::mem::replace(slot, new);
+                old.into_keys().chain(slot.keys().copied()).collect()
+            }
+            VpnPrefixUpdate::Add(r) => {
+                let (k, mut v) = local(r);
+                // An unchanged re-push keeps its age (decision step 8).
+                if let Some(old) = slot.get(&k)
+                    && old.labels == v.labels
+                    && old.route.extended_communities == v.route.extended_communities
+                {
+                    v.route.received_at = old.route.received_at;
+                }
+                slot.insert(k, v);
+                vec![k]
+            }
+            VpnPrefixUpdate::Remove(rd, prefix) => {
+                slot.remove(&(rd, prefix));
+                vec![(rd, prefix)]
+            }
+        };
+        for k in touched {
+            self.select_vpn(&k);
         }
     }
 
@@ -183,9 +243,13 @@ impl BgpRib {
             self.cluster_id,
             Some((vpn_family(k.1), outbox.export_policy.as_ref())),
         )?;
-        // ponytail: next hop always unchanged, so the label stays valid;
-        // next-hop-self needs a label of our own (#580/#581).
-        route.next_hop = r.route.next_hop?;
+        // A local export is always next-hop-self (its label is ours; the
+        // codec sends an IPv4 one IPv4-mapped in a VPNv6 batch). A reflected
+        // path keeps its next hop so its label stays valid.
+        route.next_hop = match r.route.origin {
+            RouteOrigin::Local => outbox.local_addr?,
+            RouteOrigin::Peer(_) => r.route.next_hop?,
+        };
         Some(AdvertisedVpn {
             key: *k,
             labels: r.labels.clone(),
@@ -207,7 +271,7 @@ impl BgpRib {
         let sent = self.vpn_adj_rib_out.entry(peer).or_default();
         match adv {
             Some(adv) if force || sent.get(k) != Some(&adv) => {
-                info!(peer = %peer, family = %family, rd = %format_rd(&k.0), prefix = %k.1, "vpn route advertised");
+                info!(peer = %peer, family = %family, rd = %format_rd(&k.0), prefix = %k.1, labels = ?adv.labels, next_hop = %adv.route.next_hop, "vpn route advertised");
                 sent.insert(*k, adv.clone());
                 outbox.tx.send(OutboundUpdate::AnnounceVpn(adv));
             }
@@ -287,7 +351,10 @@ impl BgpRib {
             .flat_map(|(peer, t)| t.iter().map(move |(k, r)| (*peer, k, r)))
             .filter(|(_, k, _)| vpn_family(k.1) == family)
             .map(|(peer, k, r)| {
-                let best = self.vpn_loc.get(k).is_some_and(|(p, _)| *p == peer);
+                let best = self
+                    .vpn_loc
+                    .get(k)
+                    .is_some_and(|(o, _)| *o == RouteOrigin::Peer(peer));
                 (peer, k, r, best)
             })
             .collect();

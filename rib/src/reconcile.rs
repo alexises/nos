@@ -20,6 +20,8 @@ use crate::evpn_client::EvpnTarget;
 use crate::interface_client;
 use crate::ospf_client;
 use crate::rib::{build_from_config, Rib, RibEntry, RouteSource};
+use crate::vpn;
+use crate::vpn_client::VpnTarget;
 use nos_daemon::config;
 use nos_daemon::watchdog;
 
@@ -68,6 +70,7 @@ pub async fn run(
     redistribute_tx: watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: Vec<OspfFeed>,
     evpn_tx: watch::Sender<EvpnTarget>,
+    vpn: VpnFeed,
     bfd_target_tx: watch::Sender<bfd_client::Target>,
     bfd_up: watch::Receiver<bfd_client::UpSet>,
     mut shutdown: watch::Receiver<bool>,
@@ -99,7 +102,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &bfd_target_tx, &bfd_up).await;
+                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -113,11 +116,11 @@ pub async fn run(
                         },
                         r = bfd_changed.changed() => {
                             if r.is_ok() {
-                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &bfd_target_tx, &bfd_up).await;
+                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
                             }
                         }
                         _ = reapply.tick() => {
-                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &bfd_target_tx, &bfd_up).await;
+                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -156,6 +159,7 @@ async fn resync(
     redistribute_tx: &watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: &[OspfFeed],
     evpn_tx: &watch::Sender<EvpnTarget>,
+    vpn: &VpnFeed,
     bfd_target_tx: &watch::Sender<bfd_client::Target>,
     bfd_up: &watch::Receiver<bfd_client::UpSet>,
 ) {
@@ -226,6 +230,7 @@ async fn resync(
                 let _ = tx.send(compute_redistribute_target_ospf(&cfg, table, &routes, *to));
             }
             let _ = evpn_tx.send(evpn_target(&*rib.read().await));
+            vpn_export(&cfg, table, rib, vpn).await;
         }
         Err(e) => {
             warn!(table = %table, error = %e, "failed to fetch running config, keeping previous RIB");
@@ -321,6 +326,35 @@ fn evpn_target(rib: &Rib) -> EvpnTarget {
         },
         _ => EvpnTarget::default(),
     }
+}
+
+/// What `vpn_client` exports (`vpn::originated`), once `vpn` resolves and
+/// its label is known; the label is kept in the `Rib` for `show route`. A
+/// failed label allocation keeps the previous target.
+async fn vpn_export(cfg: &Config, table: &str, rib: &Arc<RwLock<Rib>>, (tx, registry): &VpnFeed) {
+    let resolved = vpn::resolve(cfg, table, |reserved| {
+        crate::driver::table_registry::ensure_label(registry, table, reserved)
+    });
+    let mut guard = rib.write().await;
+    let target = match resolved {
+        Ok(Some(v)) => {
+            guard.vpn_label = Some(v.label);
+            VpnTarget {
+                bgp_instance: Some(v.bgp_instance.clone()),
+                routes: vpn::originated(&guard.best_routes(), &v),
+            }
+        }
+        Ok(None) => {
+            guard.vpn_label = None;
+            VpnTarget::default()
+        }
+        Err(e) => {
+            warn!(table = %table, error = %e, "failed to allocate the vpn label, keeping the previous export");
+            return;
+        }
+    };
+    drop(guard);
+    let _ = tx.send(target);
 }
 
 /// Asks `nos-interfaced` (resolved via the broker, `ServiceRef::Interfaces`)
@@ -447,6 +481,9 @@ fn compute_redistribute_target(
 
 /// One OSPF redistribution feed: the rule target it serves (`Ospf` or
 /// `Ospfv3`) and its `ospf_client` task.
+/// The VPN export channel and the label registry (`--table-registry-path`).
+pub type VpnFeed = (watch::Sender<VpnTarget>, PathBuf);
+
 pub type OspfFeed = (
     RedistributeTarget,
     watch::Sender<ospf_client::RedistributeTarget>,

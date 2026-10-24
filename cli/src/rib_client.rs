@@ -43,6 +43,15 @@ pub async fn get_routes(rib_socket: &Path) -> Result<Vec<PrefixRoutes>, RibClien
     }
 }
 
+/// The table's VPN label (`None` without `vpn`, or from an older daemon
+/// that does not know the request).
+pub async fn get_vpn_label(rib_socket: &Path) -> Option<u32> {
+    match ask(rib_socket, RibRequest::GetVpnLabel).await {
+        Ok(RibEvent::VpnLabel(label)) => label,
+        _ => None,
+    }
+}
+
 /// Longest-prefix-match lookup for one destination address. `Ok(None)` means
 /// no configured prefix covers `addr` (no default route).
 pub async fn lookup(

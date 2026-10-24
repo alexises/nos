@@ -6,8 +6,8 @@ use clap::Parser;
 use nos_daemon::{bootstrap, watchdog};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_rib::{
-    bfd_client, bgp_client, evpn_client, ospf_client, reconcile, server, LinuxRibDriver,
-    NoopRibDriver, Rib, RibDriver,
+    bfd_client, bgp_client, evpn_client, ospf_client, reconcile, server, vpn_client,
+    LinuxRibDriver, NoopRibDriver, Rib, RibDriver,
 };
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
@@ -69,8 +69,8 @@ struct Args {
     #[arg(long, value_enum, default_value_t = default_driver_kind())]
     driver: DriverKind,
 
-    /// Only used by `--driver linux`: where this instance persists its own
-    /// table-id↔VRF-name allocation, for restart survival.
+    /// Where this instance persists its table-id↔VRF-name allocation
+    /// (`--driver linux` only) and its VPN label, for restart survival.
     #[arg(long, default_value = DEFAULT_TABLE_REGISTRY_PATH)]
     table_registry_path: PathBuf,
 
@@ -145,6 +145,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
 
+    let vpn_tx = vpn_client::spawn(
+        args.watchdog_socket.clone(),
+        args.table.clone(),
+        shutdown_rx.clone(),
+    );
+
     let (bfd_target_tx, bfd_up) = bfd_client::spawn(
         args.watchdog_socket.clone(),
         args.table.clone(),
@@ -161,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
         redistribute_tx,
         ospf_redistribute_tx,
         evpn_tx,
+        (vpn_tx, args.table_registry_path.clone()),
         bfd_target_tx,
         bfd_up,
         shutdown_rx,

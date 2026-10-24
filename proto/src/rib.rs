@@ -313,6 +313,9 @@ pub enum RibRequest {
         /// The addresses to resolve.
         addrs: Vec<IpAddr>,
     },
+    /// One-shot: this table's VPN label (`show route`'s header), the
+    /// explicit `vpn.label` or the one allocated; `None` without `vpn`.
+    GetVpnLabel,
 }
 
 /// Reply to `GetEvpnIrb`: what a MAC+IP route needs to be symmetric.
@@ -356,4 +359,6 @@ pub enum RibEvent {
     /// Reply to `ResolveNextHop`, one entry per address (`None`:
     /// unresolvable).
     NextHops(Vec<Option<ResolvedNextHop>>),
+    /// Reply to `GetVpnLabel`.
+    VpnLabel(Option<u32>),
 }

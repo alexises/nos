@@ -1,5 +1,5 @@
 use futures::{SinkExt, StreamExt};
-use nos_cli::rib_client::{get_routes, lookup};
+use nos_cli::rib_client::{get_routes, get_vpn_label, lookup};
 use nos_pki::testing::shared;
 use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -83,5 +83,29 @@ async fn get_routes_returns_daemon_error() {
     let err = get_routes(&path).await.unwrap_err();
     assert!(err.to_string().contains("boom"));
 
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_vpn_label_returns_the_label_and_none_on_anything_else() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let listener = shared().identity("ribd", "rt1").listen(&path).unwrap();
+    let server = tokio::spawn(serve_once(
+        listener,
+        RibRequest::GetVpnLabel,
+        RibEvent::VpnLabel(Some(1000)),
+    ));
+    assert_eq!(get_vpn_label(&path).await, Some(1000));
+    server.await.unwrap();
+
+    let path = tmp.path().join("rib2.sock");
+    let listener = shared().identity("ribd", "rt1").listen(&path).unwrap();
+    let server = tokio::spawn(serve_once(
+        listener,
+        RibRequest::GetVpnLabel,
+        RibEvent::NoMatch,
+    ));
+    assert_eq!(get_vpn_label(&path).await, None);
     server.await.unwrap();
 }

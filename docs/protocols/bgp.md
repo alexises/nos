@@ -329,7 +329,7 @@ Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Un
 
 ### L3VPN routes
 
-NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one of them per Route Distinguisher and prefix, picks a best path per (RD, prefix) and re-advertises it to its other peers, so it can act as a VPN route reflector, and imports them into VRF routing tables by Route Target. It does not yet originate them (#580) nor forward them (#581).
+NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one of them per Route Distinguisher and prefix, picks a best path per (RD, prefix) and re-advertises it to its other peers, so it can act as a VPN route reflector, and imports them into VRF routing tables by Route Target, and exports VRF routes as VPN routes. It does not forward them yet (#581).
 
 - Enable the families on the underlay peer-group: `set bgp instance r1 peer-group pg1 address-family vpnv4` (and `vpnv6`). Each is negotiated only when the peer advertises it too. Over REST: `PUT …/bgp-instance/r1/peer-group/pg1/address-family/Vpnv4Unicast` with body `"Vpnv4Unicast"`.
 - See what was received: `show bgp vpnv4` (or `vpnv6`), one line per path with `>` on the best one, RD, prefix, label, next hop, peer and Route Targets. `show bgp vpnv4 rd 65001:1` keeps one RD. Over REST: `GET /v1/bgp/vpnv4`, `GET /v1/bgp/vpnv4?rd=65001:1` (an invalid RD is `400`).
@@ -338,7 +338,7 @@ NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one
 - Filter with the peer-group's `import-policy`/`export-policy`: `this.prefix` is the customer prefix. A rejected route is dropped.
 - Reflection follows the unicast rules (iBGP split horizon, route-reflector clients, eBGP prepend). The label and RD go out unchanged and so does the next hop, even toward eBGP or with `next-hop self`: a new next hop would need a label of its own.
 - `maximum-prefix vpnv4|vpnv6` limits each family. Graceful restart and route refresh (including enhanced refresh) cover both families.
-- Name a VRF's VPN identity on its routing table (the table must differ from the underlay's), for the import and export to come: `set routing-table red vpn rd 65000:1`, `set routing-table red vpn route-target export 65000:1`, `set routing-table red vpn route-target import 65000:1`, `set routing-table red vpn bgp-instance r1`, optionally `set routing-table red vpn label 100`. Fields and checks: [routing tables](routing-tables.md#configuration-reference).
+- Name a VRF's VPN identity on its routing table (the table must differ from the underlay's): `set routing-table red vpn rd 65000:1`, `set routing-table red vpn route-target export 65000:1`, `set routing-table red vpn route-target import 65000:1`, `set routing-table red vpn bgp-instance r1`, optionally `set routing-table red vpn label 100`. Fields and checks: [routing tables](routing-tables.md#configuration-reference).
 
 #### Import VPN routes into a VRF
 
@@ -350,6 +350,19 @@ NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one
 - Changing the import RTs moves routes in or out at once.
 - A `vpn` route has distance 200: a CE-facing BGP, static, connected or OSPF route for the same prefix wins.
 - Imported routes are not installed for forwarding yet (MPLS, #581).
+
+#### Export a VRF's routes
+
+- Set the VRF's `vpn rd`, `vpn route-target export` and `vpn bgp-instance` (the underlay instance), and add `address-family vpnv4` (and `vpnv6`) to the underlay peer-group toward the other PEs or the route reflector.
+- Every best route of the table is exported: connected, static, OSPF and routes from CEs over the table's own BGP instance.
+- Not exported: routes imported from VPN (no loops between PEs) and EVPN routes.
+- Each route carries the RD, the export Route Targets and the VRF's label. The next hop is the session's own address, toward iBGP and eBGP peers alike; a VPNv6 route over an IPv4 session carries it IPv4-mapped.
+- The label: `vpn label <n>` pins it; otherwise `nos-ribd` allocates one from 1000 up, kept in its table registry across restarts and when `vpn` is removed and set again. `show route red` prints `VPN label: <n>` above the routes.
+- The peer-group's `export-policy` filters exported routes too (`this.prefix` is the customer prefix).
+- A lost route is withdrawn; removing `vpn` (or its `bgp-instance`) withdraws all of them.
+- Check it on the other PE with `show bgp vpnv4`, or in the logs: `sent initial vpn snapshot to nos-bgpd table=red …` (`nos-ribd`) and `vpn route advertised peer=… rd=… prefix=… labels=[…] next_hop=…` (`nos-bgpd`).
+- New best routes from the table's own BGP or OSPF are exported at the next resync of the table, within 10s.
+- The label is advertised but not yet bound to a kernel MPLS route (#581).
 
 ### Flowspec (RFC 8955, RFC 8956)
 
@@ -982,7 +995,7 @@ When `nos-bgpd` itself restarts (a crash or a kill) while the routing table's `n
 - It waits for End-of-RIB from every configured peer and for the routes it redistributes. A peer that doesn't advertise graceful restart, or is restarting itself (R bit), isn't waited for, nor is one still down after `restart-time`.
 - Then it logs `route selection deferral ended reason=end-of-rib`, sends each peer its routes and End-of-RIB, and replaces the kernel's BGP routes with what it selected. If that takes longer than `selection-deferral-time`, it goes ahead anyway (`reason=timer`).
 - If `nos-ribd` restarted too, or holds no BGP route, there is nothing to preserve: no deferral, and F=0.
-- EVPN routes this router originates (from a broadcast domain or an IP-VRF) aren't waited for. One that reaches `nos-bgpd` after the deferral is sent on its own, so a peer may drop and re-learn it.
+- EVPN routes this router originates (from a broadcast domain or an IP-VRF) and VRF routes it exports as VPN routes aren't waited for. One that reaches `nos-bgpd` after the deferral is sent on its own, so a peer may drop and re-learn it.
 
 Which session ends keep the routes:
 

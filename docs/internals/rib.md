@@ -19,6 +19,14 @@ There is an external query API: `server.rs` serves `nos_proto::rib::{RibRequest,
 - Not installed yet: `kernel_visible` drops a `Vpn` winner from `best_routes_for_kernel` and from `diff_best` (a `Bgp` winner falling back to a `Vpn` one is a kernel `Removed`). `ponytail:` #581 installs it as an MPLS route and drops the filter.
 - `Rib::resolve(addr)` answers `RibRequest::ResolveNextHop`: the best non-`Bgp`/`Evpn`/`Vpn`, non-discard candidate of the longest covering prefix (`resolving_best`, shared with `igp_costs`), its first next hop, or `addr` itself with no ifindex for `Connected`.
 
+## L3VPN VRF export (#580)
+
+- Config (`vpn::resolve`, from `reconcile::vpn_export` each resync): RD, export RTs and `vpn.bgp_instance` (never `table.bgp_instance`); idle without RD and instance.
+- Label: an explicit `vpn.label` wins and is not persisted. Otherwise `driver::table_registry::ensure_label`: the `labels` map of the table-id registry file, same `fs2` lock, smallest of 1000..=1048575 that no other table holds and no table configures explicitly (a persisted label that became someone's explicit one is replaced). Never freed. `info!` `vpn label allocated table=… label=…` once. A failed allocation keeps the previous export. Kept in `Rib.vpn_label` for `RibRequest::GetVpnLabel` (`user`/`restd`, `show route`'s `VPN label:` header).
+- Export (`vpn::originated`): one `VpnPrefix` per best route (`best_routes`, connected included) except `Vpn` (the loop guard) and `Evpn` ones, with `[label]` and the export RTs.
+- Push (`vpn_client.rs`): `BgpRequest::RedistributeVpnPrefixes { table, update }` to the underlay `nos-bgpd`. The connection loop is `push_client.rs`, shared with `evpn_client.rs` (a `Feed` per kind): `Full` on connect, diffed `Add`/`Remove` after, `Full([])` when the instance changes or `vpn` goes, the connection read for EOF. Log `sent initial vpn snapshot to nos-bgpd table=… bgp_instance=… routes=…`.
+- `ponytail:` refreshed on resync (config diff or 10s tick), not on each `PushBgpRoutes`/`PushOspfRoutes`, like the Type-5 export; no RPL on export (#582).
+
 ## EVPN IP-VRF (L3 VNI)
 
 A table with `RoutingTable.evpn.l3_vni` set is an RFC 9136/9135 §4.4.1 "interface-less" IP-VRF, and this daemon owns all of it — it is the only one allowed to put gateway routes in the VRF, already knows every route to originate, and has `CAP_NET_ADMIN`. No new daemon, no watchdog change.
@@ -65,7 +73,9 @@ A table with `RoutingTable.evpn.l3_vni` set is an RFC 9136/9135 §4.4.1 "interfa
 |--------|------|
 | `main.rs` | Arg parsing (`--table`, `--watchdog-socket`, `--listen-socket`, `--driver`, `--table-registry-path`), resolves `nos-configd`'s address via the watchdog broker before starting, SIGINT+SIGTERM shutdown wait, spawns `reconcile::run` and `server::start` sharing one `Arc<RwLock<Rib>>` and the driver |
 | `evpn.rs` | The EVPN IP-VRF's pure part: `L3Vni` (resolved config), `EvpnState` (on `Rib.evpn`), `desired` (received Type-5 → `Evpn` candidates + remote VTEPs), `originated` (best routes → Type-5) — see "EVPN IP-VRF" |
-| `evpn_client.rs` | Pushes `originated`'s Type-5 routes to the underlay `nos-bgpd` (`RedistributeEvpnPrefixes`), `bgp_client.rs`'s shape |
+| `evpn_client.rs` | Pushes `originated`'s Type-5 routes to the underlay `nos-bgpd` (`RedistributeEvpnPrefixes`) over `push_client` |
+| `vpn.rs`, `vpn_client.rs` | L3VPN VRF export: `VrfExport`/`resolve`/`originated`, and its push (`RedistributeVpnPrefixes`) over `push_client` |
+| `push_client.rs` | The origination push loop shared by `evpn_client` and `vpn_client` (`Feed`, `Target`, `diff`) |
 | `rib.rs` | `RouteSource`, `RibEntry`, `Rib` (best-path selection: `best_route`/`best_routes` for the winner only, `all_routes`/`lookup` for every candidate per prefix — the latter used to serve `RibRequest`), `build_from_config` |
 | `driver/mod.rs` | `RibDriver` trait (`apply`, `teardown`, `vrf_name`, `table_id`, `sync_l3vni`, `sync_tunnel`) and `DriverError` — the swappable OS backend, so a future non-Linux/hardware driver can be added without touching `reconcile.rs` |
 | `driver/noop.rs` | `NoopRibDriver` — today's original log-only behavior |

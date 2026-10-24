@@ -533,7 +533,12 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
 
     match address {
         None => match rib_client::get_routes(&rib_socket).await {
-            Ok(routes) => println!("{}", format::render_prefix_routes(&routes)),
+            Ok(routes) => {
+                if let Some(label) = rib_client::get_vpn_label(&rib_socket).await {
+                    println!("VPN label: {label}");
+                }
+                println!("{}", format::render_prefix_routes(&routes));
+            }
             Err(e) => eprintln!("error: {e}"),
         },
         Some(addr) => match rib_client::lookup(&rib_socket, addr).await {

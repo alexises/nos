@@ -51,7 +51,7 @@ pub fn start(
 // an instance to its table needs a config lookup — add it if that matters.
 fn allowed(role: Role, req: &RibRequest) -> bool {
     match req {
-        RibRequest::GetRoutes | RibRequest::Lookup { .. } => {
+        RibRequest::GetRoutes | RibRequest::Lookup { .. } | RibRequest::GetVpnLabel => {
             matches!(role, Role::User | Role::Restd)
         }
         // `ribd`/`fdbd` name a loopback VTEP's device (`lo<table id>`) of
@@ -181,6 +181,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             apply_vpn_route_update(ctx, updates).await;
             None
         }
+        RibRequest::GetVpnLabel => Some(RibEvent::VpnLabel(ctx.rib.read().await.vpn_label)),
         RibRequest::ResolveNextHop { addrs } => {
             let guard = ctx.rib.read().await;
             Some(RibEvent::NextHops(
@@ -663,6 +664,11 @@ mod authz_tests {
         };
         // A Vpn route never resolves a next hop.
         assert_eq!(hops, vec![None]);
+        ctx.rib.write().await.vpn_label = Some(1000);
+        assert!(matches!(
+            dispatch(&ctx, RibRequest::GetVpnLabel).await,
+            Some(RibEvent::VpnLabel(Some(1000)))
+        ));
     }
 
     #[test]
@@ -670,6 +676,11 @@ mod authz_tests {
         for role in Role::ALL {
             let expected = matches!(role, Role::User | Role::Restd);
             assert_eq!(allowed(role, &RibRequest::GetRoutes), expected, "{role:?}");
+            assert_eq!(
+                allowed(role, &RibRequest::GetVpnLabel),
+                expected,
+                "{role:?}"
+            );
         }
         // The daemons that resolve a VRF (or a loopback VTEP) through this instance.
         for role in [

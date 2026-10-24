@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 
 ## Scope
 
-`nos-bgpd` resolves its peers and VRF from `nos-configd`, runs the RFC 4271 FSM over VRF-scoped TCP, keeps the RIBs, and pushes best routes to `nos-ribd` and EVPN routes to/from `nos-fdbd`/`nos-ribd`. `bgp/TODO.md` lists what is open.
+`nos-bgpd` resolves its peers and VRF from `nos-configd`, runs the RFC 4271 FSM over VRF-scoped TCP, keeps the RIBs, and exchanges routes with `nos-ribd`/`nos-fdbd`. `bgp/TODO.md` lists what is open.
 
 ## VRF resolution
 
@@ -21,7 +21,7 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 - Skip dialing while `PeerSlot::is_established` (either role), or every tick causes a collision.
 - Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`), each `tcp::connect` bounded by it (#158).
 - Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease wait (#444); not in `clear_peer`.
-- **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In/`peer_outbox` outlive the session and routes stay in the Loc-RIB.
+- **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In/`peer_outbox` outlive the session.
 
 ## Session authentication
 
@@ -112,10 +112,10 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162).
 ## EVPN and MAC mobility
 
 - `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); best path does not apply (RFC 7432 §15 aside). `evpn_import_policy` (#502, `None` = accept all) gates Type-1/2/3/5 in `learn_evpn` before mobility (reject = withdraw, Type-4 exempt).
-- MAC mobility has **no withdraw**: a sequence number only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
-- Same ESI is not a move (#172): `MacMobility::holds`; otherwise PEs on one segment bump each other into a frozen duplicate.
-- Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH), VRF import (`vpn::VrfSet`, family-agnostic; PE resolved via the underlay's `ResolveNextHop`): internals page.
-- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`).
+- MAC mobility has **no withdraw**: a sequence only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
+- Same ESI is not a move (#172): `MacMobility::holds`; else PEs on one segment freeze each other as duplicates.
+- Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH), VRF import (`vpn::VrfSet`; PE via the underlay's `ResolveNextHop`): internals page.
+- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP, VNI, label (`evpn_local` by `EvpnSource`, `vpn_local` by table). VRF exports go next-hop-self; reflected VPN paths keep theirs (the label is the PE's).
 
 ## Backup path, multipath (#70)
 

@@ -207,6 +207,9 @@ struct Env {
     ospf_rx: Vec<watch::Receiver<ospf_client::RedistributeTarget>>,
     evpn_tx: watch::Sender<EvpnTarget>,
     evpn_rx: watch::Receiver<EvpnTarget>,
+    vpn: VpnFeed,
+    vpn_rx: watch::Receiver<VpnTarget>,
+    registry_dir: tempfile::TempDir,
     bfd_tx: watch::Sender<bfd_client::Target>,
     bfd_target_rx: watch::Receiver<bfd_client::Target>,
     bfd_up_tx: watch::Sender<bfd_client::UpSet>,
@@ -219,6 +222,8 @@ impl Env {
         let (ospf_tx, ospf_r) = watch::channel(ospf_client::RedistributeTarget::default());
         let (ospfv3_tx, ospfv3_r) = watch::channel(ospf_client::RedistributeTarget::default());
         let (evpn_tx, evpn_rx) = watch::channel(EvpnTarget::default());
+        let (vpn_tx, vpn_rx) = watch::channel(VpnTarget::default());
+        let registry = tempfile::tempdir().unwrap();
         let (bfd_tx, bfd_target_rx) = watch::channel(bfd_client::Target::default());
         let (bfd_up_tx, bfd_up_rx) = watch::channel(bfd_client::UpSet::default());
         Env {
@@ -234,6 +239,9 @@ impl Env {
             ospf_rx: vec![ospf_r, ospfv3_r],
             evpn_tx,
             evpn_rx,
+            vpn: (vpn_tx, registry.path().join("table-ids.yaml")),
+            vpn_rx,
+            registry_dir: registry,
             bfd_tx,
             bfd_target_rx,
             bfd_up_tx,
@@ -272,6 +280,7 @@ impl Env {
             &self.bgp_tx,
             &self.ospf,
             &self.evpn_tx,
+            &self.vpn,
             &self.bfd_tx,
             &self.bfd_up_rx,
         )
@@ -467,6 +476,60 @@ async fn remote_lfa_asks_the_driver_for_the_tunnel_device() {
     let e = Env::ready(cfg);
     e.resync().await;
     assert_eq!(*e.rec.tunnels.lock().unwrap(), [("rt1".to_string(), true)]);
+}
+
+// --------------------------------------------------------------------- vpn
+
+fn vpn_cfg(label: Option<u32>) -> Config {
+    let mut cfg = base_cfg();
+    cfg.routing_tables[0].vpn = nos_proto::RoutingTableVpn {
+        rd: Some("65000:1".into()),
+        route_targets_import: vec![],
+        route_targets_export: vec!["65000:1".into()],
+        bgp_instance: Some("core".into()),
+        label,
+    };
+    cfg
+}
+
+/// #580: `vpn` set exports every best route with an allocated label that a
+/// reload keeps; unset, the target goes idle (`Full([])` withdraws all).
+#[tokio::test]
+async fn vpn_set_then_unset_exports_then_withdraws_with_a_stable_label() {
+    let e = Env::ready(vpn_cfg(None));
+    e.resync().await;
+    let target = e.vpn_rx.borrow().clone();
+    assert_eq!(target.bgp_instance.as_deref(), Some("core"));
+    assert!(!target.routes.is_empty(), "the statics are exported");
+    assert!(target.routes.iter().all(|r| r.labels == [1000]));
+    assert!(
+        target.routes.iter().any(|r| r.prefix == net("10.0.0.0/24")),
+        "connected too"
+    );
+    assert_eq!(e.rib.read().await.vpn_label, Some(1000));
+    e.resync().await;
+    assert_eq!(e.rib.read().await.vpn_label, Some(1000), "reused");
+
+    e.configd().set_config(base_cfg());
+    e.resync().await;
+    assert_eq!(*e.vpn_rx.borrow(), VpnTarget::default());
+    assert_eq!(e.rib.read().await.vpn_label, None);
+
+    e.configd().set_config(vpn_cfg(Some(77)));
+    e.resync().await;
+    assert!(e.vpn_rx.borrow().routes.iter().all(|r| r.labels == [77]));
+}
+
+#[tokio::test]
+async fn a_failed_label_allocation_keeps_the_previous_export() {
+    let mut e = Env::ready(vpn_cfg(None));
+    // A directory where the registry file should be: unreadable.
+    let dir = e.registry_dir.path().join("table-ids.yaml");
+    std::fs::create_dir(&dir).unwrap();
+    e.vpn.1 = dir;
+    e.resync().await;
+    assert_eq!(*e.vpn_rx.borrow(), VpnTarget::default());
+    assert_eq!(e.rib.read().await.vpn_label, None);
 }
 
 // -------------------------------------------------------------------- evpn
@@ -666,6 +729,7 @@ fn start(e: Env) -> Running {
         e.bgp_tx.clone(),
         e.ospf.clone(),
         e.evpn_tx.clone(),
+        e.vpn.clone(),
         e.bfd_tx.clone(),
         e.bfd_up_rx.clone(),
         rx,
@@ -798,6 +862,7 @@ async fn run_stops_at_once_when_shutdown_is_already_set() {
         e.bgp_tx.clone(),
         e.ospf.clone(),
         e.evpn_tx.clone(),
+        e.vpn.clone(),
         e.bfd_tx.clone(),
         e.bfd_up_rx.clone(),
         rx,

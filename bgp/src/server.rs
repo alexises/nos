@@ -47,9 +47,9 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
         | BgpRequest::GetRpkiSummary => {
             matches!(role, Role::User | Role::Restd)
         }
-        BgpRequest::RedistributeRoutes(_) | BgpRequest::RedistributeEvpnPrefixes { .. } => {
-            role == Role::Ribd
-        }
+        BgpRequest::RedistributeRoutes(_)
+        | BgpRequest::RedistributeEvpnPrefixes { .. }
+        | BgpRequest::RedistributeVpnPrefixes { .. } => role == Role::Ribd,
         BgpRequest::RedistributeMacs { .. } => role == Role::Fdbd,
     }
 }
@@ -152,6 +152,9 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
             BgpRequest::RedistributeEvpnPrefixes { table, update } => {
                 sessions.apply_evpn_prefixes(&table, update).await;
             }
+            BgpRequest::RedistributeVpnPrefixes { table, update } => {
+                sessions.apply_vpn_prefixes(&table, update).await;
+            }
             BgpRequest::SendRouteRefresh { peer } => {
                 let event = if sessions
                     .send_command(peer, FsmCommand::SendRouteRefresh)
@@ -215,6 +218,17 @@ mod authz_tests {
                 ),
                 role == Role::Ribd,
                 "{role:?} redistribute evpn prefixes"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::RedistributeVpnPrefixes {
+                        table: "red".to_string(),
+                        update: nos_proto::VpnPrefixUpdate::Full(vec![])
+                    }
+                ),
+                role == Role::Ribd,
+                "{role:?} redistribute vpn prefixes"
             );
             assert_eq!(
                 allowed(role, &BgpRequest::GetSummary),
