@@ -1207,6 +1207,34 @@ pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
     lines.join("\n")
 }
 
+/// Render one BGP instance's received VPN paths of `family`, one line per
+/// path, `>` marking the best per (RD, prefix) — used for `show bgp
+/// vpnv4|vpnv6`.
+pub fn render_bgp_vpn(
+    instance: &str,
+    family: nos_proto::AddressFamily,
+    routes: &[nos_proto::VpnRouteSummary],
+) -> String {
+    if routes.is_empty() {
+        return format!("bgp instance {instance}: no {family} routes");
+    }
+    let mut lines = vec![format!("bgp instance {instance}:")];
+    for r in routes {
+        let labels: Vec<String> = r.labels.iter().map(u32::to_string).collect();
+        lines.push(format!(
+            "  {} rd {} {} label {} next-hop {} from {} [{}]",
+            if r.best { ">" } else { " " },
+            r.rd,
+            r.prefix,
+            labels.join("/"),
+            r.next_hop,
+            r.peer,
+            r.route_targets.join(" ")
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Render one BGP instance's received Flowspec rules, one line per rule —
 /// used for `show bgp flowspec`.
 pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> String {
@@ -2190,6 +2218,30 @@ mod tests {
                 ]
             ),
             "bgp instance r1:\n  > 192.0.2.0/24 from 10.0.0.2 next-hop 10.0.0.2 as-path [65001 65002] origin-as 65002 local-pref 100 valid\n    192.0.2.0/24 from 10.0.0.3 next-hop 10.0.0.3 as-path [65001 65002] origin-as 65002 local-pref 100 invalid\n    192.0.2.0/24 from local next-hop - as-path [] origin-as - local-pref 100 not-found"
+        );
+    }
+
+    #[test]
+    fn render_bgp_vpn_marks_the_best_path() {
+        let family = nos_proto::AddressFamily::Vpnv4Unicast;
+        assert_eq!(
+            render_bgp_vpn("r1", family, &[]),
+            "bgp instance r1: no vpnv4 routes"
+        );
+        let r = |best, labels: Vec<u32>| nos_proto::VpnRouteSummary {
+            peer: "10.0.0.3".parse().unwrap(),
+            rd: "65001:1".into(),
+            prefix: "10.10.0.0/24".into(),
+            labels,
+            next_hop: "10.0.0.3".parse().unwrap(),
+            route_targets: vec!["RT:65000:1".into()],
+            as_path: "65001".into(),
+            local_pref: 100,
+            best,
+        };
+        assert_eq!(
+            render_bgp_vpn("r1", family, &[r(true, vec![100]), r(false, vec![16, 17])]),
+            "bgp instance r1:\n  > rd 65001:1 10.10.0.0/24 label 100 next-hop 10.0.0.3 from 10.0.0.3 [RT:65000:1]\n    rd 65001:1 10.10.0.0/24 label 16/17 next-hop 10.0.0.3 from 10.0.0.3 [RT:65000:1]"
         );
     }
 

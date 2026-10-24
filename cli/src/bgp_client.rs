@@ -84,6 +84,28 @@ pub async fn get_flowspec_routes(
     }
 }
 
+/// Fetches every VPN path of `family` the instance has received, only those
+/// of Route Distinguisher `rd` when set.
+pub async fn get_vpn_routes(
+    bgp_socket: &Path,
+    family: nos_proto::AddressFamily,
+    rd: Option<&str>,
+) -> Result<Vec<nos_proto::VpnRouteSummary>, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer
+        .send(BgpRequest::GetVpnRoutes {
+            family,
+            rd: rd.map(str::to_string),
+        })
+        .await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::VpnRoutes(routes))) => Ok(routes),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
 /// Every unicast route the instance holds.
 pub async fn get_routes(
     bgp_socket: &Path,

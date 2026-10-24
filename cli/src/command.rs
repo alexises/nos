@@ -89,6 +89,12 @@ pub enum Command {
     ShowBgpFlowspec,
     /// `show bgp rpki` — every configured BGP instance's RPKI cache sessions.
     ShowBgpRpki,
+    /// `show bgp vpnv4|vpnv6 [rd <rd>]` — every VPN path of `family` received
+    /// by every configured BGP instance, optionally of one RD only.
+    ShowBgpVpn {
+        family: nos_proto::AddressFamily,
+        rd: Option<String>,
+    },
     /// `show bgp routes` — every BGP instance's unicast routes with their
     /// RPKI origin validation state.
     ShowBgpRoutes,
@@ -587,6 +593,20 @@ mod tests {
         );
         assert_eq!(Command::parse("show bgp rpki"), Command::ShowBgpRpki);
         assert_eq!(Command::parse("show bgp routes"), Command::ShowBgpRoutes);
+        assert_eq!(
+            Command::parse("show bgp vpnv6"),
+            Command::ShowBgpVpn {
+                family: nos_proto::AddressFamily::Vpnv6Unicast,
+                rd: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show bgp vpnv4 rd 65001:1"),
+            Command::ShowBgpVpn {
+                family: nos_proto::AddressFamily::Vpnv4Unicast,
+                rd: Some("65001:1".into())
+            }
+        );
     }
 
     #[test]

@@ -147,6 +147,33 @@ pub struct FlowspecRouteSummary {
     pub dataplane: Option<String>,
 }
 
+/// One received VPN-IPv4/VPN-IPv6 path (RFC 4364/4659, SAFI 128), for
+/// `show bgp vpnv4|vpnv6`. RD and Route Targets are rendered by `nos-bgpd`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VpnRouteSummary {
+    /// The advertising peer.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub peer: IpAddr,
+    /// The Route Distinguisher, `65001:1` or `192.0.2.1:7`.
+    pub rd: String,
+    /// The customer prefix, `10.10.0.0/24`.
+    pub prefix: String,
+    /// The MPLS label stack as received (RFC 8277), outermost first.
+    pub labels: Vec<u32>,
+    /// The BGP next hop (the egress PE).
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub next_hop: IpAddr,
+    /// The Route Targets, `RT:65000:1`.
+    pub route_targets: Vec<String>,
+    /// The AS path as text (`65001 65002`).
+    pub as_path: String,
+    /// Effective `LOCAL_PREF`.
+    pub local_pref: u32,
+    /// This path is the best one for its (RD, prefix), the one reflected.
+    pub best: bool,
+}
+
 /// RFC 6811 origin validation state of a route, for `show bgp routes`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +338,15 @@ pub enum BgpRequest {
     GetRoutes,
     /// One-shot: every Flowspec route received from any peer.
     GetFlowspecRoutes,
+    /// One-shot: every VPN route of `family` (`Vpnv4Unicast` or
+    /// `Vpnv6Unicast`) received from any peer, only those with Route
+    /// Distinguisher `rd` when set (`show bgp vpnv4|vpnv6 [rd <rd>]`).
+    GetVpnRoutes {
+        /// `Vpnv4Unicast` or `Vpnv6Unicast`; any other family has none.
+        family: crate::AddressFamily,
+        /// The Route Distinguisher text (`65001:1`) to filter on.
+        rd: Option<String>,
+    },
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
@@ -334,4 +370,6 @@ pub enum BgpEvent {
     Routes(Vec<BgpRouteSummary>),
     /// Reply to `GetFlowspecRoutes`.
     FlowspecRoutes(Vec<FlowspecRouteSummary>),
+    /// Reply to `GetVpnRoutes`, sorted by peer, RD, prefix.
+    VpnRoutes(Vec<VpnRouteSummary>),
 }

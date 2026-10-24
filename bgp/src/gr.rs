@@ -43,7 +43,6 @@ pub fn afi_safi(family: AddressFamily) -> (u16, u8) {
 pub fn family_of(afi: u16, safi: u8) -> Option<AddressFamily> {
     AddressFamily::ALL
         .into_iter()
-        .filter(|f| !crate::fsm::is_vpn(*f))
         .find(|f| afi_safi(*f) == (afi, safi))
 }
 
@@ -111,7 +110,6 @@ pub fn our_cap(
         time,
         families: families
             .iter()
-            .filter(|f| !crate::fsm::is_vpn(**f))
             .map(|f| {
                 let (afi, safi) = afi_safi(*f);
                 GrFamily {

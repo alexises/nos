@@ -422,7 +422,7 @@ impl BgpRib {
                     update
                         .mp_reach
                         .iter()
-                        .filter(|m| !m.nlri.is_empty() || !m.evpn.is_empty())
+                        .filter(|m| !m.nlri.is_empty() || !m.evpn.is_empty() || !m.vpn.is_empty())
                         .find(|m| martian(m.next_hop))
                         .map(|m| m.next_hop)
                 });
@@ -541,6 +541,14 @@ impl BgpRib {
                 }
             }
         }
+        if let Some(stale) = self.vpn_stale.get_mut(&from) {
+            for n in update.mp_reach.iter().flat_map(|m| &m.vpn) {
+                stale.remove(&(n.rd, n.prefix));
+            }
+            for n in update.mp_unreach.iter().flat_map(|m| &m.vpn) {
+                stale.remove(&(n.rd, n.prefix));
+            }
+        }
         let withdrawn = withdrawn_paths(update);
         let announced = announced_paths(update);
         // RFC 7313 / RFC 4724: any path the peer mentions again is no
@@ -563,6 +571,9 @@ impl BgpRib {
             }
         }
         for u in &update.mp_unreach {
+            for n in &u.vpn {
+                self.drop_vpn(from, &(n.rd, n.prefix));
+            }
             let Some(family) = flowspec_family(u.afi) else {
                 continue;
             };
@@ -749,6 +760,7 @@ impl BgpRib {
         for (vni, mac) in evpn_recheck {
             self.mac_mobility_recheck(vni, mac);
         }
+        self.learn_vpn(update, &base_route, (from, peer_as), import_policy);
     }
 
     /// RFC 7606 treat-as-withdraw, decided here rather than in the codec
@@ -768,6 +780,9 @@ impl BgpRib {
             }
         }
         for m in &update.mp_reach {
+            for n in &m.vpn {
+                self.drop_vpn(from, &(n.rd, n.prefix));
+            }
             let Some(family) = flowspec_family(m.afi) else {
                 continue;
             };

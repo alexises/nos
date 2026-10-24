@@ -477,6 +477,40 @@ fn flowspec_encodes_as_safi_133_with_its_ipv6_communities() {
 }
 
 #[test]
+fn vpn_encodes_as_safi_128_with_its_label_rd_and_next_hop() {
+    let rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 1];
+    let prefix: ipnet::IpNet = "2001:db8:5::/48".parse().unwrap();
+    let u = expect_update(outbound_update_to_message(OutboundUpdate::AnnounceVpn(
+        crate::rib::AdvertisedVpn {
+            key: (rd, prefix),
+            labels: vec![100],
+            route: route("2001:db8:5::/48", "192.0.2.9", true, None),
+        },
+    )));
+    let mp = &u.mp_reach[0];
+    assert_eq!((mp.afi, mp.safi), (AFI_IPV6, message::SAFI_VPN));
+    assert_eq!(mp.next_hop, "192.0.2.9".parse::<IpAddr>().unwrap());
+    assert_eq!(
+        mp.vpn,
+        [crate::vpn::VpnNlri {
+            labels: vec![100],
+            rd,
+            prefix
+        }]
+    );
+    assert_eq!(u.attributes.unwrap().local_pref, Some(150));
+
+    let u = expect_update(outbound_update_to_message(OutboundUpdate::WithdrawVpn((
+        rd, prefix,
+    ))));
+    assert!(u.attributes.is_none() && u.mp_reach.is_empty());
+    let mp = &u.mp_unreach[0];
+    assert_eq!((mp.afi, mp.safi), (AFI_IPV6, message::SAFI_VPN));
+    assert_eq!(mp.vpn[0].labels, Vec::<u32>::new());
+    assert_eq!(mp.vpn[0].rd, rd);
+}
+
+#[test]
 fn withdraws_encode_as_legacy_or_mp_unreach() {
     let v4: IpNet = "192.0.2.0/24".parse().unwrap();
     let v6: IpNet = "2001:db8::/32".parse().unwrap();

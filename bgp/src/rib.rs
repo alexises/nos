@@ -96,6 +96,7 @@ use crate::flowspec::FlowSpec;
 use crate::gr::{Disconnect, PeerGr};
 use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
+use crate::vpn::VpnKey;
 
 mod adj_in;
 mod aggregate;
@@ -106,12 +107,14 @@ mod flowspec_validate;
 mod gr;
 mod outbox;
 mod shared;
+mod vpn_out;
 pub use evpn_out::{feeds as evpn_feeds, AdvertisedEvpn, EvpnSource};
 pub use flowspec_out::AdvertisedFlowspec;
 #[cfg(test)]
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
 pub use shared::{RibGuard, SharedRib};
+pub use vpn_out::AdvertisedVpn;
 
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
 pub use decision::Hops;
@@ -290,6 +293,16 @@ pub struct EvpnRoute {
     pub extended_communities: Vec<u64>,
 }
 
+/// One received VPN-IPv4/IPv6 path (RFC 4364) — `Adj-RIB-In` content, after
+/// the peer-group import policy (`vpn_out::learn_vpn`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VpnRoute {
+    /// The label stack as received; passed through unchanged on reflection.
+    pub labels: Vec<u32>,
+    /// The path as a decision-process candidate; `next_hop` is the PE.
+    pub route: RibRoute,
+}
+
 /// One candidate route for a prefix, either locally redistributed or learned
 /// from a peer.
 #[derive(Debug, Clone, PartialEq)]
@@ -399,6 +412,9 @@ pub enum OutboundUpdate {
     /// A selected Flowspec rule (see `flowspec_out`).
     AnnounceFlowspec(AdvertisedFlowspec),
     WithdrawFlowspec(AddressFamily, FlowSpec),
+    /// A selected VPN path (see `vpn_out`).
+    AnnounceVpn(AdvertisedVpn),
+    WithdrawVpn(VpnKey<IpNet>),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -583,6 +599,15 @@ pub struct BgpRib {
     flowspec_export: HashMap<IpAddr, Arc<CompiledPolicy>>,
     /// The Flowspec twin of `evpn_stale`.
     flowspec_stale: HashMap<IpAddr, HashSet<FlowspecKey>>,
+    /// Received VPN-IPv4/IPv6 paths per peer, keyed by (RD, prefix), every
+    /// RT kept (see `vpn_out`).
+    vpn_adj_rib_in: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
+    /// Per key, the selected copy and the peer it came from (`select_vpn`).
+    vpn_loc: HashMap<VpnKey<IpNet>, (IpAddr, VpnRoute)>,
+    /// What each peer was last sent per key (`sync_vpn_to`).
+    vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, AdvertisedVpn>>,
+    /// The VPN twin of `stale` (graceful restart and RFC 7313 refresh).
+    vpn_stale: HashMap<IpAddr, HashSet<VpnKey<IpNet>>>,
     /// Peers whose peer-group tunes Flowspec validation (`set_peer_flowspec_validation`).
     flowspec_validation: HashMap<IpAddr, nos_proto::BgpFlowspecValidation>,
     /// Derived indexes for incremental Flowspec revalidation.
@@ -724,6 +749,10 @@ impl BgpRib {
             flowspec_export: HashMap::new(),
             flowspec_stale: HashMap::new(),
             flowspec_validation: HashMap::new(),
+            vpn_adj_rib_in: HashMap::new(),
+            vpn_loc: HashMap::new(),
+            vpn_adj_rib_out: HashMap::new(),
+            vpn_stale: HashMap::new(),
             flow_ix: flowspec_validate::FlowIndexes::default(),
             stale: HashMap::new(),
             evpn_stale: HashMap::new(),
@@ -1142,6 +1171,20 @@ impl BgpRib {
         n
     }
 
+    /// Paths held from `peer` of `family`.
+    fn accepted_count(&self, peer: IpAddr, family: AddressFamily) -> u32 {
+        let [v4, v6, evpn] = self.accepted_prefixes(peer);
+        match family {
+            AddressFamily::Ipv4Unicast => v4,
+            AddressFamily::Ipv6Unicast => v6,
+            AddressFamily::L2vpnEvpn => evpn,
+            AddressFamily::Ipv4Flowspec => self.accepted_flowspec(peer)[0],
+            AddressFamily::Ipv6Flowspec => self.accepted_flowspec(peer)[1],
+            AddressFamily::Vpnv4Unicast => self.accepted_vpn(peer)[0],
+            AddressFamily::Vpnv6Unicast => self.accepted_vpn(peer)[1],
+        }
+    }
+
     /// RFC 4486 §4: the first address family whose accepted-prefix count from
     /// `peer` is over a hard (not `warning_only`) limit, with that count —
     /// the caller closes the session. Logs `maximum prefix limit exceeded`
@@ -1151,15 +1194,13 @@ impl BgpRib {
         peer: IpAddr,
     ) -> Option<(AddressFamily, nos_proto::BgpPrefixLimit, u32)> {
         let limits = *self.max_prefix.get(&peer)?;
-        let [v4, v6, evpn] = self.accepted_prefixes(peer);
-        let [fs4, fs6] = self.accepted_flowspec(peer);
-        // VPN families have no Adj-RIB-In yet (#578): `zip` stops at five.
-        let counts = [v4, v6, evpn, fs4, fs6];
         let mut tripped = None;
-        for (family, count) in AddressFamily::ALL.into_iter().zip(counts) {
+        for family in AddressFamily::ALL {
             let Some(limit) = limits.get(family) else {
                 continue;
             };
+            // Only for a limited family: Flowspec and VPN are counted by scan.
+            let count = self.accepted_count(peer, family);
             // `limit 0` is explicitly uncapped.
             if limit.limit == 0 || count <= limit.limit {
                 self.max_prefix_warned.remove(&(peer, family));
@@ -1268,6 +1309,7 @@ impl BgpRib {
         self.adj_rib_out.remove(&peer);
         self.evpn_adj_rib_out.remove(&peer);
         self.flowspec_adj_rib_out.remove(&peer);
+        self.vpn_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
         if let (false, Some(gr)) = (retained.is_empty(), gr) {
@@ -1278,7 +1320,18 @@ impl BgpRib {
         self.stale.remove(&peer);
         self.evpn_stale.remove(&peer);
         self.flowspec_stale.remove(&peer);
+        self.vpn_stale.remove(&peer);
         self.gr_deadline.remove(&peer);
+        let vpns: Vec<VpnKey<IpNet>> = self
+            .vpn_adj_rib_in
+            .get(&peer)
+            .into_iter()
+            .flat_map(HashMap::keys)
+            .copied()
+            .collect();
+        for k in vpns {
+            self.drop_vpn(peer, &k);
+        }
         let flows: Vec<FlowspecKey> = self
             .flowspec_adj_rib_in
             .remove(&peer)

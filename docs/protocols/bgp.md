@@ -323,19 +323,22 @@ A malformed attribute in a received UPDATE does not reset the session: the route
 - `ipv4` and `ipv6` are unicast routes, installed in the routing table.
 - `l2vpn-evpn` (RFC 7432) carries EVPN routes for VXLAN broadcast domains. It is described with the rest of EVPN.
 - `ipv4-flowspec` and `ipv6-flowspec` (RFC 8955, RFC 8956) carry Flowspec rules. See [Flowspec](#flowspec-rfc-8955-rfc-8956).
-- `vpnv4` and `vpnv6` (RFC 4364, RFC 4659) are the L3VPN families. See [L3VPN: configuration so far](#l3vpn-configuration-so-far).
+- `vpnv4` and `vpnv6` (RFC 4364, RFC 4659) are the L3VPN families. See [L3VPN routes](#l3vpn-routes).
 
 Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Unicast`, `L2vpnEvpn`, `Ipv4Flowspec`, `Ipv6Flowspec`, `Vpnv4Unicast` and `Vpnv6Unicast`: `PUT …/peer-group/pg1/address-family/Ipv6Unicast` with body `"Ipv6Unicast"` adds one, and `DELETE` on the same path removes it.
 
-### L3VPN: configuration so far
+### L3VPN routes
 
-Only the configuration exists. The address families are accepted but not negotiated: they are never sent in OPEN or graceful restart, so a session carries no VPN route yet.
+NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one of them per Route Distinguisher and prefix, picks a best path per (RD, prefix) and re-advertises it to its other peers, so it can act as a VPN route reflector. It does not yet import them into VRFs nor originate them (#579, #580).
 
-- Name the VRF's VPN identity on its routing table (the table must differ from the underlay's):
-  `set routing-table red vpn rd 65000:1`, `set routing-table red vpn route-target export 65000:1`, `set routing-table red vpn route-target import 65000:1`, `set routing-table red vpn bgp-instance r1`, optionally `set routing-table red vpn label 100`. Fields and checks: [routing tables](routing-tables.md#configuration-reference).
-- Add the families to the underlay peer-group: `set bgp instance r1 peer-group pg1 address-family vpnv4` (and `vpnv6`).
-- Over REST: `PUT /v1/transactions/{tx}/routing-table/red/vpn/rd` with body `"65000:1"`, and `PUT …/bgp-instance/r1/peer-group/pg1/address-family/Vpnv4Unicast` with body `"Vpnv4Unicast"`.
-- `maximum-prefix vpnv4|vpnv6` is accepted; it is enforced once VPN routes are held.
+- Enable the families on the underlay peer-group: `set bgp instance r1 peer-group pg1 address-family vpnv4` (and `vpnv6`). Each is negotiated only when the peer advertises it too. Over REST: `PUT …/bgp-instance/r1/peer-group/pg1/address-family/Vpnv4Unicast` with body `"Vpnv4Unicast"`.
+- See what was received: `show bgp vpnv4` (or `vpnv6`), one line per path with `>` on the best one, RD, prefix, label, next hop, peer and Route Targets. `show bgp vpnv4 rd 65001:1` keeps one RD. Over REST: `GET /v1/bgp/vpnv4`, `GET /v1/bgp/vpnv4?rd=65001:1` (an invalid RD is `400`).
+- Every path is held whatever its Route Targets: they only decide VRF import, so a reflector needs no VRF.
+- Different RDs never compete: `10.0.0.0/24` under `65001:1` and under `65001:2` are two routes, each reflected.
+- Filter with the peer-group's `import-policy`/`export-policy`: `this.prefix` is the customer prefix. A rejected route is dropped.
+- Reflection follows the unicast rules (iBGP split horizon, route-reflector clients, eBGP prepend). The label and RD go out unchanged and so does the next hop, even toward eBGP or with `next-hop self`: a new next hop would need a label of its own.
+- `maximum-prefix vpnv4|vpnv6` limits each family. Graceful restart and route refresh (including enhanced refresh) cover both families.
+- Name a VRF's VPN identity on its routing table (the table must differ from the underlay's), for the import and export to come: `set routing-table red vpn rd 65000:1`, `set routing-table red vpn route-target export 65000:1`, `set routing-table red vpn route-target import 65000:1`, `set routing-table red vpn bgp-instance r1`, optionally `set routing-table red vpn label 100`. Fields and checks: [routing tables](routing-tables.md#configuration-reference).
 
 ### Flowspec (RFC 8955, RFC 8956)
 
@@ -1105,6 +1108,7 @@ Created with `set bgp instance <i> peer <address> peer-group <g>` (or `set peer 
 | `show bgp brief` | `GET /v1/bgp/summary` | Every peer of every instance, with state, remote AS, uptime, hold time and TCP-AO state |
 | `show bgp evpn` | `GET /v1/bgp/evpn` | EVPN routes received, per instance |
 | `show bgp flowspec` | `GET /v1/bgp/flowspec` | Flowspec rules received, per instance |
+| `show bgp vpnv4\|vpnv6 [rd <rd>]` | `GET /v1/bgp/vpnv4\|vpnv6[?rd=<rd>]` | VPN routes received, per instance |
 | `show route <table> [<address>]` | `GET /v1/routes/{table}[/{addr}]` | Installed routes, BGP ones marked `bgp` |
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` | Route refresh request to one peer |
 | `clear bgp <instance> <peer>` | `POST /v1/bgp/{instance}/peer/{peer}/clear` | Releases a maximum-prefix hold; resets an Established session |

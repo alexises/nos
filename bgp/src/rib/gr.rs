@@ -98,6 +98,7 @@ impl BgpRib {
         self.adj_rib_out.insert(peer, advertised);
         self.announce_evpn_to(peer);
         self.announce_flowspec_to(peer);
+        self.announce_vpn_to(peer);
         if add_path {
             let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
             for prefix in prefixes {
@@ -186,6 +187,8 @@ impl BgpRib {
             AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec
         ) {
             self.resend_flowspec(peer, family);
+        } else if crate::fsm::is_vpn(family) {
+            self.resend_vpn(peer, family);
         } else if outbox.add_path_tx.contains(&family) {
             // The same top N again, under the same ids (a path the export
             // policy now refuses gives its id up), plus every prefix still
@@ -235,6 +238,9 @@ impl BgpRib {
     /// RFC 7313 `BoRR` received: every `family` route currently held from
     /// `peer` becomes stale until the peer re-announces it.
     pub fn begin_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) {
+        if crate::fsm::is_vpn(family) {
+            return self.mark_vpn_stale(peer, family);
+        }
         let Some(table) = self.adj_rib_in.get(&peer) else {
             return;
         };
@@ -250,6 +256,9 @@ impl BgpRib {
     /// that the refresh did not re-announce.
     /// Returns how many routes it purged.
     pub fn end_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) -> usize {
+        if crate::fsm::is_vpn(family) {
+            return self.purge_stale_vpn(peer, family);
+        }
         let Some(set) = self.stale.get_mut(&peer) else {
             return 0;
         };
@@ -323,7 +332,11 @@ impl BgpRib {
             .flowspec_stale
             .get(&peer)
             .is_some_and(|s| s.iter().any(|(f, _)| family.is_none_or(|x| x == *f)));
-        ip || evpn || flowspec
+        let vpn = self.vpn_stale.get(&peer).is_some_and(|s| {
+            s.iter()
+                .any(|k| family.is_none_or(|f| super::vpn_out::vpn_family(k.1) == f))
+        });
+        ip || evpn || flowspec || vpn
     }
 
     /// `BgpGracefulRestart.stale_time`.
@@ -357,7 +370,8 @@ impl BgpRib {
     pub fn stale_count(&self, peer: IpAddr) -> u32 {
         let n = self.stale.get(&peer).map_or(0, HashSet::len)
             + self.evpn_stale.get(&peer).map_or(0, HashSet::len)
-            + self.flowspec_stale.get(&peer).map_or(0, HashSet::len);
+            + self.flowspec_stale.get(&peer).map_or(0, HashSet::len)
+            + self.vpn_stale.get(&peer).map_or(0, HashSet::len);
         u32::try_from(n).unwrap_or(u32::MAX)
     }
 
@@ -501,6 +515,16 @@ impl BgpRib {
         self.flowspec_stale.entry(peer).or_default().extend(keep);
         for k in drop {
             self.drop_flow(peer, &k);
+        }
+        let (keep, drop): (Vec<_>, Vec<_>) = self
+            .vpn_adj_rib_in
+            .get(&peer)
+            .into_iter()
+            .flat_map(|t| t.keys().copied())
+            .partition(|k| families.contains(&super::vpn_out::vpn_family(k.1)));
+        self.vpn_stale.entry(peer).or_default().extend(keep);
+        for k in drop {
+            self.drop_vpn(peer, &k);
         }
         let now = Instant::now();
         self.gr_deadline

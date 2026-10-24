@@ -840,6 +840,36 @@ impl SessionManager {
             .collect()
     }
 
+    /// Every received VPN path of `family`, only those with Route
+    /// Distinguisher `rd` when set (an unparsable one matches nothing), for
+    /// `BgpRequest::GetVpnRoutes` (`show bgp vpnv4|vpnv6`).
+    pub async fn vpn_route_summaries(
+        &self,
+        family: AddressFamily,
+        rd: Option<&str>,
+    ) -> Vec<nos_proto::VpnRouteSummary> {
+        let rd = rd.map(nos_proto::evpn_id::parse_rd);
+        let rib = self.bgp_rib.lock().await;
+        rib.vpn_routes(family)
+            .into_iter()
+            .filter(|(_, k, ..)| rd.is_none_or(|want| want == Some(k.0)))
+            .map(|(peer, k, r, best)| nos_proto::VpnRouteSummary {
+                peer,
+                rd: crate::vpn::format_rd(&k.0),
+                prefix: k.1.to_string(),
+                labels: r.labels.clone(),
+                next_hop: r.route.next_hop.unwrap_or(peer),
+                route_targets: crate::vpn::route_targets(&r.route.extended_communities)
+                    .into_iter()
+                    .map(crate::vpn::format_ext_community)
+                    .collect(),
+                as_path: r.route.as_path.to_string(),
+                local_pref: r.route.local_pref,
+                best,
+            })
+            .collect()
+    }
+
     /// Every unicast route held, for `BgpRequest::GetRoutes` (`show bgp routes`).
     pub async fn route_summaries(&self) -> Vec<nos_proto::BgpRouteSummary> {
         self.bgp_rib.lock().await.routes()
@@ -1569,6 +1599,90 @@ mod tests {
             (false, false, false, Nothing),
         ] {
             assert_eq!(bfd_action(established, stale, cpi), want);
+        }
+    }
+
+    #[tokio::test]
+    async fn vpn_summaries_render_rd_labels_and_rts_and_filter_by_family_and_rd() {
+        let m = SessionManager::new("r1".into());
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let rd = |n| [0, 0, 0xfd, 0xe9, 0, 0, 0, n];
+        let attrs = crate::message::PathAttributes {
+            origin: crate::message::Origin::Igp,
+            as_path: vec![65001].into(),
+            next_hop: std::net::Ipv4Addr::UNSPECIFIED,
+            local_pref: None,
+            med: None,
+            originator_id: None,
+            atomic_aggregate: false,
+            aggregator: None,
+            otc: None,
+            cluster_list: vec![],
+            communities: vec![],
+            // RT:65000:1, and a non-RT (encap) that is not listed.
+            extended_communities: vec![0x0002_fde8_0000_0001, 0x030c_0000_0000_0008],
+            large_communities: vec![],
+            ipv6_extended_communities: vec![],
+            pmsi: None,
+        };
+        let update = crate::message::UpdateMessage {
+            withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
+            nlri: vec![],
+            nlri_path_ids: vec![],
+            attributes: Some(attrs),
+            mp_reach: vec![crate::message::MpReachNlri {
+                afi: 1,
+                safi: crate::message::SAFI_VPN,
+                next_hop: peer,
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                vpn: [1, 2]
+                    .map(|n| crate::vpn::VpnNlri {
+                        labels: vec![100 * u32::from(n)],
+                        rd: rd(n),
+                        prefix: "10.10.0.0/24".parse().unwrap(),
+                    })
+                    .to_vec(),
+            }],
+            mp_unreach: vec![],
+        };
+        m.bgp_rib.lock().await.handle_update(
+            peer,
+            false,
+            "2.2.2.2".parse().unwrap(),
+            &update,
+            &nos_rpl::ACCEPT_ALL,
+        );
+        let all = m
+            .vpn_route_summaries(AddressFamily::Vpnv4Unicast, None)
+            .await;
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[0],
+            nos_proto::VpnRouteSummary {
+                peer,
+                rd: "65001:1".into(),
+                prefix: "10.10.0.0/24".into(),
+                labels: vec![100],
+                next_hop: peer,
+                route_targets: vec!["RT:65000:1".into()],
+                as_path: "65001".into(),
+                local_pref: 100,
+                best: true,
+            }
+        );
+        let one = m
+            .vpn_route_summaries(AddressFamily::Vpnv4Unicast, Some("65001:2"))
+            .await;
+        assert_eq!((one.len(), one[0].labels.clone()), (1, vec![200]));
+        for (family, rd) in [
+            (AddressFamily::Vpnv6Unicast, None),
+            (AddressFamily::Vpnv4Unicast, Some("not-an-rd")),
+        ] {
+            assert_eq!(m.vpn_route_summaries(family, rd).await.len(), 0);
         }
     }
 
