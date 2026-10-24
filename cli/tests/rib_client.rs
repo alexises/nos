@@ -14,6 +14,8 @@ fn sample_prefix_routes() -> PrefixRoutes {
             discard: false,
             evpn: None,
             backup_tunnel: false,
+            mpls_labels: vec![],
+            vpn: None,
         }],
     }
 }

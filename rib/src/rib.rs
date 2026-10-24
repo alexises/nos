@@ -35,6 +35,12 @@ pub enum RouteSource {
     /// `crate::evpn::desired`). Its one next hop is the remote VTEP, installed
     /// `onlink` through the L3 VNI's bridge (`RibDriver::sync_l3vni`).
     Evpn,
+    /// A VPN route imported by Route Target (RFC 4364), pushed by the
+    /// underlay `nos-bgpd` over `RibRequest::PushVpnRoutes`
+    /// (`crate::server::apply_vpn_route_update`). Its next hop is the PE as
+    /// resolved in the underlay, so it is not installed in the kernel yet
+    /// (`kernel_visible`; MPLS encapsulation is #581).
+    Vpn,
 }
 
 impl RouteSource {
@@ -49,7 +55,7 @@ impl RouteSource {
             RouteSource::Static => 1,
             RouteSource::Bgp => 20,
             RouteSource::Ospf => 110,
-            RouteSource::Evpn => 200,
+            RouteSource::Evpn | RouteSource::Vpn => 200,
         }
     }
 }
@@ -77,6 +83,9 @@ pub struct RibEntry {
     /// `backup` is an RFC 7490 remote LFA: a PQ node reached through this
     /// table's IP-in-IP device (`rlfa<table-id>`), not a neighbor.
     pub backup_tunnel: bool,
+    /// The MPLS label stack of a `Vpn` candidate (empty otherwise). Part of
+    /// equality, so a label change re-installs the winner.
+    pub mpls_labels: Vec<u32>,
 }
 
 impl RibEntry {
@@ -101,7 +110,18 @@ pub enum BestPathChange {
     Installed(RibEntry),
 }
 
+/// Whether the kernel gets `e`: not a `Vpn` winner, whose gateway resolves
+/// only in the underlay table.
+// ponytail: #581 installs a `Vpn` winner as an MPLS route; drop this then.
+fn kernel_visible(e: &RibEntry) -> bool {
+    e.source != RouteSource::Vpn
+}
+
+/// The kernel-visible change between two winners: a `Vpn` winner counts as
+/// no route (`kernel_visible`), so a delta never installs one.
 fn diff_best(before: Option<&RibEntry>, after: Option<RibEntry>) -> BestPathChange {
+    let before = before.filter(|e| kernel_visible(e));
+    let after = after.filter(kernel_visible);
     if before == after.as_ref() {
         BestPathChange::Unchanged
     } else {
@@ -129,6 +149,9 @@ pub struct Rib {
     ospf_metrics: HashMap<IpNet, u32>,
     /// The table's EVPN IP-VRF state, beside `entries` like `ospf_metrics`.
     pub evpn: crate::evpn::EvpnState,
+    /// PE and RD per `Vpn`-sourced prefix, for `show route` only (beside
+    /// `entries` like `ospf_metrics`: the kernel never sees it).
+    pub vpn_info: HashMap<IpNet, nos_proto::VpnRouteInfo>,
 }
 
 impl Rib {
@@ -234,7 +257,8 @@ impl Rib {
             .collect()
     }
 
-    /// `best_routes` for the driver: every winner except a `Connected` one.
+    /// `best_routes` for the driver: every winner except a `Connected` one
+    /// (or a `Vpn` one, see `kernel_visible`).
     /// A prefix whose winner is `Connected` is left to the kernel's own
     /// on-link route (it exists the instant `nos-interfaced` applies the
     /// address, and `driver::linux::extract_route` ignores it as an
@@ -247,7 +271,7 @@ impl Rib {
     /// still shadows the prefix; add an oper-state field if it ever matters.
     pub fn best_routes_for_kernel(&self) -> HashMap<IpNet, RibEntry> {
         let mut routes = self.best_routes();
-        routes.retain(|_, e| e.source != RouteSource::Connected);
+        routes.retain(|_, e| e.source != RouteSource::Connected && kernel_visible(e));
         routes
     }
 
@@ -304,8 +328,30 @@ impl Rib {
         self.replace_source(RouteSource::Evpn, entries);
     }
 
+    /// The best candidate of the longest prefix covering `addr` that has
+    /// one which may resolve a next hop (same filter as `igp_costs`):
+    /// its gateway and ifindex, or `addr` itself on a `Connected` prefix.
+    pub fn resolve(&self, addr: IpAddr) -> Option<nos_proto::ResolvedNextHop> {
+        self.entries
+            .iter()
+            .filter(|(net, _)| net.contains(&addr))
+            .filter_map(|(net, candidates)| Some((net, resolving_best(candidates)?)))
+            .max_by_key(|(net, _)| net.prefix_len())
+            .map(|(_, e)| {
+                let (gateway, interface_id) = match e.source {
+                    RouteSource::Connected => (addr, None),
+                    _ => e.next_hops[0],
+                };
+                nos_proto::ResolvedNextHop {
+                    gateway,
+                    interface_id,
+                    source: crate::server::to_source_kind(e.source),
+                }
+            })
+    }
+
     /// IGP cost per prefix: its best non-BGP candidate's cost (`Connected`/
-    /// `Static` 0, `Ospf` its SPF metric). `Bgp`/`Evpn` candidates never
+    /// `Static` 0, `Ospf` its SPF metric). `Bgp`/`Evpn`/`Vpn` candidates never
     /// count (a next hop never resolves through the overlay), nor
     /// a discard route: a next hop only reachable through an area range's
     /// blackhole is unresolvable (RFC 4271 §9.1.2), not selectable-then-dropped.
@@ -313,12 +359,7 @@ impl Rib {
         self.entries
             .iter()
             .filter_map(|(prefix, candidates)| {
-                let best = candidates
-                    .iter()
-                    .filter(|e| {
-                        !matches!(e.source, RouteSource::Bgp | RouteSource::Evpn) && !e.is_discard()
-                    })
-                    .min_by_key(|e| e.source.preference())?;
+                let best = resolving_best(candidates)?;
                 let cost = match best.source {
                     RouteSource::Ospf => self.ospf_metrics.get(prefix).copied().unwrap_or(0),
                     _ => 0,
@@ -327,6 +368,21 @@ impl Rib {
             })
             .collect()
     }
+}
+
+/// The best candidate a next hop may resolve through: no overlay source
+/// (`Bgp`/`Evpn`/`Vpn`, so nothing resolves recursively) and no discard
+/// route (RFC 4271 section 9.1.2: unresolvable, not selectable-then-dropped).
+fn resolving_best(candidates: &[RibEntry]) -> Option<&RibEntry> {
+    candidates
+        .iter()
+        .filter(|e| {
+            !matches!(
+                e.source,
+                RouteSource::Bgp | RouteSource::Evpn | RouteSource::Vpn
+            ) && !e.is_discard()
+        })
+        .min_by_key(|e| e.source.preference())
 }
 
 /// Clones and sorts a prefix's candidates best (lowest preference value)
@@ -374,6 +430,7 @@ pub fn build_from_config(cfg: &Config, table_name: &str, bfd_up: &HashSet<IpAddr
                     backup: None,
                     backup_interface_id: None,
                     backup_tunnel: false,
+                    mpls_labels: Vec::new(),
                 });
             }
         } else {
@@ -422,7 +479,7 @@ pub fn bfd_target(cfg: &Config, table_name: &str) -> crate::bfd_client::Target {
 mod tests {
     use super::*;
     use nos_proto::schema::BfdProfile;
-    use nos_proto::{RoutingTable, StaticRoute, StaticRoutingInstance};
+    use nos_proto::{RouteSourceKind, RoutingTable, StaticRoute, StaticRoutingInstance};
 
     fn cfg(tables: Vec<RoutingTable>, instances: Vec<StaticRoutingInstance>) -> Config {
         Config {
@@ -442,6 +499,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         rib.insert(entry("10.1.0.0/16", RouteSource::Ospf));
         rib.insert(entry("10.2.0.0/16", RouteSource::Static));
@@ -504,6 +562,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Ospf);
         rib.evpn.local = None;
@@ -528,6 +587,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         assert_eq!(
             rib.best_route(&prefix).unwrap().next_hops[0].0,
@@ -549,6 +609,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -557,6 +618,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Static);
     }
@@ -569,7 +631,113 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         }
+    }
+
+    fn vpn(prefix: &str, gateway: &str, label: u32) -> RibEntry {
+        RibEntry {
+            mpls_labels: vec![label],
+            ..entry(prefix, gateway, RouteSource::Vpn)
+        }
+    }
+
+    #[test]
+    fn a_vpn_candidate_loses_to_every_ce_source_and_shows_its_labels() {
+        let mut rib = Rib::new();
+        rib.insert(vpn("10.1.0.0/24", "192.0.2.9", 100));
+        for source in [RouteSource::Static, RouteSource::Bgp, RouteSource::Ospf] {
+            let mut r = rib.clone();
+            r.insert(entry("10.1.0.0/24", "10.0.0.1", source));
+            assert_eq!(
+                r.best_route(&"10.1.0.0/24".parse().unwrap())
+                    .unwrap()
+                    .source,
+                source
+            );
+        }
+        let all = rib.all_routes();
+        assert_eq!(all[0].1[0].mpls_labels, vec![100]);
+    }
+
+    /// The CE-facing instance's `Full` must not wipe the VPN routes, nor the
+    /// reverse.
+    #[test]
+    fn replace_source_vpn_and_bgp_leave_each_other_alone() {
+        let mut rib = Rib::new();
+        rib.insert(entry("10.2.0.0/24", "10.0.0.1", RouteSource::Bgp));
+        rib.replace_source(RouteSource::Vpn, [vpn("10.1.0.0/24", "192.0.2.9", 100)]);
+        rib.replace_source(
+            RouteSource::Bgp,
+            [entry("10.3.0.0/24", "10.0.0.1", RouteSource::Bgp)],
+        );
+        assert_eq!(rib.count_source(RouteSource::Vpn), 1);
+        rib.replace_source(RouteSource::Vpn, []);
+        assert_eq!(rib.count_source(RouteSource::Bgp), 1);
+        assert_eq!(rib.count_source(RouteSource::Vpn), 0);
+    }
+
+    #[test]
+    fn the_kernel_never_sees_a_vpn_winner() {
+        let mut rib = Rib::new();
+        rib.insert(vpn("10.1.0.0/24", "192.0.2.9", 100));
+        assert!(rib.best_routes_for_kernel().is_empty());
+        let p: IpNet = "10.1.0.0/24".parse().unwrap();
+        // A Bgp winner falling back to the Vpn one removes the kernel route.
+        assert!(matches!(
+            rib.upsert_and_diff(entry("10.1.0.0/24", "10.0.0.1", RouteSource::Bgp)),
+            BestPathChange::Installed(_)
+        ));
+        assert_eq!(
+            rib.remove_and_diff(&p, RouteSource::Bgp),
+            BestPathChange::Removed
+        );
+        // A label change on a Vpn winner is no kernel change yet (#581).
+        assert_eq!(
+            rib.upsert_and_diff(vpn("10.1.0.0/24", "192.0.2.9", 200)),
+            BestPathChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn resolve_uses_only_underlay_sources() {
+        let mut rib = Rib::new();
+        rib.insert(entry("10.0.0.0/24", "10.0.0.2", RouteSource::Connected));
+        rib.insert(entry("192.0.2.0/24", "10.0.0.7", RouteSource::Ospf));
+        rib.insert(RibEntry {
+            next_hops: vec![("10.0.0.8".parse().unwrap(), Some(4))],
+            ..entry("198.51.100.0/24", "10.0.0.8", RouteSource::Static)
+        });
+        // More specific, but overlay or discard: never resolves.
+        for (p, s) in [
+            ("192.0.2.9/32", RouteSource::Bgp),
+            ("192.0.2.8/30", RouteSource::Evpn),
+            ("192.0.2.0/25", RouteSource::Vpn),
+        ] {
+            rib.insert(entry(p, "10.9.9.9", s));
+        }
+        rib.insert(RibEntry {
+            next_hops: vec![],
+            ..entry("198.51.100.0/25", "10.0.0.1", RouteSource::Ospf)
+        });
+        let r = |a: &str| rib.resolve(a.parse().unwrap());
+        let hop = |gw: &str, ifi, source| {
+            Some(nos_proto::ResolvedNextHop {
+                gateway: gw.parse().unwrap(),
+                interface_id: ifi,
+                source,
+            })
+        };
+        assert_eq!(
+            r("10.0.0.5"),
+            hop("10.0.0.5", None, RouteSourceKind::Connected)
+        );
+        assert_eq!(r("192.0.2.9"), hop("10.0.0.7", None, RouteSourceKind::Ospf));
+        assert_eq!(
+            r("198.51.100.1"),
+            hop("10.0.0.8", Some(4), RouteSourceKind::Static)
+        );
+        assert_eq!(r("203.0.113.1"), None);
     }
 
     #[test]
@@ -633,6 +801,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -641,6 +810,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         assert_eq!(rib.best_routes().len(), 2);
     }
@@ -657,6 +827,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -665,6 +836,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -673,6 +845,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
 
         let all = rib.all_routes();
@@ -698,6 +871,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix: narrow,
@@ -706,6 +880,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
 
         let (matched, candidates) = rib.lookup("10.0.1.5".parse().unwrap()).unwrap();
@@ -755,6 +930,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.replace_source(
             RouteSource::Static,
@@ -765,6 +941,7 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                mpls_labels: Vec::new(),
             }],
         );
         let candidates = rib
@@ -789,6 +966,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.replace_source(RouteSource::Static, Vec::new());
         assert!(rib.is_empty());
@@ -805,6 +983,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.upsert(RibEntry {
             prefix,
@@ -813,6 +992,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.upsert(RibEntry {
             prefix,
@@ -821,6 +1001,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         let candidates = rib
             .all_routes()
@@ -847,6 +1028,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         assert_eq!(
             rib.upsert_and_diff(entry.clone()),
@@ -866,6 +1048,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         // Static already wins this prefix, so a new/changed Bgp candidate
         // never becomes the winner — no kernel-visible change.
@@ -877,6 +1060,7 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                mpls_labels: Vec::new(),
             }),
             BestPathChange::Unchanged
         );
@@ -893,6 +1077,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         assert_eq!(
             rib.upsert_and_diff(bgp_entry),
@@ -903,6 +1088,7 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                mpls_labels: Vec::new(),
             })
         );
         let static_entry = RibEntry {
@@ -912,6 +1098,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         assert_eq!(
             rib.upsert_and_diff(static_entry.clone()),
@@ -930,6 +1117,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Bgp),
@@ -948,6 +1136,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -956,6 +1145,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         // Static still wins after Bgp's candidate is removed.
         assert_eq!(
@@ -975,6 +1165,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -983,6 +1174,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Static),
@@ -993,6 +1185,7 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                mpls_labels: Vec::new(),
             })
         );
     }
@@ -1008,6 +1201,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -1016,6 +1210,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
         rib.remove(&prefix, RouteSource::Bgp);
         let candidates = rib

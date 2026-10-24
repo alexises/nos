@@ -398,6 +398,7 @@ fn connected_entries(
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         });
     }
     entries
@@ -526,6 +527,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         }
     }
 
@@ -755,6 +757,7 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                mpls_labels: Vec::new(),
             },
         );
 
@@ -790,6 +793,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         routes.insert(entry.prefix, entry);
 
@@ -946,6 +950,7 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                mpls_labels: Vec::new(),
             },
         );
 

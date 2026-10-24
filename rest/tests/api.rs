@@ -686,6 +686,8 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
                 discard: false,
                 evpn: None,
                 backup_tunnel: false,
+                mpls_labels: vec![],
+                vpn: None,
             }],
         }]),
         RibRequest::Lookup { .. } => RibEvent::NoMatch,

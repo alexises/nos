@@ -107,6 +107,7 @@ mod flowspec_validate;
 mod gr;
 mod outbox;
 mod shared;
+mod vpn_import;
 mod vpn_out;
 pub use evpn_out::{feeds as evpn_feeds, AdvertisedEvpn, EvpnSource};
 pub use flowspec_out::AdvertisedFlowspec;
@@ -114,6 +115,7 @@ pub use flowspec_out::AdvertisedFlowspec;
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
 pub use shared::{RibGuard, SharedRib};
+pub use vpn_import::{VpnImport, VpnImports};
 pub use vpn_out::AdvertisedVpn;
 
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
@@ -608,6 +610,8 @@ pub struct BgpRib {
     vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, AdvertisedVpn>>,
     /// The VPN twin of `stale` (graceful restart and RFC 7313 refresh).
     vpn_stale: HashMap<IpAddr, HashSet<VpnKey<IpNet>>>,
+    /// The VRFs this (underlay) instance imports VPN routes into (`vpn_import`).
+    vpn_vrfs: crate::vpn::VrfSet,
     /// Peers whose peer-group tunes Flowspec validation (`set_peer_flowspec_validation`).
     flowspec_validation: HashMap<IpAddr, nos_proto::BgpFlowspecValidation>,
     /// Derived indexes for incremental Flowspec revalidation.
@@ -753,6 +757,7 @@ impl BgpRib {
             vpn_loc: HashMap::new(),
             vpn_adj_rib_out: HashMap::new(),
             vpn_stale: HashMap::new(),
+            vpn_vrfs: crate::vpn::VrfSet::default(),
             flow_ix: flowspec_validate::FlowIndexes::default(),
             stale: HashMap::new(),
             evpn_stale: HashMap::new(),

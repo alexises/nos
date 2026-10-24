@@ -714,6 +714,20 @@ impl SessionManager {
         self.bgp_rib.lock().await.set_maximum_paths(maximum_paths);
     }
 
+    /// The VRFs this instance imports VPN routes into (`rib::vpn_import`).
+    pub async fn set_vpn_vrfs(&self, vrfs: crate::vpn::VrfSet) {
+        let mut rib = self.bgp_rib.lock().await;
+        // Unchanged: no `&mut` access, so the push clients are not woken.
+        if rib.vpn_vrfs() != &vrfs {
+            rib.set_vpn_vrfs(vrfs);
+        }
+    }
+
+    /// `BgpRib::vpn_import_snapshot`, for `vpn_push_client`.
+    pub async fn vpn_import_snapshot(&self) -> (Option<String>, Option<crate::rib::VpnImports>) {
+        self.bgp_rib.lock().await.vpn_import_snapshot()
+    }
+
     /// `BgpInstance.aggregates` (RFC 4271 §9.2.2.2).
     pub async fn set_aggregates(&self, aggregates: Vec<nos_proto::BgpAggregate>) {
         self.bgp_rib.lock().await.set_aggregates(aggregates);

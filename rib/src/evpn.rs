@@ -90,6 +90,7 @@ pub fn desired<S: BuildHasher>(
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         })
         .collect();
     (entries, best.into_values().collect())
@@ -261,6 +262,7 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         let best: HashMap<IpNet, RibEntry> = [
             entry("10.1.0.0/24", RouteSource::Connected),

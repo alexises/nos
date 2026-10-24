@@ -43,9 +43,10 @@ of re-auditing the codebase. Update this file as items are implemented.
   COMMUNITIES, LARGE COMMUNITIES, AS4_PATH/AS4_AGGREGATOR (moot — always
   native 4-byte).
 - **Capabilities**: Graceful Restart, ORF, dynamic capability negotiation.
-- **AFI/SAFI**: multicast. VPNv4/VPNv6 (#573) is received, selected and
-  reflected (#578); VRF import (#579), origination (#580) and the MPLS
-  dataplane (#581) are open. A VPN best path has no next-hop feasibility
+- **AFI/SAFI**: multicast. VPNv4/VPNv6 (#573) is received, selected,
+  reflected (#578) and imported into VRFs by RT (#579, single best path per
+  VRF prefix, no multipath); origination (#580) and the MPLS dataplane
+  (#581) are open. A reflected VPN best path has no next-hop feasibility
   check, is not re-run on an IGP cost change, and reflected routes keep
   their next hop (next-hop-self needs a local label).
 - **EVPN** (AFI 25 / SAFI 70): received routes are stored per peer and

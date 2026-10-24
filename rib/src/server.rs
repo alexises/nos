@@ -6,7 +6,8 @@ use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{
     BgpRouteUpdate, EvpnRouteInfo, EvpnUpdate, IpNet, IpcCodec, OspfRoute, OspfRouteUpdate,
-    PrefixRoutes, RibEvent, RibRequest, Role, RouteEntry, RouteSourceKind,
+    PrefixRoutes, RibEvent, RibRequest, Role, RouteEntry, RouteSourceKind, VpnRoute,
+    VpnRouteUpdate,
 };
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -72,11 +73,15 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         // `BgpRouteCount`: a restarted `nos-bgpd`'s graceful-restart check.
         RibRequest::PushBgpRoutes(_)
         | RibRequest::PushEvpnRoutes(_)
+        | RibRequest::PushVpnRoutes(_)
         | RibRequest::BgpRouteCount => role == Role::Bgpd,
         // `nos-ospfv3d` shares the OSPF route source: its SPF results are
         // pushed with the same request.
         RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
-        RibRequest::IgpCosts => matches!(role, Role::User | Role::Restd | Role::Bgpd),
+        // `ResolveNextHop`: `nos-bgpd` resolving its VPN PE next hops.
+        RibRequest::IgpCosts | RibRequest::ResolveNextHop { .. } => {
+            matches!(role, Role::User | Role::Restd | Role::Bgpd)
+        }
         // Symmetric IRB: the `nos-fdbd` of a domain whose SVI is in this table.
         RibRequest::GetEvpnIrb => role == Role::Fdbd,
     }
@@ -140,7 +145,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
                 guard
                     .all_routes()
                     .into_iter()
-                    .map(|(prefix, candidates)| to_prefix_routes(prefix, &candidates, &guard.evpn))
+                    .map(|(prefix, candidates)| to_prefix_routes(prefix, &candidates, &guard))
                     .collect(),
             ))
         }
@@ -148,7 +153,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             let guard = ctx.rib.read().await;
             Some(match guard.lookup(addr) {
                 Some((prefix, candidates)) => {
-                    RibEvent::Match(to_prefix_routes(prefix, &candidates, &guard.evpn))
+                    RibEvent::Match(to_prefix_routes(prefix, &candidates, &guard))
                 }
                 None => RibEvent::NoMatch,
             })
@@ -172,6 +177,81 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             None
         }
         RibRequest::GetEvpnIrb => Some(RibEvent::EvpnIrb(ctx.rib.read().await.evpn.irb())),
+        RibRequest::PushVpnRoutes(updates) => {
+            apply_vpn_route_update(ctx, updates).await;
+            None
+        }
+        RibRequest::ResolveNextHop { addrs } => {
+            let guard = ctx.rib.read().await;
+            Some(RibEvent::NextHops(
+                addrs.into_iter().map(|a| guard.resolve(a)).collect(),
+            ))
+        }
+    }
+}
+
+/// A pushed VPN route as a `Rib` candidate.
+fn vpn_entry(r: &VpnRoute) -> RibEntry {
+    RibEntry {
+        prefix: r.prefix,
+        next_hops: r.next_hops.clone(),
+        source: RouteSource::Vpn,
+        backup: None,
+        backup_interface_id: None,
+        backup_tunnel: false,
+        mpls_labels: r.mpls_labels.clone(),
+    }
+}
+
+/// Applies one batch of VPN routes imported by the underlay `nos-bgpd` —
+/// the `Vpn`-source twin of `apply_bgp_route_update` (`Full` replaces only
+/// the `Vpn` candidates, so a CE-facing instance's `Bgp` routes in the same
+/// table are untouched). Kernel effect only where a non-`Vpn` winner
+/// appears or goes (`Rib::kernel_visible`).
+async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
+    let mut guard = ctx.rib.write().await;
+    let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
+    let mut full_replace = false;
+    for update in updates {
+        let (prefix, change) = match update {
+            VpnRouteUpdate::Full(routes) => {
+                guard.vpn_info = routes.iter().map(|r| (r.prefix, r.vpn.clone())).collect();
+                guard.replace_source(RouteSource::Vpn, routes.iter().map(vpn_entry));
+                full_replace = true;
+                continue;
+            }
+            VpnRouteUpdate::Add(r) => {
+                guard.vpn_info.insert(r.prefix, r.vpn.clone());
+                (r.prefix, guard.upsert_and_diff(vpn_entry(&r)))
+            }
+            VpnRouteUpdate::Remove(prefix) => {
+                guard.vpn_info.remove(&prefix);
+                (prefix, guard.remove_and_diff(&prefix, RouteSource::Vpn))
+            }
+        };
+        match change {
+            BestPathChange::Unchanged => {}
+            BestPathChange::Installed(e) => {
+                deltas.insert(prefix, Some(e));
+            }
+            BestPathChange::Removed => {
+                deltas.insert(prefix, None);
+            }
+        }
+    }
+    let result = if full_replace {
+        let routes = guard.best_routes_for_kernel();
+        drop(guard);
+        ctx.driver.apply(&ctx.table, &routes).await
+    } else {
+        drop(guard);
+        if deltas.is_empty() {
+            return;
+        }
+        ctx.driver.apply_delta(&ctx.table, &deltas).await
+    };
+    if let Err(e) = result {
+        error!(table = %ctx.table, error = %e, "failed to apply vpn-pushed routes to kernel");
     }
 }
 
@@ -228,6 +308,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                         backup: r.backup_next_hop,
                         backup_interface_id: None,
                         backup_tunnel: false,
+                        mpls_labels: Vec::new(),
                     }),
                 );
                 full_replace = true;
@@ -240,6 +321,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                     backup: r.backup_next_hop,
                     backup_interface_id: None,
                     backup_tunnel: false,
+                    mpls_labels: Vec::new(),
                 };
                 match guard.upsert_and_diff(entry) {
                     BestPathChange::Unchanged => {}
@@ -356,14 +438,12 @@ fn ospf_entry(r: OspfRoute) -> RibEntry {
         backup: r.backup_next_hop.or(r.backup_tunnel).filter(|_| !r.discard),
         backup_interface_id: r.backup_interface_id,
         backup_tunnel: r.backup_next_hop.is_none() && r.backup_tunnel.is_some() && !r.discard,
+        mpls_labels: Vec::new(),
     }
 }
 
-fn to_prefix_routes(
-    prefix: nos_proto::IpNet,
-    candidates: &[RibEntry],
-    evpn: &EvpnState,
-) -> PrefixRoutes {
+fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry], rib: &Rib) -> PrefixRoutes {
+    let (evpn, vpn_info) = (&rib.evpn, &rib.vpn_info);
     PrefixRoutes {
         prefix,
         candidates: candidates
@@ -375,6 +455,10 @@ fn to_prefix_routes(
                 discard: e.is_discard(),
                 evpn: evpn_info(e, evpn),
                 backup_tunnel: e.backup_tunnel,
+                mpls_labels: e.mpls_labels.clone(),
+                vpn: (e.source == RouteSource::Vpn)
+                    .then(|| vpn_info.get(&prefix).cloned())
+                    .flatten(),
             })
             .collect(),
     }
@@ -395,13 +479,14 @@ fn evpn_info(e: &RibEntry, evpn: &EvpnState) -> Option<EvpnRouteInfo> {
     })
 }
 
-fn to_source_kind(source: RouteSource) -> RouteSourceKind {
+pub(crate) fn to_source_kind(source: RouteSource) -> RouteSourceKind {
     match source {
         RouteSource::Static => RouteSourceKind::Static,
         RouteSource::Bgp => RouteSourceKind::Bgp,
         RouteSource::Ospf => RouteSourceKind::Ospf,
         RouteSource::Connected => RouteSourceKind::Connected,
         RouteSource::Evpn => RouteSourceKind::Evpn,
+        RouteSource::Vpn => RouteSourceKind::Vpn,
     }
 }
 
@@ -423,9 +508,7 @@ mod authz_tests {
         let entry = ospf_entry(route.clone());
         assert!(entry.is_discard());
         assert_eq!(entry.backup, None);
-        assert!(
-            to_prefix_routes(entry.prefix, &[entry], &EvpnState::default()).candidates[0].discard
-        );
+        assert!(to_prefix_routes(entry.prefix, &[entry], &Rib::new()).candidates[0].discard);
         assert!(!ospf_entry(OspfRoute {
             discard: false,
             ..route
@@ -446,7 +529,7 @@ mod authz_tests {
             backup_tunnel: Some(pq),
         });
         assert_eq!((entry.backup, entry.backup_tunnel), (Some(pq), true));
-        let shown = to_prefix_routes(entry.prefix, &[entry], &EvpnState::default());
+        let shown = to_prefix_routes(entry.prefix, &[entry], &Rib::new());
         assert!(shown.candidates[0].backup_tunnel);
     }
 
@@ -481,12 +564,15 @@ mod authz_tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         let evpn = EvpnState {
             remotes: [(vtep, [2, 0, 0, 0, 0, 3])].into(),
             ..EvpnState::default()
         };
-        let shown = to_prefix_routes(entry.prefix, &[entry], &evpn);
+        let mut rib = Rib::new();
+        rib.evpn = evpn;
+        let shown = to_prefix_routes(entry.prefix, &[entry], &rib);
         let info = shown.candidates[0].evpn.as_ref().unwrap();
         assert_eq!(shown.candidates[0].source, RouteSourceKind::Evpn);
         assert_eq!(
@@ -510,7 +596,73 @@ mod authz_tests {
                 allowed(role, &RibRequest::PushEvpnRoutes(EvpnUpdate::Full(vec![]))),
                 role == Role::Bgpd
             );
+            assert_eq!(
+                allowed(role, &RibRequest::PushVpnRoutes(vec![])),
+                role == Role::Bgpd
+            );
         }
+    }
+
+    #[test]
+    fn next_hop_resolution_is_for_bgpd_and_readers_only() {
+        for role in Role::ALL {
+            let expected = matches!(role, Role::User | Role::Restd | Role::Bgpd);
+            let req = RibRequest::ResolveNextHop { addrs: vec![] };
+            assert_eq!(allowed(role, &req), expected, "{role:?}");
+        }
+    }
+
+    fn vpn_route(prefix: &str, label: u32) -> VpnRoute {
+        VpnRoute {
+            prefix: prefix.parse().unwrap(),
+            next_hops: vec![("10.0.0.3".parse().unwrap(), None)],
+            mpls_labels: vec![label],
+            vpn: nos_proto::VpnRouteInfo {
+                pe_next_hop: "192.0.2.3".parse().unwrap(),
+                rd: "65001:1".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn vpn_pushes_land_as_the_vpn_source_and_show_their_pe() {
+        let ctx = Context {
+            table: "red".to_string(),
+            rib: Arc::new(RwLock::new(Rib::new())),
+            driver: Arc::new(crate::driver::NoopRibDriver),
+        };
+        let a = vpn_route("10.1.0.0/24", 100);
+        let b = vpn_route("10.2.0.0/24", 200);
+        apply_vpn_route_update(&ctx, vec![VpnRouteUpdate::Full(vec![a.clone()])]).await;
+        apply_vpn_route_update(
+            &ctx,
+            vec![VpnRouteUpdate::Add(b), VpnRouteUpdate::Remove(a.prefix)],
+        )
+        .await;
+        // A delta that changes nothing in the kernel is a no-op.
+        apply_vpn_route_update(&ctx, vec![VpnRouteUpdate::Remove(a.prefix)]).await;
+        let Some(RibEvent::Routes(routes)) = dispatch(&ctx, RibRequest::GetRoutes).await else {
+            panic!("no routes");
+        };
+        assert_eq!(routes.len(), 1);
+        let c = &routes[0].candidates[0];
+        assert_eq!(
+            (c.source, c.mpls_labels.clone()),
+            (RouteSourceKind::Vpn, vec![200])
+        );
+        assert_eq!(c.vpn.as_ref().unwrap().rd, "65001:1");
+        let Some(RibEvent::NextHops(hops)) = dispatch(
+            &ctx,
+            RibRequest::ResolveNextHop {
+                addrs: vec!["10.2.0.1".parse().unwrap()],
+            },
+        )
+        .await
+        else {
+            panic!("no next hops");
+        };
+        // A Vpn route never resolves a next hop.
+        assert_eq!(hops, vec![None]);
     }
 
     #[test]

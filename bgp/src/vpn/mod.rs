@@ -1,9 +1,11 @@
 //! VPN-IPv4/IPv6 (RFC 4364, RFC 4659) wire pieces: the SAFI 128 NLRI codec
 //! and the Route Target / Site of Origin extended-community helpers.
-//! Import/export logic (`VpnKey`, `VrfSet`) lands here with #578/#579.
+//! The family-agnostic VRF import surface (`VrfSet`, #579) lives here too;
+//! the unicast import itself is `rib::vpn_import`.
 
 mod ext_comm;
 mod nlri;
+mod vrf;
 
 pub use crate::evpn::{format_ext_community, format_rd, Rd};
 pub use ext_comm::{is_route_target, route_targets, rt, sites_of_origin};
@@ -11,6 +13,7 @@ pub use nlri::{
     decode_next_hop, decode_vpn_reach, decode_vpn_unreach, encode_next_hop, encode_vpn_reach,
     encode_vpn_unreach,
 };
+pub use vrf::{Vrf, VrfSet};
 
 use ipnet::IpNet;
 

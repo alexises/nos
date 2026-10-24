@@ -3269,16 +3269,40 @@ async fn flowspec_propagation(
 /// encoding, keep one prefix under two RDs as two routes, serve them on
 /// `show bgp vpnv4|vpnv6` (`GET /v1/bgp/vpnv4|vpnv6`, `?rd=` filtered), and
 /// drop them on an explicit withdrawal and when the session goes away.
+///
+/// VRF import (#579): router-a's `VPN_TABLE` imports RT 65000:1 from r1, so
+/// GoBGP's routes land there as `Vpn` routes (label, PE next hop resolved in
+/// rt1), a foreign-RT route does not, moving the import RT over REST swaps
+/// them, and a withdrawal or the session's end unimports.
 pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
-    let flags: Vec<String> = evpn_flags()
-        .into_iter()
-        .map(|f| match f.as_str() {
-            "--evpn" => "--vpn".to_string(),
-            "pg-evpn" => "pg-vpn".to_string(),
-            _ => f,
-        })
-        .collect();
-    gobgp_speaker(w, flags, &["l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"], &[]).await?;
+    let vpn_flags = |import_rt: &str| -> Vec<String> {
+        let mut f: Vec<String> = evpn_flags()
+            .into_iter()
+            .map(|f| match f.as_str() {
+                "--evpn" => "--vpn".to_string(),
+                "pg-evpn" => "pg-vpn".to_string(),
+                _ => f,
+            })
+            .collect();
+        f.extend(strings(&[
+            "--vpn-table",
+            VPN_TABLE,
+            "--vpn-rd",
+            "65000:100",
+            "--vpn-rt-export",
+            "65000:100",
+            "--vpn-rt-import",
+            import_rt,
+        ]));
+        f
+    };
+    gobgp_speaker(
+        w,
+        vpn_flags("65000:1"),
+        &["l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"],
+        &[],
+    )
+    .await?;
     let a = w.a()?;
     a.wait(&format!(
         "address families negotiated peer={IP_G} families=\\[.*\"vpnv4\", \"vpnv6\"\\]"
@@ -3309,6 +3333,7 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         ))
         .await?;
     }
+    vrf_import(w, &vpn_flags).await?;
 
     let show = |q: &str| {
         let path = format!("/v1/bgp/{q}");
@@ -3358,9 +3383,17 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         withdrawn("vpnv6", "65001:1", "2001:db8:10::/48"),
     );
     let (b4, b6) = (a.count(&v4), a.count(&v6));
+    let unimported = |p: &str| format!("vpn route unimported table={VPN_TABLE} prefix={p}");
+    let (u4, u6) = (unimported("10.10.0.0/24"), unimported("2001:db8:10::/48"));
+    let (c4, c6) = (a.count(&u4), a.count(&u6));
     w.dock.container_remove("router-g").await;
     a.wait_new(&v4, b4, 60).await?;
     a.wait_new(&v6, b6, 60).await?;
+    a.wait_new(&u4, c4, 30).await?;
+    a.wait_new(&u6, c6, 30).await?;
+    if vrf_routes(a).await?.contains("\"Vpn\"") {
+        bail!("{VPN_TABLE} kept VPN routes after the session went away");
+    }
     for q in ["vpnv4", "vpnv6"] {
         let body = show(q).await?;
         if body.contains("\"prefix\"") {
@@ -3368,6 +3401,90 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `GET /v1/routes/<VPN_TABLE>` on router-a.
+async fn vrf_routes(a: &Router) -> anyhow::Result<String> {
+    a.rest_expect(Method::GET, &format!("/v1/routes/{VPN_TABLE}"), None, 200)
+        .await
+}
+
+/// `vpn`'s VRF import part (#579), with GoBGP holding 10.10.0.0/24 under
+/// RDs 65001:1/65001:2 (labels 100/200) and 2001:db8:10::/48 (label 300),
+/// all with RT 65000:1; `flags(rt)` is router-a's provisioning importing `rt`.
+async fn vrf_import(w: &World, flags: &dyn Fn(&str) -> Vec<String>) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let imported = |p: &str, labels: &str, rd: &str| {
+        format!(
+            "vpn route imported table={VPN_TABLE} prefix={p} labels=\\[{labels}\\] rd={rd} next_hop={IP_G}"
+        )
+    };
+    // The two RDs compete for one VRF prefix: either may win.
+    let (v4, v6) = (
+        imported("10.10.0.0/24", "[12]00", "65001:[12]"),
+        imported("2001:db8:10::/48", "300", "65001:1"),
+    );
+    a.wait(&v4).await?;
+    a.wait(&v6).await?;
+    let body = vrf_routes(a).await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    let vpn = table
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["prefix"] == "10.10.0.0/24")
+        .and_then(|p| p["candidates"].get(0))
+        .with_context(|| format!("{VPN_TABLE} has no 10.10.0.0/24: {body}"))?;
+    let labels = vpn["mpls_labels"].to_string();
+    if vpn["source"] != "Vpn"
+        || !(labels == "[100]" || labels == "[200]")
+        || vpn["vpn"]["pe_next_hop"] != IP_G
+        || vpn["gateways"][0] != IP_G
+    {
+        bail!("{VPN_TABLE}'s 10.10.0.0/24 is not the imported VPN route: {vpn}");
+    }
+
+    log("a route with a foreign RT is not imported");
+    let foreign = "10.20.0.0/24";
+    let foreign_in = format!("vpn route imported table={VPN_TABLE} prefix={foreign}");
+    let base = a.count(&foreign_in);
+    let add_foreign = [
+        "global", "rib", "add", "-a", "vpnv4", foreign, "label", "400", "rd", "65001:3", "rt",
+        "65000:99",
+    ];
+    gobgp(w, &add_foreign).await?;
+    a.wait(&format!(
+        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:3 prefix={foreign}"
+    ))
+    .await?;
+    a.assert_quiet(&foreign_in, base, 5).await?;
+    if vrf_routes(a).await?.contains(foreign) {
+        bail!("{VPN_TABLE} imported {foreign} without a matching RT");
+    }
+
+    log("moving the import RT to 65000:99 over REST");
+    let out = |p: &str| format!("vpn route unimported table={VPN_TABLE} prefix={p}");
+    let (out4, b_out) = (out("10.10.0.0/24"), a.count(&out("10.10.0.0/24")));
+    a.provision_flags(&flags("65000:99")).await?;
+    a.wait_new(&foreign_in, base, 30).await?;
+    a.wait_new(&out4, b_out, 30).await?;
+
+    log("withdrawing the foreign-RT route unimports it");
+    let (gone, b_gone) = (out(foreign), a.count(&out(foreign)));
+    gobgp(
+        w,
+        &[
+            "global", "rib", "del", "-a", "vpnv4", foreign, "label", "400", "rd", "65001:3",
+        ],
+    )
+    .await?;
+    a.wait_new(&gone, b_gone, 30).await?;
+
+    log("restoring the import RT 65000:1");
+    let (b4, b6) = (a.count(&v4), a.count(&v6));
+    a.provision_flags(&flags("65000:1")).await?;
+    a.wait_new(&v4, b4, 30).await?;
+    a.wait_new(&v6, b6, 30).await
 }
 
 /// RFC 7432 EVPN, receive side. No NOS router originates EVPN yet, so an

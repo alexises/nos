@@ -20,6 +20,23 @@ pub enum RouteSourceKind {
     Connected,
     /// An EVPN Type-5 (RFC 9136) route received over the table's L3 VNI.
     Evpn,
+    /// A VPN-IPv4/IPv6 (RFC 4364) route imported by Route Target from the
+    /// underlay `nos-bgpd`'s VPN Adj-RIB-In. Appended (postcard indexes
+    /// variants by position).
+    Vpn,
+}
+
+/// Where a `Vpn`-sourced candidate came from: the remote PE (the BGP next
+/// hop, resolved in the underlay into the candidate's gateway) and the
+/// Route Distinguisher it was received under.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnRouteInfo {
+    /// The remote PE: the VPN route's BGP next hop.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub pe_next_hop: IpAddr,
+    /// `asn:nn` or `a.b.c.d:nn`.
+    pub rd: String,
 }
 
 /// What an `Evpn`-sourced candidate is reached through: the remote VTEP (its
@@ -61,6 +78,13 @@ pub struct RouteEntry {
     /// (IP-in-IP) to, not a neighbor.
     #[serde(default)]
     pub backup_tunnel: bool,
+    /// The MPLS label stack a `Vpn` candidate is forwarded with (RFC 4364
+    /// section 4.3.4), outermost first; empty for every other source.
+    #[serde(default)]
+    pub mpls_labels: Vec<u32>,
+    /// Set on a `Vpn` candidate.
+    #[serde(default)]
+    pub vpn: Option<VpnRouteInfo>,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -170,6 +194,50 @@ pub enum OspfRouteUpdate {
     Remove(IpNet),
 }
 
+/// One VPN route imported into a customer table by the underlay `nos-bgpd`
+/// (RFC 4364 section 4.3.2): the best path per prefix among every received
+/// VPN route whose Route Targets match the table's import set, RD stripped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnRoute {
+    /// The customer prefix.
+    pub prefix: IpNet,
+    /// The PE next hop resolved in the underlay table (`ResolveNextHop`):
+    /// gateway and, when known, the ifindex it leaves over. Never empty.
+    pub next_hops: Vec<(IpAddr, Option<u32>)>,
+    /// The received label stack.
+    pub mpls_labels: Vec<u32>,
+    /// The PE and RD the route came from.
+    pub vpn: VpnRouteInfo,
+}
+
+/// `PushVpnRoutes`' payload: `Full` on connect, then `Add`/`Remove`, like
+/// `BgpRouteUpdate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VpnRouteUpdate {
+    /// The complete imported set, replacing any previous one.
+    Full(Vec<VpnRoute>),
+    /// One route added or changed.
+    Add(VpnRoute),
+    /// One route no longer imported.
+    Remove(IpNet),
+}
+
+/// One answer of `RibRequest::ResolveNextHop`: how the table reaches an
+/// address through its non-BGP routes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedNextHop {
+    /// The covering route's gateway, or the address itself when it is on a
+    /// directly connected prefix (on-link).
+    pub gateway: IpAddr,
+    /// The ifindex the gateway is reached over, when the covering route
+    /// knows it. Always `None` for a `Connected` route (`nos-ribd` has no
+    /// ifindex for connected prefixes): the kernel MPLS install (#581) must
+    /// find the device with its own route lookup in the underlay table.
+    pub interface_id: Option<u32>,
+    /// The covering route's source.
+    pub source: RouteSourceKind,
+}
+
 /// Messages sent from a client to a `nos-ribd` instance's IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -232,6 +300,19 @@ pub enum RibRequest {
     /// One-shot, `nos-fdbd` only: this table's EVPN IP-VRF, for RFC 9135
     /// symmetric IRB (Label2 + Router's MAC on a domain's MAC+IP routes).
     GetEvpnIrb,
+    /// Fire-and-forget, no reply, `nos-bgpd` only: the VPN routes the
+    /// underlay instance named by this table's `vpn.bgp_instance` imports
+    /// into it (`Full` on connect, then `Add`/`Remove`), stored as the `Vpn`
+    /// source. Route-Target matching and best path are `nos-bgpd`'s.
+    PushVpnRoutes(Vec<VpnRouteUpdate>),
+    /// One-shot: resolves each address by longest-prefix match over this
+    /// table's non-BGP candidates (`Bgp`/`Evpn`/`Vpn` never count, like
+    /// `IgpCosts`), answered by `RibEvent::NextHops` in the same order.
+    /// `nos-bgpd` asks its own (underlay) table for its VPN PE next hops.
+    ResolveNextHop {
+        /// The addresses to resolve.
+        addrs: Vec<IpAddr>,
+    },
 }
 
 /// Reply to `GetEvpnIrb`: what a MAC+IP route needs to be symmetric.
@@ -272,4 +353,7 @@ pub enum RibEvent {
     /// Reply to `GetEvpnIrb`. `None` until the IP-VRF is up (an L3 VNI, its
     /// VTEP and the Router's MAC known; never with `--driver noop`).
     EvpnIrb(Option<EvpnIrb>),
+    /// Reply to `ResolveNextHop`, one entry per address (`None`:
+    /// unresolvable).
+    NextHops(Vec<Option<ResolvedNextHop>>),
 }

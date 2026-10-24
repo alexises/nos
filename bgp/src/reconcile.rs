@@ -302,6 +302,8 @@ async fn resync(
         .filter(|t| t.evpn.l3_vni.is_some() && t.evpn.bgp_instance.as_deref() == Some(instance))
         .map(|t| t.name.clone())
         .collect();
+    // The VRFs whose `vpn` rides this (underlay) instance (RFC 4364 import).
+    let mut vpn_vrfs = crate::vpn::VrfSet::from_config(&cfg, instance);
 
     let mut routing_table = own.routing_table.clone();
     if !*restart_decided {
@@ -314,6 +316,7 @@ async fn resync(
         routing_table = None;
         fdb_domains.clear();
         evpn_tables.clear();
+        vpn_vrfs = crate::vpn::VrfSet::default();
     }
 
     // After the restart decision: `routing_table` is cleared until then.
@@ -343,6 +346,7 @@ async fn resync(
     // After `reconcile`, which sets the local ASN/router-id the AGGREGATOR
     // attribute carries.
     sessions.set_aggregates(own.aggregates.clone()).await;
+    sessions.set_vpn_vrfs(vpn_vrfs).await;
 }
 
 /// The BFD sessions `own`'s peers want: a non-shut peer whose peer-group

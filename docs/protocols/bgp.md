@@ -329,7 +329,7 @@ Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Un
 
 ### L3VPN routes
 
-NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one of them per Route Distinguisher and prefix, picks a best path per (RD, prefix) and re-advertises it to its other peers, so it can act as a VPN route reflector. It does not yet import them into VRFs nor originate them (#579, #580).
+NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one of them per Route Distinguisher and prefix, picks a best path per (RD, prefix) and re-advertises it to its other peers, so it can act as a VPN route reflector, and imports them into VRF routing tables by Route Target. It does not yet originate them (#580) nor forward them (#581).
 
 - Enable the families on the underlay peer-group: `set bgp instance r1 peer-group pg1 address-family vpnv4` (and `vpnv6`). Each is negotiated only when the peer advertises it too. Over REST: `PUT …/bgp-instance/r1/peer-group/pg1/address-family/Vpnv4Unicast` with body `"Vpnv4Unicast"`.
 - See what was received: `show bgp vpnv4` (or `vpnv6`), one line per path with `>` on the best one, RD, prefix, label, next hop, peer and Route Targets. `show bgp vpnv4 rd 65001:1` keeps one RD. Over REST: `GET /v1/bgp/vpnv4`, `GET /v1/bgp/vpnv4?rd=65001:1` (an invalid RD is `400`).
@@ -339,6 +339,17 @@ NOS receives VPN routes (RFC 4364, RFC 4659: AFI 1/2, SAFI 128), keeps every one
 - Reflection follows the unicast rules (iBGP split horizon, route-reflector clients, eBGP prepend). The label and RD go out unchanged and so does the next hop, even toward eBGP or with `next-hop self`: a new next hop would need a label of its own.
 - `maximum-prefix vpnv4|vpnv6` limits each family. Graceful restart and route refresh (including enhanced refresh) cover both families.
 - Name a VRF's VPN identity on its routing table (the table must differ from the underlay's), for the import and export to come: `set routing-table red vpn rd 65000:1`, `set routing-table red vpn route-target export 65000:1`, `set routing-table red vpn route-target import 65000:1`, `set routing-table red vpn bgp-instance r1`, optionally `set routing-table red vpn label 100`. Fields and checks: [routing tables](routing-tables.md#configuration-reference).
+
+#### Import VPN routes into a VRF
+
+- Give the VRF table an RD, an export RT and the underlay instance, then the RTs to import: `set routing-table red vpn route-target import 65000:1`. REST paths: [routing tables](routing-tables.md#configuration-reference).
+- A received VPN route is imported into every VRF whose import list shares one of its Route Targets. A route without a matching RT is imported nowhere.
+- The RD is dropped on import: the same prefix under two RDs competes in the VRF, and the best path wins.
+- Check it with `show route red`: the route shows `via <gateway> pe <pe> rd <rd> label <n> [vpn]`. Over REST: `GET /v1/routes/red`, a candidate with `"source":"Vpn"`, `mpls_labels` and `vpn.pe_next_hop`/`vpn.rd`.
+- The gateway is how the underlay table (the instance's own) reaches the PE. A route whose PE is not reachable there is not imported until it is.
+- Changing the import RTs moves routes in or out at once.
+- A `vpn` route has distance 200: a CE-facing BGP, static, connected or OSPF route for the same prefix wins.
+- Imported routes are not installed for forwarding yet (MPLS, #581).
 
 ### Flowspec (RFC 8955, RFC 8956)
 

@@ -336,6 +336,7 @@ async fn resync_without_a_config_leaves_everything_alone() {
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
+        mpls_labels: Vec::new(),
     });
     e.resync().await;
     assert_eq!(e.best().await.len(), 1, "previous RIB kept");
@@ -356,6 +357,7 @@ async fn resync_of_a_table_missing_from_config_clears_the_statics() {
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
+        mpls_labels: Vec::new(),
     });
     e.resync().await;
     let best = e.best().await;
