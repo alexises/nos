@@ -965,9 +965,12 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
         "multipath-reject",
     ]));
     let one = format!("added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_B} next_hops=1 ");
-    let base = a.count(&one);
+    let removed = format!("removed route prefix={REDISTRIBUTE_PREFIX} ");
+    let (base, base_removed) = (a.count(&one), a.count(&removed));
     c.provision_flags(&withdrawn).await?;
     a.wait_new(&one, base, 60).await?;
+    // The shrink replaced the route in place: nothing was removed (#598).
+    a.assert_quiet(&removed, base_removed, 5).await?;
 
     log("router-c advertises again: both next hops are back");
     let base = a.count(&both);
@@ -3751,9 +3754,10 @@ const C_IN_AS_B: Id = Id { asn: ASN_B, ..C };
 /// two RDs, labels 3001 and 3002) with `maximum-paths 2`: its `nos-ribd`
 /// installs ONE labelled route with both next hops and both labels, and the
 /// CE behind a pings the host behind b and c. router-c then unsets `vpn`: the
-/// route is replaced by one with router-b's hop alone (the driver removes the
-/// two-hop route and installs the new one in the same pass), and the ping
-/// still passes.
+/// route is replaced in place by one with router-b's hop alone (#598: one
+/// `NLM_F_REPLACE`, no `removed labelled route`), and re-provisioning it grows
+/// the route back the same way. A continuous ping from the CE across both
+/// changes loses nothing.
 pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
     const LABEL_B: &str = "3001";
     const LABEL_C: &str = "3002";
@@ -3854,17 +3858,52 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
     let single = format!(
         "installed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{LABEL_B}\\]\\] gateway={IP_B} interfaces="
     );
-    let removed = format!(
-        "removed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{LABEL_B}\\], \\[{LABEL_C}\\]\\]"
-    );
-    let (base_single, base_removed) = (a.count(&single), a.count(&removed));
+    let removed = format!("removed labelled route prefix={L3_SUBNET_B} ");
+    let replaced = |p: &str| format!("{p}.* replaced=true");
+    let (single, both) = (replaced(&single), replaced(&both));
+    let (base_single, base_both, base_removed) =
+        (a.count(&single), a.count(&both), a.count(&removed));
+    // Every change of the set below is a replace: a loss-free ping proves
+    // the route never left the table.
+    host_sh(
+        w,
+        CE_HOST,
+        &format!(
+            "nohup ping -i 0.2 -c 100000 {L3_HOST_IP_B} > /tmp/ping.out 2>&1 & echo $! > /tmp/ping.pid"
+        ),
+    )
+    .await?;
+    let (a, c) = (w.a()?, w.c()?);
     let mut clear = dp_base(C_IN_AS_B);
     clear.extend(strings(&["--vpn-table", VPN_TABLE, "--vpn-clear"]));
     c.provision_flags(&clear).await?;
     a.wait_new(&single, base_single, 60).await?;
-    a.wait_new(&removed, base_removed, 10).await?;
+    a.assert_quiet(&removed, base_removed, 10).await?;
     ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
     ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+
+    log("router-c sets vpn again: the route grows back to both hops, in place");
+    let (a, c) = (w.a()?, w.c()?);
+    c.provision_flags(&dp_pe(
+        C_IN_AS_B,
+        RD_C,
+        &format!("{gw_c}/24"),
+        &["--vpn-label", LABEL_C],
+    ))
+    .await?;
+    a.wait_new(&both, base_both, 60).await?;
+    a.assert_quiet(&removed, base_removed, 10).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
+
+    let out = host_sh(
+        w,
+        CE_HOST,
+        "kill -INT $(cat /tmp/ping.pid); sleep 1; cat /tmp/ping.out",
+    )
+    .await?;
+    if !out.contains(" 0% packet loss") {
+        bail!("the CE lost packets while the route was replaced:\n{out}");
+    }
 
     w.dock.network_disconnect(NET_L3_B, "router-c").await;
     vpn_dp_teardown(w).await;
