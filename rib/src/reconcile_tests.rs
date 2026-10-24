@@ -362,12 +362,11 @@ async fn resync_without_a_config_leaves_everything_alone() {
     let e = Env::with(&[Fake::Watchdog, Fake::Interfaced]);
     e.rib.write().await.insert(RibEntry {
         prefix: net("10.7.0.0/24"),
-        next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
+        next_hops: vec![("10.0.0.9".parse().unwrap(), None).into()],
         source: RouteSource::Static,
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
-        mpls_labels: Vec::new(),
     });
     e.resync().await;
     assert_eq!(e.best().await.len(), 1, "previous RIB kept");
@@ -383,12 +382,11 @@ async fn resync_of_a_table_missing_from_config_clears_the_statics() {
     let e = Env::ready(cfg);
     e.rib.write().await.insert(RibEntry {
         prefix: net("10.7.0.0/24"),
-        next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
+        next_hops: vec![("10.0.0.9".parse().unwrap(), None).into()],
         source: RouteSource::Static,
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
-        mpls_labels: Vec::new(),
     });
     e.resync().await;
     let best = e.best().await;

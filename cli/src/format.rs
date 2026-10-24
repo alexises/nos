@@ -1069,25 +1069,31 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
             let via = if candidate.discard {
                 "discard".to_string()
             } else {
+                // A `Vpn` hop shows its own PE, RD and labels.
                 let gateways = candidate
                     .gateways
                     .iter()
-                    .map(ToString::to_string)
+                    .enumerate()
+                    .map(|(i, gw)| match candidate.vpn.get(i) {
+                        Some(v) => {
+                            let labels = candidate
+                                .mpls_labels
+                                .get(i)
+                                .into_iter()
+                                .flatten()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("/");
+                            format!("{gw} pe {} rd {} label {labels}", v.pe_next_hop, v.rd)
+                        }
+                        None => gw.to_string(),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let evpn = candidate.evpn.as_ref().map_or_else(String::new, |e| {
                     format!(" rmac {} vni {}", e.router_mac, e.vni)
                 });
-                let vpn = candidate.vpn.as_ref().map_or_else(String::new, |v| {
-                    let labels = candidate
-                        .mpls_labels
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("/");
-                    format!(" pe {} rd {} label {labels}", v.pe_next_hop, v.rd)
-                });
-                format!("via {gateways}{evpn}{vpn}")
+                format!("via {gateways}{evpn}")
             };
             lines.push(format!(
                 "  {marker} {via} [{}]{backup}",
@@ -1859,7 +1865,7 @@ mod tests {
                 evpn: None,
                 backup_tunnel: false,
                 mpls_labels: vec![],
-                vpn: None,
+                vpn: vec![],
             }],
         }];
         assert_eq!(
@@ -1884,7 +1890,7 @@ mod tests {
                 }),
                 backup_tunnel: false,
                 mpls_labels: vec![],
-                vpn: None,
+                vpn: vec![],
             }],
         }];
         assert_eq!(
@@ -1904,16 +1910,44 @@ mod tests {
                 discard: false,
                 evpn: None,
                 backup_tunnel: false,
-                mpls_labels: vec![100, 7],
-                vpn: Some(nos_proto::VpnRouteInfo {
+                mpls_labels: vec![vec![100, 7]],
+                vpn: vec![nos_proto::VpnRouteInfo {
                     pe_next_hop: "192.0.2.3".parse().unwrap(),
                     rd: "65001:1".to_string(),
-                }),
+                }],
             }],
         }];
         assert_eq!(
             render_prefix_routes(&routes),
             "10.10.0.0/24\n  * via 10.0.0.3 pe 192.0.2.3 rd 65001:1 label 100/7 [vpn]"
+        );
+    }
+
+    /// #594: each next hop of a multipath `Vpn` candidate shows its own PE,
+    /// RD and labels, the same gateway twice included.
+    #[test]
+    fn a_multipath_vpn_route_renders_each_hop_with_its_labels() {
+        let info = |rd: &str| nos_proto::VpnRouteInfo {
+            pe_next_hop: "192.0.2.3".parse().unwrap(),
+            rd: rd.to_string(),
+        };
+        let routes = [PrefixRoutes {
+            prefix: "10.10.0.0/24".parse().unwrap(),
+            candidates: vec![nos_proto::RouteEntry {
+                gateways: vec!["10.0.0.3".parse().unwrap(), "10.0.0.3".parse().unwrap()],
+                source: nos_proto::RouteSourceKind::Vpn,
+                backup: None,
+                discard: false,
+                evpn: None,
+                backup_tunnel: false,
+                mpls_labels: vec![vec![100], vec![200]],
+                vpn: vec![info("65001:1"), info("65001:2")],
+            }],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "10.10.0.0/24\n  * via 10.0.0.3 pe 192.0.2.3 rd 65001:1 label 100, \
+             10.0.0.3 pe 192.0.2.3 rd 65001:2 label 200 [vpn]"
         );
     }
 
@@ -1929,7 +1963,7 @@ mod tests {
                 evpn: None,
                 backup_tunnel: false,
                 mpls_labels: vec![],
-                vpn: None,
+                vpn: vec![],
             }],
         }];
         assert_eq!(
@@ -1950,7 +1984,7 @@ mod tests {
                 evpn: None,
                 backup_tunnel: true,
                 mpls_labels: vec![],
-                vpn: None,
+                vpn: vec![],
             }],
         }];
         assert_eq!(

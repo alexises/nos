@@ -98,9 +98,9 @@ pub use paths::{
     DEFAULT_WATCHDOG_SOCKET,
 };
 pub use rib::{
-    BgpRoute, BgpRouteUpdate, EvpnRouteInfo, OspfRoute, OspfRouteUpdate, PrefixRoutes,
-    ResolvedNextHop, RibEvent, RibRequest, RouteEntry, RouteSourceKind, VpnRoute, VpnRouteInfo,
-    VpnRouteUpdate,
+    BgpRoute, BgpRouteUpdate, EvpnRouteInfo, NextHop, OspfRoute, OspfRouteUpdate, PrefixRoutes,
+    ResolvedNextHop, RibEvent, RibRequest, RouteEntry, RouteSourceKind, VpnPath, VpnRoute,
+    VpnRouteInfo, VpnRouteUpdate,
 };
 pub use schema::{
     loopback_table_name, parse_fingerprint, AddressFamily, Admin, AdminKey, AsPathList, BfdAuth,

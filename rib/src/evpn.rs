@@ -85,12 +85,11 @@ pub fn desired<S: BuildHasher>(
         .iter()
         .map(|(prefix, (vtep, _))| RibEntry {
             prefix: *prefix,
-            next_hops: vec![(*vtep, None)],
+            next_hops: vec![(*vtep, None).into()],
             source: RouteSource::Evpn,
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
-            mpls_labels: Vec::new(),
         })
         .collect();
     (entries, best.into_values().collect())
@@ -192,7 +191,7 @@ mod tests {
         assert_eq!(entries[0].source, RouteSource::Evpn);
         assert_eq!(
             entries[0].next_hops,
-            vec![("10.50.0.3".parse().unwrap(), None)]
+            vec![("10.50.0.3".parse().unwrap(), None).into()]
         );
         assert_eq!(
             remotes,
@@ -248,7 +247,7 @@ mod tests {
         assert_eq!(entries[0].prefix, "10.72.0.20/32".parse::<IpNet>().unwrap());
         assert_eq!(
             entries[0].next_hops,
-            vec![("10.50.0.3".parse().unwrap(), None)]
+            vec![("10.50.0.3".parse().unwrap(), None).into()]
         );
         assert_eq!(remotes.len(), 1);
     }
@@ -257,12 +256,11 @@ mod tests {
     fn originated_skips_evpn_routes_and_carries_rt_encap_and_rmac() {
         let entry = |p: &str, source| RibEntry {
             prefix: p.parse().unwrap(),
-            next_hops: vec![("10.1.0.1".parse().unwrap(), None)],
+            next_hops: vec![("10.1.0.1".parse().unwrap(), None).into()],
             source,
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
-            mpls_labels: Vec::new(),
         };
         let best: HashMap<IpNet, RibEntry> = [
             entry("10.1.0.0/24", RouteSource::Connected),

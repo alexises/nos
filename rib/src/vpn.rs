@@ -164,12 +164,11 @@ mod tests {
     fn originated_skips_imported_and_evpn_routes() {
         let entry = |p: &str, source| RibEntry {
             prefix: p.parse().unwrap(),
-            next_hops: vec![("10.1.0.1".parse().unwrap(), None)],
+            next_hops: vec![("10.1.0.1".parse().unwrap(), None).into()],
             source,
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
-            mpls_labels: Vec::new(),
         };
         let best: HashMap<IpNet, RibEntry> = [
             entry("10.1.0.0/24", RouteSource::Connected),

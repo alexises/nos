@@ -365,7 +365,7 @@ Site of Origin (RFC 4364 section 7):
 Look at it:
 
 - `show bgp vpnv4` (or `vpnv6`): one line per received path with `>` on the best one, RD, prefix, label, next hop, peer and Route Targets; `show bgp vpnv4 rd 65001:1` keeps one RD. Over REST: `GET /v1/bgp/vpnv4`, `GET /v1/bgp/vpnv4?rd=65001:1` (an invalid RD is `400`).
-- `show route red`: an imported route shows `via <gateway> pe <pe> rd <rd> label <n> [vpn]`. Over REST: `GET /v1/routes/red`, a candidate with `"source":"Vpn"`, `mpls_labels` and `vpn.pe_next_hop`/`vpn.rd`.
+- `show route red`: an imported route shows `via <gateway> pe <pe> rd <rd> label <n> [vpn]`. Over REST: `GET /v1/routes/red`, a candidate with `"source":"Vpn"` and, one entry per gateway, `mpls_labels` (each a label stack) and `vpn` (`pe_next_hop`, `rd`).
 - On the host: `ip -f mpls route` and `ip route show vrf <vrf device>` (and `ip -6 route show vrf <vrf device>`).
 
 Use it as a route reflector:
@@ -398,7 +398,7 @@ Limits:
 
 - One VPN label per route (no label stacks, so no LDP or segment-routing transport).
 - No RT-constrained distribution (RFC 4684), no inter-AS options (RFC 4364 section 10), no carrier's carrier, no ADD-PATH on SAFI 128, no per-prefix labels, one Site of Origin per table (not per CE).
-- Labelled multipath installs only the first next hop (#590).
+- One path per VRF prefix: `nos-bgpd` does not load-balance VPN routes yet (#595).
 
 ### Flowspec (RFC 8955, RFC 8956)
 

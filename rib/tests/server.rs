@@ -15,31 +15,28 @@ fn sample_rib() -> Rib {
     let narrow: nos_proto::IpNet = "10.0.1.0/24".parse().unwrap();
     rib.insert(RibEntry {
         prefix: broad,
-        next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
+        next_hops: vec![("10.0.0.1".parse().unwrap(), None).into()],
         source: RouteSource::Static,
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
-        mpls_labels: Vec::new(),
     });
     // Two competing candidates for the same prefix, to prove ordering.
     rib.insert(RibEntry {
         prefix: narrow,
-        next_hops: vec![("10.0.1.9".parse().unwrap(), None)],
+        next_hops: vec![("10.0.1.9".parse().unwrap(), None).into()],
         source: RouteSource::Bgp,
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
-        mpls_labels: Vec::new(),
     });
     rib.insert(RibEntry {
         prefix: narrow,
-        next_hops: vec![("10.0.1.1".parse().unwrap(), None)],
+        next_hops: vec![("10.0.1.1".parse().unwrap(), None).into()],
         source: RouteSource::Static,
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
-        mpls_labels: Vec::new(),
     });
     rib
 }
@@ -386,7 +383,10 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     let guard = rib.read().await;
     let best = guard.best_route(&prefix).unwrap();
     // A BGP multipath set reaches the kernel entry whole.
-    assert_eq!(best.next_hops, vec![(next_hop, None), (sibling, None)]);
+    assert_eq!(
+        best.next_hops,
+        vec![(next_hop, None).into(), (sibling, None).into()]
+    );
     assert_eq!(best.source, RouteSource::Bgp);
 }
 

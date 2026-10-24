@@ -20,7 +20,7 @@ use std::time::Duration;
 use futures::{FutureExt, SinkExt};
 use ipnet::IpNet;
 use nos_proto::{
-    IpcCodec, ResolvedNextHop, RibRequest, Role, ServiceRef, VpnRoute, VpnRouteInfo, VpnRouteUpdate,
+    IpcCodec, ResolvedNextHop, RibRequest, Role, ServiceRef, VpnPath, VpnRoute, VpnRouteUpdate,
 };
 use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
 use tokio::sync::watch;
@@ -189,12 +189,13 @@ fn build(imports: &VpnImports, resolved: &Resolved) -> HashMap<String, Routes> {
                         *prefix,
                         VpnRoute {
                             prefix: *prefix,
-                            next_hops: vec![(hop.gateway, hop.interface_id)],
-                            mpls_labels: imp.labels.clone(),
-                            vpn: VpnRouteInfo {
+                            paths: vec![VpnPath {
                                 pe_next_hop: imp.pe,
                                 rd: format_rd(&imp.rd),
-                            },
+                                gateway: hop.gateway,
+                                interface_id: hop.interface_id,
+                                labels: imp.labels.clone(),
+                            }],
                         },
                     ))
                 })
@@ -218,12 +219,14 @@ fn log_changes(old: &HashMap<String, Routes>, new: &HashMap<String, Routes>) {
     for (table, routes) in new {
         let before = old.get(table).unwrap_or(&empty);
         for (prefix, r) in routes {
+            // One path per route until #595.
+            let p = &r.paths[0];
             match before.get(prefix) {
                 None => {
-                    info!(table = %table, prefix = %prefix, labels = ?r.mpls_labels, rd = %r.vpn.rd, next_hop = %r.vpn.pe_next_hop, "vpn route imported");
+                    info!(table = %table, prefix = %prefix, labels = ?p.labels, rd = %p.rd, next_hop = %p.pe_next_hop, "vpn route imported");
                 }
                 Some(b) if b != r => {
-                    debug!(table = %table, prefix = %prefix, labels = ?r.mpls_labels, rd = %r.vpn.rd, next_hop = %r.vpn.pe_next_hop, "vpn route import changed");
+                    debug!(table = %table, prefix = %prefix, labels = ?p.labels, rd = %p.rd, next_hop = %p.pe_next_hop, "vpn route import changed");
                 }
                 Some(_) => {}
             }
@@ -330,12 +333,16 @@ mod tests {
         let red = &tables["red"];
         assert_eq!(red.len(), 1, "192.0.2.9 does not resolve");
         let r = &red[&"10.1.0.0/24".parse().unwrap()];
-        assert_eq!(r.next_hops, vec![(ip("10.0.0.1"), Some(3))]);
         assert_eq!(
-            (r.mpls_labels.clone(), r.vpn.rd.as_str()),
-            (vec![100], "65001:1")
+            r.paths,
+            vec![VpnPath {
+                pe_next_hop: ip("192.0.2.1"),
+                rd: "65001:1".to_string(),
+                gateway: ip("10.0.0.1"),
+                interface_id: Some(3),
+                labels: vec![100],
+            }]
         );
-        assert_eq!(r.vpn.pe_next_hop, ip("192.0.2.1"));
     }
 
     #[test]

@@ -3606,7 +3606,8 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
 
     log("router-b's vpn unset: its pop route and router-a's labelled route go");
-    let gone = format!("removed labelled route prefix={L3_SUBNET_B} labels=\\[{new_label}\\]");
+    let gone =
+        format!("removed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{new_label}\\]\\]");
     let (base_rm, base_gone) = (b.count(&dp_removed_pop(new_label)), a.count(&gone));
     let clear = {
         let mut f = dp_base(B);
@@ -3680,9 +3681,9 @@ pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
         .and_then(|p| p["candidates"].get(0))
         .with_context(|| format!("{VPN_TABLE} has no {prefix}: {body}"))?;
     if route["source"] != "Vpn"
-        || route["vpn"]["pe_next_hop"] != IP_G
+        || route["vpn"][0]["pe_next_hop"] != IP_G
         || route["gateways"][0] != IP_G
-        || route["mpls_labels"] != serde_json::json!([300])
+        || route["mpls_labels"] != serde_json::json!([[300]])
     {
         bail!("{VPN_TABLE}'s {prefix} is not the imported VPNv6 route (IPv4 PE, IPv4 gateway): {route}");
     }
@@ -3720,7 +3721,8 @@ pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
     ping_until(w, H_HOST, L3V6_HOST_A, 30).await?;
 
     log("router-b's vpn unset: the IPv6 labelled route goes and the ping stops");
-    let gone = format!("removed labelled route prefix={L3V6_SUBNET_B} labels=\\[{VPN_LABEL}\\]");
+    let gone =
+        format!("removed labelled route prefix={L3V6_SUBNET_B} labels=\\[\\[{VPN_LABEL}\\]\\]");
     let base_gone = a.count(&gone);
     let clear = {
         let mut f = dp_base(B);
@@ -3752,7 +3754,7 @@ fn dp_removed_pop(label: u32) -> String {
 
 /// The `Log` pattern of the labelled route to `prefix` via the PE `pe`.
 fn dp_labelled(prefix: &str, label: u32, pe: &str) -> String {
-    format!("installed labelled route prefix={prefix} labels=\\[{label}\\] gateway={pe} interface=Some(")
+    format!("installed labelled route prefix={prefix} labels=\\[\\[{label}\\]\\] gateway={pe} interfaces=\\[[0-9]")
 }
 
 /// A data-plane PE's base flags: the session to the other PE and `--vpn`.
@@ -4152,8 +4154,8 @@ async fn vrf_import(w: &World, flags: &dyn Fn(&str) -> Vec<String>) -> anyhow::R
         .with_context(|| format!("{VPN_TABLE} has no 10.10.0.0/24: {body}"))?;
     let labels = vpn["mpls_labels"].to_string();
     if vpn["source"] != "Vpn"
-        || !(labels == "[100]" || labels == "[200]")
-        || vpn["vpn"]["pe_next_hop"] != IP_G
+        || !(labels == "[[100]]" || labels == "[[200]]")
+        || vpn["vpn"][0]["pe_next_hop"] != IP_G
         || vpn["gateways"][0] != IP_G
     {
         bail!("{VPN_TABLE}'s 10.10.0.0/24 is not the imported VPN route: {vpn}");
