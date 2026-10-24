@@ -2,7 +2,8 @@
 //! (`rib::vpn_import`) to that VRF table's `nos-ribd`
 //! (`RibRequest::PushVpnRoutes`, the `Vpn` route source), with each PE next
 //! hop resolved in this instance's own table (`RibRequest::ResolveNextHop`).
-//! A route whose PE does not resolve there is withheld until it does.
+//! A next hop whose PE does not resolve there is withheld until it does
+//! (the route goes once none resolves); the rest of its multipath set stays.
 //!
 //! The loop is `fdb_push_client`'s `Feed::Tables` one: a persistent
 //! connection per VRF, `Full` on connect then diffed `Add`/`Remove`, woken
@@ -155,7 +156,7 @@ async fn resolve(
     let mut pes: Vec<IpAddr> = imports
         .values()
         .flat_map(HashMap::values)
-        .map(|i| i.pe)
+        .flat_map(|i| i.paths.iter().map(|p| p.pe))
         .collect();
     pes.sort_unstable();
     pes.dedup();
@@ -172,8 +173,8 @@ async fn resolve(
     )
 }
 
-/// Each VRF's routes as pushed: an import whose PE resolved, its gateway
-/// the resolution. Pure, unit-tested.
+/// Each VRF's routes as pushed: an import's paths whose PE resolved, their
+/// gateway the resolution (a route with none is withheld). Pure, unit-tested.
 fn build(imports: &VpnImports, resolved: &Resolved) -> HashMap<String, Routes> {
     imports
         .iter()
@@ -181,21 +182,28 @@ fn build(imports: &VpnImports, resolved: &Resolved) -> HashMap<String, Routes> {
             let routes = routes
                 .iter()
                 .filter_map(|(prefix, imp)| {
-                    let Some(hop) = resolved.get(&imp.pe) else {
-                        debug!(table = %table, prefix = %prefix, next_hop = %imp.pe, "vpn route withheld, pe next hop unresolved in the underlay");
-                        return None;
-                    };
-                    Some((
+                    let paths: Vec<VpnPath> = imp
+                        .paths
+                        .iter()
+                        .filter_map(|p| {
+                            let Some(hop) = resolved.get(&p.pe) else {
+                                debug!(table = %table, prefix = %prefix, next_hop = %p.pe, "vpn route withheld, pe next hop unresolved in the underlay");
+                                return None;
+                            };
+                            Some(VpnPath {
+                                pe_next_hop: p.pe,
+                                rd: format_rd(&p.rd),
+                                gateway: hop.gateway,
+                                interface_id: hop.interface_id,
+                                labels: p.labels.clone(),
+                            })
+                        })
+                        .collect();
+                    (!paths.is_empty()).then_some((
                         *prefix,
                         VpnRoute {
                             prefix: *prefix,
-                            paths: vec![VpnPath {
-                                pe_next_hop: imp.pe,
-                                rd: format_rd(&imp.rd),
-                                gateway: hop.gateway,
-                                interface_id: hop.interface_id,
-                                labels: imp.labels.clone(),
-                            }],
+                            paths,
                         },
                     ))
                 })
@@ -219,16 +227,17 @@ fn log_changes(old: &HashMap<String, Routes>, new: &HashMap<String, Routes>) {
     for (table, routes) in new {
         let before = old.get(table).unwrap_or(&empty);
         for (prefix, r) in routes {
-            // One path per route until #595.
-            let p = &r.paths[0];
-            match before.get(prefix) {
-                None => {
-                    info!(table = %table, prefix = %prefix, labels = ?p.labels, rd = %p.rd, next_hop = %p.pe_next_hop, "vpn route imported");
+            // One line per next hop, the single-path format unchanged.
+            for p in &r.paths {
+                match before.get(prefix) {
+                    None => {
+                        info!(table = %table, prefix = %prefix, labels = ?p.labels, rd = %p.rd, next_hop = %p.pe_next_hop, "vpn route imported");
+                    }
+                    Some(b) if b != r => {
+                        debug!(table = %table, prefix = %prefix, labels = ?p.labels, rd = %p.rd, next_hop = %p.pe_next_hop, "vpn route import changed");
+                    }
+                    Some(_) => {}
                 }
-                Some(b) if b != r => {
-                    debug!(table = %table, prefix = %prefix, labels = ?p.labels, rd = %p.rd, next_hop = %p.pe_next_hop, "vpn route import changed");
-                }
-                Some(_) => {}
             }
         }
     }
@@ -287,18 +296,75 @@ fn diff(last_sent: &Routes, new: &Routes) -> Vec<VpnRouteUpdate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rib::VpnImport;
+    use crate::rib::{VpnImport, VpnImportPath};
     use nos_proto::RouteSourceKind;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
 
-    fn imports(label: u32) -> VpnImports {
-        let imp = |pe: &str| VpnImport {
+    fn path(pe: &str, label: u32) -> VpnImportPath {
+        VpnImportPath {
             pe: ip(pe),
             labels: vec![label],
             rd: [0, 0, 0xfd, 0xe9, 0, 0, 0, 1],
+        }
+    }
+
+    fn multi(paths: Vec<VpnImportPath>) -> VpnImports {
+        [(
+            "red".to_string(),
+            [("10.1.0.0/24".parse().unwrap(), VpnImport { paths })].into(),
+        )]
+        .into()
+    }
+
+    fn resolved2() -> Resolved {
+        let mut r = resolved("10.0.0.1");
+        r.insert(
+            ip("192.0.2.2"),
+            ResolvedNextHop {
+                gateway: ip("10.0.0.2"),
+                interface_id: Some(4),
+                source: RouteSourceKind::Ospf,
+            },
+        );
+        r
+    }
+
+    #[test]
+    fn multipath_pushes_the_resolved_subset_and_withholds_when_none() {
+        let both = multi(vec![path("192.0.2.1", 100), path("192.0.2.2", 200)]);
+        let key = "10.1.0.0/24".parse().unwrap();
+        let red = |t: &HashMap<String, Routes>| t["red"].clone();
+        let full = build(&both, &resolved2());
+        assert_eq!(full["red"][&key].paths.len(), 2);
+        assert_eq!(full["red"][&key].paths[1].labels, vec![200]);
+        // One PE unresolved: a subset, an Add with the smaller set, no Remove.
+        let subset = build(&both, &resolved("10.0.0.1"));
+        assert_eq!(subset["red"][&key].paths.len(), 1);
+        let updates = diff(&red(&full), &red(&subset));
+        assert!(
+            matches!(&updates[..], [VpnRouteUpdate::Add(r)] if r.paths.len() == 1),
+            "{updates:?}"
+        );
+        // A label-only change is an Add.
+        let relabel = build(
+            &multi(vec![path("192.0.2.1", 100), path("192.0.2.2", 201)]),
+            &resolved2(),
+        );
+        assert!(matches!(
+            &diff(&red(&full), &red(&relabel))[..],
+            [VpnRouteUpdate::Add(_)]
+        ));
+        // None resolved: withheld.
+        assert!(build(&both, &Resolved::new())["red"].is_empty());
+        log_changes(&full, &subset);
+    }
+
+    fn imports(label: u32) -> VpnImports {
+        let imp = |pe: &str| VpnImport {
+            paths: vec![path(pe, label)],
         };
         [
             (

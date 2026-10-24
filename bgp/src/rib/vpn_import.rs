@@ -3,24 +3,35 @@
 //! import set (`VrfSet::import_by_table`) is a candidate in that VRF, the RD
 //! stripped, so paths under different RDs for one prefix compete there
 //! (section 4.3.5 keeps them apart only in the VPN table itself). The best
-//! one per (VRF, prefix) is what `vpn_push_client` resolves and pushes.
+//! set per (VRF, prefix) (the best path plus, up to `maximum-paths`, the
+//! ones tying with it as for unicast multipath, RD ignored) is what
+//! `vpn_push_client` resolves and pushes. Install-only: `select_vpn` /
+//! `vpn_out` (what is re-advertised) still picks one best.
 //!
 //! Snapshot-based like `evpn_push_snapshot`: one derivation covers announce,
 //! withdraw, RT change, peer loss, GR purge and a VRF set change.
 // ponytail: O(paths x VRFs) per push tick; import incrementally if it ever
-// shows in `tools/bench-bgp.sh`. Single best path, no VPN multipath yet.
+// shows in `tools/bench-bgp.sh`.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use ipnet::IpNet;
 
+use super::decision::multipath_ties;
 use super::{decision_cmp, BgpRib, Candidate, VpnRoute};
 use crate::vpn::{Rd, VpnKey, VrfSet};
 
 /// One route imported into one VRF.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpnImport {
+    /// Never empty, sorted by (PE, labels).
+    pub paths: Vec<VpnImportPath>,
+}
+
+/// One next hop of an imported route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnImportPath {
     /// The remote PE (the path's BGP next hop), still to resolve in the
     /// underlay.
     pub pe: IpAddr,
@@ -93,9 +104,12 @@ impl BgpRib {
             .collect()
     }
 
-    /// The unicast decision process over one VRF prefix's candidates. They
-    /// are ordered by RD and the position is the step-10 path id, so a full
-    /// tie (one peer, two RDs) always picks the lowest RD.
+    /// The unicast decision process over one VRF prefix's candidates, then
+    /// the multipath ties (`multipath_ties`, RD plays no part). They are
+    /// ordered by RD and the position is the step-10 path id, so a full tie
+    /// (one peer, two RDs) always picks the lowest RD. Only an identical
+    /// (PE, labels) pair is collapsed: one PE under two RDs with different
+    /// labels stays two next hops.
     fn best_import(&self, mut cands: Vec<(&VpnKey<IpNet>, &VpnRoute)>) -> Option<VpnImport> {
         cands.sort_by_key(|(k, _)| k.0);
         let scored: Vec<Candidate> = cands
@@ -107,11 +121,29 @@ impl BgpRib {
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| decision_cmp(a, b, &self.igp))?;
-        let (k, r) = cands[i];
-        Some(VpnImport {
-            pe: r.route.next_hop?,
-            labels: r.labels.clone(),
-            rd: k.0,
-        })
+        let best = &scored[i].0;
+        best.next_hop?;
+        let mut paths: Vec<VpnImportPath> = Vec::new();
+        for tie in multipath_ties(&scored, best, &self.igp, usize::MAX) {
+            if paths.len() >= self.maximum_paths {
+                break;
+            }
+            // `tie` borrows `scored`; its index maps back to the VPN key.
+            let j = scored.iter().position(|(r, _)| std::ptr::eq(r, tie))?;
+            let (k, r) = cands[j];
+            let path = VpnImportPath {
+                pe: r.route.next_hop?,
+                labels: r.labels.clone(),
+                rd: k.0,
+            };
+            if !paths
+                .iter()
+                .any(|p| (p.pe, &p.labels) == (path.pe, &path.labels))
+            {
+                paths.push(path);
+            }
+        }
+        paths.sort_by(|a, b| (a.pe, &a.labels).cmp(&(b.pe, &b.labels)));
+        Some(VpnImport { paths })
     }
 }

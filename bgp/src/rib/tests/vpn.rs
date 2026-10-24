@@ -578,8 +578,10 @@ fn imported(rib: &BgpRib) -> Vec<(String, IpNet, IpAddr, Vec<u32>, Rd)> {
         .unwrap()
         .into_iter()
         .flat_map(|(t, m)| {
-            m.into_iter()
-                .map(move |(p, i)| (t.clone(), p, i.pe, i.labels, i.rd))
+            m.into_iter().map(move |(p, i)| {
+                let h = i.paths.into_iter().next().unwrap();
+                (t.clone(), p, h.pe, h.labels, h.rd)
+            })
         })
         .collect();
     out.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
@@ -1010,4 +1012,102 @@ fn an_export_policy_edits_the_rts_and_matches_the_rd() {
     let sent = advs(&mut rx);
     assert_eq!(sent.len(), 1, "the RD match rejected the other");
     assert_eq!(sent[0].route.extended_communities, vec![SOO77, RT2]);
+}
+
+// ---- VRF import multipath (#595) ----
+
+const PE1: &str = "10.0.0.11";
+const PE2: &str = "10.0.0.12";
+const PE3: &str = "10.0.0.13";
+const RD3: Rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 3]; // 65001:3
+
+/// Feeds `P` from `peer` (AS path `as_path`) with next hop `pe`, under `rd`.
+fn learn(rib: &mut BgpRib, peer: &str, as_path: Vec<u32>, pe: &str, rd: Rd, label: u32) {
+    feed(
+        rib,
+        peer,
+        false,
+        &reach(pe, as_path, vec![nlri(rd, P, label)]),
+    );
+}
+
+/// (pe, labels, rd) of `red`'s paths for `P`.
+fn red_paths(rib: &BgpRib) -> Vec<(IpAddr, Vec<u32>, Rd)> {
+    let imports = rib.vpn_import_snapshot().1.unwrap();
+    imports["red"][&prefix(P)]
+        .paths
+        .iter()
+        .map(|p| (p.pe, p.labels.clone(), p.rd))
+        .collect()
+}
+
+fn mp_rib(max: Option<u8>) -> BgpRib {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    rib.set_maximum_paths(max);
+    rib
+}
+
+#[test]
+fn import_multipath_takes_ties_across_rds_and_caps_at_maximum_paths() {
+    let mut rib = mp_rib(Some(2));
+    learn(&mut rib, SRC, vec![65001], PE2, RD2, 2);
+    learn(&mut rib, SRC, vec![65001], PE1, RD1, 1);
+    learn(&mut rib, SRC, vec![65001], PE3, RD3, 3);
+    // The oldest path (RD2, step 8) is best, then the next in decision order.
+    assert_eq!(
+        red_paths(&rib),
+        vec![(addr(PE1), vec![1], RD1), (addr(PE2), vec![2], RD2)]
+    );
+    rib.set_maximum_paths(Some(3));
+    assert_eq!(red_paths(&rib).len(), 3);
+    rib.set_maximum_paths(None);
+    assert_eq!(red_paths(&rib), vec![(addr(PE2), vec![2], RD2)]);
+}
+
+#[test]
+fn import_multipath_needs_the_same_neighbouring_as_and_equal_preference() {
+    let mut rib = mp_rib(Some(4));
+    learn(&mut rib, SRC, vec![65001], PE1, RD1, 1);
+    // Other neighbouring AS: not eligible.
+    learn(&mut rib, EBGP, vec![65003], PE2, RD2, 2);
+    assert_eq!(red_paths(&rib).len(), 1);
+    // Same AS but a longer path loses on step 3.
+    learn(&mut rib, EBGP, vec![65001, 65009], PE2, RD2, 2);
+    assert_eq!(red_paths(&rib).len(), 1);
+    // Same AS, equal path: joins.
+    learn(&mut rib, EBGP, vec![65001], PE2, RD2, 2);
+    assert_eq!(red_paths(&rib).len(), 2);
+}
+
+#[test]
+fn import_multipath_keeps_one_pe_under_two_labels_and_collapses_identical_pairs() {
+    let mut rib = mp_rib(Some(4));
+    learn(&mut rib, SRC, vec![65001], PE1, RD1, 1);
+    learn(&mut rib, SRC, vec![65001], PE1, RD2, 2);
+    assert_eq!(
+        red_paths(&rib),
+        vec![(addr(PE1), vec![1], RD1), (addr(PE1), vec![2], RD2)]
+    );
+    // Same PE and label under a third RD: one path.
+    learn(&mut rib, SRC, vec![65001], PE1, RD3, 2);
+    assert_eq!(red_paths(&rib).len(), 2);
+}
+
+#[test]
+fn import_multipath_drops_an_unfeasible_pe() {
+    let mut rib = mp_rib(Some(4));
+    learn(&mut rib, SRC, vec![65001], PE1, RD1, 1);
+    learn(&mut rib, SRC, vec![65001], "10.1.0.11", RD2, 2);
+    assert_eq!(red_paths(&rib).len(), 2);
+    rib.set_igp(HashMap::from([(prefix("10.0.0.0/24"), 0)]));
+    assert_eq!(red_paths(&rib), vec![(addr(PE1), vec![1], RD1)]);
+}
+
+#[test]
+fn import_multipath_defers_with_graceful_restart() {
+    let mut rib = mp_rib(Some(2));
+    learn(&mut rib, SRC, vec![65001], PE1, RD1, 1);
+    rib.begin_deferral(5, 120, 360, [addr(SRC)]);
+    assert_eq!(rib.vpn_import_snapshot(), (None, None));
 }

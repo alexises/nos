@@ -89,4 +89,14 @@ mod tests {
         rx.changed().await.unwrap();
         assert!(!rx.has_changed().unwrap());
     }
+
+    /// The VPN push (`vpn_push_client`) re-imports on this wake, so a change
+    /// of `maximum-paths` alone must bump the generation.
+    #[tokio::test]
+    async fn a_maximum_paths_change_wakes_the_pushes() {
+        let shared = SharedRib::new(BgpRib::new());
+        let rx = shared.subscribe();
+        shared.lock().await.set_maximum_paths(Some(2));
+        assert!(rx.has_changed().unwrap());
+    }
 }
