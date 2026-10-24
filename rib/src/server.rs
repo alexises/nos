@@ -181,6 +181,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             apply_vpn_route_update(ctx, updates).await;
             None
         }
+        // ponytail: CLI only; REST `GET /v1/routes/<t>` does not show the label.
         RibRequest::GetVpnLabel => Some(RibEvent::VpnLabel(ctx.rib.read().await.vpn_label)),
         RibRequest::ResolveNextHop { addrs } => {
             let guard = ctx.rib.read().await;
