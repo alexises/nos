@@ -206,6 +206,7 @@ Every field starts with `this.`. The prefix and the BGP attributes are:
 - `this.bgp.originator_id`: the `ORIGINATOR_ID` of a reflected route (RFC 4456). Compare with `==` or `!=`.
 - `this.bgp.cluster_list`: the `CLUSTER_LIST`, a list of IPv4 addresses. Read it with `.length` and `.contains(<address>)`.
 - `this.bgp.communities`, `this.bgp.extended_communities`, `this.bgp.large_communities`: the three kinds of communities. Read them with `.length` and `.contains(<value>)`; change them with `.add`, `.remove` and `.clear`.
+- `this.bgp.rd`: the Route Distinguisher of a VPN route (RFC 4364), absent on other routes. Compare it with `==` or `!=` against `rd(<asn>:<nn>)` or `rd(<a.b.c.d>:<nn>)`; read-only. An absent RD is never equal to anything.
 - `this.bgp.validation_state`: the route's RPKI origin validation state (RFC 6811), `rpki.valid`, `rpki.invalid` or `rpki.not_found`. Compare with `==` or `!=`; read-only. It is `rpki.not_found` unless the instance has an RPKI cache (see [RPKI origin validation](bgp.md#rpki-origin-validation-rfc-6811-rfc-8210)).
 
 A list field (the AS path, the cluster list and the communities) cannot be used as a whole value; use one of its methods.
@@ -229,7 +230,7 @@ A list field (the AS path, the cluster list and the communities) cannot be used 
   - a standard community (RFC 1997) is `<AS>:<value>`, each 0 to 65535: `65001:100`;
   - an extended community (RFC 4360) is `<type>:<subtype>:<value>`, with type and subtype 0 to 255 and a 48-bit value: `0:2:100`;
   - a large community (RFC 8092) is `<global>:<local1>:<local2>`, each 0 to 4294967295: `65001:1:1`.
-- A route target for an EVPN import policy is an extended community: `65000:10000` is `0:2:279172874250000`. See [Filter received EVPN routes](evpn-vxlan.md#filter-received-evpn-routes-trust-model).
+- Route targets, Sites of Origin and Route Distinguishers: `rt(65000:10000)`, `soo(65001:77)` and `rd(65001:1)`, with an AS number or an IPv4 address before the colon (`rt(192.0.2.1:7)`). `rt()` and `soo()` are extended communities (`.contains`, `.add`, `.remove` on `this.bgp.extended_communities`); `rd()` only compares with `this.bgp.rd`. They encode exactly as the configuration does (two-octet AS and 32-bit number, IPv4 address and 16-bit number, or four-octet AS and 16-bit number), so `rt(65000:10000)` is the raw `0:2:279172874250000`, which still works.
 - Strings in double quotes, used only as the regular expression of `.matches(…)`.
 - `origin.igp`, `origin.egp`, `origin.incomplete`, `rpki.valid`, `rpki.invalid`, `rpki.not_found`, and `self` (only as a next hop).
 - A bare name refers to a prefix list, community alias or group, or AS-path list, depending on where it is used. A name that is not defined is a compile error.
@@ -401,6 +402,29 @@ reject
 ```
 
 `customers` is the prefix list defined in [Prefix lists](#prefix-lists).
+
+### Steer VPN imports with route targets
+
+A VPN route is imported into a VRF when it carries one of the VRF's import Route Targets. The peer-group's import policy runs before that match, so it can rewrite the Route Targets, and rejects drop a route for good.
+
+Import a customer's routes into the `red` VRF (imports `65000:1`) whatever RT the sender used:
+
+```
+if this.bgp.extended_communities.contains(rt(65000:99)):
+    this.bgp.extended_communities.remove(rt(65000:99))
+    this.bgp.extended_communities.add(rt(65000:1))
+accept
+```
+
+Drop everything from one Route Distinguisher:
+
+```
+if this.bgp.rd == rd(65001:1):
+    reject
+accept
+```
+
+On export, the same script language edits what a PE sends: `this.bgp.extended_communities.add(rt(65000:2))` before `accept`. The Site of Origin the VRF attaches is visible there too (`soo(65001:77)`). See [L3VPN](bgp.md#l3vpn-vpnv4vpnv6).
 
 ### Drop tagged routes and clean communities on export
 

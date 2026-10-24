@@ -260,9 +260,9 @@ pub(super) fn build_advertisement(
     local_asn: u32,
     source_is_rr_client: bool,
     cluster_id: Ipv4Addr,
-    flow: Option<(AddressFamily, &nos_rpl::CompiledPolicy)>,
+    flow: Option<(AddressFamily, &nos_rpl::CompiledPolicy, Option<[u8; 8]>)>,
 ) -> Option<AdvertisedRoute> {
-    let family = flow.map_or_else(|| family_of(prefix), |(f, _)| f);
+    let family = flow.map_or_else(|| family_of(prefix), |(f, ..)| f);
     if !outbox.negotiated_afs.contains(&family) {
         return None;
     }
@@ -300,8 +300,13 @@ pub(super) fn build_advertisement(
         adjusted.med = None;
     }
     let verdict = nos_rpl::vm::run(
-        flow.map_or(&*outbox.export_policy, |(_, p)| p),
-        &to_policy_input(prefix, &adjusted, Some((peer, outbox.remote_asn))),
+        flow.map_or(&*outbox.export_policy, |(_, p, _)| p),
+        &to_policy_input(
+            prefix,
+            &adjusted,
+            Some((peer, outbox.remote_asn)),
+            flow.and_then(|(.., rd)| rd),
+        ),
     );
     let nh_edit = apply_verdict(&mut adjusted, verdict)?;
     // RFC 9234 §5 egress, after policy so it cannot defeat it (unicast only).

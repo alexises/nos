@@ -510,6 +510,7 @@ fn vpn_cfg(label: Option<u32>) -> Config {
         route_targets_export: vec!["65000:1".into()],
         bgp_instance: Some("core".into()),
         label,
+        site_of_origin: None,
     };
     cfg
 }

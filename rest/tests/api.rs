@@ -1255,6 +1255,7 @@ async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
                 as_path: "65001".into(),
                 local_pref: 100,
                 best: true,
+                site_of_origin: None,
             }])
         }
         _ => BgpEvent::PeerNotFound,

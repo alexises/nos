@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, Expr, ExprKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
+use crate::ast::{BinOp, Expr, ExprKind, ExtKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
 use crate::lexer::{SpannedToken, Token};
 use crate::CompileError;
 
@@ -306,6 +306,29 @@ impl Parser<'_> {
         })
     }
 
+    /// `rt(`/`soo(`/`rd(` already consumed up to the `(`: `asn:nn` or
+    /// `a.b.c.d:nn`, then `)`.
+    fn parse_ext_lit(&mut self, name: &str, line: usize) -> Result<ExprKind, CompileError> {
+        self.expect(&Token::LParen)?;
+        let admin = self.advance();
+        self.expect(&Token::Colon)?;
+        let Token::Int(nn) = self.advance() else {
+            return Err(CompileError::new(
+                line,
+                format!("{name}() needs asn:nn or a.b.c.d:nn"),
+            ));
+        };
+        self.expect(&Token::RParen)?;
+        let kind = match name {
+            "rt" => ExtKind::Rt,
+            "soo" => ExtKind::Soo,
+            _ => ExtKind::Rd,
+        };
+        let value = encode_ext(kind, &admin, nn)
+            .ok_or_else(|| CompileError::new(line, format!("{name}() value out of range")))?;
+        Ok(ExprKind::ExtLit(kind, value))
+    }
+
     fn parse_atom(&mut self) -> Result<Expr, CompileError> {
         let line = self.line();
         let kind = match self.advance() {
@@ -339,6 +362,12 @@ impl Parser<'_> {
                 return Ok(inner);
             }
             Token::Ident(name) if name == "this" => ExprKind::This(Vec::new()),
+            Token::Ident(name)
+                if matches!(name.as_str(), "rt" | "soo" | "rd")
+                    && matches!(self.peek(), Token::LParen) =>
+            {
+                self.parse_ext_lit(&name, line)?
+            }
             Token::Ident(name) => {
                 if matches!(self.peek(), Token::Dot) {
                     self.advance();
@@ -357,6 +386,42 @@ impl Parser<'_> {
         };
         Ok(Expr { kind, line })
     }
+}
+
+/// The 8-octet value of `kind` for `admin:nn`, with the same type choice as
+/// `nos_proto::evpn_id::parse_rt`/`parse_rd` (a `bgp`-side test pins that
+/// equality, since this crate cannot depend on `nos-proto`): a 16-bit AS is
+/// type 0 with a 32-bit number, any other AS type 2 and a 16-bit number, an
+/// IPv4 address type 1 and a 16-bit number.
+fn encode_ext(kind: ExtKind, admin: &Token, nn: i64) -> Option<u64> {
+    let nn = u64::try_from(nn).ok()?;
+    let (ty, admin, nn_bits) = match admin {
+        Token::Int(asn) => {
+            let asn = u32::try_from(*asn).ok()?;
+            if u16::try_from(asn).is_ok() {
+                (0u64, u64::from(asn), 32)
+            } else {
+                (2, u64::from(asn), 16)
+            }
+        }
+        Token::IpAddr(std::net::IpAddr::V4(ip)) => (1, u64::from(u32::from(*ip)), 16),
+        _ => return None,
+    };
+    if nn >= 1 << nn_bits {
+        return None;
+    }
+    let (first, sub) = match kind {
+        ExtKind::Rt => (ty, 0x02),
+        ExtKind::Soo => (ty, 0x03),
+        ExtKind::Rd => (0, ty),
+    };
+    // Two-octet admin: 16 bits then 32; otherwise 32 bits then 16.
+    let body = if nn_bits == 32 {
+        (admin << 32) | nn
+    } else {
+        (admin << 16) | nn
+    };
+    Some((first << 56) | (sub << 48) | body)
 }
 
 #[cfg(test)]

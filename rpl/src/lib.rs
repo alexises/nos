@@ -137,6 +137,7 @@ mod tests {
                 extended_communities: &[],
                 large_communities: &[],
                 validation_state: ValidationState::default(),
+                rd: None,
             },
         };
         assert_eq!(
@@ -172,6 +173,7 @@ mod tests {
                 extended_communities: &[],
                 large_communities: &[],
                 validation_state: ValidationState::default(),
+                rd: None,
             },
         };
         assert_eq!(vm::run(&DENY_ALL, &input), Verdict::Reject);

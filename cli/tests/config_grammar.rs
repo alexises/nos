@@ -296,6 +296,7 @@ fn routing_table_vpn() {
         format!("{rt} route-target export 65000:1"),
         format!("{rt} bgp-instance r1"),
         format!("{rt} label 100"),
+        format!("{rt} site-of-origin 65001:77"),
     ] {
         let w = writes(&line, &doc).unwrap_or_else(|| panic!("rejected: {line}"));
         for pair in w.as_array().unwrap() {
@@ -312,6 +313,7 @@ fn routing_table_vpn() {
             route_targets_export: vec!["65000:1".into()],
             bgp_instance: Some("r1".into()),
             label: Some(100),
+            site_of_origin: Some("65001:77".into()),
         }
     );
 }

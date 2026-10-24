@@ -561,6 +561,7 @@ fn vrfs() -> crate::vpn::VrfSet {
         rd: [0; 8],
         import,
         export: vec![],
+        soo: None,
     };
     crate::vpn::VrfSet(vec![vrf("red", vec![RT]), vrf("blue", vec![RT2, RT])])
 }
@@ -881,4 +882,132 @@ fn a_local_export_beats_a_received_copy_of_the_same_key() {
         (vec![1000], addr(LOCAL))
     );
     assert!(!held(&rib, AddressFamily::Vpnv4Unicast)[0].3);
+}
+
+// ------------------------------------------------- Site of Origin, RPL hooks (#582)
+
+const RT3: u64 = 0x0002_fde8_0000_0003; // RT:65000:3, imported nowhere
+const SOO77: u64 = 0x0003_fde9_0000_004d; // 65001:77
+const SOO99: u64 = 0x0003_fde9_0000_0063; // 65001:99
+
+fn script(src: &str) -> nos_rpl::CompiledPolicy {
+    nos_rpl::compile(src, &nos_rpl::Symbols::EMPTY).unwrap()
+}
+
+fn feed_with(rib: &mut BgpRib, u: &UpdateMessage, policy: &nos_rpl::CompiledPolicy) {
+    rib.handle_update(addr(SRC), false, v4("2.2.2.2"), u, policy);
+}
+
+fn tables_of(rib: &BgpRib) -> Vec<String> {
+    imported(rib).into_iter().map(|g| g.0).collect()
+}
+
+/// RFC 4364 section 7: a route carrying a VRF's own Site of Origin is not
+/// imported into it (another table still takes it), a foreign one is, and it
+/// returns the moment the table's Site of Origin changes.
+#[test]
+fn a_route_carrying_the_tables_own_site_of_origin_is_not_imported_back() {
+    let (mut rib, _rx) = setup();
+    let mut set = vrfs();
+    set.0[0].soo = Some(SOO77);
+    rib.set_vpn_vrfs(set.clone());
+    let with = |soo: Option<u64>| {
+        let mut ext = vec![RT];
+        ext.extend(soo);
+        with_rts(reach(SRC, vec![65001], vec![nlri(RD1, P, 100)]), ext)
+    };
+    feed(&mut rib, SRC, false, &with(Some(SOO77)));
+    assert_eq!(tables_of(&rib), ["blue"], "red is the origin site");
+    assert_eq!(
+        rib.vpn_soo_skipped(),
+        HashSet::from([("red".to_string(), RD1, prefix(P), SOO77)])
+    );
+    // A foreign SoO, then none: both import everywhere.
+    for soo in [Some(SOO99), None] {
+        feed(&mut rib, SRC, false, &with(soo));
+        assert_eq!(tables_of(&rib), ["blue", "red"]);
+        assert!(rib.vpn_soo_skipped().is_empty());
+    }
+    // Back to the own SoO, then the table's SoO changes: it is imported again.
+    feed(&mut rib, SRC, false, &with(Some(SOO77)));
+    assert_eq!(tables_of(&rib), ["blue"]);
+    set.0[0].soo = Some(SOO99);
+    rib.set_vpn_vrfs(set);
+    assert_eq!(tables_of(&rib), ["blue", "red"]);
+}
+
+/// The import policy runs when the path is stored, before import by RT: an
+/// RT added there steers the route into a table it did not match, and the
+/// stored (and reflected) path carries the edit.
+#[test]
+fn an_import_policy_adding_an_rt_imports_into_a_table_that_did_not_match() {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    let foreign = with_rts(reach(SRC, vec![65001], vec![nlri(RD1, P, 100)]), vec![RT3]);
+    feed(&mut rib, SRC, false, &foreign);
+    assert_eq!(tables_of(&rib), [] as [String; 0]);
+    feed_with(
+        &mut rib,
+        &foreign,
+        &script("this.bgp.extended_communities.add(rt(65000:1))\naccept\n"),
+    );
+    assert_eq!(tables_of(&rib), ["blue", "red"]);
+    let (_, _, route, _) = &rib.vpn_routes(AddressFamily::Vpnv4Unicast)[0].clone();
+    assert_eq!(route.route.extended_communities, vec![RT3, RT]);
+}
+
+/// A reject by RD withdraws the held copy (and so its import); another RD
+/// is untouched.
+#[test]
+fn an_import_policy_rejecting_by_rd_withdraws_a_held_route() {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    let both = reach(
+        SRC,
+        vec![65001],
+        vec![nlri(RD1, P, 1), nlri(RD2, "10.20.0.0/24", 2)],
+    );
+    feed(&mut rib, SRC, false, &both);
+    assert_eq!(imported(&rib).len(), 4);
+    feed_with(
+        &mut rib,
+        &both,
+        &script("if this.bgp.rd == rd(65001:1):\n    reject\naccept\n"),
+    );
+    let left = imported(&rib);
+    assert_eq!(left.len(), 2);
+    assert!(left
+        .iter()
+        .all(|g| g.1 == prefix("10.20.0.0/24") && g.4 == RD2));
+}
+
+/// The export policy runs after the RTs and Site of Origin ribd attached: it can remove
+/// an RT and see the RD, and an unrelated community (the Site of Origin) rides on.
+#[test]
+fn an_export_policy_edits_the_rts_and_matches_the_rd() {
+    let mut rib = new_rib(65000);
+    let (tx, mut rx) = test_channel();
+    rib.peer_established(
+        addr(EBGP),
+        false,
+        Some(addr(LOCAL)),
+        afs(),
+        true,
+        None,
+        false,
+        false,
+        HashSet::new(),
+        Arc::new(script(
+            "if this.bgp.rd == rd(65000:9):\n    reject\nthis.bgp.extended_communities.remove(rt(65000:1))\nthis.bgp.extended_communities.add(rt(65000:2))\naccept\n",
+        )),
+        tx,
+    );
+    let mut red = export(P, 1000);
+    red.ext_communities = vec![RT, SOO77];
+    let mut other = export("10.11.0.0/24", 1000);
+    other.rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 9]; // 65000:9
+    rib.apply_vpn_prefixes("red", full(vec![red, other]));
+    let sent = advs(&mut rx);
+    assert_eq!(sent.len(), 1, "the RD match rejected the other");
+    assert_eq!(sent[0].route.extended_communities, vec![SOO77, RT2]);
 }

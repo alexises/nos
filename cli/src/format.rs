@@ -1241,6 +1241,11 @@ pub fn render_bgp_vpn(
             r.peer,
             r.route_targets.join(" ")
         ));
+        if let Some(soo) = &r.site_of_origin {
+            let last = lines.last_mut().expect("just pushed");
+            last.push_str(" soo ");
+            last.push_str(soo);
+        }
     }
     lines.join("\n")
 }
@@ -2280,10 +2285,31 @@ mod tests {
             as_path: "65001".into(),
             local_pref: 100,
             best,
+            site_of_origin: None,
         };
         assert_eq!(
             render_bgp_vpn("r1", family, &[r(true, vec![100]), r(false, vec![16, 17])]),
             "bgp instance r1:\n  > rd 65001:1 10.10.0.0/24 label 100 next-hop 10.0.0.3 from 10.0.0.3 [RT:65000:1]\n    rd 65001:1 10.10.0.0/24 label 16/17 next-hop 10.0.0.3 from 10.0.0.3 [RT:65000:1]"
+        );
+    }
+
+    #[test]
+    fn render_bgp_vpn_shows_the_site_of_origin() {
+        let r = nos_proto::VpnRouteSummary {
+            peer: "10.0.0.3".parse().unwrap(),
+            rd: "65001:1".into(),
+            prefix: "10.10.0.0/24".into(),
+            labels: vec![100],
+            next_hop: "10.0.0.3".parse().unwrap(),
+            route_targets: vec!["RT:65000:1".into()],
+            as_path: String::new(),
+            local_pref: 100,
+            best: true,
+            site_of_origin: Some("65001:77".into()),
+        };
+        assert!(
+            render_bgp_vpn("r1", nos_proto::AddressFamily::Vpnv4Unicast, &[r])
+                .ends_with("[RT:65000:1] soo 65001:77")
         );
     }
 

@@ -6,7 +6,7 @@
 
 use std::net::IpAddr;
 
-use crate::ast::{BinOp, Expr, ExprKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
+use crate::ast::{BinOp, Expr, ExprKind, ExtKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
 use crate::schema::{self, FieldInfo, FieldType};
 use crate::symbols::Symbols;
 use crate::vm::{
@@ -256,6 +256,10 @@ impl Codegen<'_> {
                 expr.line,
                 "a colon-separated literal is only valid as an argument to '.contains(..)', '.add(..)', or '.remove(..)'",
             )),
+            ExprKind::ExtLit(..) => Err(CompileError::new(
+                expr.line,
+                "rt(..)/soo(..) is only valid as an argument to '.contains(..)', '.add(..)' or '.remove(..)' on 'this.bgp.extended_communities'; rd(..) only in '==' / '!=' with 'this.bgp.rd'",
+            )),
             ExprKind::Ident(name) => Err(CompileError::new(
                 expr.line,
                 format!(
@@ -318,6 +322,20 @@ impl Codegen<'_> {
                 // own op: an unset field is simply never equal.
                 if let (Some(id), ExprKind::IpLit(ip)) = (optional_ip_field(lhs), &rhs.kind) {
                     self.emit(Op::OptIpEq(id, *ip), 1);
+                    if op == BinOp::Ne {
+                        self.emit(Op::Not, 0);
+                    }
+                    return Ok(Ty::Bool);
+                }
+                if is_rd_field(lhs) || matches!(rhs.kind, ExprKind::ExtLit(ExtKind::Rd, _)) {
+                    let (ExprKind::ExtLit(ExtKind::Rd, rd), true) = (&rhs.kind, is_rd_field(lhs))
+                    else {
+                        return Err(CompileError::new(
+                            line,
+                            "'this.bgp.rd' is only comparable with '==' / '!=' to rd(..)",
+                        ));
+                    };
+                    self.emit(Op::OptRdEq(*rd), 1);
                     if op == BinOp::Ne {
                         self.emit(Op::Not, 0);
                     }
@@ -474,7 +492,7 @@ impl Codegen<'_> {
                 self.emit(Op::LoadField(info.id), 1);
                 Ok(Ty::Enum(name))
             }
-            FieldType::OptionalInt | FieldType::OptionalIp => Err(CompileError::new(
+            FieldType::OptionalInt | FieldType::OptionalIp | FieldType::OptionalRd => Err(CompileError::new(
                 line,
                 "this field may be unset and can't be read directly yet (only 'set' is supported)",
             )),
@@ -622,6 +640,21 @@ fn is_community_list(ty: FieldType) -> bool {
 /// against the target field's community kind. Shared by all three call
 /// sites so arity/range checking lives in one place.
 fn community_value_for(ty: FieldType, expr: &Expr) -> Result<CommunityValue, CompileError> {
+    if let ExprKind::ExtLit(kind, value) = &expr.kind {
+        return match (ty, kind) {
+            (FieldType::ListExtCommunity, ExtKind::Rt | ExtKind::Soo) => {
+                Ok(CommunityValue::Extended(*value))
+            }
+            (_, ExtKind::Rd) => Err(CompileError::new(
+                expr.line,
+                "rd(..) is a Route Distinguisher, not a community; compare it with 'this.bgp.rd'",
+            )),
+            _ => Err(CompileError::new(
+                expr.line,
+                "rt(..)/soo(..) is only valid on 'this.bgp.extended_communities'",
+            )),
+        };
+    }
     let ExprKind::ColonLit(parts) = &expr.kind else {
         return Err(CompileError::new(
             expr.line,
@@ -737,6 +770,12 @@ fn optional_ip_field(expr: &Expr) -> Option<schema::FieldId> {
         .collect::<Option<_>>()?;
     let (info, consumed) = schema::resolve_field(&names)?;
     (consumed == names.len() && info.ty == FieldType::OptionalIp).then_some(info.id)
+}
+
+/// `this.bgp.rd` exactly.
+fn is_rd_field(expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::This(s)
+        if matches!(s.as_slice(), [Postfix::Field(a), Postfix::Field(b)] if a == "bgp" && b == "rd"))
 }
 
 /// `this.bgp.as_path` exactly, with no suffix.
@@ -869,6 +908,7 @@ mod tests {
                 extended_communities: &[],
                 large_communities: &[],
                 validation_state: ValidationState::default(),
+                rd: None,
             },
         }
     }
@@ -897,6 +937,7 @@ mod tests {
                 extended_communities,
                 large_communities,
                 validation_state: ValidationState::default(),
+                rd: None,
             },
         }
     }
@@ -1548,5 +1589,115 @@ mod tests {
     fn undefined_prefix_list_is_a_compile_error() {
         let err = compile_err("if this.prefix in BLOCKS:\n    accept\nelse:\n    reject\n");
         assert!(err.to_string().contains("undefined prefix-list"));
+    }
+
+    /// #582: `rt()`/`soo()` are the raw `type:subtype:value` literals spelled
+    /// out, in all three type forms.
+    #[test]
+    fn rt_and_soo_literals_encode_like_the_raw_form() {
+        for (sugar, raw) in [
+            ("rt(65000:2)", "0:2:279172874240002"),
+            ("rt(10.0.0.1:7)", "1:2:10995116343303"),
+            ("rt(4200000000:9)", "2:2:275251200000009"),
+            ("soo(65001:77)", "0:3:279177169207373"),
+        ] {
+            let sugar_p = compile_src(&format!(
+                "this.bgp.extended_communities.add({sugar})\naccept\n"
+            ));
+            let raw_p = compile_src(&format!(
+                "this.bgp.extended_communities.add({raw})\naccept\n"
+            ));
+            assert_eq!(sugar_p, raw_p, "{sugar}");
+        }
+        // contains/remove take them too.
+        let p = compile_src(
+            "if this.bgp.extended_communities.contains(rt(65000:1)):\n    this.bgp.extended_communities.remove(rt(65000:1))\n    this.bgp.extended_communities.add(soo(65001:5))\naccept\n",
+        );
+        let rt1 = (2u64 << 48) | (65000 << 32) | 1;
+        let soo5 = (3u64 << 48) | (65001 << 32) | 5;
+        let ext = [rt1, 7];
+        let input = make_community_input("10.0.0.0/8".parse().unwrap(), &[], &ext, &[]);
+        let Verdict::Accept {
+            extended_communities,
+            ..
+        } = vm::run(&p, &input)
+        else {
+            panic!("accept expected");
+        };
+        assert_eq!(extended_communities, vec![7, soo5]);
+    }
+
+    #[test]
+    fn bad_rt_rd_literals_are_compile_errors() {
+        let ext = |lit: &str| {
+            crate::compile(
+                &format!("this.bgp.extended_communities.add({lit})\naccept\n"),
+                &Symbols::EMPTY,
+            )
+        };
+        for bad in [
+            "rt(65000:4294967296)", // nn too big for a 16-bit AS
+            "rt(70000:65536)",      // nn too big for a 32-bit AS
+            "rt(4294967296:1)",     // AS too big
+            "rt(10.0.0.1:65536)",   // nn too big for an IPv4 admin
+            "rt(65000)",            // no nn
+            "rd(65001:1)",          // an RD is not a community
+        ] {
+            assert!(ext(bad).is_err(), "{bad}");
+        }
+        // rt() on a standard-community list, and a bare rt()/rd() as a value.
+        assert!(crate::compile(
+            "this.bgp.communities.add(rt(65000:1))\naccept\n",
+            &Symbols::EMPTY
+        )
+        .is_err());
+        assert!(crate::compile(
+            "if rt(65000:1):\n    accept\nelse:\n    reject\n",
+            &Symbols::EMPTY
+        )
+        .is_err());
+    }
+
+    /// #582: `this.bgp.rd` compares with `==`/`!=` against `rd()`; an absent
+    /// RD (a non-VPN route) never equals anything.
+    #[test]
+    fn bgp_rd_matches_only_an_equal_rd() {
+        let eq = compile_src("if this.bgp.rd == rd(65001:1):\n    reject\nelse:\n    accept\n");
+        let ne = compile_src("if this.bgp.rd != rd(65001:1):\n    reject\nelse:\n    accept\n");
+        let rd_65001_1 = (65001u64 << 32) | 1;
+        let rd_ip = (1u64 << 48) | (0x0a00_0001 << 16) | 7;
+        let rd_asn4 = (2u64 << 48) | (4_200_000_000 << 16) | 9;
+        let accept = |p: &CompiledPolicy, rd: Option<u64>| {
+            let (pfx, a, c) = default_input("10.0.0.0/8");
+            let mut input = make_input(pfx, &a, 100, None, &c);
+            input.bgp.rd = rd;
+            matches!(vm::run(p, &input), Verdict::Accept { .. })
+        };
+        assert!(!accept(&eq, Some(rd_65001_1)) && accept(&eq, Some(rd_ip)) && accept(&eq, None));
+        // `!=` is the plain negation, so an absent RD is "not equal".
+        assert!(accept(&ne, Some(rd_65001_1)) && !accept(&ne, Some(rd_ip)) && !accept(&ne, None));
+        for (lit, want) in [("rd(10.0.0.1:7)", rd_ip), ("rd(4200000000:9)", rd_asn4)] {
+            let p = compile_src(&format!(
+                "if this.bgp.rd == {lit}:\n    accept\nelse:\n    reject\n"
+            ));
+            assert!(
+                accept(&p, Some(want)) && !accept(&p, Some(rd_65001_1)),
+                "{lit}"
+            );
+        }
+    }
+
+    #[test]
+    fn bgp_rd_is_read_only_and_only_comparable_to_rd() {
+        for src in [
+            "if this.bgp.rd == 5:\n    accept\nelse:\n    reject\n",
+            "if this.bgp.rd == rt(65000:1):\n    accept\nelse:\n    reject\n",
+            "if this.bgp.rd < rd(65001:1):\n    accept\nelse:\n    reject\n",
+            "if this.bgp.rd:\n    accept\nelse:\n    reject\n",
+            "set this.bgp.rd = rd(65001:1)\naccept\n",
+            "if rd(65001:1) == this.bgp.rd:\n    accept\nelse:\n    reject\n",
+        ] {
+            assert!(crate::compile(src, &Symbols::EMPTY).is_err(), "{src}");
+        }
     }
 }

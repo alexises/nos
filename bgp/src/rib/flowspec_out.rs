@@ -87,7 +87,7 @@ pub(super) fn import_flow(
 ) -> bool {
     let candidate = flow_rib_route(peer, r, confed);
     let prefix = flow_prefix(r.family, &r.nlri);
-    let Some(out) = apply_policy(prefix, candidate, policy, Some((peer, peer_as))) else {
+    let Some(out) = apply_policy(prefix, candidate, policy, Some((peer, peer_as)), None) else {
         return false;
     };
     let a = &mut r.attributes;
@@ -223,7 +223,7 @@ impl BgpRib {
             self.local_asn,
             self.source_is_rr_client(&route),
             self.cluster_id,
-            Some((r.family, policy)),
+            Some((r.family, policy, None)),
         )?;
         let ebgp = !outbox.is_ibgp && !outbox.is_confed;
         Some(AdvertisedFlowspec {

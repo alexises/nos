@@ -49,6 +49,17 @@ pub enum BinOp {
     Or,
 }
 
+/// Which extended-community-shaped value an [`ExprKind::ExtLit`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtKind {
+    /// `rt(..)`: a Route Target (RFC 4364 section 4.3.1).
+    Rt,
+    /// `soo(..)`: a Site of Origin (RFC 4364 section 7).
+    Soo,
+    /// `rd(..)`: a Route Distinguisher (RFC 4364 section 4.2).
+    Rd,
+}
+
 /// Expression shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
@@ -60,6 +71,10 @@ pub enum ExprKind {
     PrefixLit(IpNet),
     /// IP address literal.
     IpLit(IpAddr),
+    /// `rt(65000:2)` / `soo(10.0.0.1:7)` / `rd(65001:1)`, already encoded as
+    /// the 8-octet value (the type octet in the high byte), the way
+    /// `nos_proto::evpn_id::parse_rt`/`parse_rd` do.
+    ExtLit(ExtKind, u64),
     /// `origin.igp` — an enum type name plus a variant name.
     EnumLit(String, String),
     /// `65000:100` / `3:2:900` — a colon-separated run of integer literals.

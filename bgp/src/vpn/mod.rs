@@ -8,7 +8,9 @@ mod nlri;
 mod vrf;
 
 pub use crate::evpn::{format_ext_community, format_rd, Rd};
-pub use ext_comm::{is_route_target, route_targets, rt, sites_of_origin};
+pub use ext_comm::{
+    format_soo, has_soo, is_route_target, route_targets, rt, sites_of_origin, soo_from_rt,
+};
 pub use nlri::{
     decode_next_hop, decode_vpn_reach, decode_vpn_unreach, encode_next_hop, encode_vpn_reach,
     encode_vpn_unreach,

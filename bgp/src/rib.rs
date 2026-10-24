@@ -115,7 +115,7 @@ pub use flowspec_out::AdvertisedFlowspec;
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
 pub use shared::{RibGuard, SharedRib};
-pub use vpn_import::{VpnImport, VpnImports};
+pub use vpn_import::{SooSkip, VpnImport, VpnImports};
 pub use vpn_out::AdvertisedVpn;
 
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
@@ -134,6 +134,7 @@ fn to_policy_input(
     prefix: IpNet,
     route: &RibRoute,
     peer: Option<(IpAddr, u32)>,
+    rd: Option<[u8; 8]>,
 ) -> nos_rpl::Input<'_> {
     nos_rpl::Input {
         prefix,
@@ -157,6 +158,7 @@ fn to_policy_input(
             extended_communities: &route.extended_communities,
             large_communities: &route.large_communities,
             validation_state: route.validation_state,
+            rd: rd.map(u64::from_be_bytes),
         },
     }
 }
@@ -173,8 +175,9 @@ fn apply_policy(
     mut candidate: RibRoute,
     policy: &CompiledPolicy,
     peer: Option<(IpAddr, u32)>,
+    rd: Option<[u8; 8]>,
 ) -> Option<RibRoute> {
-    let verdict = nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate, peer));
+    let verdict = nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate, peer, rd));
     apply_verdict(&mut candidate, verdict).map(|_| candidate)
 }
 
@@ -1417,7 +1420,7 @@ impl BgpRib {
                 validation_state: self.validate(prefix, &AsPath::default()),
                 ..redistributed_route()
             };
-            apply_policy(prefix, route, &self.redistribute_policy, None)
+            apply_policy(prefix, route, &self.redistribute_policy, None, None)
         } else {
             None
         };

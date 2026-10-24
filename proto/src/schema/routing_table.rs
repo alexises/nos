@@ -208,6 +208,11 @@ pub struct RoutingTableVpn {
     /// Static MPLS label (16-1048575) for this VRF's exported routes.
     #[cli(topic = RoutingTableVpnLabel)]
     pub label: Option<u32>,
+    /// Site of Origin (RFC 4364 section 7): attached to every route this
+    /// table exports; a received route carrying it is not imported here.
+    #[serde(default)]
+    #[cli(topic = RoutingTableVpnSiteOfOrigin, words = "site-of-origin")]
+    pub site_of_origin: Option<String>,
 }
 
 /// A named routing table, optionally associated with one BGP instance and
@@ -524,6 +529,12 @@ fn valid_table_vpn(table: &RoutingTable, ctx: &Config) -> garde::Result {
     }
     if v.route_targets_export.is_empty() {
         return err("vpn needs at least one export route-target");
+    }
+    if v.site_of_origin
+        .as_deref()
+        .is_some_and(|s| crate::evpn_id::parse_rt(s).is_none())
+    {
+        return err("vpn site-of-origin must be asn:nn or a.b.c.d:nn");
     }
     let Some(instance) = &v.bgp_instance else {
         return err("vpn needs a bgp-instance");
@@ -1100,6 +1111,7 @@ mod tests {
             route_targets_export: vec!["65000:1".to_string()],
             bgp_instance: Some("r1".to_string()),
             label: Some(100),
+            site_of_origin: None,
         }
     }
 
@@ -1137,12 +1149,20 @@ mod tests {
             |v| v.label = Some(0),
             |v| v.label = Some(15),
             |v| v.label = Some(1_048_576),
+            |v| v.site_of_origin = Some("junk".to_string()),
+            |v| v.site_of_origin = Some("70000:70000".to_string()),
         ] {
             let mut v = vpn();
             mutate(&mut v);
             let mut bad = cfg.clone();
             bad.routing_tables[1] = red(v);
             assert!(bad.validate_with(&bad).is_err());
+        }
+        // A SoO may equal an RT; all three forms parse.
+        for soo in ["65000:1", "10.0.0.1:7", "4200000000:9"] {
+            let mut ok = cfg.clone();
+            ok.routing_tables[1].vpn.site_of_origin = Some(soo.to_string());
+            ok.validate_with(&ok).unwrap();
         }
         for l in [16, 1_048_575] {
             let mut ok = cfg.clone();

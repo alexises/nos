@@ -35,6 +35,12 @@ of re-auditing the codebase. Update this file as items are implemented.
 - **Session auth**: RFC 2385 MD5 + RFC 5925 TCP-AO with key rotation.
 - **Config/CLI**: peer-group/peer/instance fields as expected; `show bgp
   brief`, `clear bgp <instance> <peer> soft-in`.
+- **L3VPN, VPNv4/VPNv6 (#573, RFC 4364/4659)**: SAFI 128 codec, Adj-RIB-In,
+  best path per (RD, prefix) and reflection (#578); import into VRFs by Route
+  Target (#579); export of a VRF's routes with a per-VRF label (#580); the
+  kernel MPLS data plane (#581); VPNv6 over an IPv4 session (IPv4-mapped next
+  hop), Site of Origin per VRF and the RPL `rt()`/`soo()`/`rd()` hooks (#582).
+  See `docs/protocols/bgp.md` "L3VPN".
 
 ## Not implemented (confirmed zero hits)
 
@@ -43,12 +49,12 @@ of re-auditing the codebase. Update this file as items are implemented.
   COMMUNITIES, LARGE COMMUNITIES, AS4_PATH/AS4_AGGREGATOR (moot — always
   native 4-byte).
 - **Capabilities**: Graceful Restart, ORF, dynamic capability negotiation.
-- **AFI/SAFI**: multicast. VPNv4/VPNv6 (#573) is received, selected,
-  reflected (#578) and imported into VRFs by RT (#579, single best path per
-  VRF prefix, no multipath); origination (#580) and the MPLS dataplane
-  (#581) are open. A reflected VPN best path has no next-hop feasibility
-  check, is not re-run on an IGP cost change, and reflected routes keep
-  their next hop (next-hop-self needs a local label).
+- **AFI/SAFI**: multicast. VPN (#573) still lacks RT-constrained
+  distribution (RFC 4684), inter-AS options B/C, carrier's carrier, ADD-PATH
+  on SAFI 128 and a per-CE Site of Origin (one per VRF today). A reflected
+  VPN best path has no next-hop feasibility check, is not re-run on an IGP
+  cost change, and reflected routes keep their next hop (next-hop-self needs
+  a local label); one label per route, single best path per VRF prefix.
 - **EVPN** (AFI 25 / SAFI 70): received routes are stored per peer and
   pushed to `nos-fdbd`; local MACs pushed by `nos-fdbd` are originated as
   Type-2/Type-3 (see `docs/protocols/bgp-internals.md`'s "EVPN" and `docs/protocols/evpn-vxlan.md` "Implementation notes"). Still

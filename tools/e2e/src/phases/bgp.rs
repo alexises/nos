@@ -3282,6 +3282,7 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         &[],
     )
     .await?;
+    mpls_ready(w, &["router-a"]).await?;
     let a = w.a()?;
     a.wait(&format!(
         "address families negotiated peer={IP_G} families=\\[.*\"vpnv4\", \"vpnv6\"\\]"
@@ -3313,6 +3314,7 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         .await?;
     }
     vrf_import(w, &vpn_flags).await?;
+    vpn_soo_and_policy(w, &vpn_flags).await?;
 
     let show = |q: &str| {
         let path = format!("/v1/bgp/{q}");
@@ -3428,6 +3430,7 @@ pub async fn vpn_export(w: &mut World) -> anyhow::Result<()> {
         &[],
     )
     .await?;
+    mpls_ready(w, &["router-a"]).await?;
     let a = w.a()?;
     let advertised = format!(
         "vpn route advertised peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix={VPN_EXPORT_A} labels=\\[{VPN_LABEL}\\] next_hop={IP_A}"
@@ -3438,7 +3441,7 @@ pub async fn vpn_export(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait(&advertised).await?;
     let in_gobgp = format!("{VPN_RD_A}:{VPN_EXPORT_A}");
-    let gobgp_until = |present: bool| gobgp_vpnv4_until(w, &in_gobgp, present);
+    let gobgp_until = |present: bool| gobgp_vpn_until(w, "vpnv4", &in_gobgp, present);
     let out = gobgp_until(true).await?;
     let line = out
         .lines()
@@ -3484,19 +3487,24 @@ pub async fn vpn_export(w: &mut World) -> anyhow::Result<()> {
     two_pes(w).await
 }
 
-/// Polls GoBGP's VPNv4 table until it does (or no longer does) hold
-/// `needle`; the last output.
-async fn gobgp_vpnv4_until(w: &World, needle: &str, present: bool) -> anyhow::Result<String> {
+/// Polls GoBGP's `family` (`vpnv4`/`vpnv6`) table until it does (or no
+/// longer does) hold `needle`; the last output.
+async fn gobgp_vpn_until(
+    w: &World,
+    family: &str,
+    needle: &str,
+    present: bool,
+) -> anyhow::Result<String> {
     let mut out = String::new();
     for _ in 0..30 {
-        out = gobgp(w, &["global", "rib", "-a", "vpnv4"]).await?;
+        out = gobgp(w, &["global", "rib", "-a", family]).await?;
         if out.contains(needle) == present {
             return Ok(out);
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let what = if present { "showed" } else { "dropped" };
-    bail!("GoBGP's vpnv4 rib never {what} {needle}: {out}")
+    bail!("GoBGP's {family} rib never {what} {needle}: {out}")
 }
 
 /// `vpn_export`'s second half: router-a and router-b as two PEs over one
@@ -3522,6 +3530,7 @@ async fn two_pes(w: &mut World) -> anyhow::Result<()> {
     };
     w.start(A, Some(pe(A, VPN_RD_A, VPN_EXPORT_A)), &[]).await?;
     w.start(B, Some(pe(B, VPN_RD_B, VPN_EXPORT_B)), &[]).await?;
+    mpls_ready(w, &["router-a", "router-b"]).await?;
     let (a, b) = (w.a()?, w.b()?);
     a.established().await?;
     let imported = |prefix: &str, rd: &str, pe: &str| {
@@ -3558,115 +3567,8 @@ async fn vrf_routes(a: &Router) -> anyhow::Result<String> {
 /// onlink`); the CEs ping each other across the MPLS link but not the core.
 /// A label change re-programs both sides; unsetting `vpn` removes them.
 pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
-    let base = |id: Id| {
-        let mut f = id.base_flags();
-        f.push("--vpn".into());
-        f
-    };
-    w.start(A, Some(base(A)), &[]).await?;
-    w.start(B, Some(base(B)), &[]).await?;
+    vpn_dp_setup(w, false).await?;
     let (a, b) = (w.a()?, w.b()?);
-    a.established().await?;
-    b.established().await?;
-
-    // The operator's part (docker mounts /proc/sys read-only, so nos-ribd only
-    // reads these): label space, MPLS input on the core link, forwarding.
-    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
-    for router in ["router-a", "router-b"] {
-        netns(
-            w,
-            router,
-            &[
-                "sh",
-                "-c",
-                "echo 1048575 > /proc/sys/net/mpls/platform_labels; \
-                 echo 1 > /proc/sys/net/mpls/conf/eth0/input; \
-                 echo 1 > /proc/sys/net/ipv4/ip_forward",
-            ],
-        )
-        .await?;
-    }
-
-    log("a CE host behind each PE, each on its own network and subnet");
-    w.dock
-        .ensure_image(
-            HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
-             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
-             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
-        )
-        .await?;
-    let sites = [
-        (
-            NET_L3_A,
-            L3_SUBNET_A,
-            "router-a",
-            L3_GW_A,
-            CE_HOST,
-            L3_HOST_IP_A,
-            L3_SUBNET_B,
-        ),
-        (
-            NET_L3_B,
-            L3_SUBNET_B,
-            "router-b",
-            L3_GW_B,
-            H_HOST,
-            L3_HOST_IP_B,
-            L3_SUBNET_A,
-        ),
-    ];
-    for (net, subnet, router, gw, host, ip, other) in sites {
-        if !w.dock.network_exists(net).await {
-            w.dock.network_create(net, &[subnet], false).await?;
-        }
-        w.dock.network_connect_ip(net, router, gw).await?;
-        w.dock.start_host(host, HOST_IMAGE, net).await?;
-        host_sh(
-            w,
-            host,
-            &format!(
-                "set -e; ip addr flush dev eth0; ip addr add {ip}/24 dev eth0; \
-                 ip route add {other} via {gw}"
-            ),
-        )
-        .await?;
-    }
-
-    log("each PE's VRF gets vpn and its CE-facing eth1");
-    let pe = |id: Id, rd: &str, gw: &str, extra: &[&str]| {
-        let mut f = base(id);
-        f.extend(strings(&[
-            "--vpn-table",
-            VPN_TABLE,
-            "--vpn-rd",
-            rd,
-            "--vpn-rt-export",
-            VPN_RT,
-            "--vpn-rt-import",
-            VPN_RT,
-            // `--l3vni-interface` only puts eth1 in the table here: no L3 VNI.
-            "--l3vni-table",
-            VPN_TABLE,
-            "--l3vni-interface",
-            "eth1",
-            "--l3vni-address",
-            &format!("{gw}/24"),
-        ]));
-        f.extend(strings(extra));
-        f
-    };
-    a.provision_flags(&pe(A, VPN_RD_A, L3_GW_A, &[])).await?;
-    b.provision_flags(&pe(B, VPN_RD_B, L3_GW_B, &[])).await?;
-    let pop =
-        |label: u32| format!("installed mpls pop route table={VPN_TABLE} vrf=.* label={label}");
-    let labelled = |prefix: &str, label: u32, pe: &str| {
-        format!("installed labelled route prefix={prefix} labels=\\[{label}\\] gateway={pe} interface=Some(")
-    };
-    a.wait(&pop(VPN_LABEL)).await?;
-    b.wait(&pop(VPN_LABEL)).await?;
-    a.wait(&labelled(L3_SUBNET_B, VPN_LABEL, IP_B)).await?;
-    b.wait(&labelled(L3_SUBNET_A, VPN_LABEL, IP_A)).await?;
 
     log("the CEs ping each other across the MPLS link");
     ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
@@ -3685,36 +3587,34 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
 
     log("router-b's label changes to 2000: both PEs re-program it");
     let new_label = 2000;
-    let removed_pop =
-        |label: u32| format!("removed mpls pop route table={VPN_TABLE} vrf=.* label={label}");
     let (base_rm, base_a) = (
-        b.count(&removed_pop(VPN_LABEL)),
-        a.count(&labelled(L3_SUBNET_B, new_label, IP_B)),
+        b.count(&dp_removed_pop(VPN_LABEL)),
+        a.count(&dp_labelled(L3_SUBNET_B, new_label, IP_B)),
     );
-    b.provision_flags(&pe(
+    b.provision_flags(&dp_pe(
         B,
         VPN_RD_B,
-        L3_GW_B,
+        &format!("{L3_GW_B}/24"),
         &["--vpn-label", &new_label.to_string()],
     ))
     .await?;
-    b.wait_new(&removed_pop(VPN_LABEL), base_rm, 60).await?;
-    b.wait(&pop(new_label)).await?;
-    a.wait_new(&labelled(L3_SUBNET_B, new_label, IP_B), base_a, 60)
+    b.wait_new(&dp_removed_pop(VPN_LABEL), base_rm, 60).await?;
+    b.wait(&dp_pop(new_label)).await?;
+    a.wait_new(&dp_labelled(L3_SUBNET_B, new_label, IP_B), base_a, 60)
         .await?;
     ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
     ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
 
     log("router-b's vpn unset: its pop route and router-a's labelled route go");
     let gone = format!("removed labelled route prefix={L3_SUBNET_B} labels=\\[{new_label}\\]");
-    let (base_rm, base_gone) = (b.count(&removed_pop(new_label)), a.count(&gone));
+    let (base_rm, base_gone) = (b.count(&dp_removed_pop(new_label)), a.count(&gone));
     let clear = {
-        let mut f = base(B);
+        let mut f = dp_base(B);
         f.extend(strings(&["--vpn-table", VPN_TABLE, "--vpn-clear"]));
         f
     };
     b.provision_flags(&clear).await?;
-    b.wait_new(&removed_pop(new_label), base_rm, 60).await?;
+    b.wait_new(&dp_removed_pop(new_label), base_rm, 60).await?;
     a.wait_new(&gone, base_gone, 60).await?;
     let (code, _) = w
         .dock
@@ -3723,7 +3623,328 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     if code == 0 {
         bail!("{CE_HOST} still reaches {L3_HOST_IP_B} after router-b's vpn was unset");
     }
+    vpn_dp_teardown(w).await;
+    Ok(())
+}
 
+/// `vpn-v6` (#582): VPN-IPv6 (RFC 4659) for real, the IPv6 twin of the VPN
+/// phases, over an IPv4 session so the next hop is IPv4-mapped.
+/// First against GoBGP (an `ipv6-l3vpn` route with a mapped next hop is
+/// imported into `VPN_TABLE`, its PE resolved in the IPv4 underlay; router-a's
+/// VRF loopback reaches GoBGP with RD, RT, label and next hop), then on two nos
+/// PEs with IPv6 CE hosts: the labelled route is installed for an `AF_INET6`
+/// destination and the hosts ping6 each other over the VPN label.
+pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
+    let mut flags = vpn_flags("65000:1");
+    flags.extend(strings(&["--vpn-loopback-address", VPN6_EXPORT_A]));
+    gobgp_speaker(w, flags, &["l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"], &[]).await?;
+    mpls_ready(w, &["router-a"]).await?;
+    let a = w.a()?;
+    a.wait(&format!(
+        "address families negotiated peer={IP_G} families=\\[.*\"vpnv6\""
+    ))
+    .await?;
+
+    log("GoBGP's VPNv6 route (IPv4-mapped next hop) is imported, its PE resolved over IPv4");
+    let prefix = "2001:db8:10::/48";
+    gobgp(
+        w,
+        &[
+            "global", "rib", "add", "-a", "vpnv6", prefix, "label", "300", "rd", "65001:1", "rt",
+            "65000:1",
+        ],
+    )
+    .await?;
+    a.wait(&format!(
+        "vpn route learned peer={IP_G} family=vpnv6 rd=65001:1 prefix={prefix} labels=\\[300\\] next_hop={IP_G}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "vpn route imported table={VPN_TABLE} prefix={prefix} labels=\\[300\\] rd=65001:1 next_hop={IP_G}"
+    ))
+    .await?;
+    let mut body = vrf_routes(a).await?;
+    for _ in 0..10 {
+        if body.contains(prefix) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        body = vrf_routes(a).await?;
+    }
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    let route = table
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["prefix"] == prefix)
+        .and_then(|p| p["candidates"].get(0))
+        .with_context(|| format!("{VPN_TABLE} has no {prefix}: {body}"))?;
+    if route["source"] != "Vpn"
+        || route["vpn"]["pe_next_hop"] != IP_G
+        || route["gateways"][0] != IP_G
+        || route["mpls_labels"] != serde_json::json!([300])
+    {
+        bail!("{VPN_TABLE}'s {prefix} is not the imported VPNv6 route (IPv4 PE, IPv4 gateway): {route}");
+    }
+
+    log("router-a's VRF loopback is a VPNv6 route for GoBGP, next hop the session address");
+    let advertised = format!(
+        "vpn route advertised peer={IP_G} family=vpnv6 rd={VPN_RD_A} prefix={VPN6_EXPORT_A} labels=\\[{VPN_LABEL}\\] next_hop={IP_A}"
+    );
+    a.wait(&advertised).await?;
+    let in_gobgp = format!("{VPN_RD_A}:{VPN6_EXPORT_A}");
+    let out = gobgp_vpn_until(w, "vpnv6", &in_gobgp, true).await?;
+    let line = out
+        .lines()
+        .find(|l| l.contains(&in_gobgp))
+        .unwrap_or_default();
+    for want in [
+        &format!("[{VPN_LABEL}]"),
+        IP_A,
+        &format!("{ASN_A}"),
+        VPN_RD_A,
+    ] {
+        if !line.contains(want) {
+            bail!("GoBGP's VPNv6 route lacks {want}: {line}");
+        }
+    }
+    if line.matches(VPN_RD_A).count() < 2 {
+        bail!("GoBGP's VPNv6 route lacks the export RT {VPN_RD_A}: {line}");
+    }
+    w.dock.container_remove("router-g").await;
+
+    log("two nos PEs with IPv6 CE hosts: ping6 both ways over the VPN label");
+    vpn_dp_setup(w, true).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    ping_until(w, CE_HOST, L3V6_HOST_B, 30).await?;
+    ping_until(w, H_HOST, L3V6_HOST_A, 30).await?;
+
+    log("router-b's vpn unset: the IPv6 labelled route goes and the ping stops");
+    let gone = format!("removed labelled route prefix={L3V6_SUBNET_B} labels=\\[{VPN_LABEL}\\]");
+    let base_gone = a.count(&gone);
+    let clear = {
+        let mut f = dp_base(B);
+        f.extend(strings(&["--vpn-table", VPN_TABLE, "--vpn-clear"]));
+        f
+    };
+    b.provision_flags(&clear).await?;
+    a.wait_new(&gone, base_gone, 60).await?;
+    let (code, _) = w
+        .dock
+        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", L3V6_HOST_B])
+        .await?;
+    if code == 0 {
+        bail!("{CE_HOST} still reaches {L3V6_HOST_B} after router-b's vpn was unset");
+    }
+    vpn_dp_teardown(w).await;
+    Ok(())
+}
+
+/// The `Log` pattern of a label's AF_MPLS pop route install.
+fn dp_pop(label: u32) -> String {
+    format!("installed mpls pop route table={VPN_TABLE} vrf=.* label={label}")
+}
+
+/// The `Log` pattern of a label's pop route removal.
+fn dp_removed_pop(label: u32) -> String {
+    format!("removed mpls pop route table={VPN_TABLE} vrf=.* label={label}")
+}
+
+/// The `Log` pattern of the labelled route to `prefix` via the PE `pe`.
+fn dp_labelled(prefix: &str, label: u32, pe: &str) -> String {
+    format!("installed labelled route prefix={prefix} labels=\\[{label}\\] gateway={pe} interface=Some(")
+}
+
+/// A data-plane PE's base flags: the session to the other PE and `--vpn`.
+fn dp_base(id: Id) -> Vec<String> {
+    let mut f = id.base_flags();
+    f.push("--vpn".into());
+    f
+}
+
+/// A data-plane PE's whole config: `dp_base` plus `VPN_TABLE` (its RD, the
+/// shared RT both ways) with its CE-facing `eth1` in it at `l3_address`
+/// (`--l3vni-interface` only puts eth1 in the table here: no L3 VNI).
+fn dp_pe(id: Id, rd: &str, l3_address: &str, extra: &[&str]) -> Vec<String> {
+    let mut f = dp_base(id);
+    f.extend(strings(&[
+        "--vpn-table",
+        VPN_TABLE,
+        "--vpn-rd",
+        rd,
+        "--vpn-rt-export",
+        VPN_RT,
+        "--vpn-rt-import",
+        VPN_RT,
+        "--l3vni-table",
+        VPN_TABLE,
+        "--l3vni-interface",
+        "eth1",
+        "--l3vni-address",
+        l3_address,
+    ]));
+    f.extend(strings(extra));
+    f
+}
+
+/// The operator's part of an MPLS PE (docker mounts /proc/sys read-only, so
+/// `nos-ribd` only reads these): label space (it withholds a VRF's export
+/// without it), MPLS input on the core link, forwarding. Per container start.
+async fn mpls_ready(w: &World, routers: &[&str]) -> anyhow::Result<()> {
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    for router in routers {
+        netns(
+            w,
+            router,
+            &[
+                "sh",
+                "-c",
+                "echo 1048575 > /proc/sys/net/mpls/platform_labels; \
+                 echo 1 > /proc/sys/net/mpls/conf/eth0/input; \
+                 echo 1 > /proc/sys/net/ipv4/ip_forward; \
+                 echo 1 > /proc/sys/net/ipv6/conf/all/forwarding",
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// `vpn-dataplane`/`vpn-v6`'s topology, up and converged: router-a and
+/// router-b as VPN PEs, a CE host (`CE_HOST`, `H_HOST`) on its own docker
+/// network behind each PE's `eth1` in `VPN_TABLE`, the MPLS sysctls set, and
+/// each PE with the other's CE subnet installed as a labelled route.
+/// `v6` gives the CEs IPv6 addresses (and the PEs IPv6 `eth1` addresses)
+/// instead of IPv4: the VPN session itself stays IPv4.
+async fn vpn_dp_setup(w: &mut World, v6: bool) -> anyhow::Result<()> {
+    w.start(A, Some(dp_base(A)), &[]).await?;
+    w.start(B, Some(dp_base(B)), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    b.established().await?;
+
+    mpls_ready(w, &["router-a", "router-b"]).await?;
+
+    log("a CE host behind each PE, each on its own network and subnet");
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:bookworm-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    // (network, docker subnets, router, docker address, host, host address,
+    // the other site's subnet, the PE's eth1 address)
+    let v4 = |net, subnet, router, gw: &str, host, ip, other| {
+        (
+            net,
+            vec![subnet],
+            router,
+            gw.to_string(),
+            host,
+            ip,
+            other,
+            format!("{gw}/24"),
+        )
+    };
+    let v6s = |net, subnet, subnet6, router, gw: &str, gw6: &str, host, ip, other| {
+        (
+            net,
+            vec![subnet, subnet6],
+            router,
+            gw.to_string(),
+            host,
+            ip,
+            other,
+            format!("{gw6}/64"),
+        )
+    };
+    let sites = if v6 {
+        [
+            v6s(
+                NET_L3_A,
+                L3_SUBNET_A,
+                L3V6_SUBNET_A,
+                "router-a",
+                L3_GW_A,
+                L3V6_GW_A,
+                CE_HOST,
+                L3V6_HOST_A,
+                L3V6_SUBNET_B,
+            ),
+            v6s(
+                NET_L3_B,
+                L3_SUBNET_B,
+                L3V6_SUBNET_B,
+                "router-b",
+                L3_GW_B,
+                L3V6_GW_B,
+                H_HOST,
+                L3V6_HOST_B,
+                L3V6_SUBNET_A,
+            ),
+        ]
+    } else {
+        [
+            v4(
+                NET_L3_A,
+                L3_SUBNET_A,
+                "router-a",
+                L3_GW_A,
+                CE_HOST,
+                L3_HOST_IP_A,
+                L3_SUBNET_B,
+            ),
+            v4(
+                NET_L3_B,
+                L3_SUBNET_B,
+                "router-b",
+                L3_GW_B,
+                H_HOST,
+                L3_HOST_IP_B,
+                L3_SUBNET_A,
+            ),
+        ]
+    };
+    for (net, subnets, router, gw, host, ip, other, _) in &sites {
+        if !w.dock.network_exists(net).await {
+            w.dock.network_create(net, subnets, v6).await?;
+        }
+        w.dock.network_connect_ip(net, router, gw).await?;
+        w.dock.start_host(host, HOST_IMAGE, net).await?;
+        let script = if v6 {
+            let gw6 = if *router == "router-a" {
+                L3V6_GW_A
+            } else {
+                L3V6_GW_B
+            };
+            format!(
+                "set -e; ip addr flush dev eth0; ip -6 addr add {ip}/64 dev eth0 nodad; \
+                 ip -6 route add {other} via {gw6}"
+            )
+        } else {
+            format!(
+                "set -e; ip addr flush dev eth0; ip addr add {ip}/24 dev eth0; \
+                 ip route add {other} via {gw}"
+            )
+        };
+        host_sh(w, host, &script).await?;
+    }
+
+    log("each PE's VRF gets vpn and its CE-facing eth1");
+    a.provision_flags(&dp_pe(A, VPN_RD_A, &sites[0].7, &[]))
+        .await?;
+    b.provision_flags(&dp_pe(B, VPN_RD_B, &sites[1].7, &[]))
+        .await?;
+    a.wait(&dp_pop(VPN_LABEL)).await?;
+    b.wait(&dp_pop(VPN_LABEL)).await?;
+    a.wait(&dp_labelled(sites[0].6, VPN_LABEL, IP_B)).await?;
+    b.wait(&dp_labelled(sites[1].6, VPN_LABEL, IP_A)).await
+}
+
+/// Removes `vpn_dp_setup`'s hosts and networks.
+async fn vpn_dp_teardown(w: &World) {
     for host in [CE_HOST, H_HOST] {
         w.dock.container_remove(host).await;
     }
@@ -3731,7 +3952,176 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
         w.dock.network_disconnect(net, router).await;
         w.dock.network_remove(net).await;
     }
-    Ok(())
+}
+
+/// `vpn`'s Site of Origin (RFC 4364 section 7, #582) and RPL steps, on top of
+/// `vrf_import`'s state (`flags("65000:1")` provisioned, GoBGP peering). GoBGP
+/// cannot put a Site of Origin on a VPN route from its CLI, so a global import
+/// policy adds `soo:65001:77` to 10.30.0.0/24 and `soo:65001:99` to 10.31.0.0/24
+/// as they are injected, and 10.40.0.0/24 carries a foreign RT.
+///
+/// Setting `vpn site-of-origin 65001:77` on `VPN_TABLE` must skip 10.30.0.0/24
+/// (log, not in `show route`, the SoO shown by `show bgp vpnv4`) and still
+/// import 10.31.0.0/24; the VRF loopback exported to GoBGP carries the SoO;
+/// clearing it imports 10.30.0.0/24. A peer-group import policy adding
+/// `rt(65000:1)` imports 10.40.0.0/24, removing it unimports it.
+async fn vpn_soo_and_policy(w: &World, flags: &dyn Fn(&str) -> Vec<String>) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let soo = "65001:77";
+    let with = |extra: &[&str]| {
+        let mut f = flags("65000:1");
+        f.extend(strings(&["--vpn-loopback-address", VPN_EXPORT_A]));
+        f.extend(strings(extra));
+        f
+    };
+    let imported = |p: &str| format!("vpn route imported table={VPN_TABLE} prefix={p}");
+
+    log("GoBGP tags 10.30.0.0/24 with SoO 65001:77 and 10.31.0.0/24 with 65001:99");
+    for (set, prefix, value) in [
+        ("ps77", "10.30.0.0/24", "65001:77"),
+        ("ps99", "10.31.0.0/24", "65001:99"),
+    ] {
+        let st = format!("st{}", &set[2..]);
+        let community = format!("soo:{value}");
+        for args in [
+            vec!["policy", "prefix", "add", set, prefix],
+            vec![
+                "policy",
+                "statement",
+                &st,
+                "add",
+                "condition",
+                "prefix",
+                set,
+            ],
+            vec![
+                "policy",
+                "statement",
+                &st,
+                "add",
+                "action",
+                "ext-community",
+                "add",
+                &community,
+            ],
+            vec!["policy", "statement", &st, "add", "action", "accept"],
+        ] {
+            gobgp(w, &args).await?;
+        }
+    }
+    gobgp(w, &["policy", "add", "psoo", "st77", "st99"]).await?;
+    gobgp(
+        w,
+        &[
+            "global", "policy", "import", "add", "psoo", "default", "accept",
+        ],
+    )
+    .await?;
+
+    log("vpn site-of-origin 65001:77 on the VRF");
+    a.provision_flags(&with(&["--vpn-site-of-origin", soo]))
+        .await?;
+    for (prefix, label) in [("10.30.0.0/24", "500"), ("10.31.0.0/24", "501")] {
+        gobgp(
+            w,
+            &[
+                "global", "rib", "add", "-a", "vpnv4", prefix, "label", label, "rd", "65001:4",
+                "rt", "65000:1",
+            ],
+        )
+        .await?;
+    }
+    a.wait(&format!(
+        "vpn route skipped by site of origin table={VPN_TABLE} rd=65001:4 prefix=10.30.0.0/24 soo={soo}"
+    ))
+    .await?;
+    a.wait(&imported("10.31.0.0/24")).await?;
+    // The import log precedes `nos-ribd` installing the route: poll.
+    let mut table = vrf_routes(a).await?;
+    for _ in 0..10 {
+        if table.contains("10.31.0.0/24") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        table = vrf_routes(a).await?;
+    }
+    if table.contains("10.30.0.0/24") || !table.contains("10.31.0.0/24") {
+        bail!("{VPN_TABLE} must lack the own-SoO route and hold the foreign-SoO one: {table}");
+    }
+    let shown = a
+        .rest_expect(Method::GET, "/v1/bgp/vpnv4?rd=65001:4", None, 200)
+        .await?;
+    for want in [
+        format!("\"site_of_origin\":\"{soo}\""),
+        "\"site_of_origin\":\"65001:99\"".to_string(),
+    ] {
+        if !shown.contains(&want) {
+            bail!("show bgp vpnv4 lacks {want}: {shown}");
+        }
+    }
+
+    log("the exported VRF loopback carries the SoO to GoBGP");
+    let in_gobgp = format!("{VPN_RD_A}:{VPN_EXPORT_A}");
+    gobgp_vpn_until(w, "vpnv4", &in_gobgp, true).await?;
+    let json: serde_json::Value =
+        serde_json::from_str(&gobgp(w, &["global", "rib", "-a", "vpnv4", "-j"]).await?)?;
+    let has_soo = json[&in_gobgp][0]["attrs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|attr| attr["type"] == 16)
+        .flat_map(|attr| attr["value"].as_array().into_iter().flatten())
+        .any(|ec| ec["subtype"] == 3 && ec["value"] == soo);
+    if !has_soo {
+        bail!("GoBGP's {in_gobgp} lacks SoO {soo}: {}", json[&in_gobgp]);
+    }
+
+    log("clearing the SoO imports the held route");
+    let base = a.count(&imported("10.30.0.0/24"));
+    a.provision_flags(&with(&[])).await?;
+    a.wait_new(&imported("10.30.0.0/24"), base, 30).await?;
+
+    log("a peer-group import policy adds the VRF's RT to a route with a foreign one");
+    let steered = "10.40.0.0/24";
+    gobgp(
+        w,
+        &[
+            "global", "rib", "add", "-a", "vpnv4", steered, "label", "600", "rd", "65001:6", "rt",
+            "65000:99",
+        ],
+    )
+    .await?;
+    a.wait(&format!(
+        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:6 prefix={steered}"
+    ))
+    .await?;
+    let base = a.count(&imported(steered));
+    a.assert_quiet(&imported(steered), base, 5).await?;
+    let file = policy_file(
+        "vpn-rt-steer",
+        "this.bgp.extended_communities.add(rt(65000:1))\naccept\n",
+    )?;
+    a.provision_flags(&with(&[
+        "--policy-name",
+        "vpn-rt-steer",
+        "--policy-source-file",
+        &file,
+        "--import-policy",
+        "vpn-rt-steer",
+    ]))
+    .await?;
+    a.wait_new(&imported(steered), base, 60).await?;
+    log("removing the policy unimports it again");
+    let unimported = format!("vpn route unimported table={VPN_TABLE} prefix={steered}");
+    let base = a.count(&unimported);
+    // A policy change restarts the session: wait for GoBGP's routes to come
+    // back before `vpn` goes on to read them.
+    let relearned =
+        format!("vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24");
+    let base_relearned = a.count(&relearned);
+    a.provision_flags(&with(&[])).await?;
+    a.wait_new(&unimported, base, 60).await?;
+    a.wait_new(&relearned, base_relearned, 60).await
 }
 
 /// `vpn`'s VRF import part (#579), with GoBGP holding 10.10.0.0/24 under

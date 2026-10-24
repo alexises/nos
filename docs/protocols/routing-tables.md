@@ -287,7 +287,7 @@ Connected routes are listed in `show route` and used by BGP to check next hops, 
 - A static, BGP or OSPF route for a connected prefix is still listed in `show route`, below the connected route, but it is not installed.
 - If the address is removed, the connected route goes away and the next candidate is installed.
 
-`vpn` routes are VPN routes the `vpn bgp-instance` imported into this table by Route Target ([BGP, Import VPN routes into a VRF](bgp.md#import-vpn-routes-into-a-vrf)). A `vpn` winner is installed as an MPLS route: it pushes the received label and leaves over the underlay interface toward the PE. See "Prepare a router as an L3VPN PE" below.
+`vpn` routes are VPN routes the `vpn bgp-instance` imported into this table by Route Target ([BGP, L3VPN](bgp.md#l3vpn-vpnv4vpnv6)). A `vpn` winner is installed as an MPLS route: it pushes the received label and leaves over the underlay interface toward the PE. See "Prepare a router as an L3VPN PE" below.
 
 ### Prepare a router as an L3VPN PE
 
@@ -337,6 +337,7 @@ A routing table's fields. CLI forms are shown absolute; the relative form, valid
 | vpn route-target | `set routing-table <t> vpn route-target import\|export <rt>` / `delete …` | `routing-table/{t}/vpn/route-targets-import` or `…/route-targets-export`, `["65000:1"]` | list of `asn:nn` or `a.b.c.d:nn` | at least one export; import may be empty | import: VPN routes carrying one are imported, live; export: attached to every exported route | `show config` |
 | vpn bgp-instance | `set routing-table <t> vpn bgp-instance <i>` / `delete … vpn bgp-instance` | `routing-table/{t}/vpn/bgp-instance`, `"r1"` | name, unset | required; exists; not the table's own `bgp-instance` | that instance imports into this table, resolving PEs in its own table, and carries its exports | `show config` |
 | vpn label | `set routing-table <t> vpn label <n>` / `delete … vpn label` | `routing-table/{t}/vpn/label`, `100` | 16-1048575, unset | unique across tables | The label of every exported route; unset, `nos-ribd` allocates one from 1000 (kept across restarts) | `show config`; `show route <t>` (`VPN label`) |
+| vpn site-of-origin | `set routing-table <t> vpn site-of-origin <soo>` / `delete … vpn site-of-origin` | `routing-table/{t}/vpn/site-of-origin`, `"65001:77"` | `asn:nn` or `a.b.c.d:nn`, unset | well-formed; may equal an RT | Attached to every exported VPN route; a received route carrying it is not imported into this table | `show config`; `show bgp vpnv4` (`soo`) |
 
 A static routing instance and its routes. Relative forms, after `edit static-routing-instance <s>`: `set route <prefix> gateway <ip>`, `delete route <prefix>`.
 

@@ -65,7 +65,9 @@ fn learn_batch(
             next_hop: Some(mp.next_hop),
             ..base.clone()
         };
-        let Some(mut route) = apply_policy(n.prefix, candidate, import_policy, Some(peer)) else {
+        let Some(mut route) =
+            apply_policy(n.prefix, candidate, import_policy, Some(peer), Some(n.rd))
+        else {
             table.remove(&k);
             warn!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, "vpn route rejected by import policy");
             continue;
@@ -241,7 +243,7 @@ impl BgpRib {
             self.local_asn,
             self.source_is_rr_client(&r.route),
             self.cluster_id,
-            Some((vpn_family(k.1), outbox.export_policy.as_ref())),
+            Some((vpn_family(k.1), outbox.export_policy.as_ref(), Some(k.0))),
         )?;
         // A local export is always next-hop-self (its label is ours; the
         // codec sends an IPv4 one IPv4-mapped in a VPNv6 batch). A reflected

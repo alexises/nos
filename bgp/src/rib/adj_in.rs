@@ -56,6 +56,7 @@ pub(super) fn evpn_rejected(
             extended_communities: &route.extended_communities,
             large_communities: &[],
             validation_state: nos_rpl::ValidationState::NotFound,
+            rd: None,
         },
     };
     !matches!(
@@ -296,7 +297,7 @@ pub(super) fn learn_prefix(
     import_policy: &CompiledPolicy,
 ) {
     let (from, _) = peer;
-    match apply_policy(prefix, candidate, import_policy, Some(peer)) {
+    match apply_policy(prefix, candidate, import_policy, Some(peer), None) {
         Some(mut route) => {
             if let Some(old) = get_path(table, prefix, id) {
                 // An RPKI state change alone is no flap (#17).

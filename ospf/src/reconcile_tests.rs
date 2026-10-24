@@ -899,6 +899,7 @@ fn verdict(policy: &nos_rpl::CompiledPolicy, prefix: &str, communities: &[u32]) 
             extended_communities: &[],
             large_communities: &[],
             validation_state: nos_rpl::ValidationState::default(),
+            rd: None,
         },
     };
     matches!(
