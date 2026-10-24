@@ -334,6 +334,7 @@ mod tests {
         RoutingTable {
             rest_api: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
+            vpn: crate::schema::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,

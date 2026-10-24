@@ -236,7 +236,7 @@ The request fails with `404` over REST if the peer is not configured or its sess
 
 ## Limiting the prefixes a peer sends
 
-`set maximum-prefix <family> limit <n>` caps how many prefixes each peer of the peer-group may send in that address family (RFC 4486). The family is `ipv4`, `ipv6` or `l2vpn-evpn`, and must be one the peer-group negotiates.
+`set maximum-prefix <family> limit <n>` caps how many prefixes each peer of the peer-group may send in that address family (RFC 4486). The family is `ipv4`, `ipv6`, `l2vpn-evpn`, `ipv4-flowspec`, `ipv6-flowspec`, `vpnv4` or `vpnv6`, and must be one the peer-group negotiates.
 
 - Prefixes are counted per peer, after the import policy: a route the policy rejects does not count.
 - Each family has its own limit and its own count.
@@ -318,13 +318,24 @@ A malformed attribute in a received UPDATE does not reset the session: the route
 
 ### Address families
 
-`set address-family ipv4|ipv6|l2vpn-evpn|ipv4-flowspec|ipv6-flowspec` adds an address family to a peer-group, and `delete address-family <af>` removes one. A peer-group needs at least one. The address families are independent of whether the peer is reached over IPv4 or IPv6: an IPv6 peer can carry IPv4 routes and the reverse.
+`set address-family ipv4|ipv6|l2vpn-evpn|ipv4-flowspec|ipv6-flowspec|vpnv4|vpnv6` adds an address family to a peer-group, and `delete address-family <af>` removes one. A peer-group needs at least one. The address families are independent of whether the peer is reached over IPv4 or IPv6: an IPv6 peer can carry IPv4 routes and the reverse.
 
 - `ipv4` and `ipv6` are unicast routes, installed in the routing table.
 - `l2vpn-evpn` (RFC 7432) carries EVPN routes for VXLAN broadcast domains. It is described with the rest of EVPN.
 - `ipv4-flowspec` and `ipv6-flowspec` (RFC 8955, RFC 8956) carry Flowspec rules. See [Flowspec](#flowspec-rfc-8955-rfc-8956).
+- `vpnv4` and `vpnv6` (RFC 4364, RFC 4659) are the L3VPN families. See [L3VPN: configuration so far](#l3vpn-configuration-so-far).
 
-Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Unicast`, `L2vpnEvpn`, `Ipv4Flowspec` and `Ipv6Flowspec`: `PUT …/peer-group/pg1/address-family/Ipv6Unicast` with body `"Ipv6Unicast"` adds one, and `DELETE` on the same path removes it.
+Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Unicast`, `L2vpnEvpn`, `Ipv4Flowspec`, `Ipv6Flowspec`, `Vpnv4Unicast` and `Vpnv6Unicast`: `PUT …/peer-group/pg1/address-family/Ipv6Unicast` with body `"Ipv6Unicast"` adds one, and `DELETE` on the same path removes it.
+
+### L3VPN: configuration so far
+
+Only the configuration exists. The address families are accepted but not negotiated: they are never sent in OPEN or graceful restart, so a session carries no VPN route yet.
+
+- Name the VRF's VPN identity on its routing table (the table must differ from the underlay's):
+  `set routing-table red vpn rd 65000:1`, `set routing-table red vpn route-target export 65000:1`, `set routing-table red vpn route-target import 65000:1`, `set routing-table red vpn bgp-instance r1`, optionally `set routing-table red vpn label 100`. Fields and checks: [routing tables](routing-tables.md#configuration-reference).
+- Add the families to the underlay peer-group: `set bgp instance r1 peer-group pg1 address-family vpnv4` (and `vpnv6`).
+- Over REST: `PUT /v1/transactions/{tx}/routing-table/red/vpn/rd` with body `"65000:1"`, and `PUT …/bgp-instance/r1/peer-group/pg1/address-family/Vpnv4Unicast` with body `"Vpnv4Unicast"`.
+- `maximum-prefix vpnv4|vpnv6` is accepted; it is enforced once VPN routes are held.
 
 ### Flowspec (RFC 8955, RFC 8956)
 
@@ -1047,7 +1058,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | flowspec-export-policy | `… flowspec-export-policy <policy>` / `set flowspec-export-policy <policy>`; `delete flowspec-export-policy` | `…/flowspec-export-policy`, a policy name or `null` | policy name; default: advertise every rule | `accept-all`, `deny-all` or an existing policy-definition | Accepts, rejects or rewrites Flowspec rules advertised to the peers; changing it restarts the sessions | peer's `show bgp flowspec` |
 | flowspec-validation | `… flowspec-validation disable-dest-prefix-rule <bool>` / `set flowspec-validation disable-dest-prefix-rule <bool>` | `…/flowspec-validation`, `{"disable_dest_prefix_rule":false}` | bool; default false | none | Accepts Flowspec rules without a destination prefix (RFC 8955 section 6 rule (a)); changing it restarts the sessions | `show bgp flowspec` |
 | flowspec-validation rfc8955-strict | `… flowspec-validation rfc8955-strict <bool>` / `set flowspec-validation rfc8955-strict <bool>` | `…/flowspec-validation`, `{"rfc8955_strict":false}` | bool; default false (RFC 9117) | none | Validates as RFC 8955 section 6 is written; changing it restarts the sessions | `show bgp flowspec` |
-| address-family | `… address-family ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec` / `set address-family <af>`; `delete address-family <af>` | `…/address-family/<af>`, `"Ipv4Unicast"`, `"Ipv6Unicast"`, `"L2vpnEvpn"`, `"Ipv4Flowspec"`, `"Ipv6Flowspec"` | list; at least one required | not empty, no duplicates | Address families negotiated with the peer | `show config` |
+| address-family | `… address-family ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec\|vpnv4\|vpnv6` / `set address-family <af>`; `delete address-family <af>` | `…/address-family/<af>`, `"Ipv4Unicast"`, `"Ipv6Unicast"`, `"L2vpnEvpn"`, `"Ipv4Flowspec"`, `"Ipv6Flowspec"`, `"Vpnv4Unicast"`, `"Vpnv6Unicast"` | list; at least one required | not empty, no duplicates | Address families negotiated with the peer | `show config` |
 | source-address | `… source-address interface <if> [label <l>]` or `… source-address loopback [label <l>]` / `set source-address …`; `delete source-address` | `…/source-address`, `{"Interface":{"interface":"eth0","label":null}}` or `{"Loopback":{"label":null}}` | default: chosen by the kernel | none at commit; resolved when connecting | Local address of the session | `show log nos-bgpd[<i>]` |
 | hold-time | `… hold-time <s>` / `set hold-time <s>`; `delete hold-time` | `…/hold-time`, number or `null` | 0 to 65535 seconds; default 90 | 0 or ≥ 3 | Proposed hold time; the lower of both sides is used; 0 disables keepalives | `show bgp brief` (`hold-time`) |
 | keepalive-interval | `… keepalive-interval <s>` / `set keepalive-interval <s>`; `delete keepalive-interval` | `…/keepalive-interval`, number or `null` | seconds; default: negotiated hold time / 3 | < hold-time when both are set | Interval between KEEPALIVEs | `GET /v1/bgp/summary` (`negotiated_keepalive`) |
@@ -1073,7 +1084,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | export-policy | `… export-policy <policy>` / `set export-policy <policy>`; `delete export-policy` | `…/export-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | as import-policy | Filters and modifies advertised routes | `show config`; `show route` on the peer |
 | evpn-import-policy | `… evpn-import-policy <policy>` / `set evpn-import-policy <policy>`; `delete evpn-import-policy` | `…/evpn-import-policy`, a policy name or `null` | policy name; default: accept every EVPN route | `accept-all`, `deny-all` or an existing policy-definition | Accepts or rejects received EVPN routes (types 1, 2, 3, 5), see [EVPN](evpn-vxlan.md#filter-received-evpn-routes-trust-model) | `show config`; `show bgp evpn` |
 | shutdown | `… shutdown [<message>]` / `set shutdown [<message>]`; `delete shutdown` | `…/shutdown`, `{"message":"…"}` or `{"message":null}` or `null` | message up to 255 bytes; default: not shut | message ≤ 255 bytes | Closes and keeps closed every session of the group | `show bgp brief` (`Idle (shutdown)`) |
-| maximum-prefix | `… maximum-prefix ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec limit <n> [warning-only] [restart-interval <s>]` / `set maximum-prefix …`; `delete maximum-prefix <family>` | `…/maximum-prefix/<family>`, `{"limit":1000,"warning_only":false,"restart_interval":0}` or `null` | limit 0 (uncapped) to 4294967295; default: no limit; restart-interval 0 (stay down) | the family must be in address-family | Closes the session with Cease subcode 1 when a peer sends more prefixes | `show bgp brief` (`Idle (max-prefix)`, `prefixes`) |
+| maximum-prefix | `… maximum-prefix ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec\|vpnv4\|vpnv6 limit <n> [warning-only] [restart-interval <s>]` / `set maximum-prefix …`; `delete maximum-prefix <family>` | `…/maximum-prefix/<family>`, `{"limit":1000,"warning_only":false,"restart_interval":0}` or `null` | limit 0 (uncapped) to 4294967295; default: no limit; restart-interval 0 (stay down) | the family must be in address-family | Closes the session with Cease subcode 1 when a peer sends more prefixes | `show bgp brief` (`Idle (max-prefix)`, `prefixes`) |
 
 `show config` and `show this` end each peer-group line with its `import-policy` and `export-policy` (`default (deny-all)` when unset). Over REST, `GET …/peer-group/<g>/import-policy`.
 

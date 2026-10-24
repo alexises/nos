@@ -732,6 +732,7 @@ mod tests {
         let tables = vec![RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -1035,6 +1036,7 @@ mod tests {
         let tables = vec![RoutingTable {
             rest_api: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
+            vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,

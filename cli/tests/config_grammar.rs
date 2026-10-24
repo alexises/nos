@@ -285,6 +285,37 @@ fn routing_table_evpn() {
     );
 }
 
+/// #576: a routing table's L3VPN identity is reachable from the CLI.
+#[test]
+fn routing_table_vpn() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let rt = "set routing-table rt1 vpn";
+    for line in [
+        format!("{rt} rd 65000:1"),
+        format!("{rt} route-target import 65000:1"),
+        format!("{rt} route-target export 65000:1"),
+        format!("{rt} bgp-instance r1"),
+        format!("{rt} label 100"),
+    ] {
+        let w = writes(&line, &doc).unwrap_or_else(|| panic!("rejected: {line}"));
+        for pair in w.as_array().unwrap() {
+            let path: Vec<String> = serde_json::from_value(pair[0].clone()).unwrap();
+            config_path::set(&mut doc, &path, pair[1].clone()).unwrap();
+        }
+    }
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    assert_eq!(
+        cfg.routing_tables[0].vpn,
+        nos_proto::RoutingTableVpn {
+            rd: Some("65000:1".into()),
+            route_targets_import: vec!["65000:1".into()],
+            route_targets_export: vec!["65000:1".into()],
+            bgp_instance: Some("r1".into()),
+            label: Some(100),
+        }
+    );
+}
+
 /// #120: absolute forms that #109 made work; pinned so they stay.
 #[test]
 fn absolute_peer_group_field_and_policy_definition_deletes() {

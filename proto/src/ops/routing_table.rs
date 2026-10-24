@@ -113,6 +113,18 @@ pub enum RoutingTableOp {
         /// Name of the routing table this op targets.
         name: String,
     },
+    /// Sets (replaces) the table's whole L3VPN config.
+    SetVpn {
+        /// Name of the routing table this op targets.
+        name: String,
+        /// VPN settings of the table.
+        vpn: crate::schema::RoutingTableVpn,
+    },
+    /// Clears the VPN of the routing table so it reverts to the default.
+    ClearVpn {
+        /// Name of the routing table this op targets.
+        name: String,
+    },
 }
 
 impl RoutingTableOp {
@@ -124,6 +136,7 @@ impl RoutingTableOp {
                     config.routing_tables.push(RoutingTable {
                         rest_api: None,
                         evpn: crate::schema::RoutingTableEvpn::default(),
+                        vpn: crate::schema::RoutingTableVpn::default(),
                         name: name.clone(),
                         bgp_instance: None,
                         ospf_instance: None,
@@ -221,6 +234,14 @@ impl RoutingTableOp {
                 find_table_mut(config, name)?.evpn = RoutingTableEvpn::default();
                 Ok(())
             }
+            RoutingTableOp::SetVpn { name, vpn } => {
+                find_table_mut(config, name)?.vpn = vpn.clone();
+                Ok(())
+            }
+            RoutingTableOp::ClearVpn { name } => {
+                find_table_mut(config, name)?.vpn = crate::schema::RoutingTableVpn::default();
+                Ok(())
+            }
         }
     }
 }
@@ -244,6 +265,7 @@ mod tests {
         RoutingTable {
             rest_api: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
+            vpn: crate::schema::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,
@@ -272,6 +294,7 @@ mod tests {
             routing_tables: vec![RoutingTable {
                 rest_api: None,
                 evpn: crate::schema::RoutingTableEvpn::default(),
+                vpn: crate::schema::RoutingTableVpn::default(),
                 ospfv3_instance: None,
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),
@@ -386,6 +409,37 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.routing_tables[0].rest_api, None);
+    }
+
+    #[test]
+    fn set_and_clear_vpn() {
+        let mut cfg = Config::default();
+        RoutingTableOp::Ensure { name: "red".into() }
+            .apply(&mut cfg)
+            .unwrap();
+        let vpn = crate::schema::RoutingTableVpn {
+            rd: Some("65000:1".into()),
+            label: Some(100),
+            ..Default::default()
+        };
+        let set = RoutingTableOp::SetVpn {
+            name: "red".into(),
+            vpn: vpn.clone(),
+        };
+        set.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.routing_tables[0].vpn, vpn);
+        RoutingTableOp::ClearVpn { name: "red".into() }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(
+            cfg.routing_tables[0].vpn,
+            crate::schema::RoutingTableVpn::default()
+        );
+        assert!(RoutingTableOp::ClearVpn {
+            name: "nope".into()
+        }
+        .apply(&mut cfg)
+        .is_err());
     }
 
     #[test]

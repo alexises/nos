@@ -593,6 +593,7 @@ mod tests {
         cfg.routing_tables = vec![crate::schema::RoutingTable {
             rest_api: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
+            vpn: crate::schema::RoutingTableVpn::default(),
             ospfv3_instance: None,
             name: "rt1".to_string(),
             bgp_instance: None,

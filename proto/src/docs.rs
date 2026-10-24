@@ -171,6 +171,16 @@ topics! {
     RoutingTableEvpnVtepSource,
     /// `RoutingTableEvpn.bgp_instance`
     RoutingTableEvpnBgpInstance,
+    /// `RoutingTable.vpn`
+    RoutingTableVpn,
+    /// `RoutingTableVpn.rd`
+    RoutingTableVpnRd,
+    /// `RoutingTableVpn.route_targets_import`/`route_targets_export`
+    RoutingTableVpnRouteTarget,
+    /// `RoutingTableVpn.bgp_instance`
+    RoutingTableVpnBgpInstance,
+    /// `RoutingTableVpn.label`
+    RoutingTableVpnLabel,
     /// `Config.static_routing_instances`
     StaticRoutingInstance,
     /// `StaticRoutingInstance.routes`

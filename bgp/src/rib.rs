@@ -1153,6 +1153,7 @@ impl BgpRib {
         let limits = *self.max_prefix.get(&peer)?;
         let [v4, v6, evpn] = self.accepted_prefixes(peer);
         let [fs4, fs6] = self.accepted_flowspec(peer);
+        // VPN families have no Adj-RIB-In yet (#578): `zip` stops at five.
         let counts = [v4, v6, evpn, fs4, fs6];
         let mut tripped = None;
         for (family, count) in AddressFamily::ALL.into_iter().zip(counts) {

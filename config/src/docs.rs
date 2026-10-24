@@ -271,8 +271,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::BgpPeerGroupAddressFamily => (
             "Add an address family to a peer-group.",
             concat!(
-                "Adds one AFI/SAFI (ipv4 or ipv6 unicast, or l2vpn-evpn — RFC 7432 EVPN, which \
-             is received and shown only for now) to the set exchanged over this \
+                "Adds one AFI/SAFI (ipv4 or ipv6 unicast, l2vpn-evpn — RFC 7432 EVPN, which \
+             is received and shown only for now — or vpnv4/vpnv6, RFC 4364 L3VPN, which is \
+             configuration only for now) to the set exchanged over this \
              peer-group's session. A no-op if it's already present. At least one address \
              family is required for the peer-group to be valid; checked at commit time.",
                 " ",
@@ -675,6 +676,34 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              by the instance of the underlay VRF, which needs `address-family l2vpn-evpn` on \
              its peer-groups. It must also be the instance every EVPN broadcast domain whose \
              SVI is in this table names on `redistribute from mac` (checked at commit).",
+        ),
+        Topic::RoutingTableVpn => (
+            "Give this routing table an L3VPN identity (RFC 4364 VPNv4/VPNv6).",
+            "Names the RD, route-targets and underlay bgp-instance of the VRF's VPN routes. \
+             Needs an rd, an export route-target and a bgp-instance; label is optional. \
+             Configuration only for now: no daemon consumes it yet. `delete` removes it all.",
+        ),
+        Topic::RoutingTableVpnRd => (
+            "Set the Route Distinguisher of the table's VPN routes.",
+            "Written asn:nn or a.b.c.d:nn. Unique across every routing table's vpn rd and \
+             evpn rd (an RD names one VRF, RFC 4364 section 4.2).",
+        ),
+        Topic::RoutingTableVpnRouteTarget => (
+            "Add a VPN Route Target to the table's import or export list.",
+            "`import`: a received VPN route is installed only if it carries one of these \
+             (may be empty for an export-only spoke). `export`: attached to every VPN route \
+             the table exports (at least one is required). Written asn:nn or a.b.c.d:nn.",
+        ),
+        Topic::RoutingTableVpnBgpInstance => (
+            "Name the underlay BGP instance the table's VPN routes are exchanged over.",
+            "Must exist and must not be the table's own bgp-instance: the routes are carried \
+             by the instance of the underlay VRF, whose peer-groups need `address-family \
+             vpnv4` or `vpnv6`.",
+        ),
+        Topic::RoutingTableVpnLabel => (
+            "Set a static MPLS label for the table's exported VPN routes.",
+            "16-1048575 (0-15 are reserved, RFC 3032), unique across routing tables. \
+             Left unset, nos-ribd will allocate one.",
         ),
         Topic::StaticRoutingInstance => (
             "Create a static routing instance in the transaction if it doesn't already exist.",
@@ -1321,7 +1350,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::BgpPeerGroupMaximumPrefix => (
             "Limit how many prefixes a peer-group's peers may send, per address family.",
-            "Takes an address family (`ipv4`, `ipv6`, `l2vpn-evpn`) then `limit <n>` and optionally \
+            "Takes an address family (`ipv4`, `ipv6`, `l2vpn-evpn`, `vpnv4`, `vpnv6`) then `limit <n>` and optionally \
              `warning-only` and `restart-interval <s>` (RFC 4486). Prefixes are counted per peer \
              after the import policy. Over the limit the session is closed with Cease/Maximum \
              Number of Prefixes Reached and the peer stays down until `clear bgp <instance> <peer>`, \

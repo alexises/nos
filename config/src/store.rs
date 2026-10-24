@@ -634,6 +634,7 @@ mod tests {
                 routing_tables: vec![nos_proto::RoutingTable {
                     rest_api: None,
                     evpn: nos_proto::RoutingTableEvpn::default(),
+                    vpn: nos_proto::RoutingTableVpn::default(),
                     ospfv3_instance: None,
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),
