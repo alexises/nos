@@ -152,6 +152,8 @@ pub struct Rib {
     /// PE and RD per `Vpn`-sourced prefix, for `show route` only (beside
     /// `entries` like `ospf_metrics`: the kernel never sees it).
     pub vpn_info: HashMap<IpNet, nos_proto::VpnRouteInfo>,
+    /// This VRF's label (`vpn::VrfExport::label`), for `show route`.
+    pub vpn_label: Option<u32>,
 }
 
 impl Rib {

@@ -702,3 +702,183 @@ fn vrf_import_waits_for_the_end_of_a_graceful_restart_deferral() {
     rib.begin_deferral(5, 120, 360, [addr(SRC)]);
     assert_eq!(rib.vpn_import_snapshot(), (None, None));
 }
+
+// ------------------------------------------------------------ VRF export (#580)
+
+const RD_RED: Rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 1]; // 65000:1
+const LOCAL: &str = "10.0.0.254"; // every `reg` session's own address
+
+fn export(p: &str, label: u32) -> nos_proto::VpnPrefix {
+    nos_proto::VpnPrefix {
+        rd: RD_RED,
+        prefix: prefix(p),
+        labels: vec![label],
+        ext_communities: vec![RT],
+    }
+}
+
+fn full(routes: Vec<nos_proto::VpnPrefix>) -> nos_proto::VpnPrefixUpdate {
+    nos_proto::VpnPrefixUpdate::Full(routes)
+}
+
+#[test]
+fn a_vrf_export_goes_next_hop_self_with_its_label_to_every_peer_with_the_family() {
+    let (mut rib, mut rx) = setup();
+    let mut v4_only = reg(
+        &mut rib,
+        "10.0.0.8",
+        true,
+        false,
+        HashSet::from([AddressFamily::Ipv4Unicast, AddressFamily::Vpnv4Unicast]),
+    );
+    let mut no_vpn = reg(
+        &mut rib,
+        "10.0.0.9",
+        true,
+        false,
+        HashSet::from([AddressFamily::Ipv4Unicast]),
+    );
+    rib.apply_vpn_prefixes(
+        "red",
+        full(vec![export(P, 1000), export("2001:db8:1::/48", 1000)]),
+    );
+
+    let mut to_ebgp = advs(&mut rx[1]);
+    to_ebgp.sort_by_key(|a| a.key.1);
+    assert_eq!(to_ebgp.len(), 2);
+    for a in &to_ebgp {
+        assert_eq!(a.labels, vec![1000]);
+        // VPNv6 too: the codec maps the IPv4 session address (RFC 4659).
+        assert_eq!(a.route.next_hop, addr(LOCAL));
+        assert_eq!(a.route.as_path, vec![65000u32]);
+        assert_eq!(a.route.extended_communities, vec![RT]);
+        assert_eq!(a.route.local_pref, None);
+    }
+    assert_eq!(to_ebgp[0].key, key(RD_RED, P));
+    // iBGP: empty path, LOCAL_PREF, and a local route is no reflection.
+    let internal = advs(&mut rx[2]);
+    assert_eq!(internal.len(), 2);
+    assert!(internal[0].route.as_path.is_empty());
+    assert_eq!(internal[0].route.local_pref, Some(100));
+    assert_eq!(internal[0].route.next_hop, addr(LOCAL));
+    assert_eq!(internal[0].route.cluster_list, Vec::<Ipv4Addr>::new());
+    let v4: Vec<_> = advs(&mut v4_only).into_iter().map(|a| a.key).collect();
+    assert_eq!(v4, vec![key(RD_RED, P)]);
+    assert_eq!(vpns(&mut no_vpn), [] as [OutboundUpdate; 0]);
+    // Not shown as a received path.
+    assert_eq!(held(&rib, AddressFamily::Vpnv4Unicast).len(), 0);
+}
+
+#[test]
+fn a_label_change_reannounces_a_remove_withdraws_and_tables_are_isolated() {
+    let (mut rib, mut rx) = setup();
+    rib.apply_vpn_prefixes("red", full(vec![export(P, 1000)]));
+    let other = nos_proto::VpnPrefix {
+        rd: RD2,
+        ..export("10.30.0.0/24", 1001)
+    };
+    rib.apply_vpn_prefixes("blue", full(vec![other.clone()]));
+    assert_eq!(advs(&mut rx[1]).len(), 2);
+
+    // Same route again: nothing; a new label: an implicit replace.
+    rib.apply_vpn_prefixes("red", nos_proto::VpnPrefixUpdate::Add(export(P, 1000)));
+    assert_eq!(vpns(&mut rx[1]), [] as [OutboundUpdate; 0]);
+    rib.apply_vpn_prefixes("red", nos_proto::VpnPrefixUpdate::Add(export(P, 1002)));
+    let got = vpns(&mut rx[1]);
+    assert_eq!(got.len(), 1);
+    assert!(matches!(&got[0], OutboundUpdate::AnnounceVpn(a) if a.labels == [1002]));
+
+    // `red`'s `Full([])` (vpn removed) withdraws red's only.
+    rib.apply_vpn_prefixes("red", full(vec![]));
+    assert_eq!(
+        vpns(&mut rx[1]),
+        vec![OutboundUpdate::WithdrawVpn(key(RD_RED, P))]
+    );
+    rib.apply_vpn_prefixes(
+        "blue",
+        nos_proto::VpnPrefixUpdate::Remove(RD2, prefix("10.30.0.0/24")),
+    );
+    assert_eq!(
+        vpns(&mut rx[1]),
+        vec![OutboundUpdate::WithdrawVpn(key(RD2, "10.30.0.0/24"))]
+    );
+}
+
+#[test]
+fn the_export_policy_runs_on_a_vrf_export() {
+    let mut rib = new_rib(65000);
+    let (tx, mut rx) = test_channel();
+    let reject = nos_rpl::compile(
+        "if this.prefix == 10.10.0.0/24:\n    reject\naccept\n",
+        &nos_rpl::Symbols::EMPTY,
+    )
+    .unwrap();
+    rib.peer_established(
+        addr(EBGP),
+        false,
+        Some(addr(LOCAL)),
+        afs(),
+        true,
+        None,
+        false,
+        false,
+        HashSet::new(),
+        Arc::new(reject),
+        tx,
+    );
+    rib.apply_vpn_prefixes(
+        "red",
+        full(vec![export(P, 1000), export("10.11.0.0/24", 1000)]),
+    );
+    let sent: Vec<_> = advs(&mut rx).into_iter().map(|a| a.key).collect();
+    assert_eq!(sent, vec![key(RD_RED, "10.11.0.0/24")]);
+}
+
+#[test]
+fn a_vrf_export_waits_for_the_end_of_a_deferral_and_reaches_a_late_peer() {
+    let mut rib = new_rib_with_identity(65000, v4("1.1.1.1"), v4("1.1.1.1"));
+    rib.set_peer_asn(addr(SRC), 65001);
+    rib.begin_deferral(1, 120, 360, [addr(SRC)]);
+    let mut src = reg(&mut rib, SRC, false, false, afs());
+    rib.apply_vpn_prefixes("red", full(vec![export(P, 1000)]));
+    assert_eq!(vpns(&mut src), [] as [OutboundUpdate; 0], "deferred");
+    rib.apply_redistribute_update(RedistributeUpdate::Full(Vec::new()));
+    for family in AddressFamily::ALL {
+        rib.end_of_rib(addr(SRC), family);
+    }
+    assert!(!rib.deferring());
+    assert_eq!(advs(&mut src).len(), 1);
+    // A session coming up later gets it in its initial update; its loss
+    // forgets what it was sent.
+    let mut late = reg(&mut rib, EBGP, false, false, afs());
+    assert_eq!(advs(&mut late).len(), 1);
+    rib.peer_disconnected(addr(EBGP), Disconnect::Hard);
+    rib.apply_vpn_prefixes("red", full(vec![]));
+    assert_eq!(vpns(&mut late), [] as [OutboundUpdate; 0]);
+    assert_eq!(
+        vpns(&mut src),
+        vec![OutboundUpdate::WithdrawVpn(key(RD_RED, P))]
+    );
+}
+
+/// A local export and a received path under the same (RD, prefix): the
+/// local one wins (decision step 2) and the peer gets it back.
+#[test]
+fn a_local_export_beats_a_received_copy_of_the_same_key() {
+    let (mut rib, mut rx) = setup();
+    feed(
+        &mut rib,
+        SRC,
+        false,
+        &reach(SRC, vec![65001], vec![nlri(RD_RED, P, 5)]),
+    );
+    recv_all(&mut rx[0]);
+    rib.apply_vpn_prefixes("red", full(vec![export(P, 1000)]));
+    let to_src = advs(&mut rx[0]);
+    assert_eq!(to_src.len(), 1);
+    assert_eq!(
+        (to_src[0].labels.clone(), to_src[0].route.next_hop),
+        (vec![1000], addr(LOCAL))
+    );
+    assert!(!held(&rib, AddressFamily::Vpnv4Unicast)[0].3);
+}

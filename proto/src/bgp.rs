@@ -284,6 +284,32 @@ pub enum RedistributeUpdate {
     Remove(IpNet),
 }
 
+/// One VRF route `nos-ribd` exports as a VPN-IPv4/IPv6 route (RFC 4364
+/// section 4.3.2). No next hop: `nos-bgpd` always sends next-hop-self, the
+/// session's own address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnPrefix {
+    /// The VRF's Route Distinguisher, as 8 wire bytes.
+    pub rd: [u8; 8],
+    /// The customer prefix.
+    pub prefix: IpNet,
+    /// The label stack, outermost first: today exactly the VRF label.
+    pub labels: Vec<u32>,
+    /// The export Route Targets as RFC 4360 extended communities.
+    pub ext_communities: Vec<u64>,
+}
+
+/// `RedistributeVpnPrefixes`' payload: `Full` on connect, then `Add`/`Remove`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VpnPrefixUpdate {
+    /// The table's complete export set, replacing any previous one.
+    Full(Vec<VpnPrefix>),
+    /// One route added or changed (label or Route Targets).
+    Add(VpnPrefix),
+    /// One route no longer exported, by (RD, prefix).
+    Remove([u8; 8], IpNet),
+}
+
 /// Messages sent from a client to one `nos-bgpd` instance's IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -346,6 +372,15 @@ pub enum BgpRequest {
         family: crate::AddressFamily,
         /// The Route Distinguisher text (`65001:1`) to filter on.
         rd: Option<String>,
+    },
+    /// Fire-and-forget, no reply, `nos-ribd` only: one VRF's best routes
+    /// exported as VPN routes into this (underlay) instance. `table` scopes
+    /// a `Full`, like `RedistributeEvpnPrefixes`.
+    RedistributeVpnPrefixes {
+        /// Routing table (VRF) the update belongs to.
+        table: String,
+        /// The export change.
+        update: VpnPrefixUpdate,
     },
 }
 

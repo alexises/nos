@@ -3275,27 +3275,6 @@ async fn flowspec_propagation(
 /// rt1), a foreign-RT route does not, moving the import RT over REST swaps
 /// them, and a withdrawal or the session's end unimports.
 pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
-    let vpn_flags = |import_rt: &str| -> Vec<String> {
-        let mut f: Vec<String> = evpn_flags()
-            .into_iter()
-            .map(|f| match f.as_str() {
-                "--evpn" => "--vpn".to_string(),
-                "pg-evpn" => "pg-vpn".to_string(),
-                _ => f,
-            })
-            .collect();
-        f.extend(strings(&[
-            "--vpn-table",
-            VPN_TABLE,
-            "--vpn-rd",
-            "65000:100",
-            "--vpn-rt-export",
-            "65000:100",
-            "--vpn-rt-import",
-            import_rt,
-        ]));
-        f
-    };
     gobgp_speaker(
         w,
         vpn_flags("65000:1"),
@@ -3399,6 +3378,167 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         if body.contains("\"prefix\"") {
             bail!("VPN routes outlived their session: {body}");
         }
+    }
+    Ok(())
+}
+
+/// router-a's flags for the VPN phases: `evpn_flags` with VPNv4/VPNv6
+/// toward GoBGP, and `VPN_TABLE` (RD `VPN_RD_A`, export RT `VPN_RD_A`)
+/// importing `import_rt`.
+fn vpn_flags(import_rt: &str) -> Vec<String> {
+    let mut f: Vec<String> = evpn_flags()
+        .into_iter()
+        .map(|f| match f.as_str() {
+            "--evpn" => "--vpn".to_string(),
+            "pg-evpn" => "pg-vpn".to_string(),
+            _ => f,
+        })
+        .collect();
+    f.extend(strings(&[
+        "--vpn-table",
+        VPN_TABLE,
+        "--vpn-rd",
+        VPN_RD_A,
+        "--vpn-rt-export",
+        VPN_RD_A,
+        "--vpn-rt-import",
+        import_rt,
+    ]));
+    f
+}
+
+/// VRF export (#580). GoBGP must see router-a's `VPN_TABLE` loopback
+/// (`VPN_EXPORT_A`, a connected route) as a VPNv4 route with RD and RT
+/// `VPN_RD_A`, label `VPN_LABEL` and next hop router-a's session address;
+/// removing the route, then `vpn` itself, withdraws it, and setting `vpn`
+/// again brings back the same label. Then two nos PEs (router-a, router-b,
+/// VPNv4 between them) each export their own VRF route and import the
+/// other's, PE next hop and label included.
+pub async fn vpn_export(w: &mut World) -> anyhow::Result<()> {
+    let with = |extra: &[&str]| {
+        let mut f = vpn_flags("65000:1");
+        f.extend(strings(extra));
+        f
+    };
+    let add = ["--vpn-loopback-address", VPN_EXPORT_A];
+    gobgp_speaker(
+        w,
+        with(&add),
+        &["l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"],
+        &[],
+    )
+    .await?;
+    let a = w.a()?;
+    let advertised = format!(
+        "vpn route advertised peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix={VPN_EXPORT_A} labels=\\[{VPN_LABEL}\\] next_hop={IP_A}"
+    );
+    a.wait(&format!(
+        "sent initial vpn snapshot to nos-bgpd table={VPN_TABLE} bgp_instance=r1"
+    ))
+    .await?;
+    a.wait(&advertised).await?;
+    let in_gobgp = format!("{VPN_RD_A}:{VPN_EXPORT_A}");
+    let gobgp_until = |present: bool| gobgp_vpnv4_until(w, &in_gobgp, present);
+    let out = gobgp_until(true).await?;
+    let line = out
+        .lines()
+        .find(|l| l.contains(&in_gobgp))
+        .unwrap_or_default();
+    for want in [
+        &format!("[{VPN_LABEL}]"),
+        IP_A,
+        &format!("{ASN_A}"),
+        VPN_RD_A,
+    ] {
+        if !line.contains(want) {
+            bail!("GoBGP's route lacks {want}: {line}");
+        }
+    }
+    if line.matches(VPN_RD_A).count() < 2 {
+        bail!("GoBGP's route lacks the export RT {VPN_RD_A}: {line}");
+    }
+
+    log("removing the loopback address withdraws the VPN route");
+    let withdrawn = format!(
+        "vpn route advertisement withdrawn peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix={VPN_EXPORT_A}"
+    );
+    let base = a.count(&withdrawn);
+    a.provision_flags(&with(&["--vpn-loopback-remove-address", VPN_EXPORT_A]))
+        .await?;
+    a.wait_new(&withdrawn, base, 60).await?;
+    gobgp_until(false).await?;
+
+    log("unsetting vpn withdraws everything; setting it again keeps the label");
+    let (b_adv, b_wd) = (a.count(&advertised), a.count(&withdrawn));
+    a.provision_flags(&with(&add)).await?;
+    a.wait_new(&advertised, b_adv, 60).await?;
+    a.provision_flags(&with(&["--vpn-clear"])).await?;
+    a.wait_new(&withdrawn, b_wd, 60).await?;
+    gobgp_until(false).await?;
+    let b_adv = a.count(&advertised);
+    a.provision_flags(&with(&add)).await?;
+    a.wait_new(&advertised, b_adv, 60).await?;
+    gobgp_until(true).await?;
+    w.dock.container_remove("router-g").await;
+
+    two_pes(w).await
+}
+
+/// Polls GoBGP's VPNv4 table until it does (or no longer does) hold
+/// `needle`; the last output.
+async fn gobgp_vpnv4_until(w: &World, needle: &str, present: bool) -> anyhow::Result<String> {
+    let mut out = String::new();
+    for _ in 0..30 {
+        out = gobgp(w, &["global", "rib", "-a", "vpnv4"]).await?;
+        if out.contains(needle) == present {
+            return Ok(out);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let what = if present { "showed" } else { "dropped" };
+    bail!("GoBGP's vpnv4 rib never {what} {needle}: {out}")
+}
+
+/// `vpn_export`'s second half: router-a and router-b as two PEs over one
+/// VPNv4/VPNv6 eBGP session, sharing RT `VPN_RT` with their own RDs.
+async fn two_pes(w: &mut World) -> anyhow::Result<()> {
+    log("two nos PEs export their VRF route and import each other's");
+    let pe = |id: Id, rd: &str, address: &str| {
+        let mut f = id.base_flags();
+        f.extend(strings(&[
+            "--vpn",
+            "--vpn-table",
+            VPN_TABLE,
+            "--vpn-rd",
+            rd,
+            "--vpn-rt-export",
+            VPN_RT,
+            "--vpn-rt-import",
+            VPN_RT,
+            "--vpn-loopback-address",
+            address,
+        ]));
+        f
+    };
+    w.start(A, Some(pe(A, VPN_RD_A, VPN_EXPORT_A)), &[]).await?;
+    w.start(B, Some(pe(B, VPN_RD_B, VPN_EXPORT_B)), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    let imported = |prefix: &str, rd: &str, pe: &str| {
+        format!(
+            "vpn route imported table={VPN_TABLE} prefix={prefix} labels=\\[{VPN_LABEL}\\] rd={rd} next_hop={pe}"
+        )
+    };
+    a.wait(&imported(VPN_EXPORT_B, VPN_RD_B, IP_B)).await?;
+    b.wait(&imported(VPN_EXPORT_A, VPN_RD_A, IP_A)).await?;
+    let body = vrf_routes(a).await?;
+    if !body.contains(VPN_EXPORT_B.split('/').next().unwrap_or_default())
+        || !body.contains("\"Vpn\"")
+    {
+        bail!("router-a's {VPN_TABLE} lacks router-b's VPN route: {body}");
+    }
+    if a.count(&imported(VPN_EXPORT_A, VPN_RD_A, IP_B)) > 0 {
+        bail!("router-a imported its own export back");
     }
     Ok(())
 }

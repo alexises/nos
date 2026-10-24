@@ -642,6 +642,11 @@ impl SessionManager {
             .apply_evpn_source(crate::rib::EvpnSource::Table(table.to_string()), update);
     }
 
+    /// One `nos-ribd`'s VRF export (`BgpRequest::RedistributeVpnPrefixes`).
+    pub async fn apply_vpn_prefixes(&self, table: &str, update: nos_proto::VpnPrefixUpdate) {
+        self.bgp_rib.lock().await.apply_vpn_prefixes(table, update);
+    }
+
     /// The consumers `fdb_push_client` feeds and what to feed them: every
     /// received Type-5 route to the IP-VRF routing tables (`to_tables`), every
     /// other received EVPN route to the broadcast domains, and a symmetric IRB

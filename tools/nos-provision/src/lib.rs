@@ -837,6 +837,15 @@ pub struct Args {
     #[arg(long)]
     pub vpn_clear: bool,
 
+    /// Adds this address to `--vpn-table`'s loopback (`loopback-<vpn-table>`,
+    /// ensured): a connected route in the VRF to export.
+    #[arg(long)]
+    pub vpn_loopback_address: Option<IpNet>,
+
+    /// Removes this address from `--vpn-table`'s loopback.
+    #[arg(long)]
+    pub vpn_loopback_remove_address: Option<IpNet>,
+
     /// If set, undoes the EVPN config of `--broadcast-domain`: clears
     /// redistribute, vtep-source, rd and vni (in that order, so validation
     /// passes) and removes any route target named by `--evpn-rt-import`/
@@ -1672,6 +1681,35 @@ fn l3vni_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 
 /// The `--vpn-*` flags -> ops on `--vpn-table`.
 fn vpn_ops(args: &Args) -> Vec<ConfigOp> {
+    let mut ops = vpn_loopback_ops(args);
+    ops.extend(vpn_table_ops(args));
+    ops
+}
+
+/// `--vpn-loopback-address`/`--vpn-loopback-remove-address`.
+fn vpn_loopback_ops(args: &Args) -> Vec<ConfigOp> {
+    let name = format!("loopback-{}", args.vpn_table);
+    let mut ops = Vec::new();
+    if let Some(address) = args.vpn_loopback_remove_address {
+        ops.push(ConfigOp::Interface(InterfaceOp::RemoveAddress {
+            name: name.clone(),
+            address,
+        }));
+    }
+    if let Some(address) = args.vpn_loopback_address {
+        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+            name: name.clone(),
+        }));
+        ops.push(ConfigOp::Interface(InterfaceOp::AddAddress {
+            name,
+            address,
+            label: None,
+        }));
+    }
+    ops
+}
+
+fn vpn_table_ops(args: &Args) -> Vec<ConfigOp> {
     let name = || args.vpn_table.clone();
     let op = |o| ConfigOp::RoutingTable(o);
     if args.vpn_clear {
@@ -6257,6 +6295,20 @@ mod tests {
             &ops(&["--vpn-clear", "--vpn-table", "blue"]).unwrap(),
             "ClearVpn { name: \"blue\" }",
         );
+        let lo = ops(&[
+            "--vpn-loopback-address",
+            "192.0.2.10/32",
+            "--vpn-loopback-remove-address",
+            "192.0.2.9/32",
+        ])
+        .unwrap();
+        for m in [
+            "Ensure { name: \"loopback-vrf-red\" }",
+            "AddAddress { name: \"loopback-vrf-red\", address: 192.0.2.10/32",
+            "RemoveAddress { name: \"loopback-vrf-red\", address: 192.0.2.9/32",
+        ] {
+            shows(&lo, m);
+        }
         assert!(!format!("{:?}", ops(&[]).unwrap()).contains("Vpn"));
     }
 

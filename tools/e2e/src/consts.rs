@@ -235,6 +235,18 @@ pub const L3_TABLE: &str = "tenant";
 /// `vpn`: router-a's L3VPN VRF (RFC 4364 import, #579), `nos-provision`'s
 /// `--vpn-table` default.
 pub const VPN_TABLE: &str = "vrf-red";
+/// `vpn`/`vpn-export`: router-a's RD (also its export RT toward GoBGP).
+pub const VPN_RD_A: &str = "65000:100";
+/// `vpn-export`: router-b's RD and the RT both PEs export and import.
+pub const VPN_RD_B: &str = "65000:200";
+pub const VPN_RT: &str = "65000:1";
+/// `vpn-export`: each PE's VRF loopback, the connected route it exports.
+pub const VPN_EXPORT_A: &str = "192.0.2.10/32";
+pub const VPN_EXPORT_B: &str = "192.0.2.20/32";
+/// `vpn-export`: `VPN_TABLE` is the only VRF any scenario gives a `vpn`, with
+/// no explicit label, so `nos-ribd`'s registry always hands it the first
+/// allocated label (`LABEL_BASE`), and never frees it.
+pub const VPN_LABEL: u32 = 1000;
 pub const L3_VNI: u32 = 5000;
 pub const L3_RT: &str = "65000:5000";
 pub const L3_RD_A: &str = "65001:5000";

@@ -9,11 +9,19 @@ use tracing::{debug, error, info, trace, warn};
 /// Linux reserves 0 (unspec), 253 (default), 254 (main), 255 (local).
 pub const MIN_TABLE_ID: u32 = 100;
 pub const MAX_TABLE_ID: u32 = 252;
+/// Allocated VPN labels start here: below it are the reserved labels (0-15)
+/// and room for operator-chosen static ones.
+pub const LABEL_BASE: u32 = 1000;
+/// The largest 20-bit MPLS label.
+pub const MAX_LABEL: u32 = 1_048_575;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
     #[serde(default)]
     by_name: HashMap<String, u32>,
+    /// Per-VRF VPN label (#580), allocated like the table ids, never freed.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    labels: HashMap<String, u32>,
 }
 
 /// Returns the persisted kernel table id for `table_name`, allocating
@@ -32,17 +40,7 @@ struct Registry {
 /// locking two instances could both compute the same "smallest free id" and
 /// collide.
 pub fn ensure_table_id(path: &Path, table_name: &str) -> io::Result<u32> {
-    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)?;
-    }
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_path(path))?;
-    lock_file.lock_exclusive()?;
-    let result = (|| {
-        let mut reg = load(path)?;
+    locked(path, table_name, |reg| {
         if let Some(&id) = reg.by_name.get(table_name) {
             trace!(table = %table_name, table_id = id, "reusing allocated table id");
             return Ok(id);
@@ -62,14 +60,64 @@ pub fn ensure_table_id(path: &Path, table_name: &str) -> io::Result<u32> {
                 ))
             })?;
         reg.by_name.insert(table_name.to_string(), id);
-        save(path, &reg)?;
+        save(path, reg)?;
         info!(table = %table_name, table_id = id, "allocated new kernel routing table id");
         Ok(id)
-    })();
+    })
+}
+
+/// Runs `f` over the loaded registry under the exclusive `.lock` (see
+/// `ensure_table_id`); `f` saves what it changed.
+fn locked<T>(
+    path: &Path,
+    table_name: &str,
+    f: impl FnOnce(&mut Registry) -> io::Result<T>,
+) -> io::Result<T> {
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path(path))?;
+    lock_file.lock_exclusive()?;
+    let result = load(path).and_then(|mut reg| f(&mut reg));
     if let Err(e) = fs2::FileExt::unlock(&lock_file) {
         warn!(table = %table_name, error = %e, "failed to unlock table-id registry lock file");
     }
     result
+}
+
+/// The persisted VPN label of `table_name`, allocating the smallest label of
+/// `LABEL_BASE..=MAX_LABEL` that no other table holds and that is not in
+/// `reserved` (every explicit `vpn.label` of the config) on first use, under
+/// the same lock and in the same file as the table ids. A persisted label
+/// that has since become someone's explicit one is replaced. Never freed, so
+/// re-adding `vpn` gets the same label back.
+pub fn ensure_label<S: std::hash::BuildHasher>(
+    path: &Path,
+    table_name: &str,
+    reserved: &std::collections::HashSet<u32, S>,
+) -> io::Result<u32> {
+    locked(path, table_name, |reg| {
+        if let Some(&l) = reg.labels.get(table_name).filter(|l| !reserved.contains(l)) {
+            return Ok(l);
+        }
+        let used: std::collections::HashSet<u32> = reg
+            .labels
+            .iter()
+            .filter(|(t, _)| t.as_str() != table_name)
+            .map(|(_, &l)| l)
+            .collect();
+        let label = (LABEL_BASE..=MAX_LABEL)
+            .find(|l| !used.contains(l) && !reserved.contains(l))
+            .ok_or_else(|| io::Error::other("vpn label range exhausted"))?;
+        reg.labels.insert(table_name.to_string(), label);
+        save(path, reg)?;
+        info!(table = %table_name, label, "vpn label allocated");
+        Ok(label)
+    })
 }
 
 /// Read-only, no lock needed — atomic renames (see `save`) mean a reader
@@ -134,6 +182,38 @@ mod tests {
         std::fs::write(&path, "by_name:\n  rt1: 100\n  rt2: 101\n").unwrap();
         assert_eq!(lookup_table_id(&path, "rt2"), Some(101));
         assert_eq!(ensure_table_id(&path, "rt3").unwrap(), 102);
+    }
+
+    /// #580: a registry written before labels existed still loads, and a
+    /// label persists across a reload without disturbing the table ids.
+    #[test]
+    fn vpn_labels_are_stable_skip_explicit_ones_and_coexist_with_table_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("table-ids.yaml");
+        std::fs::write(&path, "by_name:\n  red: 100\n").unwrap();
+        let none: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        assert_eq!(ensure_label(&path, "red", &none).unwrap(), LABEL_BASE);
+        assert_eq!(ensure_label(&path, "red", &none).unwrap(), LABEL_BASE);
+        assert_eq!(lookup_table_id(&path, "red"), Some(100));
+        let reserved: std::collections::HashSet<u32> = [LABEL_BASE + 1].into_iter().collect();
+        assert_eq!(
+            ensure_label(&path, "blue", &reserved).unwrap(),
+            LABEL_BASE + 2
+        );
+        // `red`'s label became another table's explicit one: reallocated.
+        let taken: std::collections::HashSet<u32> = [LABEL_BASE].into_iter().collect();
+        assert_eq!(ensure_label(&path, "red", &taken).unwrap(), LABEL_BASE + 1);
+        assert_eq!(ensure_table_id(&path, "blue").unwrap(), 101);
+        assert_eq!(ensure_label(&path, "blue", &none).unwrap(), LABEL_BASE + 2);
+    }
+
+    #[test]
+    fn vpn_label_exhaustion_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("table-ids.yaml");
+        let all: std::collections::HashSet<u32> = (LABEL_BASE..=MAX_LABEL).collect();
+        let err = ensure_label(&path, "red", &all).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
     }
 
     #[test]

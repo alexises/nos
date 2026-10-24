@@ -604,8 +604,11 @@ pub struct BgpRib {
     /// Received VPN-IPv4/IPv6 paths per peer, keyed by (RD, prefix), every
     /// RT kept (see `vpn_out`).
     vpn_adj_rib_in: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
-    /// Per key, the selected copy and the peer it came from (`select_vpn`).
-    vpn_loc: HashMap<VpnKey<IpNet>, (IpAddr, VpnRoute)>,
+    /// Per key, the selected copy and where it came from (`select_vpn`).
+    vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, VpnRoute)>,
+    /// VRF routes `nos-ribd` exports (`apply_vpn_prefixes`), per table so
+    /// one table's `Full` never clobbers another's; `Local` candidates.
+    vpn_local: HashMap<String, HashMap<VpnKey<IpNet>, VpnRoute>>,
     /// What each peer was last sent per key (`sync_vpn_to`).
     vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, AdvertisedVpn>>,
     /// The VPN twin of `stale` (graceful restart and RFC 7313 refresh).
@@ -755,6 +758,7 @@ impl BgpRib {
             flowspec_validation: HashMap::new(),
             vpn_adj_rib_in: HashMap::new(),
             vpn_loc: HashMap::new(),
+            vpn_local: HashMap::new(),
             vpn_adj_rib_out: HashMap::new(),
             vpn_stale: HashMap::new(),
             vpn_vrfs: crate::vpn::VrfSet::default(),
