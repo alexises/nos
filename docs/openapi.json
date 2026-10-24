@@ -4454,9 +4454,29 @@
             },
             "type": "array"
           },
+          "mpls_labels": {
+            "description": "The MPLS label stack a `Vpn` candidate is forwarded with (RFC 4364\nsection 4.3.4), outermost first; empty for every other source.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
           "source": {
             "$ref": "#/components/schemas/RouteSourceKind",
             "description": "Protocol that produced the route."
+          },
+          "vpn": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/VpnRouteInfo",
+                "description": "Set on a `Vpn` candidate."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -4472,7 +4492,8 @@
           "Bgp",
           "Ospf",
           "Connected",
-          "Evpn"
+          "Evpn",
+          "Vpn"
         ],
         "type": "string"
       },
@@ -6099,6 +6120,24 @@
             "type": "object"
           }
         ]
+      },
+      "VpnRouteInfo": {
+        "description": "Where a `Vpn`-sourced candidate came from: the remote PE (the BGP next\nhop, resolved in the underlay into the candidate's gateway) and the\nRoute Distinguisher it was received under.",
+        "properties": {
+          "pe_next_hop": {
+            "description": "The remote PE: the VPN route's BGP next hop.",
+            "type": "string"
+          },
+          "rd": {
+            "description": "`asn:nn` or `a.b.c.d:nn`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pe_next_hop",
+          "rd"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {

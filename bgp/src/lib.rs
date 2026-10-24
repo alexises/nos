@@ -28,3 +28,4 @@ pub mod session;
 pub mod status;
 pub mod tcp;
 pub mod vpn;
+pub mod vpn_push_client;

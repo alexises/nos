@@ -277,6 +277,7 @@ Each source has a fixed preference, and the lowest wins:
 - static: 1
 - bgp: 20
 - ospf (OSPF and OSPFv3): 110
+- evpn and vpn (routes imported from the overlay): 200
 
 These are not configurable. A static route therefore beats a BGP route to the same prefix, and a BGP route beats an OSPF route. The losing candidates stay in the table and appear in `show route` below the winner; if the winner goes away, the next one takes over without any reconfiguration.
 
@@ -285,6 +286,8 @@ Connected routes are listed in `show route` and used by BGP to check next hops, 
 - A connected route wins over every other source, so NOS installs nothing for that prefix and leaves it to the operating system.
 - A static, BGP or OSPF route for a connected prefix is still listed in `show route`, below the connected route, but it is not installed.
 - If the address is removed, the connected route goes away and the next candidate is installed.
+
+`vpn` routes are VPN routes the `vpn bgp-instance` imported into this table by Route Target ([BGP, Import VPN routes into a VRF](bgp.md#import-vpn-routes-into-a-vrf)). They are listed in `show route` but not installed for forwarding yet (#581); a `vpn` winner leaves its prefix uninstalled.
 
 ### What a routing table needs
 
@@ -317,9 +320,9 @@ A routing table's fields. CLI forms are shown absolute; the relative form, valid
 | redistribute | `set routing-table <t> redistribute bgp\|ospf [policy <p>]` / `delete … redistribute` | `routing-table/{t}/redistribute`, `{"from":"Static","to":"Bgp","policy":null}` | one rule, unset | source and target instances set on the table; policy exists | Advertises the static routes into BGP, or as OSPF AS-external LSAs | `show route <t>` on the peer, `show ospf database` |
 | redistribute policy | `… redistribute <x> policy <p>` | `routing-table/{t}/redistribute/policy`, `"no-lab"` | name, unset (everything redistributed) | policy definition, `accept-all` or `deny-all` | Filters and rewrites what is redistributed | as above |
 | rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete … rest-api` | `routing-table/{t}/rest-api`, `{"address":"10.50.0.2","port":8080}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address in this VRF | `show log nos-restd[<t>]` |
-| vpn rd | `set routing-table <t> vpn rd <rd>` / `delete … vpn rd` | `routing-table/{t}/vpn/rd`, `"65000:1"` | `asn:nn` or `a.b.c.d:nn`, unset | required once any `vpn` field is set; unique across tables' `vpn rd` and `evpn rd` | None yet: consumed by the L3VPN sub-issues | `show config` |
-| vpn route-target | `set routing-table <t> vpn route-target import\|export <rt>` / `delete …` | `routing-table/{t}/vpn/route-targets-import` or `…/route-targets-export`, `["65000:1"]` | list of `asn:nn` or `a.b.c.d:nn` | at least one export; import may be empty | None yet: consumed by the L3VPN sub-issues | `show config` |
-| vpn bgp-instance | `set routing-table <t> vpn bgp-instance <i>` / `delete … vpn bgp-instance` | `routing-table/{t}/vpn/bgp-instance`, `"r1"` | name, unset | required; exists; not the table's own `bgp-instance` | None yet: consumed by the L3VPN sub-issues | `show config` |
+| vpn rd | `set routing-table <t> vpn rd <rd>` / `delete … vpn rd` | `routing-table/{t}/vpn/rd`, `"65000:1"` | `asn:nn` or `a.b.c.d:nn`, unset | required once any `vpn` field is set; unique across tables' `vpn rd` and `evpn rd` | `nos-bgpd` of `vpn bgp-instance` imports into this table (export: #580) | `show config` |
+| vpn route-target | `set routing-table <t> vpn route-target import\|export <rt>` / `delete …` | `routing-table/{t}/vpn/route-targets-import` or `…/route-targets-export`, `["65000:1"]` | list of `asn:nn` or `a.b.c.d:nn` | at least one export; import may be empty | import: VPN routes carrying one are imported, live; export: #580 | `show config` |
+| vpn bgp-instance | `set routing-table <t> vpn bgp-instance <i>` / `delete … vpn bgp-instance` | `routing-table/{t}/vpn/bgp-instance`, `"r1"` | name, unset | required; exists; not the table's own `bgp-instance` | that instance imports into this table, resolving PEs in its own table | `show config` |
 | vpn label | `set routing-table <t> vpn label <n>` / `delete … vpn label` | `routing-table/{t}/vpn/label`, `100` | 16-1048575, unset | unique across tables | None yet: consumed by the L3VPN sub-issues | `show config` |
 
 A static routing instance and its routes. Relative forms, after `edit static-routing-instance <s>`: `set route <prefix> gateway <ip>`, `delete route <prefix>`.

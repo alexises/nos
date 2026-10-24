@@ -232,6 +232,9 @@ pub const ESI_MAC: &str = "02:00:00:00:00:0e";
 /// (RFC 2544 benchmarking blocks, so no other docker network on the host
 /// collides), so only a Type-5 route can join them.
 pub const L3_TABLE: &str = "tenant";
+/// `vpn`: router-a's L3VPN VRF (RFC 4364 import, #579), `nos-provision`'s
+/// `--vpn-table` default.
+pub const VPN_TABLE: &str = "vrf-red";
 pub const L3_VNI: u32 = 5000;
 pub const L3_RT: &str = "65000:5000";
 pub const L3_RD_A: &str = "65001:5000";

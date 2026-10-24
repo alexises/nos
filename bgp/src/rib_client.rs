@@ -2,7 +2,8 @@ use std::path::Path;
 
 use ipnet::IpNet;
 use nos_daemon::ipc::one_shot;
-use nos_proto::{RibEvent, RibRequest, Role};
+use nos_proto::{ResolvedNextHop, RibEvent, RibRequest, Role};
+use std::net::IpAddr;
 use tracing::trace;
 
 /// One-shot query of a `nos-ribd` instance's Linux VRF interface name.
@@ -39,6 +40,19 @@ pub async fn get_igp_costs(rib_socket: &Path) -> Option<Vec<(IpNet, u32)>> {
 pub async fn get_bgp_route_count(rib_socket: &Path) -> Option<u32> {
     match one_shot(rib_socket, Role::Ribd, RibRequest::BgpRouteCount).await? {
         RibEvent::BgpRouteCount(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// One-shot `RibRequest::ResolveNextHop`: one answer per address, in order.
+/// `None` on any failure (or a reply of the wrong length).
+pub async fn resolve_next_hops(
+    rib_socket: &Path,
+    addrs: Vec<IpAddr>,
+) -> Option<Vec<Option<ResolvedNextHop>>> {
+    let n = addrs.len();
+    match one_shot(rib_socket, Role::Ribd, RibRequest::ResolveNextHop { addrs }).await? {
+        RibEvent::NextHops(hops) if hops.len() == n => Some(hops),
         _ => None,
     }
 }
@@ -144,5 +158,31 @@ mod tests {
             matches!(req, RibRequest::BgpRouteCount).then_some(RibEvent::BgpRouteCount(7))
         });
         assert_eq!(get_bgp_route_count(&path).await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn resolves_next_hops_in_order_and_rejects_a_short_reply() {
+        let hop = ResolvedNextHop {
+            gateway: "10.0.0.3".parse().unwrap(),
+            interface_id: None,
+            source: nos_proto::RouteSourceKind::Connected,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rib.sock");
+        let h = hop.clone();
+        serve_once(&path, move |req| match req {
+            RibRequest::ResolveNextHop { addrs } if addrs.len() == 2 => {
+                Some(RibEvent::NextHops(vec![Some(h.clone()), None]))
+            }
+            _ => None,
+        });
+        let addrs = vec!["10.0.0.3".parse().unwrap(), "10.9.0.1".parse().unwrap()];
+        assert_eq!(
+            resolve_next_hops(&path, addrs.clone()).await,
+            Some(vec![Some(hop), None])
+        );
+        let short = tmp.path().join("short.sock");
+        serve_once(&short, |_| Some(RibEvent::NextHops(vec![])));
+        assert_eq!(resolve_next_hops(&short, addrs).await, None);
     }
 }

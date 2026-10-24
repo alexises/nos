@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_bgp::session::SessionManager;
-use nos_bgp::{acl_push_client, fdb_push_client, reconcile, rib_push_client, server};
+use nos_bgp::{
+    acl_push_client, fdb_push_client, reconcile, rib_push_client, server, vpn_push_client,
+};
 use nos_daemon::{bootstrap, watchdog};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
@@ -108,6 +110,11 @@ async fn main() -> anyhow::Result<()> {
         fdb_push_client::Feed::Tables,
         shutdown_rx.clone(),
     );
+    let vpn_push_task = vpn_push_client::spawn(
+        args.watchdog_socket.clone(),
+        sessions.clone(),
+        shutdown_rx.clone(),
+    );
     let bfd_task = nos_bgp::bfd_client::spawn(
         args.watchdog_socket.clone(),
         sessions.clone(),
@@ -165,6 +172,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(e) = ip_vrf_push_task.await {
         warn!(instance = %args.instance, error = %e, "ip-vrf push task ended abnormally");
+    }
+    if let Err(e) = vpn_push_task.await {
+        warn!(instance = %args.instance, error = %e, "vpn push task ended abnormally");
     }
     if let Err(e) = acl_push_task.await {
         warn!(instance = %args.instance, error = %e, "acl push task ended abnormally");

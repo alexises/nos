@@ -1174,6 +1174,7 @@ mod tests {
             backup: Some(addr("10.0.0.2")),
             backup_interface_id: None,
             backup_tunnel: false,
+            mpls_labels: Vec::new(),
         };
         assert_eq!(
             slots(p, &entry),

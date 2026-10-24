@@ -550,3 +550,155 @@ fn a_lost_vpn_update_is_resent_from_the_backlog() {
     keys.dedup();
     assert_eq!(keys.len(), 3);
 }
+
+// ---- VRF import (#579) ----
+
+const RT2: u64 = 0x0002_fde8_0000_0002; // RT:65000:2
+
+fn vrfs() -> crate::vpn::VrfSet {
+    let vrf = |table: &str, import: Vec<u64>| crate::vpn::Vrf {
+        table: table.to_string(),
+        rd: [0; 8],
+        import,
+        export: vec![],
+    };
+    crate::vpn::VrfSet(vec![vrf("red", vec![RT]), vrf("blue", vec![RT2, RT])])
+}
+
+fn with_rts(mut u: UpdateMessage, rts: Vec<u64>) -> UpdateMessage {
+    u.attributes.as_mut().unwrap().extended_communities = rts;
+    u
+}
+
+/// (table, prefix, pe, labels, rd), sorted.
+fn imported(rib: &BgpRib) -> Vec<(String, IpNet, IpAddr, Vec<u32>, Rd)> {
+    let (_, imports) = rib.vpn_import_snapshot();
+    let mut out: Vec<_> = imports
+        .unwrap()
+        .into_iter()
+        .flat_map(|(t, m)| {
+            m.into_iter()
+                .map(move |(p, i)| (t.clone(), p, i.pe, i.labels, i.rd))
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    out
+}
+
+#[test]
+fn vrf_import_is_by_route_target_into_every_matching_table() {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    rib.set_routing_table(Some("core".into()));
+    feed(
+        &mut rib,
+        SRC,
+        false,
+        &reach(SRC, vec![65001], vec![nlri(RD1, P, 100)]),
+    );
+    let only_rt2 = with_rts(
+        reach(SRC, vec![65001], vec![nlri(RD1, "10.20.0.0/24", 5)]),
+        vec![RT2],
+    );
+    feed(&mut rib, SRC, false, &only_rt2);
+    let no_rt = with_rts(
+        reach(SRC, vec![65001], vec![nlri(RD1, "10.30.0.0/24", 6)]),
+        vec![],
+    );
+    feed(&mut rib, SRC, false, &no_rt);
+    let got = imported(&rib);
+    let tp: Vec<_> = got.iter().map(|g| (g.0.as_str(), g.1)).collect();
+    assert_eq!(
+        tp,
+        vec![
+            ("blue", prefix(P)),
+            ("blue", prefix("10.20.0.0/24")),
+            ("red", prefix(P))
+        ]
+    );
+    assert_eq!(
+        (got[2].2, got[2].3.clone(), got[2].4),
+        (addr(SRC), vec![100], RD1)
+    );
+    assert_eq!(rib.vpn_import_snapshot().0.as_deref(), Some("core"));
+
+    // An RT change moves the route: P now carries RT2 only.
+    let moved = with_rts(reach(SRC, vec![65001], vec![nlri(RD1, P, 100)]), vec![RT2]);
+    feed(&mut rib, SRC, false, &moved);
+    assert!(imported(&rib).iter().all(|g| g.0 == "blue"));
+    // A VRF leaving the set leaves the snapshot; withdraw and peer loss empty it.
+    rib.set_vpn_vrfs(crate::vpn::VrfSet(vrfs().0[1..].to_vec()));
+    assert!(rib.vpn_import_snapshot().1.unwrap().keys().eq(["blue"]));
+    let mut w = nlri(RD1, P, 0);
+    w.labels.clear();
+    feed(&mut rib, SRC, false, &unreach(vec![w]));
+    assert_eq!(imported(&rib).len(), 1);
+    rib.peer_disconnected(addr(SRC), crate::gr::Disconnect::Hard);
+    assert_eq!(
+        imported(&rib),
+        [] as [(
+            std::string::String,
+            nos_proto::IpNet,
+            std::net::IpAddr,
+            std::vec::Vec<u32>,
+            [u8; 8]
+        ); 0]
+    );
+}
+
+#[test]
+fn rds_compete_inside_a_vrf_and_a_full_tie_picks_the_lowest_rd() {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    feed(
+        &mut rib,
+        SRC,
+        false,
+        &reach(SRC, vec![65001], vec![nlri(RD2, P, 2), nlri(RD1, P, 1)]),
+    );
+    let red =
+        |rib: &BgpRib| -> Vec<_> { imported(rib).into_iter().filter(|g| g.0 == "red").collect() };
+    let r = red(&rib);
+    assert_eq!((r.len(), r[0].4, r[0].3.clone()), (1, RD1, vec![1]));
+    // A better path under RD2 from another peer wins the VRF prefix.
+    let mut better = reach(I1, vec![], vec![nlri(RD2, P, 7)]);
+    better.attributes.as_mut().unwrap().local_pref = Some(200);
+    feed(&mut rib, I1, true, &better);
+    let r = red(&rib);
+    assert_eq!((r[0].2, r[0].4, r[0].3.clone()), (addr(I1), RD2, vec![7]));
+}
+
+#[test]
+fn an_unfeasible_pe_is_not_imported_until_the_igp_covers_it() {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    feed(
+        &mut rib,
+        SRC,
+        false,
+        &reach(SRC, vec![65001], vec![nlri(RD1, P, 1)]),
+    );
+    // Feasible until the first IGP poll.
+    assert_eq!(imported(&rib).len(), 2);
+    rib.set_igp(HashMap::from([(prefix("192.0.2.0/24"), 0)]));
+    assert_eq!(
+        imported(&rib),
+        [] as [(
+            std::string::String,
+            nos_proto::IpNet,
+            std::net::IpAddr,
+            std::vec::Vec<u32>,
+            [u8; 8]
+        ); 0]
+    );
+    rib.set_igp(HashMap::from([(prefix("10.0.0.0/24"), 0)]));
+    assert_eq!(imported(&rib).len(), 2);
+}
+
+#[test]
+fn vrf_import_waits_for_the_end_of_a_graceful_restart_deferral() {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    rib.begin_deferral(5, 120, 360, [addr(SRC)]);
+    assert_eq!(rib.vpn_import_snapshot(), (None, None));
+}

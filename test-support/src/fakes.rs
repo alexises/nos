@@ -192,9 +192,13 @@ impl FakeRibd {
                 RibRequest::GetEvpnIrb => Reply::One(RibEvent::EvpnIrb(s.evpn_irb.clone())),
                 RibRequest::GetRoutes => Reply::One(RibEvent::Routes(vec![])),
                 RibRequest::Lookup { .. } => Reply::One(RibEvent::NoMatch),
+                RibRequest::ResolveNextHop { addrs } => {
+                    Reply::One(RibEvent::NextHops(vec![None; addrs.len()]))
+                }
                 RibRequest::PushBgpRoutes(_)
                 | RibRequest::PushOspfRoutes(_)
-                | RibRequest::PushEvpnRoutes(_) => Reply::None,
+                | RibRequest::PushEvpnRoutes(_)
+                | RibRequest::PushVpnRoutes(_) => Reply::None,
             }
         });
         Self { server, state }

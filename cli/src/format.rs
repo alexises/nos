@@ -1042,6 +1042,7 @@ fn render_route_source(source: RouteSourceKind) -> &'static str {
         RouteSourceKind::Ospf => "ospf",
         RouteSourceKind::Connected => "connected",
         RouteSourceKind::Evpn => "evpn",
+        RouteSourceKind::Vpn => "vpn",
     }
 }
 
@@ -1077,7 +1078,16 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
                 let evpn = candidate.evpn.as_ref().map_or_else(String::new, |e| {
                     format!(" rmac {} vni {}", e.router_mac, e.vni)
                 });
-                format!("via {gateways}{evpn}")
+                let vpn = candidate.vpn.as_ref().map_or_else(String::new, |v| {
+                    let labels = candidate
+                        .mpls_labels
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    format!(" pe {} rd {} label {labels}", v.pe_next_hop, v.rd)
+                });
+                format!("via {gateways}{evpn}{vpn}")
             };
             lines.push(format!(
                 "  {marker} {via} [{}]{backup}",
@@ -1843,6 +1853,8 @@ mod tests {
                 discard: true,
                 evpn: None,
                 backup_tunnel: false,
+                mpls_labels: vec![],
+                vpn: None,
             }],
         }];
         assert_eq!(
@@ -1866,11 +1878,37 @@ mod tests {
                     vni: 5000,
                 }),
                 backup_tunnel: false,
+                mpls_labels: vec![],
+                vpn: None,
             }],
         }];
         assert_eq!(
             render_prefix_routes(&routes),
             "10.2.0.0/24\n  * via 10.50.0.3 rmac 02:00:00:00:00:03 vni 5000 [evpn]"
+        );
+    }
+
+    #[test]
+    fn vpn_route_renders_its_pe_rd_and_labels() {
+        let routes = [PrefixRoutes {
+            prefix: "10.10.0.0/24".parse().unwrap(),
+            candidates: vec![nos_proto::RouteEntry {
+                gateways: vec!["10.0.0.3".parse().unwrap()],
+                source: nos_proto::RouteSourceKind::Vpn,
+                backup: None,
+                discard: false,
+                evpn: None,
+                backup_tunnel: false,
+                mpls_labels: vec![100, 7],
+                vpn: Some(nos_proto::VpnRouteInfo {
+                    pe_next_hop: "192.0.2.3".parse().unwrap(),
+                    rd: "65001:1".to_string(),
+                }),
+            }],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "10.10.0.0/24\n  * via 10.0.0.3 pe 192.0.2.3 rd 65001:1 label 100/7 [vpn]"
         );
     }
 
@@ -1885,6 +1923,8 @@ mod tests {
                 discard: false,
                 evpn: None,
                 backup_tunnel: false,
+                mpls_labels: vec![],
+                vpn: None,
             }],
         }];
         assert_eq!(
@@ -1904,6 +1944,8 @@ mod tests {
                 discard: false,
                 evpn: None,
                 backup_tunnel: true,
+                mpls_labels: vec![],
+                vpn: None,
             }],
         }];
         assert_eq!(
@@ -3064,6 +3106,7 @@ mod tests {
             (RouteSourceKind::Bgp, "bgp"),
             (RouteSourceKind::Connected, "connected"),
             (RouteSourceKind::Evpn, "evpn"),
+            (RouteSourceKind::Vpn, "vpn"),
         ] {
             assert_eq!(render_route_source(s), want);
         }

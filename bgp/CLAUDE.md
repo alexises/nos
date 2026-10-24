@@ -19,8 +19,8 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 
 - Per peer, an active retry loop plus one shared passive listener (`0.0.0.0:179` + `[::]:179`), both scoped into the VRF by `SO_BINDTODEVICE` (`tcp.rs`).
 - Skip dialing while `PeerSlot::is_established` (either role), or every tick causes a collision.
-- Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`) and each `tcp::connect` is bounded by it, so an unanswered SYN (`SYN_SENT` flake, #158) can't hold the Active role ~2 min.
-- Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease wait, so nothing redials (#444); not in `clear_peer`.
+- Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`), each `tcp::connect` bounded by it (#158).
+- Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease wait (#444); not in `clear_peer`.
 - **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In/`peer_outbox` outlive the session and routes stay in the Loc-RIB.
 
 ## Session authentication
@@ -114,7 +114,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162).
 - `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); best path does not apply (RFC 7432 §15 aside). `evpn_import_policy` (#502, `None` = accept all) gates Type-1/2/3/5 in `learn_evpn` before mobility (reject = withdraw, Type-4 exempt).
 - MAC mobility has **no withdraw**: a sequence number only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; otherwise PEs on one segment bump each other into a frozen duplicate.
-- Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH): internals page.
+- Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH), VRF import (`vpn::VrfSet`, family-agnostic; PE resolved via the underlay's `ResolveNextHop`): internals page.
 - `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP and VNI (`evpn_local` keyed by `EvpnSource`).
 
 ## Backup path, multipath (#70)
@@ -131,7 +131,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162).
 
 ## Performance
 
-Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE): run `tools/bench-bgp.sh` around RIB changes. `--features dhat-heap` profiles memory (`docs/architecture/development.md`).
+Run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles memory (`docs/architecture/development.md`).
 
 ## Modules
 
@@ -141,8 +141,8 @@ Ceilings (single `Mutex<BgpRib>`, one prefix per UPDATE): run `tools/bench-bgp.s
 | `session.rs`, `tcp.rs`, `collision.rs` | `SessionManager`, `diff_peers`, `ao_delta`; VRF-scoped sockets; `PeerSlot` |
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
 | `message.rs`, `evpn.rs`, `flowspec*.rs`, `vpn/`, `as_path.rs` | Wire codecs (`BgpCodec`) |
-| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `vpn_out`, `shared` (`SharedRib`), `tests/` |
-| `rib_push_client.rs`, `fdb_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); a `nos-ribd` restart goes unnoticed until the next change |
+| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `vpn_out`, `vpn_import`, `shared` (`SharedRib`), `tests/` |
+| `rib_push_client.rs`, `fdb_push_client.rs`, `vpn_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); a `nos-ribd` restart goes unnoticed until the next change |
 | `rib_client.rs`, `interface_client.rs` | One-shot queries via `nos_daemon::ipc::one_shot` |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 
