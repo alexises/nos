@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ use rtnetlink::packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
 use rtnetlink::packet_route::route::{
-    RouteAddress, RouteAttribute, RouteFlags, RouteMessage, RouteProtocol, RouteType,
+    MplsLabel, RouteAddress, RouteAttribute, RouteFlags, RouteMessage, RouteProtocol, RouteType,
 };
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{
@@ -25,6 +25,7 @@ use rtnetlink::{
 };
 use tracing::{debug, info, trace, warn};
 
+use super::mpls::{self, Mpls, Sysctl};
 use super::route_channel::RouteChannel;
 use super::{table_registry, DriverError, RibDriver};
 use crate::evpn::{L3Vni, Mac};
@@ -35,6 +36,8 @@ use crate::rib::{RibEntry, RouteSource};
 const ENODEV: i32 = 19;
 /// errno(3) `ENOENT`: deleting a neighbour/FDB entry that is already gone.
 const ENOENT: i32 = 2;
+/// errno(3) `ESRCH`: deleting a route that is already gone.
+const ESRCH: i32 = 3;
 /// RFC 7348's IANA VXLAN port, as `nos-fdbd`'s devices use.
 const VXLAN_PORT: u16 = 4789;
 
@@ -48,6 +51,16 @@ struct L3State {
     /// change means a reopen — `nos-fdbd`'s `bound_master` rule.
     bound_master: Option<u32>,
     remotes: BTreeMap<IpAddr, Mac>,
+}
+
+/// The MPLS pop route `sync_mpls` installed for one table (by table id).
+#[derive(Debug, Clone, Copy)]
+struct MplsState {
+    label: u32,
+    vrf: u32,
+    /// The underlay VRF's ifindex: a labelled route's PE next hop without
+    /// an ifindex is looked up there (`egress_of`).
+    underlay_vrf: Option<u32>,
 }
 
 /// RFC 7490 remote LFA's IP-in-IP device for one table (`rlfa252` at most).
@@ -177,13 +190,31 @@ async fn drain<E>(ops: impl IntoIterator<Item = impl Future<Output = Result<(), 
 type Slot = (IpNet, bool);
 
 /// The kernel routes one winning entry wants: its primary (every
-/// equal-cost next hop), plus its backup.
-fn slots(prefix: IpNet, entry: &RibEntry) -> Vec<(Slot, Hops)> {
-    let mut out = vec![((prefix, false), entry.next_hops.clone())];
+/// equal-cost next hop, plus the labels it pushes), plus its backup.
+fn slots(prefix: IpNet, entry: &RibEntry) -> Vec<(Slot, Want)> {
+    let mut out = vec![(
+        (prefix, false),
+        (entry.next_hops.clone(), entry.mpls_labels.clone()),
+    )];
     if let Some(backup) = entry.backup {
-        out.push(((prefix, true), vec![(backup, entry.backup_interface_id)]));
+        out.push((
+            (prefix, true),
+            (vec![(backup, entry.backup_interface_id)], Vec::new()),
+        ));
     }
     out
+}
+
+/// One slot's next hops and the MPLS labels it pushes (empty: a plain IP
+/// route).
+type Want = (Hops, Vec<u32>);
+
+/// What a slot is compared by: its sorted gateways and its labels, so a
+/// label-only change is a changed route (remove, then add).
+type Key = (Vec<IpAddr>, Vec<u32>);
+
+fn key(want: &Want) -> Key {
+    (gateways(&want.0), want.1.clone())
 }
 
 /// One slot's next hops, each a gateway plus (when known) the local kernel
@@ -230,11 +261,17 @@ pub struct LinuxRibDriver {
     /// alongside each gateway is from `RibEntry::next_hops`, needed to
     /// reconstruct a matching `RTM_DELROUTE` for a link-local IPv6 gateway
     /// on the `apply_delta` removal path (see `add_route`'s doc comment).
-    installed: Mutex<HashMap<u32, HashMap<Slot, Hops>>>,
+    installed: Mutex<HashMap<u32, HashMap<Slot, Want>>>,
     /// Per table id: the L3 VNI devices `sync_l3vni` built.
     l3: Mutex<HashMap<u32, L3State>>,
     /// Per table id: the ifindex of the remote LFA device `sync_tunnel` built.
     tunnels: Mutex<HashMap<u32, u32>>,
+    /// Per table id: the MPLS pop route `sync_mpls` installed.
+    mpls: Mutex<HashMap<u32, MplsState>>,
+    sysctl: Sysctl,
+    /// Underlay interfaces whose `net.mpls.conf.<if>.input` could not be
+    /// set, warned about once each.
+    input_warned: Mutex<HashSet<String>>,
 }
 
 impl LinuxRibDriver {
@@ -249,6 +286,9 @@ impl LinuxRibDriver {
             installed: Mutex::new(HashMap::new()),
             l3: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
+            mpls: Mutex::new(HashMap::new()),
+            sysctl: Sysctl::default(),
+            input_warned: Mutex::new(HashSet::new()),
         })
     }
 
@@ -495,7 +535,7 @@ impl LinuxRibDriver {
     async fn dump_routes(
         &self,
         table_id: u32,
-    ) -> Result<Vec<(Slot, Vec<IpAddr>, RouteMessage)>, DriverError> {
+    ) -> Result<Vec<(Slot, Key, RouteMessage)>, DriverError> {
         let mut out = Vec::new();
         let table_id_u8 =
             u8::try_from(table_id).expect("table ids are always <= MAX_TABLE_ID (252)");
@@ -506,9 +546,9 @@ impl LinuxRibDriver {
         let mut v4 = self.handle.route().get(v4_filter).execute();
         while let Some(route) = v4.try_next().await? {
             if route.header.table == table_id_u8
-                && let Some((slot, gateways)) = extract_route(&route)
+                && let Some((slot, key)) = extract_route(&route)
             {
-                out.push((slot, gateways, route));
+                out.push((slot, key, route));
             }
         }
 
@@ -518,9 +558,9 @@ impl LinuxRibDriver {
         let mut v6 = self.handle.route().get(v6_filter).execute();
         while let Some(route) = v6.try_next().await? {
             if route.header.table == table_id_u8
-                && let Some((slot, gateways)) = extract_route(&route)
+                && let Some((slot, key)) = extract_route(&route)
             {
-                out.push((slot, gateways, route));
+                out.push((slot, key, route));
             }
         }
 
@@ -542,7 +582,7 @@ impl LinuxRibDriver {
         &self,
         table_id: u32,
         prefix: IpNet,
-        hops: &Hops,
+        (hops, labels): &Want,
         source: Option<RouteSource>,
         backup: bool,
         tunnel: bool,
@@ -552,9 +592,13 @@ impl LinuxRibDriver {
         // gateway is the remote VTEP, resolved by `sync_l3vni`'s neighbour.
         // A remote LFA backup leaves `onlink` through the table's IP-in-IP
         // device, which takes the gateway (the PQ node) as the outer
-        // destination and looks it up in the VRF.
+        // destination and looks it up in the VRF. A labelled (VPN) route
+        // leaves `onlink` over the underlay interface its PE next hop
+        // resolved to: the gateway is not reachable inside this VRF.
         let evpn = source == Some(RouteSource::Evpn);
         let tunnel = tunnel && backup;
+        let labelled = !labels.is_empty() && !backup;
+        let mut hops = hops.clone();
         let onlink_dev = if evpn {
             let Some(bridge) = self.l3.lock().unwrap().get(&table_id).map(|s| s.bridge) else {
                 debug!(%prefix, table_id, "l3 vni bridge not built yet, evpn route deferred");
@@ -567,14 +611,33 @@ impl LinuxRibDriver {
                 return Ok(());
             };
             Some(dev)
+        } else if labelled {
+            if hops.len() > 1 {
+                warn!(%prefix, %gateway, table_id, "labelled route: multipath not supported, installing the first next hop only");
+                hops.truncate(1);
+            }
+            let Some(&(gw, dev)) = hops.first() else {
+                return Ok(());
+            };
+            let dev = match dev {
+                Some(dev) => Some(dev),
+                None => self.egress_of(table_id, gw).await,
+            };
+            let Some(dev) = dev else {
+                warn!(%prefix, gateway = %gw, table_id, "labelled route skipped: next hop unresolved");
+                return Ok(());
+            };
+            Some(dev)
         } else {
             None
         };
-        let hops: Hops = match onlink_dev {
-            Some(dev) => hops.iter().map(|(gw, _)| (*gw, Some(dev))).collect(),
-            None => hops.clone(),
-        };
-        let Some(mut route) = build_route(prefix, &hops, table_id, backup) else {
+        if let Some(dev) = onlink_dev {
+            for hop in &mut hops {
+                hop.1 = Some(dev);
+            }
+        }
+        let pushed: &[u32] = if labelled { labels } else { &[] };
+        let Some(mut route) = build_route(prefix, &hops, table_id, backup, pushed) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(());
         };
@@ -584,9 +647,50 @@ impl LinuxRibDriver {
         self.route_channel.add(route).await.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to add route");
         })?;
-        let discard = hops.is_empty();
-        info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, "added route");
+        if labelled {
+            info!(%prefix, labels = ?labels, %gateway, interface = ?onlink_dev, table_id, "installed labelled route");
+        } else {
+            let discard = hops.is_empty();
+            info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, "added route");
+        }
         Ok(())
+    }
+
+    /// The ifindex `gateway` leaves over in this table's underlay (`ip route
+    /// get <gateway> vrf <underlay>`), `None` when unknown or unreachable. A
+    /// PE on a connected prefix comes from `nos-bgpd` without one.
+    // ponytail: one lookup per labelled route install; cache per gateway if
+    // VPN tables grow to many thousands of routes.
+    async fn egress_of(&self, table_id: u32, gateway: IpAddr) -> Option<u32> {
+        let underlay = self.mpls.lock().unwrap().get(&table_id)?.underlay_vrf?;
+        let mut m = RouteMessage::default();
+        let (family, len, dst) = match gateway {
+            IpAddr::V4(a) => (AddressFamily::Inet, 32, RouteAddress::from(a)),
+            IpAddr::V6(a) => (AddressFamily::Inet6, 128, RouteAddress::from(a)),
+        };
+        m.header.address_family = family;
+        m.header.destination_prefix_length = len;
+        m.attributes = vec![
+            RouteAttribute::Destination(dst),
+            RouteAttribute::Oif(underlay),
+        ];
+        // A destination makes this a lookup, not a dump.
+        let route = self
+            .handle
+            .route()
+            .get(m)
+            .execute()
+            .try_next()
+            .await
+            .ok()??;
+        route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                RouteAttribute::Oif(i) => Some(*i),
+                _ => None,
+            })
+            .filter(|i| *i != underlay)
     }
 
     /// Deletes one route directly from `(prefix, gateway, table_id,
@@ -602,19 +706,19 @@ impl LinuxRibDriver {
         &self,
         table_id: u32,
         prefix: IpNet,
-        hops: &Hops,
+        (hops, labels): &Want,
         backup: bool,
     ) -> Result<(), DriverError> {
         let gateway = show_gateways(&gateways(hops));
-        let Some(route) = build_route(prefix, hops, table_id, backup) else {
+        // No encap or oif in the request: the kernel matches on what is given.
+        let Some(route) = build_route(prefix, hops, table_id, backup, &[]) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(());
         };
         self.route_channel.del(route).await.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to remove route");
         })?;
-        let discard = hops.is_empty();
-        info!(%prefix, %gateway, table_id, backup, discard, "removed route");
+        log_removed(prefix, &gateway, labels, table_id, backup, hops.is_empty());
         Ok(())
     }
 
@@ -627,7 +731,7 @@ impl LinuxRibDriver {
         table_id: u32,
         changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError> {
-        type Slots = HashMap<Slot, Hops>;
+        type Slots = HashMap<Slot, Want>;
         let items: Vec<(IpNet, Slots, Slots, Option<RouteSource>, bool)> = {
             let installed = self.installed.lock().unwrap();
             let table_installed = installed.get(&table_id);
@@ -656,7 +760,7 @@ impl LinuxRibDriver {
 
         // The shadow state follows each op as it succeeds, so a failed one
         // leaves its slot as the kernel still has it.
-        let set = |slot: Slot, hops: Option<Hops>| {
+        let set = |slot: Slot, hops: Option<Want>| {
             let mut installed = self.installed.lock().unwrap();
             let table_installed = installed.entry(table_id).or_default();
             match hops {
@@ -668,8 +772,9 @@ impl LinuxRibDriver {
             |(prefix, old, new, source, tunnel)| async move {
                 // Remove before add, per prefix (a changed gateway at the
                 // same priority would otherwise hit EEXIST).
-                // A changed next-hop set is a del+add like a changed gateway.
-                let same = |a: Option<&Hops>, b: &Hops| a.map(gateways) == Some(gateways(b));
+                // A changed next-hop set or label is a del+add like a changed
+                // gateway.
+                let same = |a: Option<&Want>, b: &Want| a.map(key) == Some(key(b));
                 let mut result = Ok(());
                 for (slot, hops) in &old {
                     if !same(new.get(slot), hops) {
@@ -708,17 +813,17 @@ impl LinuxRibDriver {
         best_routes: &HashMap<IpNet, RibEntry>,
     ) -> Result<(), DriverError> {
         let observed = self.dump_routes(table_id).await?;
-        let observed_map: HashMap<Slot, Vec<IpAddr>> = observed
+        let observed_map: HashMap<Slot, Key> = observed
             .iter()
-            .map(|(slot, gateways, _)| (*slot, gateways.clone()))
+            .map(|(slot, key, _)| (*slot, key.clone()))
             .collect();
-        let desired_full: HashMap<Slot, Hops> = best_routes
+        let desired_full: HashMap<Slot, Want> = best_routes
             .iter()
             .flat_map(|(prefix, entry)| slots(*prefix, entry))
             .collect();
-        let desired: HashMap<Slot, Vec<IpAddr>> = desired_full
+        let desired: HashMap<Slot, Key> = desired_full
             .iter()
-            .map(|(slot, hops)| (*slot, gateways(hops)))
+            .map(|(slot, want)| (*slot, key(want)))
             .collect();
 
         let observed_by_slot: HashMap<Slot, RouteMessage> = observed
@@ -746,20 +851,20 @@ impl LinuxRibDriver {
         // regardless of client-side concurrency, so it isn't used here.
         // Both phases run every op even if some fail (#139): one bad route
         // must not hold back every other one, nor the add phase.
-        let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), gateways)| {
+        let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), key)| {
             let message = observed_by_slot.get(&(prefix, backup)).cloned();
-            let gateway = show_gateways(&gateways);
-            let discard = gateways.is_empty();
+            let gateway = show_gateways(&key.0);
             async move {
                 if let Some(mut message) = message {
                     // The kernel answers ESRCH to a delete that carries
-                    // RTNH_F_ONLINK, which an `Evpn` or tunnel route dumps with.
+                    // RTNH_F_ONLINK, which an `Evpn`, tunnel or labelled
+                    // route dumps with.
                     message.header.flags.remove(RouteFlags::Onlink);
-                    self.route_channel.del(message).await.map_err(|e| {
+                    if let Err(e) = self.route_channel.del(message).await {
                         warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to remove route");
-                        ((prefix, backup), gateways, e)
-                    })?;
-                    info!(%prefix, %gateway, table_id, backup, discard, "removed route");
+                        return Err(((prefix, backup), key, e));
+                    }
+                    log_removed(prefix, &gateway, &key.1, table_id, backup, key.0.is_empty());
                 }
                 Ok(())
             }
@@ -769,9 +874,9 @@ impl LinuxRibDriver {
         let add_failed = drain(to_add.into_iter().map(|(slot, _)| {
             let source = best_routes.get(&slot.0).map(|e| e.source);
             let tunnel = best_routes.get(&slot.0).is_some_and(|e| e.backup_tunnel);
-            let hops = desired_full.get(&slot).cloned().unwrap_or_default();
+            let want = desired_full.get(&slot).cloned().unwrap_or_default();
             async move {
-                self.add_route(table_id, slot.0, &hops, source, slot.1, tunnel)
+                self.add_route(table_id, slot.0, &want, source, slot.1, tunnel)
                     .await
                     .map_err(|e| (slot, e))
             }
@@ -787,8 +892,9 @@ impl LinuxRibDriver {
             installed.remove(&slot);
             first_error.get_or_insert(e);
         }
-        for (slot, gateways, e) in remove_failed {
-            installed.insert(slot, gateways.into_iter().map(|gw| (gw, None)).collect());
+        for (slot, (gateways, labels), e) in remove_failed {
+            let hops = gateways.into_iter().map(|gw| (gw, None)).collect();
+            installed.insert(slot, (hops, labels));
             first_error.get_or_insert(e);
         }
         self.installed.lock().unwrap().insert(table_id, installed);
@@ -828,6 +934,7 @@ impl RibDriver for LinuxRibDriver {
             debug!(table = %table_name, "no table id allocated, nothing to tear down");
             return Ok(());
         };
+        self.remove_pop_route(table_name, table_id).await?;
         self.reconcile_routes(table_id, &HashMap::new()).await?;
         let l3 = self.l3.lock().unwrap().remove(&table_id);
         if let Some(l3) = l3 {
@@ -926,6 +1033,139 @@ impl RibDriver for LinuxRibDriver {
         self.l3.lock().unwrap().insert(table_id, state);
         Ok(Some(rmac))
     }
+
+    async fn sync_mpls(&self, table_name: &str, m: Option<&Mpls>) -> Result<(), DriverError> {
+        let Some(m) = m else {
+            return match table_registry::lookup_table_id(&self.registry_path, table_name) {
+                Some(table_id) => self.remove_pop_route(table_name, table_id).await,
+                None => Ok(()),
+            };
+        };
+        mpls::check_label(m.label)?;
+        let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
+        let vrf_name = table_registry::vrf_ifname(table_id);
+        let vrf = self.ensure_vrf(&vrf_name, table_id).await?;
+        self.sysctl.ensure_platform_labels(m.label)?;
+        let underlay_vrf = match &m.underlay {
+            Some(u) => self.underlay_vrf(u).await?,
+            None => None,
+        };
+        if let Some(u) = underlay_vrf {
+            self.enable_input(u).await?;
+        }
+
+        // Converge the AF_MPLS routes into our VRF: a stale label (a changed
+        // `vpn.label`, or one left by a previous run) goes first, then ours.
+        let mut existing = Vec::new();
+        let mut dump = self
+            .handle
+            .route()
+            .get(RouteMessageBuilder::<MplsLabel>::new().build())
+            .execute();
+        while let Some(route) = dump.try_next().await? {
+            if let Some(pop) = mpls::pop_route_of(&route) {
+                existing.push(pop);
+            }
+        }
+        for (label, _) in existing
+            .iter()
+            .filter(|(l, oif)| *oif == Some(vrf) && *l != m.label)
+        {
+            self.del_pop_route(*label, vrf).await?;
+            info!(table = %table_name, vrf = %vrf_name, label, "removed mpls pop route");
+        }
+        if !existing.contains(&(m.label, Some(vrf))) {
+            self.handle
+                .route()
+                .add(mpls::pop_route_msg(m.label, vrf))
+                .replace()
+                .execute()
+                .await?;
+            info!(table = %table_name, vrf = %vrf_name, label = m.label, "installed mpls pop route");
+        }
+        self.mpls.lock().unwrap().insert(
+            table_id,
+            MplsState {
+                label: m.label,
+                vrf,
+                underlay_vrf,
+            },
+        );
+        Ok(())
+    }
+}
+
+impl LinuxRibDriver {
+    /// The ifindex of `underlay`'s VRF device, `None` before its `nos-ribd`
+    /// created it (the next `sync_mpls` tries again).
+    async fn underlay_vrf(&self, underlay: &str) -> Result<Option<u32>, DriverError> {
+        let Some(id) = table_registry::lookup_table_id(&self.registry_path, underlay) else {
+            return Ok(None);
+        };
+        Ok(self
+            .find_link(&table_registry::vrf_ifname(id))
+            .await?
+            .map(|l| l.header.index))
+    }
+
+    /// `net.mpls.conf.<if>.input = 1` on every interface of the underlay
+    /// VRF, so labelled packets from the other PEs are accepted. One that
+    /// cannot be set is warned about once, not fatal: it may face no PE.
+    // ponytail: every underlay interface, never a CE-facing one (those are in
+    // the customer VRF); an explicit per-interface `mpls` knob is the clean model.
+    async fn enable_input(&self, underlay_vrf: u32) -> Result<(), DriverError> {
+        let mut links = self.handle.link().get().execute();
+        while let Some(link) = links.try_next().await? {
+            if master_of(&link) != Some(underlay_vrf) {
+                continue;
+            }
+            let Some(name) = link.attributes.iter().find_map(|a| match a {
+                LinkAttribute::IfName(n) => Some(n.clone()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            match self.sysctl.ensure_input(&name) {
+                Ok(()) => {
+                    self.input_warned.lock().unwrap().remove(&name);
+                }
+                Err(e) => {
+                    if self.input_warned.lock().unwrap().insert(name.clone()) {
+                        warn!(interface = %name, error = %e, "mpls input not enabled on an underlay interface");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Deletes one `AF_MPLS` route; one already gone counts as done.
+    async fn del_pop_route(&self, label: u32, vrf: u32) -> Result<(), DriverError> {
+        match self
+            .handle
+            .route()
+            .del(mpls::pop_route_msg(label, vrf))
+            .execute()
+            .await
+        {
+            Err(rtnetlink::Error::NetlinkError(e))
+                if e.raw_code() == -ESRCH || e.raw_code() == -ENOENT =>
+            {
+                Ok(())
+            }
+            r => r.map_err(Into::into),
+        }
+    }
+
+    /// Removes the pop route `sync_mpls` installed for `table_id`, if any.
+    async fn remove_pop_route(&self, table_name: &str, table_id: u32) -> Result<(), DriverError> {
+        let Some(st) = self.mpls.lock().unwrap().remove(&table_id) else {
+            return Ok(());
+        };
+        self.del_pop_route(st.label, st.vrf).await?;
+        info!(table = %table_name, vrf = %table_registry::vrf_ifname(table_id), label = st.label, "removed mpls pop route");
+        Ok(())
+    }
 }
 
 /// Extracts `((prefix, is_backup), gateways)` (sorted) from a dumped
@@ -946,7 +1186,7 @@ impl RibDriver for LinuxRibDriver {
 // merge siblings per slot here once it does.
 /// A `RTM_F_CLONED` entry is a kernel exception (e.g. the PMTU a tunnel
 /// learned), dumped beside the route it belongs to: never a route of ours.
-fn extract_route(route: &RouteMessage) -> Option<(Slot, Vec<IpAddr>)> {
+fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
     if route.header.flags.contains(RouteFlags::Cloned) {
         return None;
     }
@@ -994,14 +1234,38 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Vec<IpAddr>)> {
 
     IpNet::new(destination, route.header.destination_prefix_length)
         .ok()
-        .map(|prefix| ((prefix, backup), gateways))
+        .map(|prefix| ((prefix, backup), (gateways, mpls::labels_of(route))))
+}
+
+/// The "removed route" log line, or "removed labelled route" for one that
+/// pushed `labels`.
+fn log_removed(
+    prefix: IpNet,
+    gateway: &str,
+    labels: &[u32],
+    table_id: u32,
+    backup: bool,
+    discard: bool,
+) {
+    if labels.is_empty() {
+        info!(%prefix, %gateway, table_id, backup, discard, "removed route");
+    } else {
+        info!(%prefix, labels = ?labels, %gateway, table_id, "removed labelled route");
+    }
 }
 
 /// Builds the `RouteMessage` for one kernel route, `None` on a
 /// prefix/gateway address-family mismatch (or a backup with no hop). No hop
 /// is a discard (`RTN_BLACKHOLE`) route, one is `RTA_GATEWAY` (+ `RTA_OIF`),
 /// two or more are `RTA_MULTIPATH`. `backup` sets the family's backup metric.
-fn build_route(prefix: IpNet, hops: &Hops, table_id: u32, backup: bool) -> Option<RouteMessage> {
+/// `labels` (one hop only) is an MPLS encap pushing them (`RTA_ENCAP`).
+fn build_route(
+    prefix: IpNet,
+    hops: &Hops,
+    table_id: u32,
+    backup: bool,
+    labels: &[u32],
+) -> Option<RouteMessage> {
     let v4 = prefix.addr().is_ipv4();
     if (backup && hops.is_empty()) || hops.iter().any(|(gw, _)| gw.is_ipv4() != v4) {
         return None;
@@ -1017,6 +1281,7 @@ fn build_route(prefix: IpNet, hops: &Hops, table_id: u32, backup: bool) -> Optio
         if let Some(interface_id) = interface_id {
             builder = builder.output_interface(*interface_id);
         }
+        builder = builder.output_mpls(mpls::stack(labels));
     } else {
         let family = if v4 {
             AddressFamily::Inet
@@ -1179,8 +1444,8 @@ mod tests {
         assert_eq!(
             slots(p, &entry),
             vec![
-                ((p, false), vec![(addr("10.0.0.1"), None)]),
-                ((p, true), vec![(addr("10.0.0.2"), None)]),
+                ((p, false), (vec![(addr("10.0.0.1"), None)], vec![])),
+                ((p, true), (vec![(addr("10.0.0.2"), None)], vec![])),
             ]
         );
     }
@@ -1189,7 +1454,7 @@ mod tests {
     fn ecmp_route_round_trips_through_multipath() {
         let p = net("203.0.113.80/32");
         let hops = vec![(addr("10.0.0.9"), None), (addr("10.0.0.2"), Some(7))];
-        let route = build_route(p, &hops, 100, false).unwrap();
+        let route = build_route(p, &hops, 100, false, &[]).unwrap();
         assert!(!route
             .attributes
             .iter()
@@ -1205,7 +1470,10 @@ mod tests {
         // What a dump of it gives back: both gateways, sorted, primary slot.
         assert_eq!(
             extract_route(&route),
-            Some(((p, false), vec![addr("10.0.0.2"), addr("10.0.0.9")]))
+            Some((
+                (p, false),
+                (vec![addr("10.0.0.2"), addr("10.0.0.9")], vec![])
+            ))
         );
     }
 
@@ -1213,17 +1481,20 @@ mod tests {
     fn ipv6_ecmp_route_round_trips_through_multipath() {
         let p = net("2001:db8:80::/48");
         let hops = vec![(addr("2001:db8::9"), None), (addr("2001:db8::2"), None)];
-        let route = build_route(p, &hops, 100, false).unwrap();
+        let route = build_route(p, &hops, 100, false, &[]).unwrap();
         assert_eq!(
             extract_route(&route),
-            Some(((p, false), vec![addr("2001:db8::2"), addr("2001:db8::9")]))
+            Some((
+                (p, false),
+                (vec![addr("2001:db8::2"), addr("2001:db8::9")], vec![])
+            ))
         );
     }
 
     #[test]
     fn a_cloned_exception_is_not_a_route() {
         let p = net("10.62.0.2/32");
-        let mut route = build_route(p, &vec![(addr("10.62.0.4"), None)], 100, false).unwrap();
+        let mut route = build_route(p, &vec![(addr("10.62.0.4"), None)], 100, false, &[]).unwrap();
         assert!(extract_route(&route).is_some());
         route.header.flags.insert(RouteFlags::Cloned);
         assert_eq!(extract_route(&route), None);
@@ -1232,25 +1503,25 @@ mod tests {
     #[test]
     fn single_hop_route_uses_rta_gateway() {
         let p = net("10.0.0.0/24");
-        let route = build_route(p, &vec![(addr("10.0.0.1"), None)], 100, true).unwrap();
+        let route = build_route(p, &vec![(addr("10.0.0.1"), None)], 100, true, &[]).unwrap();
         assert_eq!(
             extract_route(&route),
-            Some(((p, true), vec![addr("10.0.0.1")]))
+            Some(((p, true), (vec![addr("10.0.0.1")], vec![])))
         );
-        assert!(build_route(p, &vec![(addr("2001:db8::1"), None)], 100, false).is_none());
-        assert!(build_route(p, &vec![], 100, true).is_none());
+        assert!(build_route(p, &vec![(addr("2001:db8::1"), None)], 100, false, &[]).is_none());
+        assert!(build_route(p, &vec![], 100, true, &[]).is_none());
     }
 
     #[test]
     fn discard_route_round_trips_as_a_managed_blackhole() {
         let p = net("10.9.0.0/16");
-        let route = build_route(p, &vec![], 100, false).unwrap();
+        let route = build_route(p, &vec![], 100, false, &[]).unwrap();
         assert_eq!(route.header.kind, RouteType::BlackHole);
         assert!(!route
             .attributes
             .iter()
             .any(|a| matches!(a, RouteAttribute::Gateway(_) | RouteAttribute::Oif(_))));
-        assert_eq!(extract_route(&route), Some(((p, false), vec![])));
+        assert_eq!(extract_route(&route), Some(((p, false), (vec![], vec![]))));
         // An operator's own blackhole (iproute2's default `proto boot`) is
         // not ours, so never deleted.
         let mut foreign = route;
@@ -1278,5 +1549,48 @@ mod tests {
         let (add, remove) = diff_routes(&observed, &desired);
         assert_eq!(add, vec![(net("10.0.0.0/24"), addr("10.0.0.2"))]);
         assert_eq!(remove, vec![(net("10.0.0.0/24"), addr("10.0.0.1"))]);
+    }
+
+    #[test]
+    fn a_labelled_route_pushes_its_labels_and_reads_them_back() {
+        for (p, gw) in [
+            ("10.2.0.0/24", "10.0.0.2"),
+            ("2001:db8:2::/48", "2001:db8::2"),
+        ] {
+            let p = net(p);
+            let route = build_route(p, &vec![(addr(gw), Some(4))], 100, false, &[2000]).unwrap();
+            assert_eq!(
+                extract_route(&route),
+                Some(((p, false), (vec![addr(gw)], vec![2000])))
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_only_change_is_a_remove_and_an_add() {
+        let p = net("10.2.0.0/24");
+        let entry = |labels: Vec<u32>| RibEntry {
+            prefix: p,
+            next_hops: vec![(addr("10.0.0.2"), None)],
+            source: RouteSource::Vpn,
+            backup: None,
+            backup_interface_id: None,
+            backup_tunnel: false,
+            mpls_labels: labels,
+        };
+        let keyed = |e: &RibEntry| -> HashMap<Slot, Key> {
+            slots(p, e).iter().map(|(s, w)| (*s, key(w))).collect()
+        };
+        let (old, new) = (keyed(&entry(vec![1000])), keyed(&entry(vec![2000])));
+        let (add, remove) = diff_routes(&old, &new);
+        assert_eq!(
+            add,
+            vec![((p, false), (vec![addr("10.0.0.2")], vec![2000]))]
+        );
+        assert_eq!(
+            remove,
+            vec![((p, false), (vec![addr("10.0.0.2")], vec![1000]))]
+        );
+        assert_eq!(diff_routes(&old, &old), (vec![], vec![]));
     }
 }

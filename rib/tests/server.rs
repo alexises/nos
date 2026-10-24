@@ -74,7 +74,7 @@ async fn get_routes_returns_sorted_prefixes_with_ranked_candidates() {
         &path,
         "rt1".to_string(),
         rib,
-        Arc::new(NoopRibDriver),
+        Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
     .unwrap();
@@ -104,7 +104,7 @@ async fn lookup_matches_longest_prefix() {
         &path,
         "rt1".to_string(),
         rib,
-        Arc::new(NoopRibDriver),
+        Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
     .unwrap();
@@ -130,7 +130,7 @@ async fn lookup_with_no_covering_prefix_returns_no_match() {
         &path,
         "rt1".to_string(),
         rib,
-        Arc::new(NoopRibDriver),
+        Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
     .unwrap();
@@ -474,7 +474,7 @@ async fn route_pushes_from_the_wrong_role_are_refused() {
         &path,
         "rt1".to_string(),
         rib.clone(),
-        Arc::new(NoopRibDriver),
+        Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
     .unwrap();

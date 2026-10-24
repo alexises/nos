@@ -16,7 +16,7 @@ There is an external query API: `server.rs` serves `nos_proto::rib::{RibRequest,
 
 - `RouteSource::Vpn` (preference 200, like `Evpn`) is written only by `server::apply_vpn_route_update` from `RibRequest::PushVpnRoutes`, the underlay `nos-bgpd`'s `vpn_push_client`. `Full` is `replace_source(Vpn)`, so a CE-facing `PushBgpRoutes` and the VPN feed never wipe each other.
 - `RibEntry.mpls_labels` holds the label stack (part of equality). The PE and RD sit beside `entries` in `Rib.vpn_info` (display only), rendered by `show route` as `via <gw> pe <pe> rd <rd> label <n> [vpn]`.
-- Not installed yet: `kernel_visible` drops a `Vpn` winner from `best_routes_for_kernel` and from `diff_best` (a `Bgp` winner falling back to a `Vpn` one is a kernel `Removed`). `ponytail:` #581 installs it as an MPLS route and drops the filter.
+- A `Vpn` winner is installed like any other (#581, "L3VPN data plane" below); a label-only change is a changed winner (`diff_best`), so `apply_delta` re-installs it.
 - `Rib::resolve(addr)` answers `RibRequest::ResolveNextHop`: the best non-`Bgp`/`Evpn`/`Vpn`, non-discard candidate of the longest covering prefix (`resolving_best`, shared with `igp_costs`), its first next hop, or `addr` itself with no ifindex for `Connected`.
 
 ## L3VPN VRF export (#580)
@@ -26,6 +26,16 @@ There is an external query API: `server.rs` serves `nos_proto::rib::{RibRequest,
 - Export (`vpn::originated`): one `VpnPrefix` per best route (`best_routes`, connected included) except `Vpn` (the loop guard) and `Evpn` ones, with `[label]` and the export RTs.
 - Push (`vpn_client.rs`): `BgpRequest::RedistributeVpnPrefixes { table, update }` to the underlay `nos-bgpd`. The connection loop is `push_client.rs`, shared with `evpn_client.rs` (a `Feed` per kind): `Full` on connect, diffed `Add`/`Remove` after, `Full([])` when the instance changes or `vpn` goes, the connection read for EOF. Log `sent initial vpn snapshot to nos-bgpd table=… bgp_instance=… routes=…`.
 - `ponytail:` refreshed on resync (config diff or 10s tick), not on each `PushBgpRoutes`/`PushOspfRoutes`, like the Type-5 export; no RPL on export (#582).
+
+## L3VPN data plane (#581)
+
+- Order per resync: `reconcile::vpn_export` (label, then `RibDriver::sync_mpls`, then the export push), then `apply_to_kernel` (`sync_l3vni`, `apply`). The export is sent only when `sync_mpls` returned `Ok`: a label the kernel cannot pop would black-hole traffic, so on `Err` the target is empty and `error!` `mpls label not programmed, vpn export withheld` says why. `Rib.vpn_label` still shows the label.
+- `sync_mpls(table, Some(Mpls { label, underlay }))`: `underlay` is `vpn.bgp_instance`'s routing table (`VrfExport.underlay`). `None` (no `vpn`) removes the pop route; `teardown` does too, before deleting the VRF.
+- Pure parts in `driver/mpls.rs` (counted in coverage, unlike `linux.rs`): label checks (16 to 1048574), the label stack (bottom-of-stack on the last entry), the pop route message, `labels_of` (read `RTA_ENCAP` back), the `net.mpls` sysctls (`Sysctl`, a tempdir in tests).
+- Kernel slots compare by `(gateways, labels)` (`Key` in `linux.rs`) on both the `apply` dump-diff (`extract_route` reads the labels back) and the `apply_delta` path (`installed` holds `(hops, labels)`).
+- A labelled route has one next hop (`ponytail:` multipath is not supported: the first hop is installed and a `warn!` says so). Its PE next hop comes from `nos-bgpd`, already resolved in the underlay table (#579); a hop without an ifindex (a PE on a connected prefix) is looked up with `RTM_GETROUTE <gw> oif <underlay vrf>`, then installed `onlink` over that device in this table. No answer: `labelled route skipped: next hop unresolved`, retried by the next `apply`.
+- Re-resolution is `nos-bgpd`'s: its `vpn_push_client` re-resolves every PE on each push wake-up and on a 10s tick, and a changed gateway or a lost resolution reaches this daemon as `Add`/`Remove`. A link going down makes the kernel flush the route; the next `apply` (10s tick) re-adds it once the link is up.
+- `NoopRibDriver` records each table's label (`mpls_label`), for tests.
 
 ## EVPN IP-VRF (L3 VNI)
 

@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let driver: Arc<dyn RibDriver> = match args.driver {
-        DriverKind::Noop => Arc::new(NoopRibDriver),
+        DriverKind::Noop => Arc::new(NoopRibDriver::default()),
         DriverKind::Linux => Arc::new(
             LinuxRibDriver::new(args.table_registry_path.clone())
                 .inspect_err(|e| {

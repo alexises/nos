@@ -14,7 +14,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::bfd_client;
 use crate::bgp_client;
-use crate::driver::RibDriver;
+use crate::driver::{Mpls, RibDriver};
 use crate::evpn::{self, L3Vni};
 use crate::evpn_client::EvpnTarget;
 use crate::interface_client;
@@ -224,13 +224,15 @@ async fn resync(
                     "best route"
                 );
             }
+            // Before the routes: the pop route gates the export, and a
+            // labelled route needs the underlay `sync_mpls` records.
+            vpn_export(&cfg, table, rib, driver, vpn).await;
             apply_to_kernel(table, rib, driver).await;
             let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
             for (to, tx) in ospf_redistribute_tx {
                 let _ = tx.send(compute_redistribute_target_ospf(&cfg, table, &routes, *to));
             }
             let _ = evpn_tx.send(evpn_target(&*rib.read().await));
-            vpn_export(&cfg, table, rib, vpn).await;
         }
         Err(e) => {
             warn!(table = %table, error = %e, "failed to fetch running config, keeping previous RIB");
@@ -328,20 +330,50 @@ fn evpn_target(rib: &Rib) -> EvpnTarget {
     }
 }
 
-/// What `vpn_client` exports (`vpn::originated`), once `vpn` resolves and
-/// its label is known; the label is kept in the `Rib` for `show route`. A
-/// failed label allocation keeps the previous target.
-async fn vpn_export(cfg: &Config, table: &str, rib: &Arc<RwLock<Rib>>, (tx, registry): &VpnFeed) {
+/// What `vpn_client` exports (`vpn::originated`), once `vpn` resolves, its
+/// label is known and the driver programmed it (`RibDriver::sync_mpls`: a
+/// label the kernel cannot pop would black-hole the traffic, so nothing is
+/// exported then); the label is kept in the `Rib` for `show route`. A failed
+/// label allocation keeps the previous target.
+async fn vpn_export(
+    cfg: &Config,
+    table: &str,
+    rib: &Arc<RwLock<Rib>>,
+    driver: &dyn RibDriver,
+    (tx, registry): &VpnFeed,
+) {
     let resolved = vpn::resolve(cfg, table, |reserved| {
         crate::driver::table_registry::ensure_label(registry, table, reserved)
     });
+    let mpls = match &resolved {
+        Ok(v) => v.as_ref().map(|v| Mpls {
+            label: v.label,
+            underlay: v.underlay.clone(),
+        }),
+        Err(_) => None,
+    };
+    let programmed = if resolved.is_ok() {
+        match driver.sync_mpls(table, mpls.as_ref()).await {
+            Ok(()) => true,
+            Err(e) => {
+                error!(table = %table, label = ?mpls.map(|m| m.label), error = %e, "mpls label not programmed, vpn export withheld");
+                false
+            }
+        }
+    } else {
+        false
+    };
     let mut guard = rib.write().await;
     let target = match resolved {
         Ok(Some(v)) => {
             guard.vpn_label = Some(v.label);
-            VpnTarget {
-                bgp_instance: Some(v.bgp_instance.clone()),
-                routes: vpn::originated(&guard.best_routes(), &v),
+            if programmed {
+                VpnTarget {
+                    bgp_instance: Some(v.bgp_instance.clone()),
+                    routes: vpn::originated(&guard.best_routes(), &v),
+                }
+            } else {
+                VpnTarget::default()
             }
         }
         Ok(None) => {

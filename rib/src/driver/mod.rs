@@ -9,11 +9,13 @@ use crate::evpn::{L3Vni, Mac};
 use crate::rib::RibEntry;
 
 pub mod linux;
+pub mod mpls;
 pub mod noop;
 pub mod route_channel;
 pub mod table_registry;
 
 pub use linux::LinuxRibDriver;
+pub use mpls::Mpls;
 pub use noop::NoopRibDriver;
 
 /// Errors from applying `Rib` state to a real (or simulated) OS backend.
@@ -109,5 +111,16 @@ pub trait RibDriver: Send + Sync {
         _remotes: &BTreeMap<IpAddr, Mac>,
     ) -> Result<Option<Mac>, DriverError> {
         Ok(None)
+    }
+
+    /// L3VPN (#581): with `mpls`, ensures the `AF_MPLS` route `<label> dev
+    /// <vrf>` (pop, IP lookup in this table) and the `net.mpls` sysctls it
+    /// needs, and records the underlay that `apply` resolves a labelled
+    /// route's PE next hop in; `None` removes the route. An `Err` means the
+    /// label cannot be forwarded, so the caller must not advertise it. Must
+    /// run before `apply` installs a labelled (`Vpn`) route. The default
+    /// builds nothing.
+    async fn sync_mpls(&self, _table_name: &str, _mpls: Option<&Mpls>) -> Result<(), DriverError> {
+        Ok(())
     }
 }

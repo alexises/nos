@@ -208,8 +208,8 @@ fn vpn_entry(r: &VpnRoute) -> RibEntry {
 /// Applies one batch of VPN routes imported by the underlay `nos-bgpd` —
 /// the `Vpn`-source twin of `apply_bgp_route_update` (`Full` replaces only
 /// the `Vpn` candidates, so a CE-facing instance's `Bgp` routes in the same
-/// table are untouched). Kernel effect only where a non-`Vpn` winner
-/// appears or goes (`Rib::kernel_visible`).
+/// table are untouched). A `Vpn` winner is installed as a labelled route;
+/// a changed label or PE resolution is a changed winner (`apply_delta`).
 async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
     let mut guard = ctx.rib.write().await;
     let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
@@ -631,7 +631,7 @@ mod authz_tests {
         let ctx = Context {
             table: "red".to_string(),
             rib: Arc::new(RwLock::new(Rib::new())),
-            driver: Arc::new(crate::driver::NoopRibDriver),
+            driver: Arc::new(crate::driver::NoopRibDriver::default()),
         };
         let a = vpn_route("10.1.0.0/24", 100);
         let b = vpn_route("10.2.0.0/24", 200);

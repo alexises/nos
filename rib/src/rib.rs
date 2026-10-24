@@ -38,8 +38,8 @@ pub enum RouteSource {
     /// A VPN route imported by Route Target (RFC 4364), pushed by the
     /// underlay `nos-bgpd` over `RibRequest::PushVpnRoutes`
     /// (`crate::server::apply_vpn_route_update`). Its next hop is the PE as
-    /// resolved in the underlay, so it is not installed in the kernel yet
-    /// (`kernel_visible`; MPLS encapsulation is #581).
+    /// resolved in the underlay table, so the driver installs it `onlink`
+    /// over the underlay interface, pushing `mpls_labels` (#581).
     Vpn,
 }
 
@@ -110,18 +110,8 @@ pub enum BestPathChange {
     Installed(RibEntry),
 }
 
-/// Whether the kernel gets `e`: not a `Vpn` winner, whose gateway resolves
-/// only in the underlay table.
-// ponytail: #581 installs a `Vpn` winner as an MPLS route; drop this then.
-fn kernel_visible(e: &RibEntry) -> bool {
-    e.source != RouteSource::Vpn
-}
-
-/// The kernel-visible change between two winners: a `Vpn` winner counts as
-/// no route (`kernel_visible`), so a delta never installs one.
+/// The change between two winners (`RibEntry` equality, labels included).
 fn diff_best(before: Option<&RibEntry>, after: Option<RibEntry>) -> BestPathChange {
-    let before = before.filter(|e| kernel_visible(e));
-    let after = after.filter(kernel_visible);
     if before == after.as_ref() {
         BestPathChange::Unchanged
     } else {
@@ -259,8 +249,7 @@ impl Rib {
             .collect()
     }
 
-    /// `best_routes` for the driver: every winner except a `Connected` one
-    /// (or a `Vpn` one, see `kernel_visible`).
+    /// `best_routes` for the driver: every winner except a `Connected` one.
     /// A prefix whose winner is `Connected` is left to the kernel's own
     /// on-link route (it exists the instant `nos-interfaced` applies the
     /// address, and `driver::linux::extract_route` ignores it as an
@@ -273,7 +262,7 @@ impl Rib {
     /// still shadows the prefix; add an oper-state field if it ever matters.
     pub fn best_routes_for_kernel(&self) -> HashMap<IpNet, RibEntry> {
         let mut routes = self.best_routes();
-        routes.retain(|_, e| e.source != RouteSource::Connected && kernel_visible(e));
+        routes.retain(|_, e| e.source != RouteSource::Connected);
         routes
     }
 
@@ -680,24 +669,27 @@ mod tests {
     }
 
     #[test]
-    fn the_kernel_never_sees_a_vpn_winner() {
+    fn a_vpn_winner_is_installed_and_a_label_change_is_a_new_winner() {
         let mut rib = Rib::new();
         rib.insert(vpn("10.1.0.0/24", "192.0.2.9", 100));
-        assert!(rib.best_routes_for_kernel().is_empty());
         let p: IpNet = "10.1.0.0/24".parse().unwrap();
-        // A Bgp winner falling back to the Vpn one removes the kernel route.
+        assert_eq!(rib.best_routes_for_kernel()[&p].mpls_labels, vec![100]);
+        // A Bgp winner falling back to the Vpn one re-installs the Vpn route.
         assert!(matches!(
             rib.upsert_and_diff(entry("10.1.0.0/24", "10.0.0.1", RouteSource::Bgp)),
             BestPathChange::Installed(_)
         ));
-        assert_eq!(
+        assert!(matches!(
             rib.remove_and_diff(&p, RouteSource::Bgp),
-            BestPathChange::Removed
-        );
-        // A label change on a Vpn winner is no kernel change yet (#581).
-        assert_eq!(
+            BestPathChange::Installed(e) if e.source == RouteSource::Vpn
+        ));
+        assert!(matches!(
             rib.upsert_and_diff(vpn("10.1.0.0/24", "192.0.2.9", 200)),
-            BestPathChange::Unchanged
+            BestPathChange::Installed(e) if e.mpls_labels == [200]
+        ));
+        assert_eq!(
+            rib.remove_and_diff(&p, RouteSource::Vpn),
+            BestPathChange::Removed
         );
     }
 
