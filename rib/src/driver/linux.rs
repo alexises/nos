@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -219,6 +219,28 @@ fn key(hops: &[NextHop]) -> Key {
     let mut out: Key = hops.iter().map(|h| (h.gateway, h.labels.clone())).collect();
     out.sort_unstable();
     out
+}
+
+/// What one slot needs to go from the `old` key (what the kernel has) to the
+/// `new` one (what is wanted).
+#[derive(Debug, PartialEq, Eq)]
+enum SlotOp {
+    Keep,
+    Remove,
+    Add,
+    /// Both exist with a different key: one `NLM_F_REPLACE` request, never a
+    /// delete then an add (make-before-break, #598).
+    Replace,
+}
+
+fn slot_op(old: Option<&Key>, new: Option<&Key>) -> SlotOp {
+    match (old, new) {
+        (None, None) => SlotOp::Keep,
+        (Some(_), None) => SlotOp::Remove,
+        (None, Some(_)) => SlotOp::Add,
+        (Some(o), Some(n)) if o == n => SlotOp::Keep,
+        (Some(_), Some(_)) => SlotOp::Replace,
+    }
 }
 
 /// The gateways of `hops` in order, comma-joined for a log line.
@@ -569,6 +591,14 @@ impl LinuxRibDriver {
     /// passes `None` and needs none. Two or more hops are one
     /// `RTA_MULTIPATH` (ECMP) route. `backup` installs it at
     /// the family's backup metric instead of the default priority.
+    ///
+    /// `replace` swaps the slot's installed route in one atomic request
+    /// instead of adding. Returns `false` when nothing was sent (the route is
+    /// deferred or skipped), so a caller replacing must remove the old one.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one install request; a struct would only rename the arguments"
+    )]
     async fn add_route(
         &self,
         table_id: u32,
@@ -577,7 +607,8 @@ impl LinuxRibDriver {
         source: Option<RouteSource>,
         backup: bool,
         tunnel: bool,
-    ) -> Result<(), DriverError> {
+        replace: bool,
+    ) -> Result<bool, DriverError> {
         let gateway = show_gateways(hops.iter().map(|h| &h.gateway));
         // An `Evpn` route leaves `onlink` through the L3 VNI's bridge: its
         // gateway is the remote VTEP, resolved by `sync_l3vni`'s neighbour.
@@ -593,13 +624,13 @@ impl LinuxRibDriver {
         let shared_dev = if evpn {
             let Some(bridge) = self.l3.lock().unwrap().get(&table_id).map(|s| s.bridge) else {
                 debug!(%prefix, table_id, "l3 vni bridge not built yet, evpn route deferred");
-                return Ok(());
+                return Ok(false);
             };
             Some(bridge)
         } else if tunnel {
             let Some(dev) = self.tunnels.lock().unwrap().get(&table_id).copied() else {
                 debug!(%prefix, table_id, "remote lfa tunnel device not built yet, backup deferred");
-                return Ok(());
+                return Ok(false);
             };
             Some(dev)
         } else {
@@ -621,7 +652,7 @@ impl LinuxRibDriver {
             let (kept, unresolved) = mpls::onlink_hops(hops, &devs);
             if kept.is_empty() {
                 warn!(%prefix, %gateway, table_id, "labelled route skipped: next hop unresolved");
-                return Ok(());
+                return Ok(false);
             }
             for gw in unresolved {
                 warn!(%prefix, gateway = %gw, table_id, "labelled next hop skipped: unresolved");
@@ -631,21 +662,26 @@ impl LinuxRibDriver {
         let onlink = labelled || shared_dev.is_some();
         let Some(route) = build_route(prefix, &hops, table_id, backup, onlink) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
-            return Ok(());
+            return Ok(false);
         };
-        self.route_channel.add(route).await.inspect_err(|e| {
-            warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to add route");
+        let sent = if replace {
+            self.route_channel.replace(route).await
+        } else {
+            self.route_channel.add(route).await
+        };
+        sent.inspect_err(|e| {
+            warn!(%prefix, %gateway, table_id, backup, replace, error = %e, "failed to add route");
         })?;
         if labelled {
             let labels: Vec<_> = hops.iter().map(|h| &h.labels).collect();
             let gateway = show_gateways(hops.iter().map(|h| &h.gateway));
             let interfaces: Vec<_> = hops.iter().filter_map(|h| h.interface_id).collect();
-            info!(%prefix, labels = ?labels, %gateway, interfaces = ?interfaces, table_id, "installed labelled route");
+            info!(%prefix, labels = ?labels, %gateway, interfaces = ?interfaces, table_id, replaced = replace, "installed labelled route");
         } else {
             let discard = hops.is_empty();
-            info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, "added route");
+            info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, replaced = replace, "added route");
         }
-        Ok(())
+        Ok(true)
     }
 
     /// The ifindex `gateway` leaves over in this table's underlay (`ip route
@@ -720,6 +756,34 @@ impl LinuxRibDriver {
         Ok(())
     }
 
+    /// Installs `hops` at a slot: a replace when the slot holds `old` (its
+    /// install request replaces the kernel route in one step), then removes
+    /// `old` itself only if the install was deferred and left it behind.
+    async fn install(
+        &self,
+        table_id: u32,
+        prefix: IpNet,
+        hops: &[NextHop],
+        old: Option<&Hops>,
+        (source, backup, tunnel): (Option<RouteSource>, bool, bool),
+    ) -> Result<(), DriverError> {
+        let sent = self
+            .add_route(
+                table_id,
+                prefix,
+                hops,
+                source,
+                backup,
+                tunnel,
+                old.is_some(),
+            )
+            .await?;
+        if let (false, Some(old)) = (sent, old) {
+            self.remove_route(table_id, prefix, old, backup).await?;
+        }
+        Ok(())
+    }
+
     /// Applies only `changes` directly against the kernel, using
     /// `self.installed` (not a kernel dump) to know each prefix's previous
     /// gateway — the hot path for incremental per-prefix BGP pushes. See
@@ -768,30 +832,26 @@ impl LinuxRibDriver {
         };
         let errors = drain(items.into_iter().map(
             |(prefix, old, new, source, tunnel)| async move {
-                // Remove before add, per prefix (a changed gateway at the
-                // same priority would otherwise hit EEXIST).
-                // A changed next-hop set or label is a del+add like a changed
-                // gateway.
-                let same = |a: Option<&Hops>, b: &Hops| a.map(|a| key(a)) == Some(key(b));
+                // A changed slot is replaced in place (make-before-break), a
+                // vanished one removed, a new one added.
                 let mut result = Ok(());
-                for (slot, hops) in &old {
-                    if !same(new.get(slot), hops) {
-                        match self.remove_route(table_id, prefix, hops, slot.1).await {
-                            Ok(()) => set(*slot, None),
-                            Err(e) => result = result.and(Err(e)),
-                        }
-                    }
-                }
-                for (slot, hops) in new {
-                    if same(old.get(&slot), &hops) {
-                        set(slot, Some(hops));
-                        continue;
-                    }
-                    match self
-                        .add_route(table_id, prefix, &hops, source, slot.1, tunnel)
-                        .await
-                    {
-                        Ok(()) => set(slot, Some(hops)),
+                let all: BTreeSet<Slot> = old.keys().chain(new.keys()).copied().collect();
+                for slot in all {
+                    let (o, n) = (old.get(&slot), new.get(&slot));
+                    let op = slot_op(o.map(|h| key(h)).as_ref(), n.map(|h| key(h)).as_ref());
+                    let step = match (op, o, n) {
+                        (SlotOp::Remove, Some(o), _) => self
+                            .remove_route(table_id, prefix, o, slot.1)
+                            .await
+                            .map(|()| None),
+                        (SlotOp::Add | SlotOp::Replace, o, Some(n)) => self
+                            .install(table_id, prefix, n, o, (source, slot.1, tunnel))
+                            .await
+                            .map(|()| Some(n.clone())),
+                        (_, _, n) => Ok(n.cloned()),
+                    };
+                    match step {
+                        Ok(hops) => set(slot, hops),
                         Err(e) => result = result.and(Err(e)),
                     }
                 }
@@ -849,6 +909,17 @@ impl LinuxRibDriver {
         // regardless of client-side concurrency, so it isn't used here.
         // Both phases run every op even if some fail (#139): one bad route
         // must not hold back every other one, nor the add phase.
+        // A slot in both lists changed key: replaced in one request, so its
+        // delete is skipped (#598).
+        let replaced: HashSet<Slot> = to_add
+            .iter()
+            .map(|(slot, _)| *slot)
+            .filter(|slot| slot_op(observed_map.get(slot), desired.get(slot)) == SlotOp::Replace)
+            .collect();
+        let to_remove: Vec<_> = to_remove
+            .into_iter()
+            .filter(|(slot, _)| !replaced.contains(slot))
+            .collect();
         let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), key)| {
             let message = observed_by_slot.get(&(prefix, backup)).cloned();
             let gateway = show_gateways(key.iter().map(|(gw, _)| gw));
@@ -874,10 +945,31 @@ impl LinuxRibDriver {
             let source = best_routes.get(&slot.0).map(|e| e.source);
             let tunnel = best_routes.get(&slot.0).is_some_and(|e| e.backup_tunnel);
             let want = desired_full.get(&slot).cloned().unwrap_or_default();
+            let gone = replaced.contains(&slot).then(|| {
+                (
+                    observed_by_slot.get(&slot).cloned(),
+                    observed_map[&slot].clone(),
+                )
+            });
             async move {
-                self.add_route(table_id, slot.0, &want, source, slot.1, tunnel)
+                let replace = gone.is_some();
+                let sent = self
+                    .add_route(table_id, slot.0, &want, source, slot.1, tunnel, replace)
                     .await
-                    .map_err(|e| (slot, e))
+                    .map_err(|e| (slot, e))?;
+                // Deferred or skipped: the old route is still there, drop it.
+                match gone {
+                    Some((Some(mut message), key)) if !sent => {
+                        message.header.flags.remove(RouteFlags::Onlink);
+                        self.route_channel
+                            .del(message)
+                            .await
+                            .map_err(|e| (slot, e))?;
+                        log_removed(slot.0, &key, table_id, slot.1);
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
             }
         }))
         .await;
@@ -888,19 +980,16 @@ impl LinuxRibDriver {
         let mut installed = desired_full;
         let mut first_error = None;
         for (slot, e) in add_failed {
-            installed.remove(&slot);
+            // A failed replace leaves what the kernel had (like a failed
+            // delete below); a failed add leaves nothing.
+            match replaced.contains(&slot).then(|| &observed_map[&slot]) {
+                Some(key) => installed.insert(slot, hops_of(key)),
+                None => installed.remove(&slot),
+            };
             first_error.get_or_insert(e);
         }
         for (slot, key, e) in remove_failed {
-            let hops = key
-                .into_iter()
-                .map(|(gateway, labels)| NextHop {
-                    gateway,
-                    interface_id: None,
-                    labels,
-                })
-                .collect();
-            installed.insert(slot, hops);
+            installed.insert(slot, hops_of(&key));
             first_error.get_or_insert(e);
         }
         self.installed.lock().unwrap().insert(table_id, installed);
@@ -1258,6 +1347,18 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
         .map(|prefix| ((prefix, backup), key))
 }
 
+/// The hops a dumped `key` stands for (no interface: a dump carries none of
+/// ours).
+fn hops_of(key: &Key) -> Hops {
+    key.iter()
+        .map(|(gateway, labels)| NextHop {
+            gateway: *gateway,
+            interface_id: None,
+            labels: labels.clone(),
+        })
+        .collect()
+}
+
 /// The "removed route" log line, or "removed labelled route" (each hop's
 /// labels, in `key` order) for one that pushed labels.
 fn log_removed(prefix: IpNet, key: &Key, table_id: u32, backup: bool) {
@@ -1405,6 +1506,40 @@ mod tests {
     }
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    fn k(hops: &[(&str, &[u32])]) -> Key {
+        let mut k: Key = hops.iter().map(|(g, l)| (addr(g), l.to_vec())).collect();
+        k.sort_unstable();
+        k
+    }
+
+    #[test]
+    fn slot_op_replaces_instead_of_remove_then_add() {
+        let one = k(&[("10.0.0.1", &[])]);
+        let two = k(&[("10.0.0.1", &[]), ("10.0.0.2", &[])]);
+        let labelled = k(&[("10.0.0.1", &[16])]);
+        let other = k(&[("10.0.0.9", &[])]);
+        let discard: Key = Vec::new();
+        assert_eq!(slot_op(None, None), SlotOp::Keep);
+        assert_eq!(slot_op(Some(&one), None), SlotOp::Remove);
+        assert_eq!(slot_op(None, Some(&one)), SlotOp::Add);
+        assert_eq!(slot_op(Some(&one), Some(&one)), SlotOp::Keep);
+        // shrink, grow, label-only, gateway change, discard <-> gateway
+        assert_eq!(slot_op(Some(&two), Some(&one)), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&one), Some(&two)), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&one), Some(&labelled)), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&one), Some(&other)), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&discard), Some(&one)), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&one), Some(&discard)), SlotOp::Replace);
+        // a discard route installed from nothing is an add, not a replace
+        assert_eq!(slot_op(None, Some(&discard)), SlotOp::Add);
+    }
+
+    #[test]
+    fn hops_of_round_trips_a_key() {
+        let key = k(&[("10.0.0.1", &[16, 17]), ("10.0.0.2", &[])]);
+        assert_eq!(super::key(&hops_of(&key)), key);
     }
 
     #[test]

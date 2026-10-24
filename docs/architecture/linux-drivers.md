@@ -21,6 +21,15 @@ Because `nos-interfaced` needs to enslave an interface into the VRF device that 
 
 `nos-interfaced` also owns spanning-tree port safety (#326): while `spanning-tree mode` is not `disabled`, every bridge port is written DISABLED (the only blocking state a `BR_NO_STP` bridge keeps) and gets an ingress `flower`+`gact drop` BPDU trap, until `nos-stpd` pushes a state with `SetStpPortStates`. Details and kernel findings: [STP internals](../internals/stp.md#kernel-side-nos-interfaced-326).
 
+## Route replace (`nos-ribd`, #598)
+
+- A changed next-hop set (shrink, grow, labels, gateway, discard <-> gateway) at an already-installed slot is one `RTM_NEWROUTE` with `NLM_F_REPLACE | NLM_F_CREATE` (`RouteChannel::replace`), never a delete then an add: the route is never absent from the table, so a labelled or ECMP flow does not blackhole.
+- `NLM_F_CREATE` without `EXCL` is deliberate: when the shadow state drifted and the old route is gone, the replace still installs.
+- Both `apply_delta` and the dump-diff `apply` do it (`slot_op`: a slot in both lists with different keys is a `Replace`); only a slot that vanished is a `del`.
+- A failed replace is surfaced and the shadow keeps the old hops (the kernel still has them); there is no del+add fallback.
+- Logs: the usual `added route` / `installed labelled route` line with a trailing `replaced=true`; no `removed ...` line for the old key. Check with `assert_quiet` on `removed route prefix=` in `nos-e2e`.
+- IPv4 and IPv6 are both replaced; the `vpn-v6`, `vpn-multipath`, `bgp-multipath` and `ospf-spf` phases are the kernel regression guard. IPv6 ECMP replace needs a kernel that replaces a multipath route whole (the behaviour of current kernels; very old ones could replace only the first hop).
+
 ## MPLS (L3VPN, `nos-ribd`, #581)
 
 - `RibDriver::sync_mpls(table, Some(Mpls { label, underlay }))` installs the AF_MPLS route `<label> dev <vrf>` (pop, then an IP lookup in the VRF; one route serves IPv4 and IPv6). Each call dumps the AF_MPLS routes, deletes any other label pointing at this VRF first (a changed `vpn.label`, a previous run), then adds ours with `NLM_F_REPLACE` if missing. `None` and `teardown` delete it. Logs: `installed mpls pop route` / `removed mpls pop route` with `table`, `vrf`, `label`.

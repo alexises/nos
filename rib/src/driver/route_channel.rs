@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use netlink_packet_core::{
-    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST,
+    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE,
+    NLM_F_REQUEST,
 };
 use netlink_packet_route::route::RouteMessage;
 use netlink_packet_route::RouteNetlinkMessage;
@@ -57,6 +58,16 @@ impl RouteChannel {
 
     pub async fn add(&self, message: RouteMessage) -> Result<(), DriverError> {
         let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE;
+        self.request(RouteNetlinkMessage::NewRoute(message), flags)
+            .await
+    }
+
+    /// Installs `message`, replacing the route at the same
+    /// `(prefix, table, priority)` in one atomic kernel step (make-before-break:
+    /// no window with the route absent). `NLM_F_CREATE` without `EXCL` also
+    /// installs when the route is already gone.
+    pub async fn replace(&self, message: RouteMessage) -> Result<(), DriverError> {
+        let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_REPLACE | NLM_F_CREATE;
         self.request(RouteNetlinkMessage::NewRoute(message), flags)
             .await
     }
