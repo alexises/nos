@@ -361,6 +361,7 @@ pub(super) fn passes_redistribute_policy(prefix: Ipv4Net, policy: &CompiledPolic
             extended_communities: &[],
             large_communities: &[],
             validation_state: nos_rpl::ValidationState::default(),
+            rd: None,
         },
     };
     matches!(

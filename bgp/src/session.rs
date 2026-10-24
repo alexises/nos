@@ -728,6 +728,11 @@ impl SessionManager {
         }
     }
 
+    /// `BgpRib::vpn_soo_skipped`, for `vpn_push_client`'s log line.
+    pub async fn vpn_soo_skipped(&self) -> std::collections::HashSet<crate::rib::SooSkip> {
+        self.bgp_rib.lock().await.vpn_soo_skipped()
+    }
+
     /// `BgpRib::vpn_import_snapshot`, for `vpn_push_client`.
     pub async fn vpn_import_snapshot(&self) -> (Option<String>, Option<crate::rib::VpnImports>) {
         self.bgp_rib.lock().await.vpn_import_snapshot()
@@ -885,6 +890,9 @@ impl SessionManager {
                 as_path: r.route.as_path.to_string(),
                 local_pref: r.route.local_pref,
                 best,
+                site_of_origin: crate::vpn::sites_of_origin(&r.route.extended_communities)
+                    .first()
+                    .map(|s| crate::vpn::format_soo(*s)),
             })
             .collect()
     }
@@ -1691,6 +1699,7 @@ mod tests {
                 as_path: "65001".into(),
                 local_pref: 100,
                 best: true,
+                site_of_origin: None,
             }
         );
         let one = m

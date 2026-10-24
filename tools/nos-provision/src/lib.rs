@@ -833,6 +833,10 @@ pub struct Args {
     #[arg(long)]
     pub vpn_label: Option<u32>,
 
+    /// Site of Origin of `--vpn-table` (`asn:nn`).
+    #[arg(long)]
+    pub vpn_site_of_origin: Option<String>,
+
     /// Clears `--vpn-table`'s VPN config (`RoutingTableOp::ClearVpn`).
     #[arg(long)]
     pub vpn_clear: bool,
@@ -1735,6 +1739,7 @@ fn vpn_table_ops(args: &Args) -> Vec<ConfigOp> {
                         .unwrap_or_else(|| args.bgp_instance.clone()),
                 ),
                 label: args.vpn_label,
+                site_of_origin: args.vpn_site_of_origin.clone(),
             },
         }),
     ]
@@ -6281,6 +6286,8 @@ mod tests {
             "65000:2",
             "--vpn-label",
             "100",
+            "--vpn-site-of-origin",
+            "65001:77",
         ])
         .unwrap();
         for m in [
@@ -6288,6 +6295,7 @@ mod tests {
             "SetVpn",
             "65000:2",
             "label: Some(100)",
+            "site_of_origin: Some(\"65001:77\")",
         ] {
             shows(&o, m);
         }

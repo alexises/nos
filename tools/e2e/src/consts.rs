@@ -247,6 +247,16 @@ pub const VPN_EXPORT_B: &str = "192.0.2.20/32";
 /// no explicit label, so `nos-ribd`'s registry always hands it the first
 /// allocated label (`LABEL_BASE`), and never frees it.
 pub const VPN_LABEL: u32 = 1000;
+/// `vpn-v6`: router-a's VRF loopback (the VPNv6 route GoBGP must see) and the
+/// IPv6 twin of `vpn-dataplane`'s CE networks (ULA, next to their IPv4
+/// `L3_SUBNET_*`): each PE's address, the host's, and the subnet.
+pub const VPN6_EXPORT_A: &str = "2001:db8:a::1/128";
+pub const L3V6_SUBNET_A: &str = "fd18:1::/64";
+pub const L3V6_SUBNET_B: &str = "fd18:2::/64";
+pub const L3V6_GW_A: &str = "fd18:1::2";
+pub const L3V6_GW_B: &str = "fd18:2::2";
+pub const L3V6_HOST_A: &str = "fd18:1::10";
+pub const L3V6_HOST_B: &str = "fd18:2::10";
 pub const L3_VNI: u32 = 5000;
 pub const L3_RT: &str = "65000:5000";
 pub const L3_RD_A: &str = "65001:5000";

@@ -351,8 +351,27 @@ The reverse feed is `fdb_push_client.rs`: a change-driven feed (like `rib_push_c
 - Matching, family-agnostic (the surface #574/#580 reuse): `VrfSet::import_targets(ext_communities)` is any-of between the route's RTs (`vpn::route_targets`) and each VRF's import set, no RT no import; `VrfSet::import_by_table::<T, R>(routes)` groups `(VpnKey<T>, ext communities, payload)` by table, a route landing in every matching table.
 - Selection (`rib/vpn_import.rs`, `BgpRib::vpn_import_snapshot`): every VPN Adj-RIB-In path whose PE passes `next_hop_feasible` is a candidate in each matching VRF, RD stripped, so RDs compete there. `decision_cmp` picks one per (table, prefix); candidates are sorted by RD and the position is the step-10 path id, so a full tie picks the lowest RD. `(None, None)` while deferring. Returns the underlay table (`owning_routing_table`) beside it.
 - Push (`vpn_push_client.rs`, started in `main.rs`): a copy of `fdb_push_client`'s `Feed::Tables` loop (`ponytail:` merge when a third table feed appears). Each tick resolves every distinct PE with one `RibRequest::ResolveNextHop` to the underlay `nos-ribd` (a failed query keeps the last answers), withholds a route whose PE is unresolved (`debug!` `vpn route withheld, pe next hop unresolved in the underlay`), then pushes `RibRequest::PushVpnRoutes` per VRF table: `Full` on connect, diffed `Add`/`Remove` after. A label or resolution change is an `Add`.
+- Site of Origin (#582): `Vrf.soo` is the table's `vpn.site_of_origin` as a `u64` (`nos_proto::evpn_id::parse_soo`, the RT value with subtype 0x03). `import_targets` skips a VRF whose own SoO (`vpn::has_soo`) is on the route; `VrfSet::soo_blocked` lists those pairs, `BgpRib::vpn_soo_skipped` collects them over the Adj-RIB-In and `vpn_push_client::log_soo_skips` logs each once (`vpn route skipped by site of origin table=… rd=… prefix=… soo=…`, again if it clears and returns). Export is `nos-ribd`'s: `rib/src/vpn.rs::originated` appends the SoO to `VpnPrefix.ext_communities` beside the export RTs, so `nos-bgpd` carries it like any extended community.
 - `ponytail:` snapshot-based, O(paths x VRFs) per push tick; single best path per VRF prefix, no VPN multipath. A `Connected` underlay hop resolves to the PE itself with no ifindex (#581 looks the device up).
 - Logs (e2e anchors): `vpn route imported table=… prefix=… labels=[…] rd=… next_hop=<pe>`, `vpn route unimported table=… prefix=…` (`info`), `vpn route import changed …` (`debug`), `sent initial vpn snapshot to nos-ribd table=… routes=…`.
+
+### VPN reuse surface (#574)
+
+What the L3VPN code (#573) leaves for VPN Flowspec (#574, SAFI 134) to build on:
+
+- `vpn::VpnKey<T> = (Rd, T)` keys any VPN table; L3VPN uses `T = IpNet`, #574 uses `T = FlowSpec`. Selection is `select_vpn`/`vpn_loc` in `rib/vpn_out.rs`: learn through the peer-group policy, `best_path` over every peer's copy plus the local export, advertise next-hop-self for local and unchanged for reflected. `rib/vpn_out.rs` is the template for a SAFI 134 Adj-RIB-In, selection and reflection.
+- `vpn::VrfSet` is the table -> (RD, import RTs, export RTs, SoO) map built from `nos_proto::Config` each resync; `import_targets`/`import_by_table::<T, R>` are family-agnostic (they never name an IP prefix), so #574 imports a `VpnKey<FlowSpec>` by the same RT rule and gets the Site of Origin check for free.
+- `vpn/ext_comm.rs`: `route_targets`, `sites_of_origin`, `has_soo`, `rt`, `soo_from_rt`, `format_soo`; `nos_proto::evpn_id` parses the text forms. RPL reaches the same values through `rt()`/`soo()`/`rd()` and `this.bgp.rd` (`nos-rpl` keeps its own encoder; `vpn/ext_comm.rs`'s `rpl_literals_equal_the_config_parsers` pins it to `parse_rt`/`parse_rd`).
+- Push: `vpn_push_client.rs` (bgpd -> a VRF's ribd) and `RedistributeVpnPrefixes` (ribd -> bgpd, `VpnPrefix { rd, prefix, labels, ext_communities }`) are the two directions. #574 adds a second payload next to them: the received rules per VRF, validated against that VRF's unicast table, and `nos-acld` receiving the table beside the rule.
+- Log conventions: `vpn route learned|withdrawn|imported|unimported|advertised|skipped by site of origin`, fields `table`, `rd`, `prefix`, `labels`, `next_hop`, in that order.
+
+Still #574's: SAFI 134 negotiation (`fsm::negotiate_safi` is shared), the per-VRF validation, and the acld push carrying the table.
+
+### Policy hooks on VPN routes (#582)
+
+- Import policy runs in `vpn_out::learn_batch` through `apply_policy(.., Some(rd))` when the path is stored, before VRF import by RT: an RT added there steers the route into other tables, a reject withdraws a held copy, and the stored and reflected path carries the edit.
+- Export policy runs in `build_advertisement` (its `flow` tuple carries the policy and the RD) on every path sent, after ribd attached the RTs and the SoO.
+- `to_policy_input(.., rd)` feeds `BgpInput.rd` (`u64::from_be_bytes` of the RD); every non-VPN caller passes `None`, and a route without an RD never equals `rd(..)`.
 
 ### Backup path
 

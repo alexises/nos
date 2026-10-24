@@ -74,6 +74,19 @@ pub fn parse_rt(text: &str) -> Option<u64> {
     Some(u64::from_be_bytes(b))
 }
 
+/// The Site of Origin (RFC 4364 section 7, subtype 0x03) with `rt`'s value:
+/// same three types, same encoding, only the subtype differs.
+#[must_use]
+pub fn soo_from_rt(rt: u64) -> u64 {
+    (rt & !(0xff << 48)) | (0x03 << 48)
+}
+
+/// Parses `asn:nn` / `a.b.c.d:nn` as a Site of Origin (see [`parse_rt`]).
+#[must_use]
+pub fn parse_soo(text: &str) -> Option<u64> {
+    parse_rt(text).map(soo_from_rt)
+}
+
 /// RFC 7348 / RFC 8365 VXLAN Encapsulation extended community (type 0x03,
 /// subtype 0x0c, tunnel type 8).
 pub const ENCAP_VXLAN: u64 = 0x030c_0000_0000_0008;
@@ -226,6 +239,18 @@ pub fn vxlan_name(vni: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soo_has_the_rt_value_in_the_three_forms() {
+        assert_eq!(parse_soo("65001:77"), Some(0x0003_fde9_0000_004d));
+        assert_eq!(parse_soo("10.0.0.1:7"), Some(0x0103_0a00_0001_0007));
+        assert_eq!(parse_soo("4200000000:9"), Some(0x0203_fa56_ea00_0009));
+        assert_eq!(parse_soo("junk"), None);
+        assert_eq!(
+            soo_from_rt(parse_rt("65001:77").unwrap()),
+            parse_soo("65001:77").unwrap()
+        );
+    }
 
     #[test]
     fn router_mac_round_trips_with_the_rfc_9135_layout() {

@@ -2702,6 +2702,7 @@ fn passes_redistribute_policy(prefix: Ipv6Net, policy: &CompiledPolicy) -> bool 
             extended_communities: &[],
             large_communities: &[],
             validation_state: nos_rpl::ValidationState::default(),
+            rd: None,
         },
     };
     matches!(

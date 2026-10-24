@@ -45,6 +45,9 @@ pub enum FieldId {
     BgpLargeCommunities,
     /// RFC 6811 origin validation state, read-only.
     BgpValidationState,
+    /// `this.bgp.rd`: the Route Distinguisher of a VPN route (RFC 4364),
+    /// read-only; unset for a non-VPN route.
+    BgpRd,
 }
 
 /// The type of a [`FieldId`], as the checker sees it.
@@ -60,6 +63,8 @@ pub enum FieldType {
     OptionalIp,
     /// Integer that may be absent.
     OptionalInt,
+    /// A Route Distinguisher that may be absent; only `==`/`!=` against `rd(..)`.
+    OptionalRd,
     /// One of the named enum's variants (e.g. `origin`).
     Enum(&'static str),
     /// List of integers (e.g. an AS path).
@@ -214,6 +219,14 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
         FieldInfo {
             id: FieldId::BgpValidationState,
             ty: FieldType::Enum("rpki"),
+            mutable: false,
+        },
+    ),
+    (
+        &["bgp", "rd"],
+        FieldInfo {
+            id: FieldId::BgpRd,
+            ty: FieldType::OptionalRd,
             mutable: false,
         },
     ),

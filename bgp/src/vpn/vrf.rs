@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 
-use nos_proto::evpn_id::{parse_rd, parse_rt};
+use nos_proto::evpn_id::{parse_rd, parse_rt, parse_soo};
 use nos_proto::Config;
 
-use super::{route_targets, Rd, VpnKey};
+use super::{has_soo, route_targets, Rd, VpnKey};
 
 /// One VRF: a routing table whose `vpn.bgp_instance` is this instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,9 @@ pub struct Vrf {
     pub import: Vec<u64>,
     /// Export Route Targets (#580).
     pub export: Vec<u64>,
+    /// The table's Site of Origin (RFC 4364 section 7): a route carrying it
+    /// came from this VRF's own CE site and is not imported back.
+    pub soo: Option<u64>,
 }
 
 /// Every VRF of one instance, in config order.
@@ -42,6 +45,7 @@ impl VrfSet {
                         rd: parse_rd(t.vpn.rd.as_deref()?)?,
                         import: rts(&t.vpn.route_targets_import),
                         export: rts(&t.vpn.route_targets_export),
+                        soo: t.vpn.site_of_origin.as_deref().and_then(parse_soo),
                     })
                 })
                 .collect(),
@@ -54,16 +58,36 @@ impl VrfSet {
     }
 
     /// The tables a route carrying `ext_communities` is imported into: those
-    /// whose import set holds one of its Route Targets (other extended
-    /// communities are ignored).
+    /// whose import set holds one of its Route Targets, unless it carries
+    /// the table's own Site of Origin (other extended communities are
+    /// ignored; another table's Site of Origin does not block).
     #[must_use]
     pub fn import_targets(&self, ext_communities: &[u64]) -> Vec<&str> {
+        self.matching(ext_communities)
+            .filter(|v| !v.soo.is_some_and(|s| has_soo(ext_communities, s)))
+            .map(|v| v.table.as_str())
+            .collect()
+    }
+
+    /// The (table, Site of Origin) pairs whose import would take a route
+    /// carrying `ext_communities` but for that table's own Site of Origin on it.
+    #[must_use]
+    pub fn soo_blocked(&self, ext_communities: &[u64]) -> Vec<(&str, u64)> {
+        self.matching(ext_communities)
+            .filter_map(|v| {
+                Some((
+                    v.table.as_str(),
+                    v.soo.filter(|s| has_soo(ext_communities, *s))?,
+                ))
+            })
+            .collect()
+    }
+
+    fn matching<'a>(&'a self, ext_communities: &[u64]) -> impl Iterator<Item = &'a Vrf> {
         let rts = route_targets(ext_communities);
         self.0
             .iter()
-            .filter(|v| v.import.iter().any(|i| rts.contains(i)))
-            .map(|v| v.table.as_str())
-            .collect()
+            .filter(move |v| v.import.iter().any(|i| rts.contains(i)))
     }
 
     /// Groups `routes` (key, extended communities, payload) by the tables
@@ -97,6 +121,7 @@ mod tests {
                 route_targets_export: vec!["65000:9".to_string()],
                 bgp_instance: Some(instance.to_string()),
                 label: None,
+                site_of_origin: None,
             },
             ..RoutingTable::default()
         }
@@ -124,6 +149,31 @@ mod tests {
         assert_eq!(s.tables().collect::<Vec<_>>(), ["red", "blue"]);
         assert_eq!(s.0[0].rd, parse_rd("65000:3").unwrap());
         assert_eq!(s.0[0].export, vec![rt(0, 65000, 9).unwrap()]);
+    }
+
+    #[test]
+    fn own_site_of_origin_blocks_the_import_and_a_foreign_one_does_not() {
+        let mut s = set();
+        let soo = |t: &str| parse_soo(t).unwrap();
+        s.0[0].soo = Some(soo("65001:77"));
+        let rt1 = rt(0, 65000, 1).unwrap();
+        // Own SoO: red skipped, blue (no SoO) still takes it.
+        assert_eq!(s.import_targets(&[rt1, soo("65001:77")]), ["blue"]);
+        assert_eq!(
+            s.soo_blocked(&[rt1, soo("65001:77")]),
+            [("red", soo("65001:77"))]
+        );
+        // Foreign and absent SoO import into both; nothing is blocked.
+        for ext in [vec![rt1, soo("65001:99")], vec![rt1]] {
+            assert_eq!(s.import_targets(&ext), ["red", "blue"]);
+            assert_eq!(s.soo_blocked(&ext), []);
+        }
+        // No import RT matches: nothing to block either.
+        assert_eq!(s.soo_blocked(&[soo("65001:77")]), []);
+        // The block is per-table: the SoO, not the RT, decides, so the route
+        // returns the moment the table's SoO changes.
+        s.0[0].soo = Some(soo("65001:78"));
+        assert_eq!(s.import_targets(&[rt1, soo("65001:77")]), ["red", "blue"]);
     }
 
     #[test]

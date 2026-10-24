@@ -181,6 +181,8 @@ topics! {
     RoutingTableVpnBgpInstance,
     /// `RoutingTableVpn.label`
     RoutingTableVpnLabel,
+    /// `RoutingTableVpn.site_of_origin`
+    RoutingTableVpnSiteOfOrigin,
     /// `Config.static_routing_instances`
     StaticRoutingInstance,
     /// `StaticRoutingInstance.routes`

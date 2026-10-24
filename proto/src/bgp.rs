@@ -172,6 +172,9 @@ pub struct VpnRouteSummary {
     pub local_pref: u32,
     /// This path is the best one for its (RD, prefix), the one reflected.
     pub best: bool,
+    /// The Site of Origin the path carries (RFC 4364 section 7), `65001:77`.
+    #[serde(default)]
+    pub site_of_origin: Option<String>,
 }
 
 /// RFC 6811 origin validation state of a route, for `show bgp routes`.

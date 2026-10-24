@@ -205,6 +205,7 @@ mod tests {
                 extended_communities: &[],
                 large_communities: &[],
                 validation_state: nos_rpl::ValidationState::default(),
+                rd: None,
             },
         };
         matches!(

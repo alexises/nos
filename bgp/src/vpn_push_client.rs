@@ -11,7 +11,7 @@
 // ponytail: copied from `fdb_push_client` rather than generalized; merge the
 // two when a third table feed appears.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,10 +28,10 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, info, warn};
 
-use crate::rib::VpnImports;
+use crate::rib::{SooSkip, VpnImports};
 use crate::rib_client::resolve_next_hops;
 use crate::session::SessionManager;
-use crate::vpn::format_rd;
+use crate::vpn::{format_rd, format_soo};
 use nos_daemon::watchdog::resolve_once;
 
 const FALLBACK_TICK: Duration = Duration::from_secs(10);
@@ -74,6 +74,7 @@ async fn run(
     let mut conns: HashMap<String, Conn> = HashMap::new();
     let mut shown: HashMap<String, Routes> = HashMap::new();
     let mut resolved = Resolved::new();
+    let mut skipped = HashSet::new();
     let mut changed = sessions.push_changed();
     while !*shutdown.borrow() {
         let mut unconnected = false;
@@ -84,6 +85,7 @@ async fn run(
             if let Some(r) = resolve(&watchdog_socket, underlay, &imports).await {
                 resolved = r;
             }
+            log_soo_skips(&mut skipped, sessions.vpn_soo_skipped().await);
             let tables = build(&imports, &resolved);
             log_changes(&shown, &tables);
             shown.clone_from(&tables);
@@ -200,6 +202,14 @@ fn build(imports: &VpnImports, resolved: &Resolved) -> HashMap<String, Routes> {
             (table.clone(), routes)
         })
         .collect()
+}
+
+/// Logs each path newly refused by Site of Origin, once; `held` becomes `now`.
+fn log_soo_skips(held: &mut HashSet<SooSkip>, now: HashSet<SooSkip>) {
+    for (table, rd, prefix, soo) in now.difference(held) {
+        info!(table = %table, rd = %format_rd(rd), prefix = %prefix, soo = %format_soo(*soo), "vpn route skipped by site of origin");
+    }
+    *held = now;
 }
 
 /// The imported/unimported log lines between two pushes.
@@ -351,6 +361,13 @@ mod tests {
             diff(&red(&base), &red(&gone)),
             vec![VpnRouteUpdate::Remove("10.1.0.0/24".parse().unwrap())]
         );
+        // A Site of Origin skip is logged once, then again after it clears.
+        let skip: SooSkip = ("red".into(), [0; 8], "10.1.0.0/24".parse().unwrap(), 7);
+        let mut held = HashSet::new();
+        log_soo_skips(&mut held, [skip.clone()].into());
+        assert_eq!(held.len(), 1);
+        log_soo_skips(&mut held, HashSet::new());
+        assert!(held.is_empty());
         // Logging covers appear, change and disappear without panicking.
         log_changes(&HashMap::new(), &base);
         log_changes(&base, &build(&imports(200), &resolved("10.0.0.1")));
@@ -392,6 +409,7 @@ mod tests {
             rd: [0; 8],
             import: vec![],
             export: vec![],
+            soo: None,
         };
         sessions.set_vpn_vrfs(crate::vpn::VrfSet(vec![vrf])).await;
         let (tx, rx) = watch::channel(false);

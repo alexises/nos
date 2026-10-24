@@ -28,8 +28,7 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 - Socket-level only: `fsm.rs` never sees it. MD5 or TCP-AO, mutually exclusive (one per socket); raw `setsockopt` lives in `nos-tcp-auth`, `nos-bgp` only calls its safe wrappers. Keys are admin labels (#508): `ResolvedAuth::resolve(&BgpAuth, &Config)` (peers and `rpki::resolve_auths`), subscribed with `DiffScope::Admin`, so a rotation restarts the peer (`diff_peers`) except what `session::ao_delta` expresses.
 - The listener is shared: keys are installed on it per peer address (`applied_auth`, `sync_listener_auth`; `spawn_listeners` primes them).
 - `tcp::apply_auth(on_listener)` strips `set_current`/`set_rnext` for a socket in `LISTEN` (`TCP_AO_ADD_KEY` returns `EINVAL` otherwise); the active side keeps them.
-- `nos_tcp_auth::add_ao_key`/`delete_ao_key` set `ifindex = 0`, not `-1` (`TCP_AO_KEYF_IFINDEX` is never used); else `EINVAL`.
-- Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; config `is_current` only seeds new connections. `ao_delta` returns `None` (restart) for MD5, a kept key whose RecvID/algorithm/secret/`exclude_options` changed, or an add reusing a removed RecvID. Otherwise an Established session gets `FsmCommand::UpdateAo`, `PeerSlot::auth()`/`set_auth()` seed new connections. Only rnext is pushed to a live socket (also on accept), never `set_current`; any error (expected `EBUSY`) resets.
+- Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; `ao_delta` returns `None` (restart) for MD5, a changed kept key or a reused RecvID, else an Established session gets `FsmCommand::UpdateAo` (only rnext reaches a live socket, errors such as `EBUSY` reset). Rules: internals page.
 
 ## GTSM / `max-hops`
 
@@ -115,7 +114,14 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162).
 - MAC mobility has **no withdraw**: a sequence only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; else PEs on one segment freeze each other as duplicates.
 - Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH), VRF import (`vpn::VrfSet`; PE via the underlay's `ResolveNextHop`): internals page.
-- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP, VNI, label (`evpn_local` by `EvpnSource`, `vpn_local` by table). VRF exports go next-hop-self; reflected VPN paths keep theirs (the label is the PE's).
+- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP, VNI, label (`evpn_local` by `EvpnSource`, `vpn_local` by table).
+
+## L3VPN (#573)
+
+- A reflector holds every VPN path whatever its RTs (no VRF needed) and keeps label, RD and next hop; a VRF export is next-hop-self.
+- Imported routes are never re-exported; a route with a VRF's own Site of Origin is not imported into it.
+- The label is owned and persisted by `nos-ribd`, never `nos-bgpd`.
+- `bgp/src/vpn/` is the shared RD/RT core (`VpnKey<T>`, `VrfSet`); VPN Flowspec (#574) must reuse it. Policies see `this.bgp.rd`.
 
 ## Backup path, multipath (#70)
 

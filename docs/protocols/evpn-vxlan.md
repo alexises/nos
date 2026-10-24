@@ -137,7 +137,7 @@ edge-1(t1/bgp-instance:r1/peer-group:pg-evpn)> set evpn-import-policy only-tenan
 ```
 
 - The policy is an ordinary [RPL](routing-policy.md) policy. Match route targets with `this.bgp.extended_communities.contains(<rt>)`; a two-octet-AS route target `65000:10000` is the extended community `0:2:279172874250000` (the AS times 2^32 plus the number). Aliases and groups work too.
-- Example policy: `if this.bgp.extended_communities.contains(0:2:279172874250000):` then `accept`, else `reject`.
+- Example policy: `if this.bgp.extended_communities.contains(0:2:279172874250000):` then `accept`, else `reject`. The same RT can be written `rt(65000:10000)` ([Values](routing-policy.md#values)).
 - Applies to Type-1, 2, 3 and 5. A rejected route is treated like a withdrawal: it is not stored, not given to `nos-fdbd`, and `nos-bgpd` logs `evpn route rejected by import policy`.
 - Type-4 (Ethernet Segment) routes are never filtered by this policy: their route target is the ES-Import one, so an RT match would reject all of them. `nos-fdbd` applies the ES-Import check itself (below).
 - Only accept/reject counts; attribute rewrites are ignored. `this.prefix` is the Type-5 prefix, `0.0.0.0/0` for the other types.

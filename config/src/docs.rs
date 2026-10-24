@@ -705,6 +705,13 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "16-1048575 (0-15 are reserved, RFC 3032), unique across routing tables. \
              Left unset, nos-ribd will allocate one.",
         ),
+        Topic::RoutingTableVpnSiteOfOrigin => (
+            "Set the Site of Origin of the table's CE site.",
+            "Written asn:nn or a.b.c.d:nn (RFC 4364 section 7). Attached to every VPN route \
+             the table exports; a received VPN route that already carries it is not imported \
+             into this table, so a route never returns to the site it came from. A routing \
+             table is one site; a foreign Site of Origin still imports.",
+        ),
         Topic::StaticRoutingInstance => (
             "Create a static routing instance in the transaction if it doesn't already exist.",
             concat!(

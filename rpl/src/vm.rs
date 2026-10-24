@@ -138,6 +138,8 @@ pub enum Op {
     /// `this.bgp.<field> == <ip literal>` on an optional-address field:
     /// false when the field is unset.
     OptIpEq(FieldId, IpAddr),
+    /// `this.bgp.rd == rd(..)`: false when the route has no RD.
+    OptRdEq(u64),
     /// Pops an `Enum` and sets `this.bgp.origin`.
     SetOrigin,
     /// Pops an `Ip` and sets `this.bgp.next_hop`.
@@ -257,6 +259,10 @@ pub struct BgpInput<'a> {
     pub large_communities: &'a [(u32, u32, u32)],
     /// RFC 6811 origin validation state.
     pub validation_state: ValidationState,
+    /// The Route Distinguisher of a VPN route (RFC 4364 section 4.2), the 8
+    /// octets as a big-endian integer (types 0/1/2 start with a zero octet,
+    /// so it is also a non-negative `i64`); `None` for a non-VPN route.
+    pub rd: Option<u64>,
 }
 
 /// Attribute rewrites beyond the always-carried ones on `Verdict::Accept`.
@@ -380,6 +386,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             Op::OptIpEq(id, ip) => {
                 push!(Value::Bool(opt_ip(*id, input, next_hop_edit) == Some(*ip)));
             }
+            Op::OptRdEq(rd) => push!(Value::Bool(input.bgp.rd == Some(*rd))),
             Op::SetOrigin => cur_origin = origin_from(pop!()),
             Op::SetNextHop => match pop!() {
                 Value::Ip(a) => next_hop_edit = NextHopSet::Addr(a),

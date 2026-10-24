@@ -1190,8 +1190,13 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
     if route.header.flags.contains(RouteFlags::Cloned) {
         return None;
     }
+    // `build_route` sends a VPNv6 route to an IPv4 PE through its IPv4-mapped
+    // address; the desired state says IPv4.
     let gateway_of = |attr: &RouteAttribute| match attr {
-        RouteAttribute::Gateway(addr) => route_address_to_ip(addr),
+        RouteAttribute::Gateway(addr) => route_address_to_ip(addr).map(|ip| match ip {
+            IpAddr::V6(a) => a.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+            IpAddr::V4(_) => ip,
+        }),
         _ => None,
     };
     let mut gateways: Vec<IpAddr> = route
@@ -1267,6 +1272,23 @@ fn build_route(
     labels: &[u32],
 ) -> Option<RouteMessage> {
     let v4 = prefix.addr().is_ipv4();
+    // A VPNv6 route (RFC 4659) leaves toward an IPv4 PE: the kernel refuses an
+    // IPv6 route with `RTA_VIA` ("IPv6 does not support RTA_VIA"), but takes
+    // the IPv4-mapped gateway (`via ::ffff:a.b.c.d`) and sends the labelled
+    // packet to the PE's IPv4 neighbour. `extract_route` maps it back.
+    let mapped;
+    let hops = if !v4 && matches!(hops.as_slice(), [(IpAddr::V4(_), _)]) {
+        mapped = hops
+            .iter()
+            .map(|(gw, oif)| match gw {
+                IpAddr::V4(a) => (IpAddr::V6(a.to_ipv6_mapped()), *oif),
+                IpAddr::V6(_) => (*gw, *oif),
+            })
+            .collect::<Hops>();
+        &mapped
+    } else {
+        hops
+    };
     if (backup && hops.is_empty()) || hops.iter().any(|(gw, _)| gw.is_ipv4() != v4) {
         return None;
     }
@@ -1564,6 +1586,45 @@ mod tests {
                 Some(((p, false), (vec![addr(gw)], vec![2000])))
             );
         }
+    }
+
+    /// #582: a `VPNv6` route toward an IPv4 PE is an `RTA_GATEWAY` of the
+    /// IPv4-mapped address (the kernel has no `RTA_VIA` for IPv6) that reads
+    /// back as the IPv4 gateway, so the dump-diff sees no change.
+    #[test]
+    fn a_vpnv6_route_to_an_ipv4_pe_uses_the_mapped_gateway_and_reads_back_as_ipv4() {
+        let p = net("fd18:2::/64");
+        let route =
+            build_route(p, &vec![(addr("10.50.0.3"), Some(4))], 100, false, &[1000]).unwrap();
+        let wire: Vec<_> = route
+            .attributes
+            .iter()
+            .filter_map(|a| match a {
+                RouteAttribute::Gateway(RouteAddress::Inet6(g)) => Some(*g),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wire, vec!["::ffff:10.50.0.3".parse::<Ipv6Addr>().unwrap()]);
+        assert_eq!(
+            extract_route(&route),
+            Some(((p, false), (vec![addr("10.50.0.3")], vec![1000])))
+        );
+        // Removal builds the same message from the IPv4 gateway, no labels.
+        assert!(build_route(p, &vec![(addr("10.50.0.3"), None)], 100, false, &[]).is_some());
+        // Not a licence for ECMP, and an IPv6 gateway stays as it is.
+        assert!(build_route(
+            p,
+            &vec![(addr("10.50.0.3"), None), (addr("10.50.0.4"), None)],
+            100,
+            false,
+            &[]
+        )
+        .is_none());
+        let v6 = build_route(p, &vec![(addr("fd18::1"), None)], 100, false, &[]).unwrap();
+        assert_eq!(
+            extract_route(&v6),
+            Some(((p, false), (vec![addr("fd18::1")], vec![])))
+        );
     }
 
     #[test]

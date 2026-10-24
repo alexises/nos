@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 
-use nos_proto::evpn_id::{parse_rd, parse_rt};
+use nos_proto::evpn_id::{parse_rd, parse_rt, parse_soo};
 use nos_proto::{Config, IpNet, VpnPrefix};
 
 use crate::rib::{RibEntry, RouteSource};
@@ -17,6 +17,8 @@ pub struct VrfExport {
     pub rd: [u8; 8],
     /// Export Route Targets as extended communities.
     pub export: Vec<u64>,
+    /// The table's Site of Origin (RFC 4364 section 7), attached beside the RTs.
+    pub soo: Option<u64>,
     /// The underlay instance, `vpn.bgp_instance` (never `table.bgp_instance`).
     pub bgp_instance: String,
     /// That instance's routing table: where MPLS arrives and leaves.
@@ -69,13 +71,14 @@ pub fn resolve<E>(
             .find(|i| &i.name == bgp_instance)
             .and_then(|i| i.routing_table.clone()),
         label,
+        soo: v.site_of_origin.as_deref().and_then(parse_soo),
     }))
 }
 
 /// One VPN route per best route of the table, except the loop guard's
 /// `Vpn` (imported) ones and `Evpn` ones (no EVPN/VPN stitching): when the
 /// best route of a prefix is imported, nothing is exported for it.
-// ponytail: no RPL policy on export (RT/RD hooks are #582); every best route goes.
+// ponytail: no RPL policy here; `nos-bgpd`'s export policy edits the RTs/SoO after.
 pub fn originated<S: BuildHasher>(
     best: &HashMap<IpNet, RibEntry, S>,
     vrf: &VrfExport,
@@ -86,7 +89,7 @@ pub fn originated<S: BuildHasher>(
             rd: vrf.rd,
             prefix: e.prefix,
             labels: vec![vrf.label],
-            ext_communities: vrf.export.clone(),
+            ext_communities: vrf.export.iter().copied().chain(vrf.soo).collect(),
         })
         .collect()
 }
@@ -107,6 +110,7 @@ mod tests {
                         route_targets_export: vec!["65000:1".into(), "junk".into()],
                         bgp_instance: Some("core".into()),
                         label,
+                        site_of_origin: Some("65001:77".into()),
                     },
                     ..RoutingTable::default()
                 },
@@ -132,6 +136,7 @@ mod tests {
         assert_eq!(got.label, 77);
         assert_eq!(got.rd, parse_rd("65000:1").unwrap());
         assert_eq!(got.export, vec![parse_rt("65000:1").unwrap()]);
+        assert_eq!(got.soo, parse_soo("65001:77"));
         assert_eq!(got.bgp_instance, "core");
         assert_eq!(got.underlay, None, "no such instance in the config");
         let got: R = resolve(&cfg(None, Some("65000:1")), "red", |reserved| {
@@ -180,6 +185,7 @@ mod tests {
         let vrf = VrfExport {
             rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
             export: vec![7],
+            soo: parse_soo("65001:77"),
             bgp_instance: "core".into(),
             underlay: None,
             label: 1000,
@@ -191,8 +197,12 @@ mod tests {
             prefixes,
             ["10.1.0.0/24", "10.2.0.0/24", "10.3.0.0/24", "10.4.0.0/24"]
         );
-        assert!(out
+        assert!(out.iter().all(|r| r.rd == vrf.rd
+            && r.labels == [1000]
+            && r.ext_communities == [7, parse_soo("65001:77").unwrap()]));
+        let plain = VrfExport { soo: None, ..vrf };
+        assert!(originated(&best, &plain)
             .iter()
-            .all(|r| r.rd == vrf.rd && r.labels == [1000] && r.ext_communities == [7]));
+            .all(|r| r.ext_communities == [7]));
     }
 }

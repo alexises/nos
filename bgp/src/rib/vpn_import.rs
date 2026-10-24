@@ -10,7 +10,7 @@
 // ponytail: O(paths x VRFs) per push tick; import incrementally if it ever
 // shows in `tools/bench-bgp.sh`. Single best path, no VPN multipath yet.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use ipnet::IpNet;
@@ -27,6 +27,9 @@ pub struct VpnImport {
     pub labels: Vec<u32>,
     pub rd: Rd,
 }
+
+/// A path a VRF refused by Site of Origin: (table, RD, prefix, Site of Origin).
+pub type SooSkip = (String, Rd, IpNet, u64);
 
 /// Per VRF table (every one of the set, even empty), per prefix.
 pub type VpnImports = HashMap<String, HashMap<IpNet, VpnImport>>;
@@ -73,6 +76,21 @@ impl BgpRib {
             }
         }
         (self.owning_routing_table.clone(), Some(out))
+    }
+
+    /// The (table, RD, prefix, Site of Origin) of every held path a VRF
+    /// refused for carrying its own Site of Origin (RFC 4364 section 7).
+    pub fn vpn_soo_skipped(&self) -> HashSet<SooSkip> {
+        self.vpn_adj_rib_in
+            .values()
+            .flatten()
+            .flat_map(|(k, r)| {
+                self.vpn_vrfs
+                    .soo_blocked(&r.route.extended_communities)
+                    .into_iter()
+                    .map(move |(t, soo)| (t.to_string(), k.0, k.1, soo))
+            })
+            .collect()
     }
 
     /// The unicast decision process over one VRF prefix's candidates. They
