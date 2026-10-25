@@ -4,9 +4,17 @@ use bytes::{Buf, BufMut, BytesMut};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
+/// Largest accepted payload; a longer length prefix is `InvalidData` on both encode and decode.
+pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+fn too_large() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "ipc frame too large")
+}
+
 /// Framed codec for IPC messages over a Unix socket.
 ///
-/// Wire format: 4-byte little-endian length prefix followed by a postcard-encoded payload.
+/// Wire format: 4-byte little-endian length prefix followed by a postcard-encoded payload
+/// of at most [`MAX_FRAME`] bytes.
 /// A single `IpcCodec<T>` instance handles both encoding and decoding of type `T`.
 pub struct IpcCodec<T>(PhantomData<T>);
 
@@ -22,9 +30,14 @@ impl<T: Serialize> Encoder<T> for IpcCodec<T> {
     fn encode(&mut self, item: T, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let payload = postcard::to_allocvec(&item)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        let len = u32::try_from(payload.len())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        dst.put_u32_le(len);
+        if payload.len() > MAX_FRAME {
+            return Err(too_large());
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "bounded by MAX_FRAME < u32::MAX"
+        )]
+        dst.put_u32_le(payload.len() as u32);
         dst.put_slice(&payload);
         Ok(())
     }
@@ -39,6 +52,9 @@ impl<T: DeserializeOwned> Decoder for IpcCodec<T> {
             return Ok(None);
         }
         let len = u32::from_le_bytes(src[..4].try_into().unwrap()) as usize;
+        if len > MAX_FRAME {
+            return Err(too_large());
+        }
         if src.len() < 4 + len {
             src.reserve(4 + len - src.len());
             return Ok(None);
@@ -85,6 +101,32 @@ mod tests {
         let mut b = BytesMut::from(&[0u8, 0, 0, 0][..]);
         assert!(dec(&mut b).is_err());
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn over_cap_header_rejected_without_reserving() {
+        for len in [u32::try_from(MAX_FRAME + 1).unwrap(), u32::MAX] {
+            let mut b = BytesMut::from(&len.to_le_bytes()[..]);
+            let cap = b.capacity();
+            let e = dec(&mut b).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(b.capacity(), cap, "no reserve for a hostile length");
+        }
+    }
+
+    #[test]
+    fn at_cap_frame_roundtrips_and_over_cap_encode_fails() {
+        // postcard `Vec<u8>` = varint length (4 bytes at this size) + bytes.
+        let mut c = IpcCodec::<Vec<u8>>::default();
+        let mut buf = BytesMut::new();
+        c.encode(vec![7u8; MAX_FRAME - 4], &mut buf).unwrap();
+        assert_eq!(buf.len(), 4 + MAX_FRAME);
+        assert_eq!(c.decode(&mut buf).unwrap().unwrap().len(), MAX_FRAME - 4);
+
+        let e = c
+            .encode(vec![7u8; MAX_FRAME - 3], &mut BytesMut::new())
+            .unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

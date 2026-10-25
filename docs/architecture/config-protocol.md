@@ -40,6 +40,12 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - On start, a primary that fails to parse falls back to `config.yaml.bak` with an `error!` ("primary config corrupt, loaded backup"); the next commit rewrites the primary.
 - If the backup is missing or also corrupt, `nos-configd` refuses to start (never a silent default).
 
+### Framing limit
+
+- `IpcCodec` frames are a 4-byte LE length plus a postcard payload of at most `nos_proto::codec::MAX_FRAME` (64 MiB).
+- A longer length is `InvalidData` on decode (checked before any buffer is reserved, so a hostile `ff ff ff ff` costs nothing) and the connection is dropped.
+- Encode rejects an over-cap payload too, so an oversize message fails at the sender.
+
 ### Config plane vs data plane
 
 | Plane | Transport | Pattern |
