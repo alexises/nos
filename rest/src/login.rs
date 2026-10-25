@@ -11,13 +11,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::{Extension, Json};
 use base64::Engine as _;
-use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED};
+use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY, SESSION_EXPIRED};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -26,8 +27,8 @@ use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::ipc::Daemons;
 
 /// A failed login costs the account this much before the next attempt on it.
-// ponytail: per-username only — many usernames in parallel are unthrottled
-// (each still costs an argon2 verify). Add a per-source limit if that matters.
+// Per-username only; `MAX_INFLIGHT_LOGINS` caps the rest (many usernames at
+// once), and `nos-watchdogd` is the authoritative bound on argon2 work (#381).
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 
 /// After this many failures inside `FAILED_LOGIN_WINDOW` (counted from the
@@ -35,23 +36,92 @@ const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 const MAX_FAILED_LOGINS: u32 = 5;
 const FAILED_LOGIN_WINDOW: Duration = Duration::from_secs(60);
 
+/// Same window per source address, over all usernames. Higher than the
+/// per-user limit because a NAT or proxy puts many users behind one address;
+/// a success does not reset it (else one valid account would launder guesses).
+const MAX_FAILED_LOGINS_PER_IP: u32 = 20;
+/// Addresses tracked at once; past this, expired windows are pruned and, if
+/// that frees nothing, the map starts over (a forgotten source gets a fresh
+/// window).
+const MAX_TRACKED_IPS: usize = 4096;
+
+/// The peer address of the connection a request arrived on.
+#[derive(Clone, Copy)]
+pub struct ClientIp(pub IpAddr);
+
+/// Logins in flight to the watchdog at once, across all usernames. Above its
+/// own limit so the watchdog stays the real bound; this only stops `nos-restd`
+/// from queueing unbounded IPC connections behind it.
+const MAX_INFLIGHT_LOGINS: usize = 8;
+
 /// One attempt at a time per username, so guessing one account's password is
 /// limited to one guess per `FAILED_LOGIN_DELAY` however many streams or
 /// connections the guesses arrive on.
-#[derive(Default)]
 pub struct LoginGate {
+    inflight: Arc<tokio::sync::Semaphore>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per username: failures so far and when the window opened.
     failures: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per source address: failures so far and when the window opened.
+    failures_by_ip: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+}
+
+impl Default for LoginGate {
+    fn default() -> Self {
+        Self::with_inflight(MAX_INFLIGHT_LOGINS)
+    }
 }
 
 impl LoginGate {
+    fn with_inflight(n: usize) -> Self {
+        Self {
+            inflight: Arc::new(tokio::sync::Semaphore::new(n)),
+            locks: Mutex::default(),
+            failures: Mutex::default(),
+            failures_by_ip: Mutex::default(),
+        }
+    }
+
+    /// A slot for one login, or `429` straight away when all are taken.
+    fn try_slot(&self) -> ApiResult<tokio::sync::OwnedSemaphorePermit> {
+        self.inflight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::TooManyRequests {
+                detail: "too many logins in progress".into(),
+                retry_after_secs: 1,
+            })
+    }
+
     /// Seconds until `user` may try again, if it is locked out.
     fn retry_after(&self, user: &str) -> Option<u64> {
         let failures = self.failures.lock().expect("login gate lock");
         let &(count, since) = failures.get(user)?;
         let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
         (count >= MAX_FAILED_LOGINS).then(|| left.as_secs() + 1)
+    }
+
+    /// Seconds until `ip` may try again, if it is locked out.
+    fn retry_after_ip(&self, ip: IpAddr) -> Option<u64> {
+        let failures = self.failures_by_ip.lock().expect("login gate lock");
+        let &(count, since) = failures.get(&ip)?;
+        let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
+        (count >= MAX_FAILED_LOGINS_PER_IP).then(|| left.as_secs() + 1)
+    }
+
+    fn record_failure_ip(&self, ip: IpAddr) {
+        let mut failures = self.failures_by_ip.lock().expect("login gate lock");
+        if failures.len() >= MAX_TRACKED_IPS && !failures.contains_key(&ip) {
+            failures.retain(|_, (_, since)| since.elapsed() < FAILED_LOGIN_WINDOW);
+            if failures.len() >= MAX_TRACKED_IPS {
+                failures.clear();
+            }
+        }
+        let e = failures.entry(ip).or_insert((0, Instant::now()));
+        if e.1.elapsed() >= FAILED_LOGIN_WINDOW {
+            *e = (0, Instant::now());
+        }
+        e.0 += 1;
     }
 
     fn record_failure(&self, user: &str) {
@@ -141,6 +211,10 @@ fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
             Err(ApiError::Unauthorized(m))
         }
         WatchdogEvent::Denied(m) if m == "bad certificate request" => Err(ApiError::BadRequest(m)),
+        WatchdogEvent::Denied(m) if m == LOGIN_BUSY => Err(ApiError::TooManyRequests {
+            detail: m,
+            retry_after_secs: 1,
+        }),
         WatchdogEvent::Denied(m) => Err(ApiError::Unavailable(m)),
         other => Err(crate::ipc::unexpected("nos-watchdogd", &other)),
     }
@@ -156,14 +230,23 @@ fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
         (status = 200, body = Certificate),
         (status = 400, body = ErrorBody, description = "malformed certificate request"),
         (status = 401, body = ErrorBody, description = "unknown user or wrong password"),
-        (status = 429, body = ErrorBody, description = "too many failed attempts for this user; see Retry-After")
+        (status = 429, body = ErrorBody, description = "too many failed attempts for this user or source address, or too many logins in progress; see Retry-After")
     )
 )]
 pub async fn login(
     State(d): State<Daemons>,
+    ip: Option<Extension<ClientIp>>,
     Json(body): Json<LoginRequest>,
 ) -> ApiResult<Json<Certificate>> {
+    let ip = ip.map(|Extension(ClientIp(ip))| ip);
+    if let Some(retry_after_secs) = ip.and_then(|ip| d.login_gate.retry_after_ip(ip)) {
+        return Err(ApiError::TooManyRequests {
+            detail: "too many failed logins from this address".into(),
+            retry_after_secs,
+        });
+    }
     let csr_der = decode_csr(&body.csr)?;
+    let _slot = d.login_gate.try_slot()?;
     let gate = d.login_gate.lock_for(&body.user);
     let held = gate.lock().await;
     if let Some(retry_after_secs) = d.login_gate.retry_after(&body.user) {
@@ -183,6 +266,9 @@ pub async fn login(
         .await;
     if matches!(&reply, Ok(WatchdogEvent::Denied(m)) if m == INVALID_CREDENTIALS) {
         d.login_gate.record_failure(&body.user);
+        if let Some(ip) = ip {
+            d.login_gate.record_failure_ip(ip);
+        }
         tokio::time::sleep(FAILED_LOGIN_DELAY).await;
     } else if matches!(&reply, Ok(WatchdogEvent::Issued { .. })) {
         d.login_gate.clear(&body.user);
@@ -252,6 +338,47 @@ mod tests {
         assert_eq!(gate.retry_after("other"), None);
         gate.clear("u");
         assert_eq!(gate.retry_after("u"), None);
+    }
+
+    #[test]
+    fn try_slot_refuses_past_the_limit_and_frees_on_drop() {
+        let gate = LoginGate::with_inflight(2);
+        let a = gate.try_slot().unwrap();
+        let _b = gate.try_slot().unwrap();
+        assert!(matches!(
+            gate.try_slot(),
+            Err(ApiError::TooManyRequests {
+                retry_after_secs: 1,
+                ..
+            })
+        ));
+        drop(a);
+        assert!(gate.try_slot().is_ok());
+    }
+
+    #[test]
+    fn ip_lockout_is_per_address_and_bounded() {
+        let gate = LoginGate::default();
+        let (a, b): (IpAddr, IpAddr) = ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap());
+        for _ in 0..MAX_FAILED_LOGINS_PER_IP - 1 {
+            gate.record_failure_ip(a);
+        }
+        assert_eq!(gate.retry_after_ip(a), None);
+        gate.record_failure_ip(a);
+        assert_eq!(gate.retry_after_ip(a), Some(60));
+        assert_eq!(gate.retry_after_ip(b), None);
+        for i in 0..u32::try_from(MAX_TRACKED_IPS).unwrap() + 10 {
+            gate.record_failure_ip(IpAddr::from(std::net::Ipv4Addr::from(i)));
+        }
+        assert!(gate.failures_by_ip.lock().unwrap().len() <= MAX_TRACKED_IPS);
+    }
+
+    #[test]
+    fn busy_watchdog_becomes_429() {
+        assert!(matches!(
+            err(WatchdogEvent::Denied(LOGIN_BUSY.into())),
+            ApiError::TooManyRequests { .. }
+        ));
     }
 
     #[test]

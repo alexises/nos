@@ -7131,7 +7131,7 @@
                 }
               }
             },
-            "description": "too many failed attempts for this user; see Retry-After"
+            "description": "too many failed attempts for this user or source address, or too many logins in progress; see Retry-After"
           }
         },
         "security": [

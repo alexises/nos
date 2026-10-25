@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
 use nos_proto::{
-    IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED,
+    IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY,
+    SESSION_EXPIRED,
 };
 use tokio::io::split;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
@@ -19,10 +21,16 @@ use crate::users_client;
 
 /// A failed login costs the caller this much wall time, and the connection is
 /// dropped after `MAX_FAILED_LOGINS` of them.
-// ponytail: per-connection throttle only — a client can reconnect. A global
-// or per-user lockout needs shared state; add it if guessing becomes a threat.
+// This is per connection only (a client can reconnect); `MAX_CONCURRENT_VERIFIES`
+// bounds the total cost of guessing, `nos-restd` adds a per-user lockout.
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 const MAX_FAILED_LOGINS: u32 = 3;
+
+/// How many password verifications (argon2id, ~64 MiB x 4 threads each) run at
+/// once in this process, across every connection. The rest wait up to
+/// `LOGIN_QUEUE_WAIT` and are then refused with `LOGIN_BUSY` (#381).
+const MAX_CONCURRENT_VERIFIES: usize = 2;
+const LOGIN_QUEUE_WAIT: Duration = Duration::from_secs(5);
 
 /// Where the singleton daemons listen — answered directly for their
 /// `ServiceRef`s, not through the registry.
@@ -42,6 +50,7 @@ struct Ctx {
     registry: EndpointRegistry,
     sockets: Sockets,
     pki: Arc<Pki>,
+    login_slots: Semaphore,
 }
 
 /// Binds `listen_socket` and spawns the accept loop for the endpoint-broker
@@ -64,6 +73,7 @@ pub fn start(
         registry,
         sockets,
         pki,
+        login_slots: Semaphore::new(MAX_CONCURRENT_VERIFIES),
     });
     Ok(tokio::spawn(async move {
         loop {
@@ -237,6 +247,21 @@ enum Realm {
     Rest,
 }
 
+/// Runs `job` on the blocking pool holding one of `slots` for its whole run, so
+/// at most `slots` jobs exist at once; waits at most `wait` for a slot (`None`
+/// then). A panicked job yields `T::default()`.
+async fn run_bounded<T: Default + Send + 'static>(
+    slots: &Semaphore,
+    wait: Duration,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let _permit = tokio::time::timeout(wait, slots.acquire())
+        .await
+        .ok()?
+        .ok()?;
+    Some(tokio::task::spawn_blocking(job).await.unwrap_or_default())
+}
+
 /// Checks `password` against the running config's users (argon2, run off the
 /// async threads — it is deliberately slow) and, on success, certifies the
 /// caller's own public key as that user.
@@ -263,7 +288,7 @@ async fn login(
     // correct password against a hash made with weaker parameters than today's
     // is re-hashed here, while the clear text is at hand.
     let old = stored.clone();
-    let (ok, upgraded) = tokio::task::spawn_blocking(move || {
+    let Some((ok, upgraded)) = run_bounded(&ctx.login_slots, LOGIN_QUEUE_WAIT, move || {
         let ok = nos_password::verify_or_dummy(&password, stored.as_deref());
         let upgraded = stored
             .filter(|h| ok && nos_password::needs_rehash(h))
@@ -271,7 +296,10 @@ async fn login(
         (ok, upgraded)
     })
     .await
-    .unwrap_or((false, None));
+    else {
+        warn!(user = %user, "login refused: too many password checks in flight");
+        return WatchdogEvent::Denied(LOGIN_BUSY.to_string());
+    };
     if !ok {
         info!(user = ?user, "login rejected");
         return WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string());
@@ -342,5 +370,43 @@ fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm, started: Instant) 
             warn!(user = ?user, error = %e, "rejected a malformed certificate request");
             WatchdogEvent::Denied("bad certificate request".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn run_bounded_never_exceeds_its_slots() {
+        let slots = Arc::new(Semaphore::new(2));
+        let (now, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let (slots, now, peak) = (slots.clone(), now.clone(), peak.clone());
+                tokio::spawn(async move {
+                    run_bounded(&slots, Duration::from_secs(10), move || {
+                        peak.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(20));
+                        now.fetch_sub(1, Ordering::SeqCst);
+                        true
+                    })
+                    .await
+                })
+            })
+            .collect();
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), Some(true));
+        }
+        assert!((1..=2).contains(&peak.load(Ordering::SeqCst)));
+    }
+
+    #[tokio::test]
+    async fn run_bounded_refuses_when_no_slot_frees_in_time() {
+        let slots = Semaphore::new(1);
+        let _held = slots.acquire().await.unwrap();
+        let r = run_bounded(&slots, Duration::from_millis(20), || true).await;
+        assert_eq!(r, None);
     }
 }

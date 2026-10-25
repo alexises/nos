@@ -288,7 +288,8 @@ pub async fn serve(
                 }
             };
             let service = TowerToHyperService::new(
-                app.layer(Extension(PeerUser(accepted.user, accepted.serial)))
+                app.layer(Extension(crate::login::ClientIp(peer.ip())))
+                    .layer(Extension(PeerUser(accepted.user, accepted.serial)))
                     .map_request(|req: axum::http::Request<Incoming>| req.map(Body::new)),
             );
             let conn = http

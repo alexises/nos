@@ -234,7 +234,65 @@ async fn revoke_user(w: &World) -> anyhow::Result<()> {
     if saved_cert_works(w).await? {
         bail!("a deleted user's certificate still opens nos-configd");
     }
-    Ok(())
+    login_burst(w).await
+}
+
+/// #381: 200 unauthenticated logins on made-up usernames at once. Every reply
+/// is 401 (checked) or 429 (refused for load); the watchdog survives the
+/// burst (it would log `broker IPC listening` again if restarted) and a good
+/// login still works.
+async fn login_burst(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    log("a burst of 200 logins on distinct usernames is bounded, not fatal");
+    let starts = a.count("broker IPC listening");
+    let replies = futures::future::join_all((0..200).map(|i| {
+        let rest = &a.rest;
+        async move { rest.login(&format!("nobody-{i}"), "wrong").await }
+    }))
+    .await;
+    for r in replies {
+        match r?.err() {
+            Some(401 | 429) => {}
+            other => bail!("burst login answered {other:?}, want 401 or 429"),
+        }
+    }
+    // The in-flight cap turned most of the burst away before it could fail,
+    // so top the failures up one at a time (no contention: a 429 now is the
+    // per-address limit, 20 failures in 60s).
+    let mut locked = false;
+    for i in 0..60 {
+        match a.rest.login(&format!("topup-{i}"), "wrong").await?.err() {
+            Some(401) => {}
+            Some(429) => {
+                locked = true;
+                break;
+            }
+            other => bail!("login answered {other:?}, want 401 or 429"),
+        }
+    }
+    if !locked {
+        bail!("60 failed logins from one address were never rate limited");
+    }
+    if a.count("broker IPC listening") != starts {
+        bail!("nos-watchdogd restarted during the login burst");
+    }
+    // The harness's address is locked out for the rest of the 60s window,
+    // even with the right password; it must recover once the window ends.
+    if a.rest.login(E2E_USER, E2E_PASSWORD).await?.err() != Some(429) {
+        bail!("a locked-out address was not answered 429");
+    }
+    let mut recovered = false;
+    for _ in 0..70 {
+        if a.rest.login(E2E_USER, E2E_PASSWORD).await?.is_ok() {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    if !recovered {
+        bail!("a good login still failed 70s after the burst");
+    }
+    a.established().await
 }
 
 /// A daemon's certificate dies with its process: the watchdog revokes it on
