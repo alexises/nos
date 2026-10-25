@@ -640,6 +640,17 @@ pub fn router_id(pkt: &OspfPacket) -> Ipv4Addr {
     }
 }
 
+/// The OSPF header type byte of `pkt` (RFC 5340 §A.3.1).
+pub fn packet_type(pkt: &OspfPacket) -> u8 {
+    match pkt {
+        OspfPacket::Hello(_) => TYPE_HELLO,
+        OspfPacket::Dbd(_) => TYPE_DBD,
+        OspfPacket::Lsr(_) => TYPE_LSR,
+        OspfPacket::Lsu(_) => TYPE_LSU,
+        OspfPacket::LsAck(_) => TYPE_LSACK,
+    }
+}
+
 /// Builds the 16-byte common header (§A.3.1) around `body`. The checksum
 /// field is always written as `0` — see this module's own doc comment for
 /// why (`socket.rs`'s `IPV6_CHECKSUM` sockopt handles it at the kernel

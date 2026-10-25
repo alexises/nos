@@ -2924,6 +2924,72 @@ pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, removed0, 30).await
 }
 
+/// RFC 2328 §16.2/§16.4 `LSInfinity` (self-contained). router-b is an ABR
+/// (area-1 loopback) and an ASBR (IPv6 static redistributed into `ospfv3`).
+/// A control run installs both routes on router-a; a second run, with
+/// `nos-ospfv3d --originate-lsinfinity` (test-only, via `--ospfv3d-arg`), has
+/// router-b originate the Inter-Area-Prefix and AS-External LSAs at
+/// `0xFFFFFF`: router-a holds both LSAs yet installs neither route. The
+/// Inter-Area-Router (ASBR distance) path is covered by `spf.rs` unit tests only.
+pub async fn ospfv3_lsinfinity(w: &mut World) -> anyhow::Result<()> {
+    for infinity in [false, true] {
+        if infinity {
+            w.up(&["--ospfv3d-arg=--originate-lsinfinity"]).await?;
+        } else {
+            w.up(&[]).await?;
+        }
+        let (a, b) = (w.a()?, w.b()?);
+        let installed = |legacy, extended| {
+            either_form(legacy, extended, |t| {
+                format!(
+                    "ospfv3 lsa installed.*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID_B}"
+                )
+            })
+        };
+        let prefix_lsa = installed(LSA_TYPE_INTER_AREA_PREFIX_V3, LSA_TYPE_E_INTER_AREA_PREFIX);
+        let external_lsa = installed(LSA_TYPE_AS_EXTERNAL_V3, LSA_TYPE_E_AS_EXTERNAL);
+        let abr_route =
+            format!("added route prefix={OSPFV3_ABR_LOOPBACK_ADDRESS}.*source=Some(Ospf)");
+        let asbr_route = format!("added route prefix={OSPFV3_ASBR_PREFIX}.*source=Some(Ospf)");
+        let gateway = OSPFV3_ADDRESS_A.trim_end_matches("/64");
+        a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+            .await?;
+        b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+            .await?;
+        b.provision(&[
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            OSPFV3_ROUTER_ID_B,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-loopback-address",
+            OSPFV3_ABR_LOOPBACK_ADDRESS,
+            "--ospfv3-loopback-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--static-route",
+            OSPFV3_ASBR_PREFIX,
+            "--static-gateway",
+            gateway,
+            "--redistribute-to-ospfv3",
+        ])
+        .await?;
+        a.wait_new(&prefix_lsa, 0, 90).await?;
+        a.wait_new(&external_lsa, 0, 90).await?;
+        if infinity {
+            log("LSInfinity LSAs held; no route may be installed from them");
+            a.assert_quiet(&abr_route, 0, 20).await?;
+            a.assert_quiet(&asbr_route, 0, 1).await?;
+        } else {
+            a.wait_new(&abr_route, 0, 60).await?;
+            a.wait_new(&asbr_route, 0, 60).await?;
+        }
+    }
+    Ok(())
+}
+
 /// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace
 /// period configured, is restarted with SIGTERM. It must send a Grace-LSA
 /// before exiting, and router-b must help: hold the adjacency and keep

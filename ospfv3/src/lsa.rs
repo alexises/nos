@@ -549,9 +549,9 @@ fn parse_prefix_tlv(v: &[u8]) -> Result<(u16, u8, Ipv6Net), PacketError> {
     if v.len() < 8 {
         return Err(PacketError::TruncatedBody);
     }
-    let metric = u32::from_be_bytes([0, v[1], v[2], v[3]]);
+    let metric = u16::from_be_bytes([v[2], v[3]]);
     let (prefix, _) = decode_prefix(&v[8..], v[4])?;
-    Ok((u16::try_from(metric).unwrap_or(u16::MAX), v[5], prefix))
+    Ok((metric, v[5], prefix))
 }
 
 fn is_extended(lsa_type: u16) -> bool {
@@ -1289,6 +1289,15 @@ pub fn is_newer(a: &LsaHeader, b: &LsaHeader) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix_tlv_metric_ignores_the_reserved_byte() {
+        let prefix: Ipv6Net = "2001:db8::/64".parse().unwrap();
+        let mut v = prefix_tlv_value(300, 0x2, &prefix);
+        assert_eq!(parse_prefix_tlv(&v).unwrap(), (300, 0x2, prefix));
+        v[1] = 0x7f;
+        assert_eq!(parse_prefix_tlv(&v).unwrap().0, 300);
+    }
 
     #[test]
     fn link_local_scope_is_only_the_two_link_lsa_types() {
