@@ -51,7 +51,8 @@ fn backup_path(path: &Path) -> std::path::PathBuf {
 /// Loads a config from `path`.
 ///
 /// A missing file is treated as a first run and yields `Config::default()`.
-/// A file that exists but fails to parse falls back to `<path>.bak` (loudly);
+/// A file that exists but fails to parse falls back to `<path>.bak` (loudly)
+/// and the primary is rewritten from it (a failed restore is logged, not fatal);
 /// if that is missing or corrupt too it is a hard error — a corrupt config
 /// must never be silently discarded in favor of a default.
 pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
@@ -67,10 +68,18 @@ pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
                 let bak = backup_path(path);
                 match std::fs::read(&bak)
                     .ok()
-                    .and_then(|b| serde_norway::from_slice(&b).ok())
+                    .and_then(|b| Some((serde_norway::from_slice::<Config>(&b).ok()?, b)))
                 {
-                    Some(cfg) => {
+                    Some((cfg, bytes)) => {
                         error!(path = %bak.display(), "primary config corrupt, loaded backup");
+                        match write_durable(path, &bytes) {
+                            Ok(()) => {
+                                info!(path = %path.display(), "restored primary config from backup");
+                            }
+                            Err(e) => {
+                                error!(path = %path.display(), error = %e, "failed to restore primary config from backup");
+                            }
+                        }
                         Ok(cfg)
                     }
                     None => Err(e.into()),
@@ -268,6 +277,25 @@ mod tests {
         two_saves(&path);
         std::fs::write(&path, CORRUPT).unwrap();
         assert_eq!(load_or_default(&path).unwrap(), Config::default());
+        // The primary was restored from the backup and parses on its own.
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            serde_norway::from_slice::<Config>(&bytes).unwrap(),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn failed_restore_still_loads_backup() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        two_saves(&path);
+        std::fs::write(&path, CORRUPT).unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let res = load_or_default(&path);
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(res.unwrap(), Config::default());
     }
 
     #[test]
