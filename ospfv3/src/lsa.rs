@@ -206,6 +206,12 @@ pub const LS_REFRESH_TIME: u16 = 1800;
 /// refresh.
 pub const INITIAL_SEQUENCE_NUMBER: i32 = i32::MIN + 1;
 
+/// RFC 2328 §12.1.6's `MaxSequenceNumber` — an LSA that reaches it must be
+/// flushed (prematurely aged) before being re-originated at
+/// `INITIAL_SEQUENCE_NUMBER`; `0x8000_0000` in between is reserved and must
+/// never be produced (see `link::install_self_originated`).
+pub const MAX_SEQUENCE_NUMBER: i32 = i32::MAX;
+
 /// Identifies one LSA instance's slot in the database, independent of its
 /// sequence number/age/checksum — RFC 5340 keeps RFC 2328 §12.2's keying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
