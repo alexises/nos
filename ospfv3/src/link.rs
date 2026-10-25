@@ -2590,7 +2590,9 @@ fn router_lsa_links(
 }
 
 /// Installs a self-originated LSA if `body` actually changed since what's
-/// held, bumping the sequence number by one — mirrors
+/// held, bumping the sequence number by one (at `MAX_SEQUENCE_NUMBER` it
+/// flushes the LSA instead and re-originates at `INITIAL_SEQUENCE_NUMBER`
+/// once the flushed copy is evicted, never producing `0x8000_0000`) — mirrors
 /// `ospf::link::originate::install_self_originated` exactly, minus the `options`
 /// header field (v3's header carries none — see `lsa::LsaHeader`). Returns
 /// the key, originated whether or not anything had to be reinstalled.
@@ -2612,7 +2614,13 @@ fn install_self_originated(
         .is_some_and(|e| e.header.age >= lsa::LS_REFRESH_TIME);
     let sequence_number = match &existing {
         Some(e) if e.body == body && !needs_refresh => return key,
-        Some(e) => e.header.sequence_number.wrapping_add(1),
+        // RFC 2328 §12.1.6: flush at MaxSequenceNumber; once the held copy is
+        // evicted the `None` arm restarts at `INITIAL_SEQUENCE_NUMBER`.
+        Some(e) if e.header.sequence_number == lsa::MAX_SEQUENCE_NUMBER => {
+            withdraw_self_originated(lsdb, &key);
+            return key;
+        }
+        Some(e) => e.header.sequence_number + 1,
         None => lsa::INITIAL_SEQUENCE_NUMBER,
     };
     let mut lsa = Lsa {
@@ -3117,6 +3125,64 @@ pub(crate) mod tests {
             lsdb.get(&key).unwrap().header.sequence_number,
             lsa::INITIAL_SEQUENCE_NUMBER
         );
+    }
+
+    #[test]
+    fn install_self_originated_at_max_sequence_flushes_then_restarts_at_initial() {
+        let mut lsdb = Lsdb::new();
+        let id = Ipv4Addr::new(1, 1, 1, 1);
+        let body = |flags| {
+            LsaBody::Router(RouterLsaBody {
+                flags,
+                options: 0,
+                links: Vec::new(),
+            })
+        };
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: id,
+            advertising_router: id,
+        };
+        let install = |lsdb: &mut Lsdb, b| {
+            install_self_originated(lsdb, id, lsa::LSA_TYPE_ROUTER, id, b);
+        };
+        lsdb.install(Lsa {
+            header: LsaHeader {
+                age: 100,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: id,
+                advertising_router: id,
+                sequence_number: lsa::MAX_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: body(0),
+        });
+        // Unchanged body: still a no-op.
+        install(&mut lsdb, body(0));
+        assert_eq!(lsdb.get(&key).unwrap().header.age, 100);
+
+        install(&mut lsdb, body(1));
+        let flushed = lsdb.get(&key).unwrap();
+        assert_eq!(flushed.header.sequence_number, lsa::MAX_SEQUENCE_NUMBER);
+        assert_eq!(flushed.header.age, lsa::MAX_AGE);
+        assert_eq!(flushed.body, body(0));
+
+        for _ in 0..crate::lsdb::MAX_AGE_HOLD_TICKS - 1 {
+            assert_eq!(lsdb.age_and_evict(1, &HashSet::new()), []);
+            install(&mut lsdb, body(1));
+            assert_eq!(
+                lsdb.get(&key).unwrap().header.sequence_number,
+                lsa::MAX_SEQUENCE_NUMBER
+            );
+        }
+        assert_eq!(lsdb.age_and_evict(1, &HashSet::new()), vec![key]);
+
+        install(&mut lsdb, body(1));
+        let fresh = lsdb.get(&key).unwrap();
+        assert_eq!(fresh.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+        assert_eq!(fresh.header.age, 0);
+        assert_eq!(fresh.body, body(1));
     }
 
     /// #157: only our own live LSAs of an owned type outside `desired` are
