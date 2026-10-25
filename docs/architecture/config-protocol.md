@@ -42,8 +42,9 @@ Editing the config happens inside a **named transaction**, held server-side in `
 
 ### Framing limit
 
-- `IpcCodec` frames are a 4-byte LE length plus a postcard payload of at most `nos_proto::codec::MAX_FRAME` (64 MiB).
+- `IpcCodec` frames are a 4-byte LE length plus a postcard payload of at most `nos_proto::codec::MAX_FRAME` (16 MiB).
 - A longer length is `InvalidData` on decode (checked before any buffer is reserved, so a hostile `ff ff ff ff` costs nothing) and the connection is dropped.
+- An incomplete frame reserves at most `RESERVE_CHUNK` (64 KiB) per `decode` call, so memory grows as bytes arrive, never the full declared length up front.
 - Encode rejects an over-cap payload too, so an oversize message fails at the sender.
 
 ### Config plane vs data plane
