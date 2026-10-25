@@ -37,7 +37,7 @@ Editing the config happens inside a **named transaction**, held server-side in `
 
 - `save_to_disk` writes a temp file, fsyncs it, renames it over `config.yaml`, then fsyncs the directory.
 - Before each save the previous `config.yaml` is copied (same durable write) to `config.yaml.bak`, but only if it still parses, so a corrupt primary never replaces the last good backup.
-- On start, a primary that fails to parse falls back to `config.yaml.bak` with an `error!` ("primary config corrupt, loaded backup"); the next commit rewrites the primary.
+- On start, a primary that fails to parse falls back to `config.yaml.bak` with an `error!` ("primary config corrupt, loaded backup"), and the primary is rewritten from the backup immediately (a failed restore is logged; the load still succeeds).
 - If the backup is missing or also corrupt, `nos-configd` refuses to start (never a silent default).
 
 ### Framing limit
