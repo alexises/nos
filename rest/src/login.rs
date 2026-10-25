@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,19 @@ const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 const MAX_FAILED_LOGINS: u32 = 5;
 const FAILED_LOGIN_WINDOW: Duration = Duration::from_secs(60);
 
+/// Same window per source address, over all usernames. Higher than the
+/// per-user limit because a NAT or proxy puts many users behind one address;
+/// a success does not reset it (else one valid account would launder guesses).
+const MAX_FAILED_LOGINS_PER_IP: u32 = 20;
+/// Addresses tracked at once; past this, expired windows are pruned and, if
+/// that frees nothing, the map starts over (a forgotten source gets a fresh
+/// window).
+const MAX_TRACKED_IPS: usize = 4096;
+
+/// The peer address of the connection a request arrived on.
+#[derive(Clone, Copy)]
+pub struct ClientIp(pub IpAddr);
+
 /// Logins in flight to the watchdog at once, across all usernames. Above its
 /// own limit so the watchdog stays the real bound; this only stops `nos-restd`
 /// from queueing unbounded IPC connections behind it.
@@ -48,6 +62,8 @@ pub struct LoginGate {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per username: failures so far and when the window opened.
     failures: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per source address: failures so far and when the window opened.
+    failures_by_ip: Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
 
 impl Default for LoginGate {
@@ -62,6 +78,7 @@ impl LoginGate {
             inflight: Arc::new(tokio::sync::Semaphore::new(n)),
             locks: Mutex::default(),
             failures: Mutex::default(),
+            failures_by_ip: Mutex::default(),
         }
     }
 
@@ -82,6 +99,29 @@ impl LoginGate {
         let &(count, since) = failures.get(user)?;
         let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
         (count >= MAX_FAILED_LOGINS).then(|| left.as_secs() + 1)
+    }
+
+    /// Seconds until `ip` may try again, if it is locked out.
+    fn retry_after_ip(&self, ip: IpAddr) -> Option<u64> {
+        let failures = self.failures_by_ip.lock().expect("login gate lock");
+        let &(count, since) = failures.get(&ip)?;
+        let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
+        (count >= MAX_FAILED_LOGINS_PER_IP).then(|| left.as_secs() + 1)
+    }
+
+    fn record_failure_ip(&self, ip: IpAddr) {
+        let mut failures = self.failures_by_ip.lock().expect("login gate lock");
+        if failures.len() >= MAX_TRACKED_IPS && !failures.contains_key(&ip) {
+            failures.retain(|_, (_, since)| since.elapsed() < FAILED_LOGIN_WINDOW);
+            if failures.len() >= MAX_TRACKED_IPS {
+                failures.clear();
+            }
+        }
+        let e = failures.entry(ip).or_insert((0, Instant::now()));
+        if e.1.elapsed() >= FAILED_LOGIN_WINDOW {
+            *e = (0, Instant::now());
+        }
+        e.0 += 1;
     }
 
     fn record_failure(&self, user: &str) {
@@ -190,13 +230,21 @@ fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
         (status = 200, body = Certificate),
         (status = 400, body = ErrorBody, description = "malformed certificate request"),
         (status = 401, body = ErrorBody, description = "unknown user or wrong password"),
-        (status = 429, body = ErrorBody, description = "too many failed attempts for this user, or too many logins in progress; see Retry-After")
+        (status = 429, body = ErrorBody, description = "too many failed attempts for this user or source address, or too many logins in progress; see Retry-After")
     )
 )]
 pub async fn login(
     State(d): State<Daemons>,
+    ip: Option<Extension<ClientIp>>,
     Json(body): Json<LoginRequest>,
 ) -> ApiResult<Json<Certificate>> {
+    let ip = ip.map(|Extension(ClientIp(ip))| ip);
+    if let Some(retry_after_secs) = ip.and_then(|ip| d.login_gate.retry_after_ip(ip)) {
+        return Err(ApiError::TooManyRequests {
+            detail: "too many failed logins from this address".into(),
+            retry_after_secs,
+        });
+    }
     let csr_der = decode_csr(&body.csr)?;
     let _slot = d.login_gate.try_slot()?;
     let gate = d.login_gate.lock_for(&body.user);
@@ -218,6 +266,9 @@ pub async fn login(
         .await;
     if matches!(&reply, Ok(WatchdogEvent::Denied(m)) if m == INVALID_CREDENTIALS) {
         d.login_gate.record_failure(&body.user);
+        if let Some(ip) = ip {
+            d.login_gate.record_failure_ip(ip);
+        }
         tokio::time::sleep(FAILED_LOGIN_DELAY).await;
     } else if matches!(&reply, Ok(WatchdogEvent::Issued { .. })) {
         d.login_gate.clear(&body.user);
@@ -303,6 +354,23 @@ mod tests {
         ));
         drop(a);
         assert!(gate.try_slot().is_ok());
+    }
+
+    #[test]
+    fn ip_lockout_is_per_address_and_bounded() {
+        let gate = LoginGate::default();
+        let (a, b): (IpAddr, IpAddr) = ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap());
+        for _ in 0..MAX_FAILED_LOGINS_PER_IP - 1 {
+            gate.record_failure_ip(a);
+        }
+        assert_eq!(gate.retry_after_ip(a), None);
+        gate.record_failure_ip(a);
+        assert_eq!(gate.retry_after_ip(a), Some(60));
+        assert_eq!(gate.retry_after_ip(b), None);
+        for i in 0..u32::try_from(MAX_TRACKED_IPS).unwrap() + 10 {
+            gate.record_failure_ip(IpAddr::from(std::net::Ipv4Addr::from(i)));
+        }
+        assert!(gate.failures_by_ip.lock().unwrap().len() <= MAX_TRACKED_IPS);
     }
 
     #[test]

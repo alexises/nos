@@ -256,11 +256,41 @@ async fn login_burst(w: &World) -> anyhow::Result<()> {
             other => bail!("burst login answered {other:?}, want 401 or 429"),
         }
     }
+    // The in-flight cap turned most of the burst away before it could fail,
+    // so top the failures up one at a time (no contention: a 429 now is the
+    // per-address limit, 20 failures in 60s).
+    let mut locked = false;
+    for i in 0..60 {
+        match a.rest.login(&format!("topup-{i}"), "wrong").await?.err() {
+            Some(401) => {}
+            Some(429) => {
+                locked = true;
+                break;
+            }
+            other => bail!("login answered {other:?}, want 401 or 429"),
+        }
+    }
+    if !locked {
+        bail!("60 failed logins from one address were never rate limited");
+    }
     if a.count("broker IPC listening") != starts {
         bail!("nos-watchdogd restarted during the login burst");
     }
-    if a.rest.login(E2E_USER, E2E_PASSWORD).await?.is_err() {
-        bail!("a good login failed after the burst");
+    // The harness's address is locked out for the rest of the 60s window,
+    // even with the right password; it must recover once the window ends.
+    if a.rest.login(E2E_USER, E2E_PASSWORD).await?.err() != Some(429) {
+        bail!("a locked-out address was not answered 429");
+    }
+    let mut recovered = false;
+    for _ in 0..70 {
+        if a.rest.login(E2E_USER, E2E_PASSWORD).await?.is_ok() {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    if !recovered {
+        bail!("a good login still failed 70s after the burst");
     }
     a.established().await
 }
