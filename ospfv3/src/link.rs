@@ -166,22 +166,24 @@ fn link_options(cfg: &LinkConfig) -> u32 {
 
 /// RFC 7166 §4.1's anti-replay check, mirroring
 /// `ospf::link::accept_crypto_sequence`: `true` to dispatch, `false` to
-/// drop. Always `true` unauthenticated (`seq` is `None`) or for a neighbor
+/// drop. Tracked per packet type: RFC 7166 §4.6 lets a sender keep one
+/// counter per type. Always `true` unauthenticated (`seq` is `None`) or for a neighbor
 /// not yet known (`handle_hello` creates the entry).
 fn accept_crypto_sequence(status: &StatusHandle, seq: Option<u64>, pkt: &OspfPacket) -> bool {
     let Some(seq) = seq else { return true };
     let router_id = packet::router_id(pkt);
+    let ptype = packet::packet_type(pkt);
     let last = status
         .borrow()
         .neighbors
         .get(&router_id)
-        .and_then(|n| n.last_crypto_seq);
+        .and_then(|n| n.last_crypto_seq.get(&ptype).copied());
     if last.is_some_and(|last| seq <= last) {
         return false;
     }
     status.send_modify(|s| {
         if let Some(n) = s.neighbors.get_mut(&router_id) {
-            n.last_crypto_seq = Some(seq);
+            n.last_crypto_seq.insert(ptype, seq);
         }
     });
     true
@@ -217,9 +219,9 @@ pub struct NeighborInfo {
     /// sent — DBD/LSR/LSU/LSAck reply unicast to this.
     pub address: Ipv6Addr,
     pub adjacency: Option<AdjacencyData>,
-    /// The last accepted RFC 7166 sequence number from this neighbor
-    /// (`None` until one is seen, or on an unauthenticated link).
-    pub last_crypto_seq: Option<u64>,
+    /// The last accepted RFC 7166 sequence number from this neighbor, per
+    /// packet type (empty until one is seen, or on an unauthenticated link).
+    pub last_crypto_seq: HashMap<u8, u64>,
     /// RFC 5187 helper mode: `Some` while this neighbor is restarting under
     /// a Grace-LSA it sent. Until then its adjacency is held `Full` through
     /// missing Hellos and Hellos that don't list us (see `in_grace`).
@@ -643,7 +645,7 @@ fn handle_hello(
                 last_heard: Instant::now(),
                 address: source,
                 adjacency: None,
-                last_crypto_seq: None,
+                last_crypto_seq: HashMap::new(),
                 grace_deadline: None,
             });
         entry.state = new_state;
@@ -1512,6 +1514,10 @@ pub struct LinkManager {
     /// (from before a toggle, or a previous incarnation) are prematurely aged
     /// on every origination tick (`withdraw_undesired`).
     extended_lsa: AtomicBool,
+    /// Test-only (`--originate-lsinfinity`): originate every Inter-Area-Prefix,
+    /// Inter-Area-Router and AS-External LSA at `LSInfinity`, so the e2e can
+    /// prove a receiver never installs one.
+    originate_lsinfinity: AtomicBool,
     /// RFC 5187 grace period (seconds) to announce on a planned restart;
     /// `0` = graceful restart off.
     grace_period: AtomicU16,
@@ -1634,6 +1640,11 @@ impl LinkManager {
         LsaTypes::new(self.extended_lsa.load(Ordering::Relaxed))
     }
 
+    /// Test-only: see the `originate_lsinfinity` field.
+    pub fn set_originate_lsinfinity(&self, on: bool) {
+        self.originate_lsinfinity.store(on, Ordering::Relaxed);
+    }
+
     pub fn new(age_multiplier: u16, dbd_max_headers: Option<usize>) -> Arc<Self> {
         Self::with_opener(
             age_multiplier,
@@ -1674,6 +1685,7 @@ impl LinkManager {
             age_multiplier,
             dbd_max_headers,
             extended_lsa: AtomicBool::new(false),
+            originate_lsinfinity: AtomicBool::new(false),
             grace_period: AtomicU16::new(0),
             bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
@@ -2088,6 +2100,7 @@ impl LinkManager {
             views.push((*area_id, spf::intra_area_routes(local_router_id, &lsas)));
         }
         let types = self.lsa_types();
+        let infinity = self.originate_lsinfinity.load(Ordering::Relaxed);
         for (dest, lsdb) in &areas {
             // Cheapest over every other area; 24-bit metrics (LSInfinity
             // excluded).
@@ -2107,6 +2120,7 @@ impl LinkManager {
             }
             let mut desired = Vec::new();
             for (prefix, metric) in prefixes.into_iter().filter(|(_, m)| *m < 0x00FF_FFFF) {
+                let metric = if infinity { 0x00FF_FFFF } else { metric };
                 let lsid = self.lsid(lsa::LSA_TYPE_INTER_AREA_PREFIX, prefix).await;
                 desired.push((
                     types.inter_area_prefix,
@@ -2121,6 +2135,7 @@ impl LinkManager {
             for (asbr, (metric, options)) in
                 asbrs.into_iter().filter(|(_, (m, _))| *m < 0x00FF_FFFF)
             {
+                let metric = if infinity { 0x00FF_FFFF } else { metric };
                 desired.push((
                     types.inter_area_router,
                     asbr,
@@ -2157,6 +2172,11 @@ impl LinkManager {
             .copied()
             .collect();
         let types = self.lsa_types();
+        let metric = if self.originate_lsinfinity.load(Ordering::Relaxed) {
+            0x00FF_FFFF
+        } else {
+            spf::EXTERNAL_METRIC
+        };
         for prefix in prefixes {
             let lsid = self.lsid(lsa::LSA_TYPE_AS_EXTERNAL, prefix).await;
             done.as_scope.insert(install_self_originated(
@@ -2166,7 +2186,7 @@ impl LinkManager {
                 lsid,
                 LsaBody::AsExternal(AsExternalLsaBody {
                     type2: false,
-                    metric: spf::EXTERNAL_METRIC,
+                    metric,
                     prefix_options: 0,
                     prefix,
                     forwarding_address: None,
@@ -2964,7 +2984,25 @@ pub(crate) mod tests {
         assert!(!accept_crypto_sequence(&tx, Some(5), &pkt));
         assert!(!accept_crypto_sequence(&tx, Some(4), &pkt));
         assert!(accept_crypto_sequence(&tx, Some(6), &pkt));
-        assert_eq!(tx.borrow().neighbors[&neighbor].last_crypto_seq, Some(6));
+        assert_eq!(
+            tx.borrow().neighbors[&neighbor].last_crypto_seq[&packet::TYPE_HELLO],
+            6
+        );
+        // A DBD has its own counter: seq 3 after Hello 6 is fresh, then a replay.
+        let dbd = OspfPacket::Dbd(packet::DbdPacket {
+            router_id: neighbor,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            options: 0,
+            interface_mtu: 1500,
+            init: false,
+            more: false,
+            master: false,
+            dd_sequence_number: 1,
+            lsa_headers: Vec::new(),
+        });
+        assert!(accept_crypto_sequence(&tx, Some(3), &dbd));
+        assert!(!accept_crypto_sequence(&tx, Some(3), &dbd));
+        assert!(!accept_crypto_sequence(&tx, Some(6), &pkt));
         // An unknown neighbor is never dropped (no state yet).
         hello.router_id = Ipv4Addr::new(9, 9, 9, 11);
         assert!(accept_crypto_sequence(
@@ -3005,7 +3043,7 @@ pub(crate) mod tests {
             last_heard: Instant::now(),
             address,
             adjacency: None,
-            last_crypto_seq: None,
+            last_crypto_seq: HashMap::new(),
             grace_deadline: None,
         }
     }

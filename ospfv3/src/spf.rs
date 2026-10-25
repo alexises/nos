@@ -696,12 +696,18 @@ fn route_via(
 
 /// RFC 5340 §4.8.3 (RFC 2328 §16.2): an Inter-Area-Prefix-LSA's prefix via
 /// its advertising ABR. Our own (`abr == root`) is skipped by `Reach::router`.
+/// RFC 2328 §12.4.3 `LSInfinity`: a metric of this value means unreachable.
+const LS_INFINITY: u32 = 0x00FF_FFFF;
+
 fn collect_inter_area_route(
     graph: &Reach,
     abr: Ipv4Addr,
     p: &InterAreaPrefixLsaBody,
     out: &mut HashMap<(Ipv6Addr, u8), RouteEntry>,
 ) {
+    if p.metric >= LS_INFINITY {
+        return;
+    }
     if let Some(via) = graph.router(abr) {
         let route = route_via(p.prefix, via, p.metric, abr);
         insert_best(out, prefix_key(p.prefix), route);
@@ -727,7 +733,7 @@ fn asbr_distance(
     }
     inter_area_routers
         .iter()
-        .filter(|(_, r)| r.destination_router_id == asbr)
+        .filter(|(_, r)| r.destination_router_id == asbr && r.metric < LS_INFINITY)
         .filter_map(|&(abr, r)| {
             let (d, nh, ifid) = graph.router(abr)?;
             Some(((d.saturating_add(r.metric), nh, ifid), abr))
@@ -745,7 +751,7 @@ fn collect_external_route(
     e: &AsExternalLsaBody,
     out: &mut HashMap<(Ipv6Addr, u8), RouteEntry>,
 ) {
-    if asbr == graph.root {
+    if asbr == graph.root || e.metric >= LS_INFINITY {
         return;
     }
     if let Some((via, egress)) = asbr_distance(graph, routers, inter_area_routers, asbr) {
@@ -1067,6 +1073,31 @@ mod tests {
             only(&routes),
             (5 + 3 + EXTERNAL_METRIC, "fe80::2".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn ls_infinity_is_never_routed_but_one_below_is() {
+        let (r1, r2, asbr) = (router_id(1), router_id(2), router_id(9));
+        for (metric, routed) in [(LS_INFINITY, false), (LS_INFINITY - 1, true)] {
+            let mut lsas = root_and_abr();
+            lsas.push(inter_area_prefix(r2, "2001:db8:9::/64", metric));
+            assert_eq!(!compute(r1, &lsas).is_empty(), routed, "prefix {metric}");
+
+            let mut lsas = root_and_abr();
+            lsas[1] = with_flags(&lsas[1], lsa::ROUTER_FLAG_E);
+            let mut ext = external(r2, "2001:db8:e::/48");
+            let LsaBody::AsExternal(b) = &mut Arc::make_mut(&mut ext).body else {
+                unreachable!()
+            };
+            b.metric = metric;
+            lsas.push(ext);
+            assert_eq!(!compute(r1, &lsas).is_empty(), routed, "external {metric}");
+
+            let mut lsas = root_and_abr();
+            lsas.push(external(asbr, "2001:db8:e::/48"));
+            lsas.push(inter_area_router(r2, asbr, metric));
+            assert_eq!(!compute(r1, &lsas).is_empty(), routed, "asbr {metric}");
+        }
     }
 
     #[test]

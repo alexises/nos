@@ -47,6 +47,11 @@ struct Args {
     /// derives it from its own MTU (`exchange::mtu_based_max_headers`).
     #[arg(long)]
     dbd_max_headers: Option<usize>,
+
+    /// Originate every summary/external LSA at `LSInfinity` (`ospfv3-lsinfinity`
+    /// e2e). Test-only, via `--ospfv3d-arg`; never a config field.
+    #[arg(long, hide = true)]
+    originate_lsinfinity: bool,
 }
 
 #[tokio::main]
@@ -80,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
+    links.set_originate_lsinfinity(args.originate_lsinfinity);
     let (link_tx, link_rx) = watch::channel(nos_ospfv3::link_client::LinkTable::default());
     let link_task = tokio::spawn(nos_ospfv3::link_client::run(
         args.watchdog_socket.clone(),
@@ -164,5 +170,10 @@ mod tests {
         Args::command().debug_assert();
         let args = Args::try_parse_from(["nos-ospfv3d", "--instance", "o1"]).unwrap();
         assert_eq!((args.instance.as_str(), args.lsa_age_multiplier), ("o1", 1));
+        assert!(!args.originate_lsinfinity);
+        let on =
+            Args::try_parse_from(["nos-ospfv3d", "--instance", "o1", "--originate-lsinfinity"])
+                .unwrap();
+        assert!(on.originate_lsinfinity);
     }
 }
