@@ -42,9 +42,14 @@ Editing the config happens inside a **named transaction**, held server-side in `
 
 ### Framing limit
 
-- `IpcCodec` frames are a 4-byte LE length plus a postcard payload of at most `nos_proto::codec::MAX_FRAME` (64 MiB).
+- `IpcCodec` frames are a 4-byte LE length plus a postcard payload of at most `nos_proto::codec::MAX_FRAME` (16 MiB).
 - A longer length is `InvalidData` on decode (checked before any buffer is reserved, so a hostile `ff ff ff ff` costs nothing) and the connection is dropped.
+- An incomplete frame reserves at most `RESERVE_CHUNK` (64 KiB) per `decode` call, so memory grows as bytes arrive, never the full declared length up front.
 - Encode rejects an over-cap payload too, so an oversize message fails at the sender.
+- Payloads that can legitimately grow past the cap are cut to fit:
+  - `nos-bgpd` → `nos-ribd` `PushBgpRoutes` (a full IPv4 table is ~1M routes, 10 MB and up with backups, multipath and IPv6): `BgpRouteUpdate::frames` sends at most `BGP_PUSH_CHUNK` (2048) routes per frame. A larger `Full` goes as `FullPart`s closed by a `Full`; `nos-ribd` stages the parts per connection and swaps the whole set in at the closing `Full` (log: `assembled chunked bgp route snapshot … parts=N`), so it never publishes half a table. A connection lost mid-snapshot drops what was staged; the reconnect sends a fresh `Full`.
+  - `nos-logd` `GetLogs`/`Tail` replies: capped at `store::REPLY_BYTES` (just under 16 MiB), newest entries kept, oldest left out.
+- Known payloads still sent whole (fail past 16 MiB, the connection drops): `GetRoutes` (`show route`) and the `nos-bgpd` RIB queries of a full table, and the `Full` snapshots of `PushVpnRoutes`/`PushEvpnRoutes`/`PushOspfRoutes`/`RedistributeRoutes`.
 
 ### Config plane vs data plane
 

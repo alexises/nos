@@ -5,7 +5,11 @@ use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
 /// Largest accepted payload; a longer length prefix is `InvalidData` on both encode and decode.
-pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+pub const MAX_FRAME: usize = 16 * 1024 * 1024;
+
+/// Most bytes a single `decode` call reserves for an incomplete frame, so buffer memory grows
+/// as bytes actually arrive rather than to the declared length up front.
+pub const RESERVE_CHUNK: usize = 64 * 1024;
 
 fn too_large() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, "ipc frame too large")
@@ -56,7 +60,7 @@ impl<T: DeserializeOwned> Decoder for IpcCodec<T> {
             return Err(too_large());
         }
         if src.len() < 4 + len {
-            src.reserve(4 + len - src.len());
+            src.reserve((4 + len - src.len()).min(RESERVE_CHUNK));
             return Ok(None);
         }
         src.advance(4);
@@ -112,6 +116,14 @@ mod tests {
             assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
             assert_eq!(b.capacity(), cap, "no reserve for a hostile length");
         }
+    }
+
+    #[test]
+    fn at_cap_header_reserves_one_chunk_not_the_declared_length() {
+        let mut b = BytesMut::from(&u32::try_from(MAX_FRAME).unwrap().to_le_bytes()[..]);
+        assert_eq!(dec(&mut b).unwrap(), None);
+        assert!(b.capacity() >= RESERVE_CHUNK, "reserved a chunk");
+        assert!(b.capacity() < 2 * RESERVE_CHUNK, "not the declared length");
     }
 
     #[test]

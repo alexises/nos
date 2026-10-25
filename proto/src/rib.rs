@@ -151,15 +151,77 @@ pub struct BgpRoute {
 /// Sent by the owning `nos-bgpd` instance to `nos-ribd` over a persistent,
 /// long-lived connection (mirroring `RedistributeUpdate`'s pattern for the
 /// opposite direction): a `Full` snapshot on connect, then incremental
-/// `Add`/`Remove` for each subsequent change.
+/// `Add`/`Remove` for each subsequent change. A push is cut into frames by
+/// [`BgpRouteUpdate::frames`] so none exceeds the codec's `MAX_FRAME`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BgpRouteUpdate {
-    /// The complete route set, replacing any previous one.
+    /// The complete route set, replacing any previous one — together with
+    /// every `FullPart` received since the last `Full` on this connection.
     Full(Vec<BgpRoute>),
     /// One route added or changed.
     Add(BgpRoute),
     /// One route withdrawn.
     Remove(IpNet),
+    /// The leading part of a `Full` snapshot too large for one frame: the
+    /// receiver stages it and publishes nothing until the closing `Full`.
+    /// Appended (postcard indexes variants by position).
+    FullPart(Vec<BgpRoute>),
+}
+
+/// Most routes one `PushBgpRoutes` frame carries. A worst-case route (IPv6
+/// prefix, 255 IPv6 multipath next hops, IPv6 backup) encodes to ~4.4 KB,
+/// so 2048 of them stay under the 16 MiB `MAX_FRAME` (pinned by a test).
+pub const BGP_PUSH_CHUNK: usize = 2048;
+
+impl BgpRouteUpdate {
+    /// Routes this update carries, for frame budgeting (at least 1).
+    fn weight(&self) -> usize {
+        match self {
+            Self::Full(r) | Self::FullPart(r) => r.len().max(1),
+            Self::Add(_) | Self::Remove(_) => 1,
+        }
+    }
+
+    /// Cuts one push into `PushBgpRoutes` frames of at most
+    /// [`BGP_PUSH_CHUNK`] routes each, in order: a larger `Full` becomes
+    /// `FullPart`s closed by a `Full` holding the last chunk, so the
+    /// receiver still swaps the whole set at once.
+    #[must_use]
+    pub fn frames(updates: Vec<Self>) -> Vec<Vec<Self>> {
+        let mut split = Vec::with_capacity(updates.len());
+        for u in updates {
+            match u {
+                Self::Full(mut routes) if routes.len() > BGP_PUSH_CHUNK => {
+                    let last =
+                        routes.split_off((routes.len() - 1) / BGP_PUSH_CHUNK * BGP_PUSH_CHUNK);
+                    let mut rest = routes.into_iter();
+                    loop {
+                        let part: Vec<_> = rest.by_ref().take(BGP_PUSH_CHUNK).collect();
+                        if part.is_empty() {
+                            break;
+                        }
+                        split.push(Self::FullPart(part));
+                    }
+                    split.push(Self::Full(last));
+                }
+                u => split.push(u),
+            }
+        }
+        let (mut frames, mut cur, mut weight) = (Vec::new(), Vec::new(), 0);
+        for u in split {
+            let w = u.weight();
+            if weight + w > BGP_PUSH_CHUNK && !cur.is_empty() {
+                frames.push(std::mem::take(&mut cur));
+                weight = 0;
+            }
+            cur.push(u);
+            weight += w;
+        }
+        if !cur.is_empty() {
+            frames.push(cur);
+        }
+        frames
+    }
 }
 
 /// One SPF-computed OSPF route, pushed by the owning `nos-ospfd` instance
@@ -400,4 +462,105 @@ pub enum RibEvent {
     NextHops(Vec<Option<ResolvedNextHop>>),
     /// Reply to `GetVpnLabel`.
     VpnLabel(Option<u32>),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv6Addr};
+
+    use tokio_util::codec::Encoder;
+
+    use super::*;
+    use crate::codec::{IpcCodec, MAX_FRAME};
+
+    fn route(i: u32) -> BgpRoute {
+        BgpRoute {
+            prefix: IpNet::new(IpAddr::from(i.to_be_bytes()), 32).unwrap(),
+            next_hops: vec![IpAddr::from([10, 0, 0, 1])],
+            backup_next_hop: None,
+        }
+    }
+
+    fn routes(n: u32) -> Vec<BgpRoute> {
+        (0..n).map(route).collect()
+    }
+
+    fn shape(frames: &[Vec<BgpRouteUpdate>]) -> Vec<Vec<(char, usize)>> {
+        frames
+            .iter()
+            .map(|f| {
+                f.iter()
+                    .map(|u| match u {
+                        BgpRouteUpdate::Full(r) => ('F', r.len()),
+                        BgpRouteUpdate::FullPart(r) => ('P', r.len()),
+                        BgpRouteUpdate::Add(_) => ('A', 1),
+                        BgpRouteUpdate::Remove(_) => ('R', 1),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn small_pushes_stay_one_frame() {
+        let f = BgpRouteUpdate::frames(vec![BgpRouteUpdate::Full(vec![])]);
+        assert_eq!(shape(&f), [vec![('F', 0)]]);
+        let f = BgpRouteUpdate::frames(vec![BgpRouteUpdate::Full(routes(2048))]);
+        assert_eq!(shape(&f), [vec![('F', 2048)]]);
+        assert_eq!(BgpRouteUpdate::frames(vec![]).len(), 0);
+    }
+
+    #[test]
+    fn a_large_full_becomes_parts_closed_by_a_full_in_order() {
+        let all = routes(5000);
+        let f = BgpRouteUpdate::frames(vec![BgpRouteUpdate::Full(all.clone())]);
+        assert_eq!(
+            shape(&f),
+            [vec![('P', 2048)], vec![('P', 2048)], vec![('F', 904)]]
+        );
+        let rejoined: Vec<BgpRoute> = f
+            .into_iter()
+            .flatten()
+            .flat_map(|u| match u {
+                BgpRouteUpdate::Full(r) | BgpRouteUpdate::FullPart(r) => r,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(rejoined, all);
+        let f = BgpRouteUpdate::frames(vec![BgpRouteUpdate::Full(routes(4096))]);
+        assert_eq!(shape(&f), [vec![('P', 2048)], vec![('F', 2048)]]);
+    }
+
+    #[test]
+    fn incremental_updates_are_cut_by_route_count() {
+        let mut u: Vec<_> = routes(4000).into_iter().map(BgpRouteUpdate::Add).collect();
+        u.push(BgpRouteUpdate::Remove(route(9).prefix));
+        let f = BgpRouteUpdate::frames(u);
+        assert_eq!(f.iter().map(Vec::len).collect::<Vec<_>>(), [2048, 1953]);
+        // A full chunk does not share its frame with a following update.
+        let f = BgpRouteUpdate::frames(vec![
+            BgpRouteUpdate::Full(routes(2048)),
+            BgpRouteUpdate::Add(route(1)),
+        ]);
+        assert_eq!(shape(&f), [vec![('F', 2048)], vec![('A', 1)]]);
+    }
+
+    /// The worst case `BGP_PUSH_CHUNK` is sized for still fits one frame.
+    #[test]
+    fn a_chunk_of_worst_case_routes_fits_max_frame() {
+        let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
+        let worst = BgpRoute {
+            prefix: IpNet::new(v6(1), 128).unwrap(),
+            next_hops: (0..255).map(v6).collect(),
+            backup_next_hop: Some(v6(999)),
+        };
+        let frame =
+            RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(vec![worst; BGP_PUSH_CHUNK])]);
+        let len = postcard::to_allocvec(&frame).unwrap().len();
+        assert!(len < MAX_FRAME, "{len} bytes");
+        let mut buf = bytes::BytesMut::new();
+        IpcCodec::<RibRequest>::default()
+            .encode(frame, &mut buf)
+            .unwrap();
+    }
 }

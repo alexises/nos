@@ -29,6 +29,7 @@ name = "nos-logd"
 path = "src/main.rs"
 
 [dev-dependencies]
+bytes    = { workspace = true }
 proptest = { workspace = true }
 rcgen        = { workspace = true }
 rustls       = { workspace = true }

@@ -412,6 +412,10 @@ pub const BFD_PREFIX_F: &str = "198.18.232.0/24";
 /// `bgp-graceful-restart`: a static router-b redistributes, so router-a's
 /// `nos-ribd` holds a BGP route when its `nos-bgpd` restarts.
 pub const GR_B_PREFIX: &str = "198.18.211.0/24";
+/// `bgp-push-chunked`: extra /32 statics router-a redistributes (in
+/// 100.64.0.0/16). With `REDISTRIBUTE_PREFIX` router-b's push is 5001 routes,
+/// over two `BGP_PUSH_CHUNK`s (2048): a `Full` of 3 frames.
+pub const CHUNKED_ROUTES: usize = 5000;
 pub const NET_OSPF_FRR: &str = "nos-verify-net-ospf-frr";
 pub const OSPF_FRR_SUBNET: &str = "10.51.0.0/24";
 pub const OSPF_FRR_IP_A: &str = "10.51.0.2";

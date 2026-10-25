@@ -87,10 +87,7 @@ async fn run(
         };
 
         let mut writer = FramedWrite::new(stream, IpcCodec::<RibRequest>::default());
-        if writer
-            .send(RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(
-                to_routes(&routes),
-            )]))
+        if send(&mut writer, vec![BgpRouteUpdate::Full(to_routes(&routes))])
             .await
             .is_err()
         {
@@ -114,20 +111,11 @@ async fn run(
                 // Withdraw everything from this connection before switching
                 // away — best-effort, we're tearing this connection down
                 // regardless of the outcome.
-                let _ = writer
-                    .send(RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(
-                        Vec::new(),
-                    )]))
-                    .await;
+                let _ = send(&mut writer, vec![BgpRouteUpdate::Full(Vec::new())]).await;
                 break;
             }
             let updates = diff_routes(&last_sent, &new_routes);
-            if !updates.is_empty()
-                && writer
-                    .send(RibRequest::PushBgpRoutes(updates))
-                    .await
-                    .is_err()
-            {
+            if send(&mut writer, updates).await.is_err() {
                 warn!(table = %table, "write failure sending bgp route update, reconnecting");
                 break;
             }
@@ -136,6 +124,22 @@ async fn run(
         // Reconnect (or idle, if the table is now None) immediately — the
         // outer loop re-reads the current snapshot from scratch.
     }
+}
+
+/// Sends one push cut into frames that each fit the codec's `MAX_FRAME`
+/// (a full-internet `Full` is ~1M routes, well past it): see
+/// `BgpRouteUpdate::frames`. Nothing is sent for an empty push.
+async fn send<S>(
+    writer: &mut FramedWrite<S, IpcCodec<RibRequest>>,
+    updates: Vec<BgpRouteUpdate>,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    for frame in BgpRouteUpdate::frames(updates) {
+        writer.feed(RibRequest::PushBgpRoutes(frame)).await?;
+    }
+    writer.flush().await
 }
 
 /// Waits for a RIB change (plus [`HOLD_DOWN`]) or [`FALLBACK_TICK`], whichever
