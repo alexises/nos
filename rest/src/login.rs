@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use axum::extract::State;
 use axum::{Extension, Json};
 use base64::Engine as _;
-use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED};
+use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY, SESSION_EXPIRED};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -26,8 +26,8 @@ use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::ipc::Daemons;
 
 /// A failed login costs the account this much before the next attempt on it.
-// ponytail: per-username only — many usernames in parallel are unthrottled
-// (each still costs an argon2 verify). Add a per-source limit if that matters.
+// Per-username only; `MAX_INFLIGHT_LOGINS` caps the rest (many usernames at
+// once), and `nos-watchdogd` is the authoritative bound on argon2 work (#381).
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 
 /// After this many failures inside `FAILED_LOGIN_WINDOW` (counted from the
@@ -35,17 +35,47 @@ const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 const MAX_FAILED_LOGINS: u32 = 5;
 const FAILED_LOGIN_WINDOW: Duration = Duration::from_secs(60);
 
+/// Logins in flight to the watchdog at once, across all usernames. Above its
+/// own limit so the watchdog stays the real bound; this only stops `nos-restd`
+/// from queueing unbounded IPC connections behind it.
+const MAX_INFLIGHT_LOGINS: usize = 8;
+
 /// One attempt at a time per username, so guessing one account's password is
 /// limited to one guess per `FAILED_LOGIN_DELAY` however many streams or
 /// connections the guesses arrive on.
-#[derive(Default)]
 pub struct LoginGate {
+    inflight: Arc<tokio::sync::Semaphore>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per username: failures so far and when the window opened.
     failures: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
+impl Default for LoginGate {
+    fn default() -> Self {
+        Self::with_inflight(MAX_INFLIGHT_LOGINS)
+    }
+}
+
 impl LoginGate {
+    fn with_inflight(n: usize) -> Self {
+        Self {
+            inflight: Arc::new(tokio::sync::Semaphore::new(n)),
+            locks: Mutex::default(),
+            failures: Mutex::default(),
+        }
+    }
+
+    /// A slot for one login, or `429` straight away when all are taken.
+    fn try_slot(&self) -> ApiResult<tokio::sync::OwnedSemaphorePermit> {
+        self.inflight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::TooManyRequests {
+                detail: "too many logins in progress".into(),
+                retry_after_secs: 1,
+            })
+    }
+
     /// Seconds until `user` may try again, if it is locked out.
     fn retry_after(&self, user: &str) -> Option<u64> {
         let failures = self.failures.lock().expect("login gate lock");
@@ -141,6 +171,10 @@ fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
             Err(ApiError::Unauthorized(m))
         }
         WatchdogEvent::Denied(m) if m == "bad certificate request" => Err(ApiError::BadRequest(m)),
+        WatchdogEvent::Denied(m) if m == LOGIN_BUSY => Err(ApiError::TooManyRequests {
+            detail: m,
+            retry_after_secs: 1,
+        }),
         WatchdogEvent::Denied(m) => Err(ApiError::Unavailable(m)),
         other => Err(crate::ipc::unexpected("nos-watchdogd", &other)),
     }
@@ -156,7 +190,7 @@ fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
         (status = 200, body = Certificate),
         (status = 400, body = ErrorBody, description = "malformed certificate request"),
         (status = 401, body = ErrorBody, description = "unknown user or wrong password"),
-        (status = 429, body = ErrorBody, description = "too many failed attempts for this user; see Retry-After")
+        (status = 429, body = ErrorBody, description = "too many failed attempts for this user, or too many logins in progress; see Retry-After")
     )
 )]
 pub async fn login(
@@ -164,6 +198,7 @@ pub async fn login(
     Json(body): Json<LoginRequest>,
 ) -> ApiResult<Json<Certificate>> {
     let csr_der = decode_csr(&body.csr)?;
+    let _slot = d.login_gate.try_slot()?;
     let gate = d.login_gate.lock_for(&body.user);
     let held = gate.lock().await;
     if let Some(retry_after_secs) = d.login_gate.retry_after(&body.user) {
@@ -252,6 +287,30 @@ mod tests {
         assert_eq!(gate.retry_after("other"), None);
         gate.clear("u");
         assert_eq!(gate.retry_after("u"), None);
+    }
+
+    #[test]
+    fn try_slot_refuses_past_the_limit_and_frees_on_drop() {
+        let gate = LoginGate::with_inflight(2);
+        let a = gate.try_slot().unwrap();
+        let _b = gate.try_slot().unwrap();
+        assert!(matches!(
+            gate.try_slot(),
+            Err(ApiError::TooManyRequests {
+                retry_after_secs: 1,
+                ..
+            })
+        ));
+        drop(a);
+        assert!(gate.try_slot().is_ok());
+    }
+
+    #[test]
+    fn busy_watchdog_becomes_429() {
+        assert!(matches!(
+            err(WatchdogEvent::Denied(LOGIN_BUSY.into())),
+            ApiError::TooManyRequests { .. }
+        ));
     }
 
     #[test]

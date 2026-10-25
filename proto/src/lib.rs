@@ -58,7 +58,8 @@ pub use bgp::{
     RpkiSessionState, RpkiValidationState, VpnPrefix, VpnPrefixUpdate, VpnRouteSummary,
 };
 pub use broker::{
-    Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, SESSION_EXPIRED,
+    Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY,
+    SESSION_EXPIRED,
 };
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;

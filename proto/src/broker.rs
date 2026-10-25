@@ -202,6 +202,10 @@ impl Role {
 /// unknown user and a wrong password so it reveals nothing about which exist.
 pub const INVALID_CREDENTIALS: &str = "invalid credentials";
 
+/// `Denied` text when the watchdog has too many password checks in flight to
+/// start another (#381). Not `INVALID_CREDENTIALS`: it is not a failed guess.
+pub const LOGIN_BUSY: &str = "login busy";
+
 /// The `Denied` message for a REST certificate that was revoked or whose
 /// session hit its renewal cap: `nos-restd` answers 401.
 pub const SESSION_EXPIRED: &str = "session expired";

@@ -234,7 +234,35 @@ async fn revoke_user(w: &World) -> anyhow::Result<()> {
     if saved_cert_works(w).await? {
         bail!("a deleted user's certificate still opens nos-configd");
     }
-    Ok(())
+    login_burst(w).await
+}
+
+/// #381: 200 unauthenticated logins on made-up usernames at once. Every reply
+/// is 401 (checked) or 429 (refused for load); the watchdog survives the
+/// burst (it would log `broker IPC listening` again if restarted) and a good
+/// login still works.
+async fn login_burst(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    log("a burst of 200 logins on distinct usernames is bounded, not fatal");
+    let starts = a.count("broker IPC listening");
+    let replies = futures::future::join_all((0..200).map(|i| {
+        let rest = &a.rest;
+        async move { rest.login(&format!("nobody-{i}"), "wrong").await }
+    }))
+    .await;
+    for r in replies {
+        match r?.err() {
+            Some(401 | 429) => {}
+            other => bail!("burst login answered {other:?}, want 401 or 429"),
+        }
+    }
+    if a.count("broker IPC listening") != starts {
+        bail!("nos-watchdogd restarted during the login burst");
+    }
+    if a.rest.login(E2E_USER, E2E_PASSWORD).await?.is_err() {
+        bail!("a good login failed after the burst");
+    }
+    a.established().await
 }
 
 /// A daemon's certificate dies with its process: the watchdog revokes it on
