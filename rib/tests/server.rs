@@ -390,6 +390,78 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     assert_eq!(best.source, RouteSource::Bgp);
 }
 
+/// A BGP `Full` past the codec's 16 MiB `MAX_FRAME` (a full-table shape)
+/// cannot go as one frame; cut by `BgpRouteUpdate::frames` it crosses the
+/// real codec, is staged by `nos-ribd` until its closing `Full` (nothing
+/// published from the `FullPart`s alone) and lands as one kernel apply.
+#[tokio::test]
+async fn push_bgp_full_past_max_frame_is_chunked_and_applied_atomically() {
+    use nos_proto::{BgpRoute, BgpRouteUpdate};
+    use tokio_util::codec::Encoder;
+    // ~54 encoded bytes per IPv6 route with a backup: 330k is ~17 MiB.
+    const N: u32 = 330_000;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let driver = Arc::new(RecordingDriver::default());
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib.clone(),
+        driver.clone(),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
+
+    let v6 = |i: u32| {
+        IpAddr::from(std::net::Ipv6Addr::from(
+            (0x2001_0db8_u128 << 96) | (u128::from(i) << 16),
+        ))
+    };
+    let routes: Vec<BgpRoute> = (0..N)
+        .map(|i| BgpRoute {
+            prefix: nos_proto::IpNet::new(v6(i), 112).unwrap(),
+            next_hops: vec![v6(N + 1)],
+            backup_next_hop: Some(v6(N + 2)),
+        })
+        .collect();
+    let whole = RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(routes.clone())]);
+    assert!(
+        IpcCodec::<RibRequest>::default()
+            .encode(whole, &mut bytes::BytesMut::new())
+            .is_err(),
+        "the unchunked snapshot must exceed MAX_FRAME"
+    );
+
+    let mut frames = BgpRouteUpdate::frames(vec![BgpRouteUpdate::Full(routes)]);
+    let last = frames.pop().unwrap();
+    assert!(frames.len() > 100);
+    let (mut reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
+    for frame in frames {
+        writer.feed(RibRequest::PushBgpRoutes(frame)).await.unwrap();
+    }
+    writer.send(RibRequest::BgpRouteCount).await.unwrap();
+    assert!(matches!(
+        reader.next().await.unwrap().unwrap(),
+        RibEvent::BgpRouteCount(0)
+    ));
+    assert!(
+        driver.applied.lock().await.is_empty(),
+        "half a table published"
+    );
+
+    writer.send(RibRequest::PushBgpRoutes(last)).await.unwrap();
+    writer.send(RibRequest::BgpRouteCount).await.unwrap();
+    assert!(matches!(
+        reader.next().await.unwrap().unwrap(),
+        RibEvent::BgpRouteCount(n) if n == N
+    ));
+    let applied = driver.applied.lock().await;
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].len(), N as usize);
+}
+
 #[tokio::test]
 async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     let tmp = tempfile::tempdir().unwrap();

@@ -23,6 +23,12 @@ pub const MAX_MEMORY_BYTES: usize = 20 * 1024 * 1024;
 const PERSIST_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 const RING_BYTES: usize = MAX_MEMORY_BYTES - PERSIST_QUEUE_BYTES;
 
+/// Most [`entry_size`] bytes one `GetLogs`/`Tail` reply carries. `entry_size`
+/// over-counts an entry's postcard encoding (≥ 100 bytes of fixed overhead
+/// against a few bytes of varint lengths), so the reply stays under the
+/// codec's `MAX_FRAME`; the headroom covers the enum tag and vec length.
+pub const REPLY_BYTES: usize = nos_proto::codec::MAX_FRAME - 1024;
+
 /// Approximate heap footprint of one entry — string payloads plus a fixed
 /// per-entry/per-field overhead. Deliberately an estimate, not an exact
 /// allocator-accurate figure.
@@ -138,22 +144,29 @@ impl LogStore {
     }
 
     /// A filtered, capped snapshot of the buffer, oldest-first — the most
-    /// recent `limit` matching entries when `limit` is given.
+    /// recent `limit` matching entries when `limit` is given, and never more
+    /// than [`REPLY_BYTES`] of them, so the `LogEvent::Logs` reply always
+    /// fits one IPC frame: past it the oldest entries are left out.
     pub async fn snapshot(&self, source: Option<&str>, limit: Option<usize>) -> Vec<LogEntry> {
         let buffer = self.buffer.read().await;
-        let filtered: Vec<LogEntry> = buffer
+        let mut budget = REPLY_BYTES;
+        let mut newest_first: Vec<LogEntry> = buffer
             .entries
             .iter()
-            .filter(|e| match source {
-                Some(s) => e.source == s,
-                None => true,
+            .rev()
+            .filter(|e| source.is_none_or(|s| e.source == s))
+            .take(limit.unwrap_or(usize::MAX))
+            .take_while(|e| match budget.checked_sub(entry_size(e)) {
+                Some(left) => {
+                    budget = left;
+                    true
+                }
+                None => false,
             })
             .cloned()
             .collect();
-        match limit {
-            Some(limit) if filtered.len() > limit => filtered[filtered.len() - limit..].to_vec(),
-            _ => filtered,
-        }
+        newest_first.reverse();
+        newest_first
     }
 
     /// A fresh receiver for live-tailing new entries as they're recorded.
@@ -245,6 +258,31 @@ mod tests {
         let total: usize = snap.iter().map(entry_size).sum();
         assert!(total <= RING_BYTES, "ring holds {total} bytes");
         assert_ne!(snap, [] as [nos_proto::LogEntry; 0]);
+    }
+
+    /// A ring full of large entries (worst case for the reply, #380) is
+    /// served newest-first up to `REPLY_BYTES`, and that reply encodes into
+    /// one IPC frame.
+    #[tokio::test]
+    async fn a_full_ring_reply_fits_one_frame() {
+        use tokio_util::codec::Encoder;
+
+        let store = store(usize::MAX);
+        // Small entries fill the ring to within one entry of `RING_BYTES`,
+        // past `REPLY_BYTES`.
+        for i in 0..100_000 {
+            let mut e = entry("a", &"x".repeat(32));
+            e.fields = vec![("i".into(), i.to_string())];
+            store.record(e).await;
+        }
+        let snap = store.snapshot(None, None).await;
+        assert!(snap.iter().map(entry_size).sum::<usize>() <= REPLY_BYTES);
+        assert_eq!(snap.last().unwrap().fields[0].1, "99999", "newest kept");
+        let ring = store.buffer.read().await.entries.len();
+        assert!(snap.len() < ring, "the cap left out the oldest");
+        nos_proto::IpcCodec::<nos_proto::LogEvent>::default()
+            .encode(nos_proto::LogEvent::Logs(snap), &mut bytes::BytesMut::new())
+            .unwrap();
     }
 
     #[tokio::test]

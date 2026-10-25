@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{
-    BgpRouteUpdate, EvpnRouteInfo, EvpnUpdate, IpNet, IpcCodec, NextHop, OspfRoute,
+    BgpRoute, BgpRouteUpdate, EvpnRouteInfo, EvpnUpdate, IpNet, IpcCodec, NextHop, OspfRoute,
     OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest, Role, RouteEntry, RouteSourceKind,
     VpnRoute, VpnRouteInfo, VpnRouteUpdate,
 };
@@ -112,6 +112,7 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<RibRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<RibEvent>::default());
+    let mut staging = FullStaging::default();
 
     while let Some(msg) = reader.next().await {
         let event = match msg {
@@ -122,7 +123,7 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
                 );
                 break;
             }
-            Ok(req) => dispatch(&ctx, req).await,
+            Ok(req) => dispatch(&ctx, staging.absorb(&ctx.table, req)).await,
             Err(e) => {
                 warn!(table = %ctx.table, error = %e, "RIB IPC read error");
                 break;
@@ -133,6 +134,49 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
         {
             break;
         }
+    }
+}
+
+/// One connection's chunked BGP `Full` snapshot in progress
+/// (`BgpRouteUpdate::FullPart`s, see `BgpRouteUpdate::frames`): nothing
+/// reaches the `Rib` until the closing `Full`, so the table never shows half
+/// a snapshot, and a connection lost mid-snapshot simply drops it.
+#[derive(Default)]
+struct FullStaging {
+    routes: Vec<BgpRoute>,
+    parts: usize,
+}
+
+impl FullStaging {
+    /// Stages every `FullPart` of a `PushBgpRoutes` and folds the staged
+    /// routes into the closing `Full`; any other request passes through.
+    fn absorb(&mut self, table: &str, req: RibRequest) -> RibRequest {
+        let RibRequest::PushBgpRoutes(updates) = req else {
+            return req;
+        };
+        let mut out = Vec::with_capacity(updates.len());
+        for update in updates {
+            match update {
+                BgpRouteUpdate::FullPart(mut routes) => {
+                    self.routes.append(&mut routes);
+                    self.parts += 1;
+                }
+                BgpRouteUpdate::Full(mut routes) if self.parts > 0 => {
+                    let mut all = std::mem::take(&mut self.routes);
+                    all.append(&mut routes);
+                    info!(
+                        table = %table,
+                        routes = all.len(),
+                        parts = self.parts + 1,
+                        "assembled chunked bgp route snapshot"
+                    );
+                    self.parts = 0;
+                    out.push(BgpRouteUpdate::Full(all));
+                }
+                update => out.push(update),
+            }
+        }
+        RibRequest::PushBgpRoutes(out)
     }
 }
 
@@ -351,6 +395,8 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                     }
                 }
             }
+            // Staged by `FullStaging::absorb` before dispatch.
+            BgpRouteUpdate::FullPart(_) => {}
             BgpRouteUpdate::Remove(prefix) => {
                 match guard.remove_and_diff(&prefix, RouteSource::Bgp) {
                     BestPathChange::Unchanged => {}

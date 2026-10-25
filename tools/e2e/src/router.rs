@@ -339,6 +339,26 @@ impl Router {
         }))
     }
 
+    /// How many prefixes nos-ribd's `rt1` lists with a `source` candidate.
+    pub async fn rt1_count(&self, source: &str) -> anyhow::Result<usize> {
+        let body = self
+            .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
+            .await?;
+        let table: serde_json::Value = serde_json::from_str(&body)?;
+        Ok(table
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| {
+                p["candidates"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|c| c["source"] == source)
+            })
+            .count())
+    }
+
     /// Waits (up to 30s: nos-ribd re-reads nos-interfaced every 10s) until
     /// `rt1` lists `prefix` as a connected route.
     pub async fn wait_connected(&self, prefix: &str) -> anyhow::Result<()> {

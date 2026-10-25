@@ -359,6 +359,68 @@ pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed_gr_b, removed_a, 60).await
 }
 
+/// `CHUNKED_ROUTES` /32s in 100.64.0.0/16, as repeated `<flag>` arguments.
+fn chunked_routes(flag: &str) -> Vec<String> {
+    (0..CHUNKED_ROUTES)
+        .flat_map(|i| {
+            [
+                flag.to_string(),
+                format!("100.64.{}.{}/32", i / 256, i % 256),
+            ]
+        })
+        .collect()
+}
+
+/// Waits (up to `secs`) until router `r`'s `rt1` holds a BGP count `ok` accepts.
+async fn wait_bgp_count(r: &Router, secs: u64, ok: impl Fn(usize) -> bool) -> anyhow::Result<()> {
+    let mut n = 0;
+    for _ in 0..secs {
+        n = r.rt1_count("Bgp").await?;
+        if ok(n) {
+            log(format!("{}: rt1 holds {n} bgp routes", r.name()));
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("{}: rt1 stuck at {n} bgp routes", r.name())
+}
+
+/// #380 follow-up: a BGP push to `nos-ribd` larger than one `PushBgpRoutes`
+/// frame (`nos_proto::rib::BGP_PUSH_CHUNK` routes) is cut into frames. Needs
+/// `redistribute`. router-a redistributes `CHUNKED_ROUTES` extra statics, so
+/// router-b's `nos-bgpd` pushes them as multi-frame `Add`s; then its
+/// `nos-bgpd` is killed: graceful restart keeps its `nos-ribd` (and kernel)
+/// routes, and after End-of-RIB the new process pushes one `Full` in 3
+/// frames (`FullPart`, `FullPart`, `Full`), which `nos-ribd` assembles before
+/// publishing — no route is removed from the kernel meanwhile. Removing the
+/// statics again is a multi-frame `Remove` push.
+pub async fn bgp_push_chunked(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let mut flags: Vec<String> = redistribute().into_iter().map(String::from).collect();
+    flags.extend(chunked_routes("--static-route"));
+    a.provision(&flags).await?;
+    wait_bgp_count(b, 120, |n| n > CHUNKED_ROUTES).await?;
+
+    let assembled = "assembled chunked bgp route snapshot table=rt1 routes=50[0-9][0-9] parts=3";
+    let (est_a, est_b, asm_b, removed_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+        b.count(assembled),
+        b.count("removed route"),
+    );
+    w.dock.kill_process("router-b", "nos-bgpd").await?;
+    reestablished(b, est_b).await?;
+    reestablished(a, est_a).await?;
+    b.wait_new(assembled, asm_b, 120).await?;
+    b.assert_quiet("removed route", removed_b, 3).await?;
+    wait_bgp_count(b, 30, |n| n > CHUNKED_ROUTES).await?;
+
+    log("router-a stops redistributing the extra statics");
+    a.provision(&chunked_routes("--remove-static-route"))
+        .await?;
+    wait_bgp_count(b, 120, |n| n < 10).await
+}
+
 /// RFC 4724 against FRR (`router-f`, self-contained), so a symmetric encoding
 /// bug between two nos routers can't hide: FRR's default (helper only) keeps
 /// nothing of its own; with `bgp graceful-restart` router-a decodes its
