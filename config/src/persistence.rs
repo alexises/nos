@@ -14,27 +14,46 @@ use crate::error::ConfigError;
 /// `path`. A crash or process kill mid-write can never leave a truncated or
 /// partially-written file at `path`.
 pub fn save_to_disk(config: &Config, path: &Path) -> Result<(), ConfigError> {
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let yaml = serde_norway::to_string(config)?;
-
-    let mut tmp = match dir {
-        Some(dir) => tempfile::NamedTempFile::new_in(dir),
-        None => tempfile::NamedTempFile::new(),
+    // Keep the last good primary as `.bak`; a corrupt primary never replaces it.
+    if let Ok(old) = std::fs::read(path)
+        && serde_norway::from_slice::<Config>(&old).is_ok()
+    {
+        write_durable(&backup_path(path), &old)?;
     }
-    .map_err(|source| persistence_error(path, source))?;
-    tmp.write_all(yaml.as_bytes())
-        .map_err(|source| persistence_error(path, source))?;
-    tmp.persist(path)
-        .map_err(|e| persistence_error(path, e.error))?;
-    Ok(())
+    write_durable(path, yaml.as_bytes())
+}
+
+/// Temp file in `path`'s directory (same filesystem, so the rename is
+/// atomic), fsynced, renamed over `path`, then the directory fsynced so the
+/// rename survives power loss.
+fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let err = |source| persistence_error(path, source);
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(err)?;
+    tmp.write_all(bytes).map_err(err)?;
+    tmp.as_file().sync_all().map_err(err)?;
+    tmp.persist(path).map_err(|e| err(e.error))?;
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(err)
+}
+
+fn backup_path(path: &Path) -> std::path::PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(".bak");
+    os.into()
 }
 
 /// Loads a config from `path`.
 ///
 /// A missing file is treated as a first run and yields `Config::default()`.
-/// A file that exists but fails to parse is a hard error — a corrupt config
-/// file must never be silently discarded in favor of a default, since that
-/// risks masking real data loss.
+/// A file that exists but fails to parse falls back to `<path>.bak` (loudly);
+/// if that is missing or corrupt too it is a hard error — a corrupt config
+/// must never be silently discarded in favor of a default.
 pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
     warn_if_readable_by_others(path);
     match std::fs::read(path) {
@@ -45,7 +64,17 @@ pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
             }
             Err(e) => {
                 error!(path = %path.display(), error = %e, "failed to parse config file");
-                Err(e.into())
+                let bak = backup_path(path);
+                match std::fs::read(&bak)
+                    .ok()
+                    .and_then(|b| serde_norway::from_slice(&b).ok())
+                {
+                    Some(cfg) => {
+                        error!(path = %bak.display(), "primary config corrupt, loaded backup");
+                        Ok(cfg)
+                    }
+                    None => Err(e.into()),
+                }
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -210,5 +239,60 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("config.yaml")]);
+    }
+
+    const CORRUPT: &[u8] = b"not: [valid: yaml: at: all";
+
+    fn two_saves(path: &Path) {
+        save_to_disk(&Config::default(), path).unwrap();
+        save_to_disk(&sample_config(), path).unwrap();
+    }
+
+    #[test]
+    fn second_save_keeps_previous_as_bak_and_no_stray_temp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        two_saves(&path);
+        assert_eq!(
+            load_or_default(&backup_path(&path)).unwrap(),
+            Config::default()
+        );
+        assert_eq!(load_or_default(&path).unwrap(), sample_config());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn corrupt_primary_loads_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        two_saves(&path);
+        std::fs::write(&path, CORRUPT).unwrap();
+        assert_eq!(load_or_default(&path).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn corrupt_primary_and_backup_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        two_saves(&path);
+        std::fs::write(&path, CORRUPT).unwrap();
+        std::fs::write(backup_path(&path), CORRUPT).unwrap();
+        assert!(matches!(
+            load_or_default(&path).unwrap_err(),
+            ConfigError::Serialization(_)
+        ));
+    }
+
+    #[test]
+    fn saving_over_corrupt_primary_keeps_good_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        two_saves(&path);
+        std::fs::write(&path, CORRUPT).unwrap();
+        save_to_disk(&sample_config(), &path).unwrap();
+        assert_eq!(
+            load_or_default(&backup_path(&path)).unwrap(),
+            Config::default()
+        );
     }
 }
