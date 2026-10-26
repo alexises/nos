@@ -162,3 +162,81 @@ async fn each_feed_is_kept_for_its_one_role_and_refused_to_all_others() {
         }
     }
 }
+
+/// #722: `GetRoutesPage` over a real connection walks the redistributed
+/// routes in order, a page on a fresh connection (no snapshot) continues from
+/// the same cursor, a route removed mid-walk is skipped, and the removed
+/// unpaged `GetRoutes` answers with an error.
+#[tokio::test]
+async fn routes_are_paged_over_a_connection_and_the_old_query_is_an_error() {
+    use nos_proto::{BgpRouteCursor, RedistributedRoute};
+    let (_tmp, path, _server) = start();
+    let route = |n: u8| RedistributedRoute {
+        prefix: format!("10.{n}.0.0/16").parse().unwrap(),
+        gateway: "192.0.2.1".parse().unwrap(),
+    };
+    let (_ribd_r, mut ribd_w) = connect_as(&path, Role::Ribd).await;
+    ribd_w
+        .send(BgpRequest::RedistributeRoutes(RedistributeUpdate::Full(
+            (1..=5).map(route).collect(),
+        )))
+        .await
+        .unwrap();
+
+    let page = |after: Option<BgpRouteCursor>| BgpRequest::GetRoutesPage { after, limit: 2 };
+    let (mut r, mut w) = connect_as(&path, Role::Restd).await;
+    let mut prefixes = Vec::new();
+    // The feed is fire-and-forget: wait until all five are visible.
+    for _ in 0..50 {
+        w.send(BgpRequest::GetRoutesPage {
+            after: None,
+            limit: 100,
+        })
+        .await
+        .unwrap();
+        match next_event(&mut r).await {
+            Some(BgpEvent::RoutesPage { routes, .. }) if routes.len() == 5 => break,
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    w.send(page(None)).await.unwrap();
+    let Some(BgpEvent::RoutesPage { routes, next }) = next_event(&mut r).await else {
+        panic!("no first page")
+    };
+    prefixes.extend(routes.iter().map(|r| r.prefix.clone()));
+    assert_eq!(prefixes, ["10.1.0.0/16", "10.2.0.0/16"]);
+    let mut after = next;
+    assert!(after.is_some());
+
+    // 10.3 disappears before its page is read; a new connection has no
+    // snapshot and still continues after the cursor.
+    ribd_w
+        .send(BgpRequest::RedistributeRoutes(RedistributeUpdate::Remove(
+            "10.3.0.0/16".parse().unwrap(),
+        )))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (mut r2, mut w2) = connect_as(&path, Role::User).await;
+    loop {
+        w2.send(page(after)).await.unwrap();
+        let Some(BgpEvent::RoutesPage { routes, next }) = next_event(&mut r2).await else {
+            panic!("no page")
+        };
+        prefixes.extend(routes.iter().map(|r| r.prefix.clone()));
+        match next {
+            Some(n) => after = Some(n),
+            None => break,
+        }
+    }
+    assert_eq!(
+        prefixes,
+        ["10.1.0.0/16", "10.2.0.0/16", "10.4.0.0/16", "10.5.0.0/16"]
+    );
+
+    w.send(BgpRequest::GetRoutes).await.unwrap();
+    assert!(matches!(
+        next_event(&mut r).await,
+        Some(BgpEvent::Error(m)) if m.contains("GetRoutesPage")
+    ));
+}

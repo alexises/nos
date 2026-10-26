@@ -2000,3 +2000,100 @@ mod over_tls {
         assert!(refused, "a certificate from another CA must not be served");
     }
 }
+
+#[tokio::test]
+async fn bgp_routes_are_paged_per_instance_with_an_opaque_cursor() {
+    use nos_proto::{BgpRouteCursor, BgpRouteSummary, RpkiValidationState};
+    let key = |n: u8| BgpRouteCursor {
+        prefix: format!("10.0.{n}.0/24").parse().unwrap(),
+        peer: None,
+        path_id: 0,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let bgpd = dir.path().join("bgp.sock");
+    serve(&bgpd, ("bgpd", "r1"), move |req: BgpRequest| match req {
+        BgpRequest::GetRoutesPage { after, limit } => {
+            let rest: Vec<u8> = (0..3)
+                .filter(|n| after.is_none_or(|a| key(*n) > a))
+                .collect();
+            let take = &rest[..rest.len().min(limit as usize)];
+            BgpEvent::RoutesPage {
+                routes: take
+                    .iter()
+                    .map(|n| BgpRouteSummary {
+                        prefix: key(*n).prefix.to_string(),
+                        peer: None,
+                        next_hop: None,
+                        as_path: String::new(),
+                        origin_as: None,
+                        local_pref: limit,
+                        best: true,
+                        validation_state: RpkiValidationState::NotFound,
+                    })
+                    .collect(),
+                next: (take.len() < rest.len()).then(|| key(*take.last().unwrap())),
+            }
+        }
+        _ => BgpEvent::PeerNotFound,
+    });
+    let f = fixture(vec![(ServiceRef::BgpInstance("r1".into()), bgpd)]).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/v1?base=current", None).await;
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/v1/bgp-instance/r1",
+        Some(bgp_instance("r1", 1)),
+    )
+    .await;
+    send(app, Method::POST, "/v1/transactions/v1/commit", None).await;
+
+    // No parameters: every instance's first page at the default size.
+    let (s, v) = send(app, Method::GET, "/v1/bgp/routes", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let r = &v[0]["result"];
+    assert_eq!(r["items"].as_array().unwrap().len(), 3);
+    assert_eq!(r["pagination"], json!({"limit": 1000, "next": null}));
+
+    // Two pages by following the opaque cursor.
+    let (_, v) = send(app, Method::GET, "/v1/bgp/routes?instance=r1&limit=2", None).await;
+    let r = &v[0]["result"];
+    assert_eq!(r["items"].as_array().unwrap().len(), 2);
+    let next = r["pagination"]["next"].as_str().unwrap().to_string();
+    assert!(!next.contains(['/', '.', ':']), "opaque, URL-safe: {next}");
+    let (s, v) = send(
+        app,
+        Method::GET,
+        &format!("/v1/bgp/routes?instance=r1&limit=2&after={next}"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let r = &v[0]["result"];
+    assert_eq!(r["items"][0]["prefix"], json!("10.0.2.0/24"));
+    assert_eq!(r["pagination"], json!({"limit": 2, "next": null}));
+
+    // The limit is clamped to 1..=1000.
+    let (_, v) = send(app, Method::GET, "/v1/bgp/routes?instance=r1&limit=0", None).await;
+    assert_eq!(v[0]["result"]["pagination"]["limit"], json!(1));
+    let (_, v) = send(
+        app,
+        Method::GET,
+        "/v1/bgp/routes?instance=r1&limit=5000",
+        None,
+    )
+    .await;
+    assert_eq!(v[0]["result"]["pagination"]["limit"], json!(1000));
+
+    // Pagination needs ?instance=, a bad cursor is 400, an unknown instance 404.
+    for bad in [
+        "/v1/bgp/routes?limit=2",
+        "/v1/bgp/routes?after=AAAA",
+        "/v1/bgp/routes?instance=r1&after=nope",
+    ] {
+        let (s, _) = send(app, Method::GET, bad, None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (s, _) = send(app, Method::GET, "/v1/bgp/routes?instance=zz", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

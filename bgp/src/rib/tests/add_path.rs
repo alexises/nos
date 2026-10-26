@@ -560,3 +560,66 @@ fn add_path_new_session_and_route_refresh_replay_the_top_n() {
     rib.resend_all(addr("10.0.0.9"), AddressFamily::Ipv4Unicast, false);
     assert_eq!(path_events(&mut d), top);
 }
+
+/// #722: walking `route_keys` through `crate::page` yields exactly `routes()`
+/// (local first, then peers, then ADD-PATH ids), whatever the page size.
+#[test]
+fn paged_route_walk_equals_the_unpaged_listing() {
+    let mut rib = new_rib(65000);
+    let (p1, p2) = (addr("10.0.0.1"), addr("10.0.0.2"));
+    let _rx1 = register_peer(&mut rib, p1, false, addr("10.0.0.254"));
+    let _rx2 = register_peer(&mut rib, p2, false, addr("10.0.0.253"));
+    for id in [1, 2] {
+        rib.handle_update(
+            p1,
+            false,
+            v4("192.0.2.1"),
+            &path_update("203.0.113.0/24", id, "10.0.0.1", Some(id)),
+            &nos_rpl::ACCEPT_ALL,
+        );
+    }
+    rib.handle_update(
+        p2,
+        false,
+        v4("192.0.2.2"),
+        &path_update("203.0.113.0/24", 1, "10.0.0.2", None),
+        &nos_rpl::ACCEPT_ALL,
+    );
+    rib.apply_redistribute_update(full_update(vec![
+        ("203.0.113.0/24", "10.0.0.9"),
+        ("9.9.9.0/24", "10.0.0.9"),
+    ]));
+    let want = rib.routes();
+    assert_eq!(want.len(), 5);
+    for limit in [1, 2, 3, 5, 9] {
+        let mut snap = crate::page::Snapshot::default();
+        let (mut got, mut after) = (Vec::new(), None);
+        loop {
+            let (rows, next) = crate::page::page(
+                &mut snap,
+                &crate::page::Ask {
+                    after: after.as_ref(),
+                    limit,
+                    budget: usize::MAX,
+                    now: std::time::Instant::now(),
+                },
+                || rib.route_keys(),
+                |k| rib.route_at(k),
+                nos_proto::page::wire_len,
+            );
+            got.extend(rows);
+            match next {
+                Some(k) => after = Some(k),
+                None => break,
+            }
+        }
+        assert_eq!(got, want, "limit {limit}");
+    }
+    // A key that no longer exists yields no row.
+    let gone = nos_proto::BgpRouteCursor {
+        prefix: prefix("1.1.1.0/24"),
+        peer: None,
+        path_id: 0,
+    };
+    assert!(rib.route_at(&gone).is_none());
+}

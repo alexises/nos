@@ -9,6 +9,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::collision::FsmCommand;
+use crate::page::{Snapshot, PAGE_BYTES};
 use crate::session::SessionManager;
 
 /// Binds `listen_socket` and spawns the IPC accept loop for session
@@ -44,6 +45,7 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
         | BgpRequest::SendRouteRefresh { .. }
         | BgpRequest::ClearPeer { .. }
         | BgpRequest::GetRoutes
+        | BgpRequest::GetRoutesPage { .. }
         | BgpRequest::GetRpkiSummary => {
             matches!(role, Role::User | Role::Restd)
         }
@@ -86,6 +88,8 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
     let mut reader = FramedRead::new(read_half, IpcCodec::<BgpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<BgpEvent>::default());
 
+    // One sorted key snapshot per query kind, dropped with the connection.
+    let mut routes_snapshot = Snapshot::default();
     while let Some(msg) = reader.next().await {
         let req = match msg {
             Ok(req) => req,
@@ -132,8 +136,20 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                 }
             }
             BgpRequest::GetRoutes => {
-                let event = BgpEvent::Routes(sessions.route_summaries().await);
+                let event = BgpEvent::Error("GetRoutes removed, use GetRoutesPage".to_string());
                 if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
+            BgpRequest::GetRoutesPage { after, limit } => {
+                let (routes, next) = sessions
+                    .route_page(&mut routes_snapshot, after.as_ref(), limit, PAGE_BYTES)
+                    .await;
+                if writer
+                    .send(BgpEvent::RoutesPage { routes, next })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -254,6 +270,17 @@ mod authz_tests {
                 allowed(role, &BgpRequest::GetRoutes),
                 matches!(role, Role::User | Role::Restd),
                 "{role:?} routes"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::GetRoutesPage {
+                        after: None,
+                        limit: 10
+                    }
+                ),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} routes page"
             );
             assert_eq!(
                 allowed(role, &BgpRequest::GetEvpnRoutes),

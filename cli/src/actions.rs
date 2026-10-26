@@ -1084,10 +1084,27 @@ async fn show_bgp_routes(config_socket: &Path, watchdog_socket: &Path) {
         )
         .await
         {
-            Ok(Some(bgp_socket)) => match bgp_client::get_routes(&bgp_socket).await {
-                Ok(routes) => println!("{}", format::render_bgp_routes(&instance.name, &routes)),
-                Err(e) => eprintln!("error: {e}"),
-            },
+            Ok(Some(bgp_socket)) => {
+                // Each page prints as it arrives; the header goes out once.
+                let mut any = false;
+                let walked = bgp_client::for_each_routes_page(&bgp_socket, |page| {
+                    if !page.is_empty() {
+                        if !any {
+                            println!("{}", format::render_bgp_routes_header(&instance.name));
+                        }
+                        any = true;
+                        println!("{}", format::render_bgp_route_lines(page));
+                    }
+                })
+                .await;
+                match walked {
+                    Ok(()) if !any => {
+                        println!("{}", format::render_bgp_routes(&instance.name, &[]));
+                    }
+                    Ok(()) => {}
+                    Err(e) => eprintln!("error: {e}"),
+                }
+            }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),
         }

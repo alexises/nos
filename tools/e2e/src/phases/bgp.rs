@@ -182,6 +182,88 @@ pub async fn redistribute_phase(w: &mut World) -> anyhow::Result<()> {
     b.assert_quiet(&loc_rib(), base, 8).await
 }
 
+/// `bgp-routes-paging` (#722): `GET /v1/bgp/routes` is paged per instance. 25
+/// extra statics redistributed into BGP on router-a (and learned by router-b)
+/// against a page size of 10 force three pages; walking `pagination.next`
+/// must return each exactly once, in ascending order, on both routers. The
+/// 1000-route server default is covered by unit tests; 1M routes are too
+/// heavy for CI.
+pub async fn bgp_routes_paging(w: &mut World) -> anyhow::Result<()> {
+    const N: usize = 25;
+    let (a, b) = (w.a()?, w.b()?);
+    let prefixes: Vec<String> = (0..N).map(|i| format!("10.89.{i}.0/24")).collect();
+    let flags = |flag: &str| -> Vec<String> {
+        prefixes
+            .iter()
+            .flat_map(|p| [flag.to_string(), p.clone()])
+            .collect()
+    };
+    let mut add = flags("--static-route");
+    add.extend(strings(&[
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+    ]));
+    a.provision(&add).await?;
+
+    let ours = |items: &[serde_json::Value]| -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|p| p["prefix"].as_str())
+            .filter(|p| p.starts_with("10.89."))
+            .map(String::from)
+            .collect()
+    };
+    for r in [a, b] {
+        let mut seen = Vec::new();
+        for _ in 0..60 {
+            seen = ours(&r.bgp_routes_walk("r1", Some(10)).await?);
+            if seen.len() == N {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if seen != prefixes {
+            bail!(
+                "{}: paged walk returned {seen:?}, expected {prefixes:?}",
+                r.name()
+            );
+        }
+    }
+
+    log("the first page is full and points at the next one");
+    let body = a
+        .rest_expect(
+            Method::GET,
+            "/v1/bgp/routes?instance=r1&limit=10",
+            None,
+            200,
+        )
+        .await?;
+    let page: serde_json::Value = serde_json::from_str(&body)?;
+    let result = &page[0]["result"];
+    if result["items"].as_array().map(Vec::len) != Some(10)
+        || result["pagination"]["limit"] != 10
+        || !result["pagination"]["next"].is_string()
+    {
+        bail!("first page of GET /v1/bgp/routes?instance=r1&limit=10 is wrong: {body}");
+    }
+    a.rest_expect(Method::GET, "/v1/bgp/routes?limit=10", None, 400)
+        .await?;
+    a.rest_expect(
+        Method::GET,
+        "/v1/bgp/routes?instance=r1&after=nope",
+        None,
+        400,
+    )
+    .await?;
+    a.rest_expect(Method::GET, "/v1/bgp/routes?instance=nope", None, 404)
+        .await?;
+
+    a.provision(&flags("--remove-static-route")).await?;
+    Ok(())
+}
+
 /// Whether, among `r`'s log lines matching `first`, `then` or `not`, the one
 /// right after the last `first` is a `then` — i.e. no `not` came between.
 fn followed_by(r: &Router, first: &str, then: &str, not: &str) -> anyhow::Result<()> {
@@ -2514,11 +2596,15 @@ async fn expect_route_state(
             .await?;
         let json: serde_json::Value = serde_json::from_str(&last)?;
         let hit = json.as_array().into_iter().flatten().any(|inst| {
-            inst["result"].as_array().into_iter().flatten().any(|rt| {
-                rt["prefix"] == prefix
-                    && rt["validation_state"] == want
-                    && (!best || rt["best"] == true)
-            })
+            inst["result"]["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|rt| {
+                    rt["prefix"] == prefix
+                        && rt["validation_state"] == want
+                        && (!best || rt["best"] == true)
+                })
         });
         if hit {
             return Ok(());

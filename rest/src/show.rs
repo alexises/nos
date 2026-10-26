@@ -17,7 +17,8 @@ use nos_proto::{
     LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
     PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
-    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo, ROUTES_PAGE_MAX,
+    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo, BGP_PAGE_MAX,
+    ROUTES_PAGE_MAX,
 };
 use serde::{Deserialize, Serialize};
 
@@ -433,7 +434,7 @@ pub type BgpEvpnReport = Vec<InstanceReport<Vec<EvpnRouteSummary>>>;
 pub type BgpFlowspecReport = Vec<InstanceReport<Vec<FlowspecRouteSummary>>>;
 /// `GET /v1/bgp/vpnv4` and `/v1/bgp/vpnv6`.
 pub type BgpVpnReport = Vec<InstanceReport<Vec<nos_proto::VpnRouteSummary>>>;
-pub type BgpRoutesReport = Vec<InstanceReport<Vec<nos_proto::BgpRouteSummary>>>;
+pub type BgpRoutesReport = Vec<InstanceReport<BgpRoutesPage>>;
 pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
@@ -677,23 +678,66 @@ async fn bgp_vpn(
     ))
 }
 
-#[utoipa::path(get, path = "/v1/bgp/routes", tag = "show", summary = "IPv4/IPv6 unicast routes with RPKI origin validation state, per instance", responses((status = 200, body = BgpRoutesReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
-pub async fn bgp_routes(State(d): State<Daemons>) -> ApiResult<Json<BgpRoutesReport>> {
-    let names = d
+/// One page of one instance's `GET /v1/bgp/routes`.
+#[derive(Serialize, ToSchema)]
+pub struct BgpRoutesPage {
+    /// Paths in (prefix, peer, path id) order, locally redistributed first per prefix.
+    items: Vec<nos_proto::BgpRouteSummary>,
+    pagination: Pagination,
+}
+
+#[derive(Deserialize)]
+pub struct BgpPageQuery {
+    instance: Option<String>,
+    after: Option<String>,
+    limit: Option<u32>,
+}
+
+#[utoipa::path(get, path = "/v1/bgp/routes", tag = "show", summary = "One page of IPv4/IPv6 unicast routes with RPKI origin validation state, per instance", description = "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so routes added mid-walk appear on the next walk; a walk never repeats or loops.", params(("instance" = Option<String>, Query, description = "only this BGP instance; required with after or limit"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (opaque)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = BgpRoutesReport), (status = 400, body = ErrorBody, description = "after is not a cursor, or after/limit without instance"), (status = 404, body = ErrorBody, description = "no such bgp instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_routes(
+    State(d): State<Daemons>,
+    Query(q): Query<BgpPageQuery>,
+) -> ApiResult<Json<BgpRoutesReport>> {
+    if q.instance.is_none() && (q.after.is_some() || q.limit.is_some()) {
+        return Err(ApiError::BadRequest(
+            "pagination requires ?instance=".to_string(),
+        ));
+    }
+    let after: Option<nos_proto::BgpRouteCursor> = q
+        .after
+        .map(|a| {
+            a.parse()
+                .map_err(|_| ApiError::BadRequest(format!("after '{a}' is not a cursor")))
+        })
+        .transpose()?;
+    let limit = q.limit.unwrap_or(BGP_PAGE_MAX).clamp(1, BGP_PAGE_MAX);
+    let mut names: Vec<String> = d
         .running_config()
         .await?
         .bgp_instances
         .into_iter()
         .map(|i| i.name)
         .collect();
+    if let Some(want) = &q.instance {
+        names.retain(|n| n == want);
+        if names.is_empty() {
+            return Err(ApiError::NotFound(format!("no bgp instance '{want}'")));
+        }
+    }
     Ok(Json(
         per_instance(
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetRoutes,
+            || BgpRequest::GetRoutesPage { after, limit },
             |e| match e {
-                BgpEvent::Routes(v) => Some(v),
+                BgpEvent::RoutesPage { routes, next } => Some(BgpRoutesPage {
+                    items: routes,
+                    pagination: Pagination {
+                        limit,
+                        next: next.map(|n| n.to_string()),
+                    },
+                }),
                 _ => None,
             },
         )

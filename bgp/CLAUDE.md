@@ -39,7 +39,7 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 - `fsm::step` is the pure transition core, unit-tested; `fsm::run` owns the framed socket and timers. `UPDATE`/`ROUTE_REFRESH` bypass `step` (handled in `run`'s read branch, only once `Established`).
 - Send to a peer only via `OutboxTx::send` (bounded, coalescing, #395).
 - Every well-formed inbound message resets the hold timer (RFC 4271 §4.4), in the read branch.
-- Hold/keepalive/connect-retry defaults and floors live in `nos_proto` (`nos-config` validates the same rules); OPEN check order: internals page.
+- Timer defaults and floors live in `nos_proto`; OPEN check order: internals page.
 - The `PeerSlot` command channel is polled only while `Established`, so one task contends for it.
 - 4-octet AS: `AS_TRANS` without capability 65 is a bad peer AS; a peer without it gets `BgpCodec::two_octet_as` (`AS4_PATH` merge). RFC 9072 OPEN is emitted only above 255 bytes.
 
@@ -148,8 +148,9 @@ Run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles mem
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
 | `message.rs`, `evpn.rs`, `flowspec*.rs`, `vpn/`, `as_path.rs` | Wire codecs (`BgpCodec`) |
 | `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `vpn_out`, `vpn_import`, `shared` (`SharedRib`), `tests/` |
+| `page.rs` | Keyset paging (#722), generic over the key: `Snapshot<K>`, `page`; internals page |
 | `rib_push_client.rs`, `fdb_push_client.rs`, `vpn_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); a `nos-ribd` restart goes unnoticed until the next change |
-| `rib_client.rs`, `interface_client.rs` | One-shot queries via `nos_daemon::ipc::one_shot` |
+| `rib_client.rs`, `interface_client.rs` | One-shot queries (`nos_daemon::ipc::one_shot`) |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 
 Tests: `bgp/tests/`, `reconcile_tests.rs`/`fsm_tests.rs` (fakes, #344).

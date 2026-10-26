@@ -918,6 +918,7 @@ bgp instance r1:
     203.0.113.0/24 from local next-hop - as-path [] origin-as - local-pref 100 not-found
 ```
 
+- The list is printed page by page as it arrives, so a large table starts printing at once.
 - One line per path (every ADD-PATH path), IPv4 and IPv6 unicast; EVPN stays in `show bgp evpn`. `>` marks the best path; `from local` is a redistributed route.
 - The state is `valid`, `invalid` or `not-found`. A route your import policy rejects (for example with `rpki.invalid`) is never held, so it is not listed; a route learned through RFC 8097 keeps the state its peer sent.
 
