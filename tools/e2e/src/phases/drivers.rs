@@ -782,6 +782,33 @@ pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&enslaved("eth2"), ens2, 30).await?;
     micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
 
+    // #693: a deleted and recreated member leaves the receive sockets on a
+    // stale ifindex; the loops must rebuild them instead of exiting for good.
+    log("eth2 deleted and recreated: the receive sockets are rebuilt, the session returns");
+    let (recreated, up2, ens2) = (
+        a.count("bfd micro receive socket recreated member=eth2"),
+        a.count(&up_eth2),
+        a.count(&enslaved("eth2")),
+    );
+    w.dock
+        .ip(
+            NETNS_HELPER_IMAGE,
+            Some("router-a"),
+            false,
+            &["link", "del", "eth2"],
+        )
+        .await?;
+    w.link_veths().await?;
+    a.wait_new(
+        "bfd micro receive socket recreated member=eth2",
+        recreated,
+        30,
+    )
+    .await?;
+    a.wait_new(&up_eth2, up2, 30).await?;
+    a.wait_new(&enslaved("eth2"), ens2, 30).await?;
+    micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
+
     log("removing the aggregate stops the sessions");
     for r in [a, b] {
         r.provision(&[

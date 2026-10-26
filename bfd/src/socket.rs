@@ -32,7 +32,7 @@ use nos_proto::{RibEvent, RibRequest, Role, ServiceRef, SessionKey};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::echo;
 use crate::manager::{Demux, Net};
@@ -173,29 +173,155 @@ fn recv_one(fd: RawFd, buf: &mut [u8]) -> io::Result<Datagram> {
     }
 }
 
-async fn rx_loop(sock: AsyncFd<Socket>, table: String, multihop: bool, demux: Demux) {
-    let mut buf = [0u8; 128];
-    loop {
-        let mut guard = match sock.readable().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(table = %table, error = %e, "bfd receive socket failed");
-                return;
-            }
-        };
-        match guard.try_io(|s| recv_one(s.get_ref().as_raw_fd(), &mut buf)) {
-            Ok(Ok(d)) => {
-                // TTL check (RFC 5881 §5 / RFC 5883 §5) is per session, in `route`.
-                let ok = demux.route(&table, d.src, multihop, d.ttl, &buf[..d.len.min(buf.len())]);
-                debug!(peer = %d.src, ttl = ?d.ttl, delivered = ok, "bfd packet received");
-            }
-            Ok(Err(e)) if e.kind() != io::ErrorKind::Interrupted => {
-                warn!(table = %table, error = %e, "bfd receive failed");
-                return;
-            }
-            Ok(Err(_)) | Err(_) => {}
+const BACKOFF_MIN: Duration = Duration::from_millis(10);
+const BACKOFF_MAX: Duration = Duration::from_secs(1);
+
+/// The next retry delay: doubled, capped at `BACKOFF_MAX`.
+fn next_backoff(d: Duration) -> Duration {
+    d.saturating_mul(2).min(BACKOFF_MAX)
+}
+
+/// Retry pacing of a receive loop (#693): 10 ms doubling to 1 s, reset by a
+/// good receive; only the first failure of a streak is a `warn!`.
+struct Backoff {
+    delay: Duration,
+    failing: bool,
+}
+
+impl Backoff {
+    const fn new() -> Self {
+        Backoff {
+            delay: BACKOFF_MIN,
+            failing: false,
         }
     }
+
+    /// A failure: whether it opens a streak, and how long to wait.
+    fn failed(&mut self) -> (bool, Duration) {
+        let first = !self.failing;
+        self.failing = true;
+        let d = self.delay;
+        self.delay = next_backoff(d);
+        (first, d)
+    }
+
+    /// A success: whether it ends a streak.
+    fn ok(&mut self) -> bool {
+        let was = self.failing;
+        *self = Self::new();
+        was
+    }
+
+    async fn fail(&mut self, what: &str, e: &io::Error) {
+        let (first, d) = self.failed();
+        if first {
+            warn!(what = %what, error = %e, "bfd receive failing, retrying with backoff");
+        } else {
+            debug!(what = %what, error = %e, "bfd receive still failing");
+        }
+        tokio::time::sleep(d).await;
+    }
+
+    fn recovered(&mut self, what: &str) {
+        if self.ok() {
+            info!(what = %what, "bfd receive recovered");
+        }
+    }
+}
+
+/// How often an L2 receive loop checks that its interface still has the
+/// index its socket was bound to: `recv` on a packet socket whose interface
+/// was deleted and recreated blocks silently, it never errors (#693).
+const IFINDEX_CHECK: Duration = Duration::from_secs(1);
+
+/// `Some(new index)` when `iface` now has an index other than `have`.
+fn ifindex_changed(iface: &str, have: i32) -> Option<i32> {
+    nos_l2_socket::if_index(iface).ok().filter(|i| *i != have)
+}
+
+/// Calls `make` until it succeeds, backing off between failures: a failed
+/// recreation (VRF or interface absent for a while) never ends the task.
+async fn reopen<T>(what: &str, b: &mut Backoff, mut make: impl FnMut() -> io::Result<T>) -> T {
+    loop {
+        match make() {
+            Ok(t) => return t,
+            Err(e) => b.fail(what, &e).await,
+        }
+    }
+}
+
+/// The receive loop of a UDP socket, which never ends (#693): a receive error
+/// backs off and retries; a failed readiness wait (`readable()`) rebuilds the
+/// socket through `remake`, retried with backoff until it works. `step` does
+/// one non-blocking receive and handles the datagram.
+async fn socket_loop(
+    what: String,
+    sock: AsyncFd<Socket>,
+    mut remake: impl FnMut(&mut Option<AsyncFd<Socket>>) -> io::Result<()>,
+    mut step: impl FnMut(&AsyncFd<Socket>) -> io::Result<()>,
+) {
+    let mut sock = Some(sock);
+    let mut dead = false;
+    let mut b = Backoff::new();
+    loop {
+        if dead {
+            match remake(&mut sock) {
+                Ok(()) => dead = false,
+                Err(e) => {
+                    b.fail(&what, &e).await;
+                    continue;
+                }
+            }
+        }
+        let Some(s) = sock.as_ref() else {
+            dead = true;
+            continue;
+        };
+        let mut guard = match s.readable().await {
+            Ok(g) => g,
+            Err(e) => {
+                b.fail(&what, &e).await;
+                dead = true;
+                continue;
+            }
+        };
+        match guard.try_io(&mut step) {
+            Ok(Ok(())) => b.recovered(&what),
+            Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => {}
+            Ok(Err(e)) => b.fail(&what, &e).await,
+            Err(_) => {}
+        }
+    }
+}
+
+async fn rx_loop(
+    sock: AsyncFd<Socket>,
+    table: String,
+    vrf: String,
+    v6: bool,
+    multihop: bool,
+    demux: Demux,
+) {
+    let mut buf = [0u8; 128];
+    socket_loop(
+        format!("udp table={table} v6={v6} multihop={multihop}"),
+        sock,
+        |old| {
+            // The port is not SO_REUSEADDR: the dead socket goes first.
+            drop(old.take());
+            *old = Some(rx_socket(&vrf, v6, port(multihop))?);
+            info!(table = %table, v6, multihop, "bfd receive socket recreated");
+            Ok(())
+        },
+        |s| {
+            let d = recv_one(s.get_ref().as_raw_fd(), &mut buf)?;
+            // TTL check (RFC 5881 §5 / RFC 5883 §5) is per session, in `route`.
+            let ok = demux.route(&table, d.src, multihop, d.ttl, &buf[..d.len.min(buf.len())]);
+            debug!(peer = %d.src, ttl = ?d.ttl, delivered = ok, "bfd packet received");
+            Ok(())
+        },
+    )
+    .await;
 }
 
 struct UdpTx(Socket);
@@ -319,7 +445,8 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Resul
 
 /// Echo packets out through the neighbour: its MAC is kept fresh by a task.
 struct L2Echo {
-    sock: Arc<L2Unicast>,
+    /// Swapped by `echo_rx_loop` when it recreates the socket (#693).
+    sock: Arc<Mutex<Arc<L2Unicast>>>,
     mac: Arc<Mutex<Option<[u8; 6]>>>,
     local: IpAddr,
     sport: u16,
@@ -330,7 +457,8 @@ impl EchoTx for L2Echo {
         let mac = (*self.mac.lock().unwrap())
             .ok_or_else(|| io::Error::other("no neighbour entry for the peer yet"))?;
         let ip = echo::build(self.local, self.sport, payload);
-        self.sock.send(mac, &ip)
+        let sock = self.sock.lock().unwrap().clone();
+        sock.send(mac, &ip)
     }
 }
 
@@ -369,15 +497,32 @@ async fn neigh_loop(
 }
 
 async fn echo_rx_loop(
-    sock: Arc<L2Unicast>,
+    slot: Arc<Mutex<Arc<L2Unicast>>>,
+    iface: String,
+    ethertype: u16,
     local: IpAddr,
     disc: u32,
     unaffiliated: bool,
     out: tokio::sync::mpsc::Sender<Looped>,
 ) {
+    let mut b = Backoff::new();
+    let what = format!("echo iface={iface}");
+    let mut have = nos_l2_socket::if_index(&iface).unwrap_or(0);
     loop {
-        match sock.recv().await {
+        let sock = slot.lock().unwrap().clone();
+        let got = match tokio::time::timeout(IFINDEX_CHECK, sock.recv()).await {
+            Ok(r) => r,
+            Err(_) => match ifindex_changed(&iface, have) {
+                Some(i) => {
+                    have = i;
+                    Err(io::Error::other("interface index changed"))
+                }
+                None => continue,
+            },
+        };
+        match got {
             Ok(p) => {
+                b.recovered(&what);
                 let looped = if unaffiliated {
                     // RFC 9747 §3: our own Control packet, TTL exactly 254.
                     echo::parse_udp(&p, local)
@@ -395,8 +540,15 @@ async fn echo_rx_loop(
                 }
             }
             Err(e) => {
-                warn!(error = %e, "bfd echo receive failed");
-                return;
+                // Any error may mean a stale ifindex: rebuild the socket (#693).
+                b.fail(&what, &e).await;
+                let new = reopen(&what, &mut b, || {
+                    L2Unicast::open(&iface, ethertype, echo::ECHO_PORT)
+                })
+                .await;
+                *slot.lock().unwrap() = Arc::new(new);
+                have = nos_l2_socket::if_index(&iface).unwrap_or(have);
+                info!(iface = %iface, "bfd echo receive socket recreated");
             }
         }
     }
@@ -409,7 +561,8 @@ async fn echo_rx_loop(
 /// member's ifindex and the bond's `rx_handler` re-targets the skb after the
 /// packet tap: `nos-e2e`'s `micro-bfd` phase proves it).
 struct MicroTx {
-    sock: Arc<L2Socket>,
+    /// Swapped by the untagged `micro_rx_loop` when it recreates the socket (#693).
+    sock: Arc<Mutex<Arc<L2Socket>>>,
     local: IpAddr,
     peer: IpAddr,
     sport: u16,
@@ -420,7 +573,8 @@ impl Tx for MicroTx {
     fn send(&self, bytes: &[u8]) -> io::Result<()> {
         let ip = micro::build_frame(self.local, self.peer, self.sport, bytes)
             .ok_or_else(|| io::Error::other("local and peer address families differ"))?;
-        self.sock.send(&ip)
+        let sock = self.sock.lock().unwrap().clone();
+        sock.send(&ip)
     }
 }
 
@@ -432,19 +586,55 @@ impl Drop for MicroTx {
     }
 }
 
+/// A member's receive socket: the untagged UDP 6784 one (also the TX socket),
+/// or the 802.1p-tagged one.
+fn micro_open(member: &str, ethertype: u16, tagged: bool) -> io::Result<L2Socket> {
+    let s = if tagged {
+        // ponytail: no kernel filter on the tagged socket: it wakes for every
+        // VLAN frame of the member (RFC 7130 §2.3 wants tag 0 received).
+        L2Socket::open(member, 0x8100, micro::GROUP, RX_FRAME)?
+    } else {
+        L2Socket::open_udp(member, ethertype, micro::GROUP, RX_FRAME, micro::PORT)?
+    };
+    Ok(s.accept_own_unicast())
+}
+
 async fn micro_rx_loop(
-    sock: Arc<L2Socket>,
+    slot: Arc<Mutex<Arc<L2Socket>>>,
+    ethertype: u16,
     tagged: bool,
     member: String,
     local: IpAddr,
     demux: Demux,
 ) {
+    let mut b = Backoff::new();
+    let what = format!("micro member={member} tagged={tagged}");
+    let mut have = nos_l2_socket::if_index(&member).unwrap_or(0);
     loop {
-        let payload = match sock.recv().await {
-            Ok(p) => p,
+        let sock = slot.lock().unwrap().clone();
+        let got = match tokio::time::timeout(IFINDEX_CHECK, sock.recv()).await {
+            Ok(r) => r,
+            Err(_) => match ifindex_changed(&member, have) {
+                Some(i) => {
+                    have = i;
+                    Err(io::Error::other("interface index changed"))
+                }
+                None => continue,
+            },
+        };
+        let payload = match got {
+            Ok(p) => {
+                b.recovered(&what);
+                p
+            }
             Err(e) => {
-                warn!(member = %member, error = %e, "bfd micro receive failed");
-                return;
+                // Any error may mean a stale ifindex: rebuild the socket (#693).
+                b.fail(&what, &e).await;
+                let new = reopen(&what, &mut b, || micro_open(&member, ethertype, tagged)).await;
+                *slot.lock().unwrap() = Arc::new(new);
+                have = nos_l2_socket::if_index(&member).unwrap_or(have);
+                info!(member = %member, tagged, "bfd micro receive socket recreated");
+                continue;
             }
         };
         let ip = if tagged {
@@ -468,34 +658,41 @@ async fn sbfd_rx_loop(
     out: tokio::sync::mpsc::Sender<sbfd::Reflection>,
 ) {
     let mut buf = [0u8; 128];
-    loop {
-        let mut guard = match sock.readable().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(peer = %peer, error = %e, "bfd sbfd receive socket failed");
-                return;
-            }
-        };
-        match guard.try_io(|s| recv_one(s.get_ref().as_raw_fd(), &mut buf)) {
-            Ok(Ok(d)) => {
+    socket_loop(
+        format!("sbfd peer={peer}"),
+        sock,
+        |old| {
+            // A new socket would get another source port and the reflections
+            // would never find it: re-register a dup of the same one.
+            let fd = old
+                .as_ref()
+                .ok_or_else(|| io::Error::other("no sbfd socket"))?
+                .get_ref()
+                .try_clone()?;
+            *old = Some(AsyncFd::new(fd)?);
+            info!(peer = %peer, "bfd sbfd receive socket recreated");
+            Ok(())
+        },
+        |s| match recv_one(s.get_ref().as_raw_fd(), &mut buf) {
+            Ok(d) => {
                 if let Ok(p) = packet::decode(&buf[..d.len.min(buf.len())]) {
                     let _ = out.try_send((p, d.ttl));
                 }
+                Ok(())
             }
             // ICMP errors on a connected socket (reflector unreachable) are not fatal.
-            Ok(Err(e))
-                if e.kind() == io::ErrorKind::Interrupted
-                    || matches!(
-                        e.raw_os_error(),
-                        Some(libc::ECONNREFUSED | libc::EHOSTUNREACH | libc::ENETUNREACH)
-                    ) => {}
-            Ok(Err(e)) => {
-                warn!(peer = %peer, error = %e, "bfd sbfd receive failed");
-                return;
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::ECONNREFUSED | libc::EHOSTUNREACH | libc::ENETUNREACH)
+                ) =>
+            {
+                Ok(())
             }
-            Err(_) => {}
-        }
-    }
+            Err(e) => Err(e),
+        },
+    )
+    .await;
 }
 
 /// One datagram for the reflector: who sent it, which of our addresses it
@@ -645,34 +842,30 @@ fn reflector_socket(vrf: &str, v6: bool) -> io::Result<AsyncFd<Socket>> {
     AsyncFd::new(s)
 }
 
-async fn reflect_loop(sock: AsyncFd<Socket>, vrf: String, reflector: Arc<Reflector>) {
+async fn reflect_loop(sock: AsyncFd<Socket>, vrf: String, v6: bool, reflector: Arc<Reflector>) {
     let mut buf = [0u8; 128];
-    loop {
-        let mut guard = match sock.readable().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(vrf = %vrf, error = %e, "bfd reflector socket failed");
-                return;
+    socket_loop(
+        format!("reflector vrf={vrf} v6={v6}"),
+        sock,
+        |old| {
+            drop(old.take());
+            *old = Some(reflector_socket(&vrf, v6)?);
+            info!(vrf = %vrf, v6, "bfd reflector socket recreated");
+            Ok(())
+        },
+        |s| {
+            let fd = s.get_ref().as_raw_fd();
+            let p = recv_probe(fd, &mut buf)?;
+            let data = &buf[..p.len.min(buf.len())];
+            if let Some(reply) = reflector.handle(std::time::Instant::now(), p.src, p.dst, data)
+                && let Err(e) = send_from(fd, &p.name, reply_source(p.dst), &reply)
+            {
+                debug!(peer = %p.src, error = %e, "bfd reflector reply failed");
             }
-        };
-        match guard.try_io(|s| recv_probe(s.get_ref().as_raw_fd(), &mut buf)) {
-            Ok(Ok(p)) => {
-                let data = &buf[..p.len.min(buf.len())];
-                if let Some(reply) = reflector.handle(std::time::Instant::now(), p.src, p.dst, data)
-                {
-                    let fd = sock.get_ref().as_raw_fd();
-                    if let Err(e) = send_from(fd, &p.name, reply_source(p.dst), &reply) {
-                        debug!(peer = %p.src, error = %e, "bfd reflector reply failed");
-                    }
-                }
-            }
-            Ok(Err(e)) if e.kind() != io::ErrorKind::Interrupted => {
-                warn!(vrf = %vrf, error = %e, "bfd reflector receive failed");
-                return;
-            }
-            Ok(Err(_)) | Err(_) => {}
-        }
-    }
+            Ok(())
+        },
+    )
+    .await;
 }
 
 type ReflectorTasks = HashMap<(String, bool), (u32, JoinHandle<()>)>;
@@ -740,6 +933,7 @@ impl ReflectorNet {
                                 tokio::spawn(reflect_loop(
                                     sock,
                                     vrf.clone(),
+                                    v6,
                                     self.reflector.clone(),
                                 )),
                             ),
@@ -798,12 +992,18 @@ impl UdpNet {
             .ok_or_else(|| io::Error::other("no interface towards the peer"))?;
         let local = key.local.unwrap_or(addr);
         let ethertype = if local.is_ipv4() { 0x0800 } else { 0x86dd };
-        let sock = Arc::new(L2Unicast::open(&iface, ethertype, echo::ECHO_PORT)?);
+        let sock = Arc::new(Mutex::new(Arc::new(L2Unicast::open(
+            &iface,
+            ethertype,
+            echo::ECHO_PORT,
+        )?)));
         let ifindex = u32::try_from(nos_l2_socket::if_index(&iface)?).unwrap_or(0);
         let mac = Arc::new(Mutex::new(None));
         let (seq_tx, seq_rx) = tokio::sync::mpsc::channel(64);
         let rx = tokio::spawn(echo_rx_loop(
             sock.clone(),
+            iface.clone(),
+            ethertype,
             local,
             disc,
             unaffiliated,
@@ -844,19 +1044,14 @@ impl UdpNet {
             .local
             .ok_or_else(|| io::Error::other("micro-BFD session without a source address"))?;
         let ethertype = if local.is_ipv4() { 0x0800 } else { 0x86dd };
-        let ip = Arc::new(
-            L2Socket::open_udp(&member, ethertype, micro::GROUP, RX_FRAME, micro::PORT)?
-                .accept_own_unicast(),
-        );
-        // ponytail: no kernel filter on the tagged socket: it wakes for every
-        // VLAN frame of the member (RFC 7130 §2.3 wants tag 0 received).
-        let tag =
-            Arc::new(L2Socket::open(&member, 0x8100, micro::GROUP, RX_FRAME)?.accept_own_unicast());
+        let ip = Arc::new(Mutex::new(Arc::new(micro_open(&member, ethertype, false)?)));
+        let tag = Arc::new(Mutex::new(Arc::new(micro_open(&member, ethertype, true)?)));
         let rx = [(ip.clone(), false), (tag, true)]
             .into_iter()
-            .map(|(sock, tagged)| {
+            .map(|(slot, tagged)| {
                 tokio::spawn(micro_rx_loop(
-                    sock,
+                    slot,
+                    ethertype,
                     tagged,
                     member.clone(),
                     local,
@@ -890,6 +1085,8 @@ impl UdpNet {
         let task = tokio::spawn(rx_loop(
             sock,
             table.to_string(),
+            vrf.to_string(),
+            v6,
             multihop,
             self.demux.clone(),
         ));
@@ -955,5 +1152,25 @@ impl Net for UdpNet {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_to_the_cap_and_resets() {
+        let mut d = BACKOFF_MIN;
+        for want in [20, 40, 80, 160, 320, 640, 1000, 1000] {
+            d = next_backoff(d);
+            assert_eq!(d, Duration::from_millis(want));
+        }
+        let mut b = Backoff::new();
+        assert_eq!(b.failed(), (true, Duration::from_millis(10)));
+        assert_eq!(b.failed(), (false, Duration::from_millis(20)));
+        assert!(b.ok());
+        assert!(!b.ok());
+        assert_eq!(b.failed(), (true, Duration::from_millis(10)));
     }
 }
