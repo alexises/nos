@@ -175,13 +175,29 @@ impl<D: Driver> Engine<D> {
         let (dev, dir) = (&key.0, key.1);
         let old = current.map(|c| c.chain);
         let chain = idle(old);
+        let mut switched = false;
         let result = self
             .driver
             .install(ifindex, dir, chain, acl)
-            .and_then(|()| self.driver.switch(ifindex, dir, chain));
+            .and_then(|()| {
+                switched = true;
+                self.driver.switch(ifindex, dir, chain, old)
+            });
         if let Err(e) = result {
             // Fail closed: the old chain stays live; drop the half-filled one.
             error!(interface = %dev, direction = %dir, acl = %name, error = %e, "acl not applied, keeping the previous state");
+            if switched {
+                // The driver may have failed half-way: never flush a chain
+                // the entry might still name.
+                if let Some(o) = old {
+                    if let Err(e) = self.driver.switch(ifindex, dir, o, Some(chain)) {
+                        error!(interface = %dev, direction = %dir, chain = o, error = %e, "could not point the acl back at the previous chain");
+                    }
+                } else {
+                    let _ = self.driver.detach(ifindex, dir);
+                    return;
+                }
+            }
             let _ = self.driver.flush(ifindex, dir, chain);
             return;
         }

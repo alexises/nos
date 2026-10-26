@@ -93,7 +93,7 @@ fn attach_replace_detach_leave_foreign_filters() {
     };
     let one = compile(&acl(vec![deny_bgp.clone()])).unwrap();
     d.install(i, Direction::In, ACL_CHAIN_A, &one).unwrap();
-    d.switch(i, Direction::In, ACL_CHAIN_A).unwrap();
+    d.switch(i, Direction::In, ACL_CHAIN_A, None).unwrap();
     let entry = show("acl0", "ingress", 0);
     assert!(
         entry.contains("pref 100") && entry.contains("goto chain 1000"),
@@ -108,7 +108,8 @@ fn attach_replace_detach_leave_foreign_filters() {
 
     let two = compile(&acl(vec![established, deny_bgp.clone()])).unwrap();
     d.install(i, Direction::In, ACL_CHAIN_B, &two).unwrap();
-    d.switch(i, Direction::In, ACL_CHAIN_B).unwrap();
+    d.switch(i, Direction::In, ACL_CHAIN_B, Some(ACL_CHAIN_A))
+        .unwrap();
     d.flush(i, Direction::In, ACL_CHAIN_A).unwrap();
     assert!(show("acl0", "ingress", 0).contains("goto chain 1001"));
     assert_eq!(show("acl0", "ingress", ACL_CHAIN_A), "");
@@ -130,7 +131,7 @@ fn attach_replace_detach_leave_foreign_filters() {
     }]))
     .unwrap();
     d.install(i, Direction::Out, ACL_CHAIN_A, &logged).unwrap();
-    d.switch(i, Direction::Out, ACL_CHAIN_A).unwrap();
+    d.switch(i, Direction::Out, ACL_CHAIN_A, None).unwrap();
     assert!(show("acl0", "egress", 0).contains("goto chain 1000"));
     let chain = show("acl0", "egress", ACL_CHAIN_A);
     assert!(
@@ -196,7 +197,7 @@ fn flowspec_rules_sit_between_foreign_filters_and_the_acl() {
     }]))
     .unwrap();
     d.install(i, Direction::In, ACL_CHAIN_A, &acl_one).unwrap();
-    d.switch(i, Direction::In, ACL_CHAIN_A).unwrap();
+    d.switch(i, Direction::In, ACL_CHAIN_A, None).unwrap();
     let exit = show("fs0", "ingress", flowspec::EXIT_CHAIN);
     assert!(exit.contains("goto chain 1000"), "{exit}");
 
@@ -252,7 +253,8 @@ fn flowspec_rules_sit_between_foreign_filters_and_the_acl() {
 
     // A new ACL chain moves the exit with it.
     d.install(i, Direction::In, ACL_CHAIN_B, &acl_one).unwrap();
-    d.switch(i, Direction::In, ACL_CHAIN_B).unwrap();
+    d.switch(i, Direction::In, ACL_CHAIN_B, Some(ACL_CHAIN_A))
+        .unwrap();
     assert!(show("fs0", "ingress", flowspec::EXIT_CHAIN).contains("goto chain 1001"));
 
     d.flowspec_set(i, 11, None).unwrap();
