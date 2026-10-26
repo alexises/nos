@@ -6,6 +6,7 @@
 //! that priority with the same actions. What flower cannot express exactly
 //! is refused, never approximated (owner decision D3 of #16).
 
+use crate::driver::sample_kind;
 use nos_proto::{FlowBitOp, FlowComponent, FlowNumOp, FlowRule, FlowRuleAction};
 use nos_tc::{
     ActionKind, FlowerKeys, Pedit, PeditFamily, Protocol, RateUnit, Verdict, FLAG_FRAG_IS_FIRST,
@@ -427,11 +428,7 @@ fn actions(rule: &FlowRule) -> Result<Vec<ActionKind>, String> {
     }
     let mut out = Vec::new();
     if sample {
-        out.push(ActionKind::Sample {
-            rate: 1,
-            trunc: SAMPLE_TRUNC,
-            group: PSAMPLE_GROUP,
-        });
+        out.push(sample_kind(SAMPLE_TRUNC, PSAMPLE_GROUP));
     }
     if let Some(value) = dscp {
         let family = if rule.ipv6 {
