@@ -48,9 +48,23 @@ impl Driver for LinuxDriver {
         Ok(())
     }
 
-    fn switch(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()> {
-        send(&entry_request(ifindex, dir, chain), &[])?;
-        send(&exit_request(ifindex, dir, chain), &[])
+    fn switch(
+        &mut self,
+        ifindex: u32,
+        dir: Direction,
+        chain: u32,
+        old: Option<u32>,
+    ) -> io::Result<()> {
+        // The exit filter first, the entry last: the entry swap is the one
+        // commit point, so a failure before it leaves the old chain live.
+        send(&exit_request(ifindex, dir, chain), &[])?;
+        if let Err(e) = send(&entry_request(ifindex, dir, chain), &[]) {
+            if let Some(old) = old {
+                let _ = send(&exit_request(ifindex, dir, old), &[]);
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn flush(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()> {

@@ -25,6 +25,9 @@ pub struct NoopDriver {
     pub live: BTreeMap<(u32, Direction), u32>,
     /// Makes the next `install` fail (a kernel refusal).
     pub fail_install: bool,
+    /// Makes the next `switch` fail; `Some(true)`: the entry has already
+    /// moved (a driver that failed half-way).
+    pub fail_switch: Option<bool>,
     /// What `counters` reports per (ifindex, direction), whatever the chain.
     pub counts: BTreeMap<(u32, Direction), Vec<Counter>>,
     /// Makes `counters` and `flowspec_counters` fail (the device vanished).
@@ -56,8 +59,20 @@ impl Driver for NoopDriver {
         Ok(())
     }
 
-    fn switch(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()> {
+    fn switch(
+        &mut self,
+        ifindex: u32,
+        dir: Direction,
+        chain: u32,
+        _old: Option<u32>,
+    ) -> io::Result<()> {
         self.calls.push(Call::Switch(ifindex, dir, chain));
+        if let Some(repoint) = self.fail_switch.take() {
+            if repoint {
+                self.live.insert((ifindex, dir), chain);
+            }
+            return Err(io::Error::other("refused"));
+        }
         self.live.insert((ifindex, dir), chain);
         Ok(())
     }

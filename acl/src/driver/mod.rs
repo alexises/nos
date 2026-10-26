@@ -91,8 +91,16 @@ pub trait Driver: Send + 'static {
         chain: u32,
         acl: &Compiled,
     ) -> io::Result<()>;
-    /// Creates or replaces the entry filter to point at `chain`.
-    fn switch(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()>;
+    /// Creates or replaces the entry filter to point at `chain`; `old` is the
+    /// chain it pointed at (`None`: first attach). On error the entry must
+    /// still name `old` (best effort: the engine re-switches to it).
+    fn switch(
+        &mut self,
+        ifindex: u32,
+        dir: Direction,
+        chain: u32,
+        old: Option<u32>,
+    ) -> io::Result<()>;
     /// Removes every filter of `chain` (absent is fine).
     fn flush(&mut self, ifindex: u32, dir: Direction, chain: u32) -> io::Result<()>;
     /// Removes the entry filter, then both chains.

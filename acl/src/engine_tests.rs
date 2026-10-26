@@ -216,6 +216,49 @@ fn a_previous_run_is_adopted_replaced_or_removed() {
 }
 
 #[test]
+fn a_half_failed_switch_points_back_at_the_old_chain() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    take(&mut e);
+    e.driver_mut().fail_switch = Some(true);
+    let two = plan(&compiled(2), &[(eth("eth0"), In)]);
+    e.sync(&two, &l);
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Install(4, In, B),
+            Call::Switch(4, In, B),
+            Call::Switch(4, In, A),
+            Call::Flush(4, In, B)
+        ]
+    );
+    assert_eq!(e.driver_mut().live[&(4, In)], A);
+    assert_eq!(e.live()[&("eth0".to_string(), In)], A);
+    // Retried on the next pass.
+    e.sync(&two, &l);
+    assert_eq!(e.driver_mut().live[&(4, In)], B);
+}
+
+#[test]
+fn a_failed_first_switch_detaches() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    e.driver_mut().fail_switch = Some(true);
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Install(4, In, A),
+            Call::Switch(4, In, A),
+            Call::Detach(4, In)
+        ]
+    );
+    assert!(e.live().is_empty());
+    assert!(e.driver_mut().live.is_empty());
+}
+
+#[test]
 fn a_refused_install_keeps_the_live_chain() {
     let mut e = Engine::new(NoopDriver::default());
     let l = links(&[link("eth0", 4, None)]);

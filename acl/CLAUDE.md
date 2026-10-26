@@ -18,7 +18,7 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 
 - Chain 0, prio `ACL_PRIO` 100, handle 1: keyless flower `goto chain` 1000/1001; its gact cookie is the live chain (read back on start).
 - Level `l`: prios `2l+1` (`ip`) and `2l+2` (`ipv6`) (the kernel refuses two protocols at one prio); a level holds every filter of the rules packed there. Defaults: one keyless filter per family after the rules. Cookies: user rule index (not the level), `u32::MAX` for defaults (`show acl` reads them).
-- Update = install idle chain, replace entry (`NLM_F_REPLACE`), flush old. Flush tolerates `ENOENT`/`EINVAL`.
+- Update = install idle chain, replace chain 999 then the entry (`NLM_F_REPLACE`, last = commit point), flush old. A failed `switch` is re-switched to the old chain (first attach: detached) before the idle chain is flushed (#698). Flush tolerates `ENOENT`/`EINVAL`.
 - Never delete the `clsact` qdisc; stay off other owners' priorities (`tc/CLAUDE.md`).
 - `switch` also keeps chain 999 (`flowspec::EXIT_CHAIN`) pointing at the live ACL chain: a flowspec rule without the T bit jumps there, so the ACL still runs.
 
