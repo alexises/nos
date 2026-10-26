@@ -17,7 +17,7 @@ use nos_proto::{
     LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
     PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
-    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo,
+    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo, ROUTES_PAGE_MAX,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,16 +37,61 @@ pub async fn config(State(d): State<Daemons>) -> ApiResult<Json<serde_json::Valu
     Ok(Json(d.running_config().await?.redacted()))
 }
 
-#[utoipa::path(get, path = "/v1/routes/{table}", tag = "show", summary = "Every route in a table, best to worst per prefix", params(("table" = String, Path, description = "routing table name")), responses((status = 200, body = Vec<PrefixRoutes>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+/// Pagination of a listing endpoint (#713; the convention #714 reuses): the
+/// page size served and the cursor to pass back as `?after=`, `null` on the
+/// last page. Keyset paging without a snapshot: a listing that changes
+/// mid-walk never loops or repeats an item, but may miss or include a
+/// concurrent change.
+#[derive(Serialize, ToSchema)]
+pub struct Pagination {
+    /// The page size that applied (the requested `limit`, clamped).
+    limit: u32,
+    /// Cursor of the next page, `null` on the last page.
+    next: Option<String>,
+}
+
+/// One page of `GET /v1/routes/{table}`.
+#[derive(Serialize, ToSchema)]
+pub struct RoutesPage {
+    /// Prefixes in ascending CIDR order, each with its candidates best to worst.
+    items: Vec<PrefixRoutes>,
+    pagination: Pagination,
+}
+
+#[derive(Deserialize)]
+pub struct PageQuery {
+    after: Option<String>,
+    limit: Option<u32>,
+}
+
+#[utoipa::path(get, path = "/v1/routes/{table}", tag = "show", summary = "One page of a table's routes, best to worst per prefix", description = "Pages of prefixes in ascending CIDR order; follow `pagination.next` as `?after=` until it is null. The table is not snapshotted: a walk may miss or include routes that change meanwhile, but never loops or repeats a prefix.", params(("table" = String, Path, description = "routing table name"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (a prefix such as 10.0.0.0/8)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = RoutesPage), (status = 400, body = ErrorBody, description = "after is not a prefix"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn routes(
     State(d): State<Daemons>,
     Path(table): Path<String>,
-) -> ApiResult<Json<Vec<PrefixRoutes>>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<RoutesPage>> {
+    let after = q
+        .after
+        .map(|a| {
+            a.parse()
+                .map_err(|_| ApiError::BadRequest(format!("after '{a}' is not a prefix")))
+        })
+        .transpose()?;
+    let limit = q.limit.unwrap_or(ROUTES_PAGE_MAX).clamp(1, ROUTES_PAGE_MAX);
     match d
-        .service(ServiceRef::RibTable(table), RibRequest::GetRoutes)
+        .service(
+            ServiceRef::RibTable(table),
+            RibRequest::GetRoutesPage { after, limit },
+        )
         .await?
     {
-        RibEvent::Routes(r) => Ok(Json(r)),
+        RibEvent::RoutesPage { routes, next } => Ok(Json(RoutesPage {
+            items: routes,
+            pagination: Pagination {
+                limit,
+                next: next.map(|n| n.to_string()),
+            },
+        })),
         RibEvent::Error(e) => Err(ApiError::BadGateway(e)),
         other => Err(unexpected("nos-ribd", &other)),
     }

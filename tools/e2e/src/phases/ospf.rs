@@ -3465,17 +3465,14 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
     let tunnel =
         format!("added route prefix={b_prefix} gateway={d_lo} .*backup=true .*tunnel=true");
     a.wait_new(&tunnel, 0, 90).await?;
-    let body = a
-        .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
-        .await?;
-    let table: serde_json::Value = serde_json::from_str(&body)?;
-    let shown = table.as_array().into_iter().flatten().any(|p| {
+    let table = a.routes_walk("rt1", None).await?;
+    let shown = table.iter().any(|p| {
         p["prefix"] == b_prefix.as_str()
             && p["candidates"][0]["backup"] == d_lo.as_str()
             && p["candidates"][0]["backup_tunnel"] == true
     });
     if !shown {
-        bail!("router-a's GET /v1/routes/rt1 shows no tunnel backup via {d_lo} for {b_prefix}: {body}");
+        bail!("router-a's GET /v1/routes/rt1 shows no tunnel backup via {d_lo} for {b_prefix}: {table:?}");
     }
 
     // #277: a nos-interfaced kill tears no link down. The kill is followed at

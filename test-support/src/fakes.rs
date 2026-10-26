@@ -190,7 +190,11 @@ impl FakeRibd {
                 RibRequest::IgpCosts => Reply::One(RibEvent::IgpCosts(s.igp_costs.clone())),
                 RibRequest::BgpRouteCount => Reply::One(RibEvent::BgpRouteCount(s.bgp_route_count)),
                 RibRequest::GetEvpnIrb => Reply::One(RibEvent::EvpnIrb(s.evpn_irb.clone())),
-                RibRequest::GetRoutes => Reply::One(RibEvent::Routes(vec![])),
+                RibRequest::GetRoutes => Reply::One(RibEvent::Error("GetRoutes removed".into())),
+                RibRequest::GetRoutesPage { .. } => Reply::One(RibEvent::RoutesPage {
+                    routes: vec![],
+                    next: None,
+                }),
                 RibRequest::Lookup { .. } => Reply::One(RibEvent::NoMatch),
                 RibRequest::GetVpnLabel => Reply::One(RibEvent::VpnLabel(None)),
                 RibRequest::ResolveNextHop { addrs } => {

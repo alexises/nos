@@ -77,11 +77,17 @@ async fn get_routes_returns_sorted_prefixes_with_ranked_candidates() {
     .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
-    writer.send(RibRequest::GetRoutes).await.unwrap();
+    writer
+        .send(RibRequest::GetRoutesPage {
+            after: None,
+            limit: 0,
+        })
+        .await
+        .unwrap();
     let event = reader.next().await.unwrap().unwrap();
 
-    let RibEvent::Routes(routes) = event else {
-        panic!("expected Routes, got {event:?}");
+    let RibEvent::RoutesPage { routes, next: None } = event else {
+        panic!("expected the only RoutesPage, got {event:?}");
     };
     assert_eq!(routes.len(), 2);
     assert_eq!(routes[0].prefix, "10.0.0.0/16".parse().unwrap());
@@ -639,12 +645,21 @@ async fn each_query_is_served_to_its_roles_and_refused_to_the_rest() {
         Role::Bfdd,
     ];
     let igp = [Role::User, Role::Restd, Role::Bgpd];
-    let cases: [Case; 6] = [
+    let cases: [Case; 7] = [
         (
             "GetRoutes",
             || RibRequest::GetRoutes,
             &people,
-            |e| matches!(e, RibEvent::Routes(v) if v.is_empty()),
+            |e| matches!(e, RibEvent::Error(m) if m.contains("GetRoutesPage")),
+        ),
+        (
+            "GetRoutesPage",
+            || RibRequest::GetRoutesPage {
+                after: None,
+                limit: 10,
+            },
+            &people,
+            |e| matches!(e, RibEvent::RoutesPage { routes, next: None } if routes.is_empty()),
         ),
         (
             "GetVrfName",

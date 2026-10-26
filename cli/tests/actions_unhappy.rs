@@ -266,7 +266,10 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                 "rib" => serve(role, name, &path, |r: RibRequest| {
                     vec![match r {
                         RibRequest::Lookup { .. } => RibEvent::Match(prefix_routes()),
-                        _ => RibEvent::Routes(vec![prefix_routes()]),
+                        _ => RibEvent::RoutesPage {
+                            routes: vec![prefix_routes()],
+                            next: None,
+                        },
                     }]
                 }),
                 "fdb" => serve_with(role, name, &path, true, |_: FdbRequest| {
