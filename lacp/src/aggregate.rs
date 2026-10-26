@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use crate::churn_machine::{ChurnState, CHURN_DETECTION_TIME};
 use crate::link::{self, LinkConfig, PortObservation};
 use crate::mux_machine::MuxState;
-use crate::packet::state_bit;
+use crate::packet::{state_bit, PortInfo};
 use crate::receive_machine::ReceiveState;
 use crate::selection::{self, PortCandidate};
 
@@ -218,37 +218,40 @@ impl AggregateManager {
         let selected_txs = self.selected_txs.lock().unwrap();
         let mut ports: Vec<LacpPortStatus> = observations
             .iter()
-            .map(|(interface, obs)| LacpPortStatus {
-                interface: interface.clone(),
-                actor_port_number: obs.actor_port,
-                receive_state: wire_receive_state(obs.receive_state),
-                mux_state: wire_mux_state(obs.mux_state),
-                partner_system_id: obs.partner.map(|p| p.system),
-                partner_key: obs.partner.map(|p| p.key),
-                partner_port_number: obs.partner.map(|p| p.port),
-                actor_port_priority: self
-                    .port_priorities
-                    .lock()
-                    .unwrap()
-                    .get(interface)
-                    .copied()
-                    .unwrap_or(DEFAULT_PRIORITY),
-                mode: self
-                    .modes
-                    .lock()
-                    .unwrap()
-                    .get(interface)
-                    .copied()
-                    .unwrap_or_default(),
-                partner_system_priority: obs.partner.map(|p| p.system_priority),
-                partner_port_priority: obs.partner.map(|p| p.port_priority),
-                selected: selected_txs.get(interface).is_some_and(|tx| *tx.borrow()),
-                individual: obs.partner_individual(),
-                synchronized: obs
-                    .partner
-                    .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
-                actor_churn: obs.actor_churn == ChurnState::Churn,
-                partner_churn: obs.partner_churn == ChurnState::Churn,
+            .map(|(interface, obs)| {
+                let pd = obs.partner.unwrap_or(PortInfo::ADMINISTRATIVE_DEFAULT);
+                LacpPortStatus {
+                    interface: interface.clone(),
+                    actor_port_number: obs.actor_port,
+                    receive_state: wire_receive_state(obs.receive_state),
+                    mux_state: wire_mux_state(obs.mux_state),
+                    partner_system_id: Some(pd.system),
+                    partner_key: Some(pd.key),
+                    partner_port_number: Some(pd.port),
+                    actor_port_priority: self
+                        .port_priorities
+                        .lock()
+                        .unwrap()
+                        .get(interface)
+                        .copied()
+                        .unwrap_or(DEFAULT_PRIORITY),
+                    mode: self
+                        .modes
+                        .lock()
+                        .unwrap()
+                        .get(interface)
+                        .copied()
+                        .unwrap_or_default(),
+                    partner_system_priority: Some(pd.system_priority),
+                    partner_port_priority: Some(pd.port_priority),
+                    selected: selected_txs.get(interface).is_some_and(|tx| *tx.borrow()),
+                    individual: obs.partner_individual(),
+                    synchronized: obs
+                        .partner
+                        .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
+                    actor_churn: obs.actor_churn == ChurnState::Churn,
+                    partner_churn: obs.partner_churn == ChurnState::Churn,
+                }
             })
             .collect();
         ports.sort_by(|a, b| a.interface.cmp(&b.interface));
@@ -327,7 +330,7 @@ async fn selection_loop(
             .iter()
             .map(|(interface, obs)| PortCandidate {
                 interface: interface.clone(),
-                current: obs.current(),
+                current: obs.selectable(),
                 partner_system_id: obs.partner.map(|p| p.system).unwrap_or_default(),
                 partner_key: obs.partner.map(|p| p.key).unwrap_or_default(),
                 partner_individual: obs.partner_individual(),

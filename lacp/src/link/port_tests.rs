@@ -34,6 +34,11 @@ impl VecSink {
     fn count(&self) -> usize {
         self.sent.lock().unwrap().len()
     }
+    fn last_pdu_partner(&self) -> PortInfo {
+        decode(self.sent.lock().unwrap().last().expect("a PDU was sent"))
+            .unwrap()
+            .partner
+    }
     fn last_actor(&self) -> PortInfo {
         decode(self.sent.lock().unwrap().last().expect("a PDU was sent"))
             .unwrap()
@@ -134,6 +139,10 @@ fn start_reports_expired_and_sends_the_first_pdu_at_once() {
     assert_eq!(o.mux_state, MuxState::Detached);
     assert_eq!(o.actor_port, 3);
     assert!(o.partner.is_none() && !o.current());
+    assert!(
+        !o.selectable(),
+        "an Expired-from-start port is not selectable"
+    );
 
     r.port.on_periodic(&r.sink);
     let actor = r.sink.last_actor();
@@ -228,7 +237,9 @@ fn a_silent_partner_expires_then_defaults_and_disarms_the_timer() {
     r.port.on_current_while_expired(&r.sink);
     let o = r.observed();
     assert_eq!(o.receive_state, ReceiveState::Expired);
-    assert!(o.partner.is_none(), "partner information cleared");
+    let kept = o.partner.expect("Expired keeps the learned partner");
+    assert!(!kept.has_state(state_bit::SYNCHRONIZATION | state_bit::COLLECTING));
+    assert!(o.selectable() && !o.current());
     assert_eq!(
         o.mux_state,
         MuxState::Attached,
@@ -239,8 +250,32 @@ fn a_silent_partner_expires_then_defaults_and_disarms_the_timer() {
     r.refill();
     r.port.on_current_while_expired(&r.sink);
     assert_eq!(r.observed().receive_state, ReceiveState::Defaulted);
+    assert!(r.observed().partner.is_none() && !r.observed().selectable());
+    assert_eq!(r.sink.last_pdu_partner(), PortInfo::ADMINISTRATIVE_DEFAULT);
     assert!(r.sink.last_actor().has_state(state_bit::DEFAULTED));
     assert!(r.port.current_while_deadline > Instant::now() + Duration::from_secs(3600));
+}
+
+#[test]
+fn one_missed_pdu_keeps_the_port_selected_and_recovers_without_waiting() {
+    let mut r = rig(true, LacpRate::Fast);
+    r.port.on_selection(true, &r.sink);
+    r.port.on_wait_while_expired(&r.sink);
+    let both = ACTIVE_PARTNER | state_bit::SYNCHRONIZATION | state_bit::COLLECTING;
+    r.port.on_frame(&partner_frame(both), &r.sink);
+    r.port.on_frame(&partner_frame(both), &r.sink);
+    assert_eq!(r.observed().mux_state, MuxState::Distributing);
+
+    r.refill();
+    r.port.on_current_while_expired(&r.sink);
+    assert_eq!(r.observed().mux_state, MuxState::Attached);
+    r.refill();
+    r.port.on_frame(&partner_frame(both), &r.sink);
+    let o = r.observed();
+    assert_eq!(o.receive_state, ReceiveState::Current);
+    assert_ne!(o.mux_state, MuxState::Detached);
+    assert_ne!(o.mux_state, MuxState::Waiting, "no 2s re-wait");
+    assert!(r.port.wait_while_deadline > Instant::now() + Duration::from_secs(3600));
 }
 
 #[test]

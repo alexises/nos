@@ -130,7 +130,12 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
         LacpMuxState::Collecting => "collecting",
         LacpMuxState::Distributing => "distributing",
     };
+    // Defaulted, or never heard (Expired with the all-zero system): the
+    // daemon reports the administrative default, shown as no partner.
+    let defaulted = port.receive_state == nos_proto::LacpReceiveState::Defaulted
+        || port.partner_system_id.is_none_or(|s| s == [0; 6]);
     let partner = match (port.partner_system_id, port.partner_key) {
+        _ if defaulted => "partner none (defaulted)".to_string(),
         (Some(system), Some(key)) => format!(
             "partner {} key {key} port {}",
             format_mac(system),
@@ -2877,7 +2882,7 @@ mod tests {
         assert!(out.contains("  min-links 2: not met, bond emptied"));
         assert!(out.contains("churn partner, port priority 32768, mode active, individual (partner not aggregatable)"), "{out}");
         assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes, churn none, port priority 50, partner priority 200/60, mode passive"));
-        assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no, churn partner"));
+        assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none (defaulted), selected no, synchronized no, churn partner"));
     }
 
     #[test]

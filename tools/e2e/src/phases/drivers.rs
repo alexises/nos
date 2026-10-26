@@ -303,8 +303,14 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         "eth2",
     ]));
     b.provision(&withdraw).await?;
+    let detached = "interface=eth2 mux_state=Detached";
+    let detached_base = a.count(detached);
     a.wait_new("interface=eth2 receive_state=Expired", expired_base, 30)
         .await?;
+    // #687: Expired keeps the partner and the selection (the short timeout
+    // gives it 3s before Defaulted), so the Mux must not fall to Detached yet.
+    log("Expired does not detach the member (partner kept, still selected)");
+    a.assert_quiet(detached, detached_base, 1).await?;
     a.wait_new(
         "removed interface from master enslavement interface=eth2",
         release_base,
@@ -465,6 +471,10 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
         f
     };
     let reconciled = format!("lacp reconciled aggregate members aggregate={LACP_AGGREGATE}");
+    // The previous step ends as soon as REST shows Distributing, but the push
+    // that follows is coalesced (up to ~1s later): let it land before the
+    // baseline so it is not mistaken for a min-links effect.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let base = a.count(&reconciled);
     log("min-links 2 with both members Distributing changes nothing");
     a.provision(&min_links("2")).await?;

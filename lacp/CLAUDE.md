@@ -28,6 +28,7 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 
 - Each member port runs three pure `step(state, event) -> (state, Action)` machines (Receive §6.4.12, Periodic Transmission §6.4.13, Mux §6.4.15) driven by the impure `link::run`; **only `Distributing` belongs in the active-member set pushed to `nos-interfaced`**.
 - Transmit rate follows the partner's `LACP_Timeout` bit, never our own `lacp-rate`; our `lacp-rate` sets our advertised TIMEOUT bit and our own `Current_While_Timer` (3s fast / 90s slow). Send on change (`link::needs_transmit`), not on every receipt.
+- `Expired` keeps the learned partner and the port selected (only Sync/Collecting clear); only `Defaulted` drops it (partner `None` = administrative default, reported as key 1/port 1/0xffff/0xff, zero system). Selectable = `PortObservation::selectable()`, never plain `current()` (#687).
 - Selection is config-scoped, permanently: it only checks the wire agrees with the configured aggregate (`selection.rs`); it never discovers membership.
 - Actor System ID is derived (FNV-1a of hostname + machine-id, `aggregate::local_system_id`), never from a member port (bonding rewrites slave MACs), overridable by `lacp-system-id`; no persisted registry. Internal state types are never `nos_proto::lacp`'s wire types.
 - Changing rate, system id or system priority restarts every member link; a port priority or `lacp-mode` change restarts only that member; `min-links` restarts nothing.

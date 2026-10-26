@@ -52,7 +52,9 @@ pub struct PortObservation {
     pub mux_state: MuxState,
     pub actor_port: u16,
     /// The partner's last recorded Actor information — `None` until a
-    /// LACPDU has been heard, and again once the Receive Machine gives up.
+    /// LACPDU has been heard, and again once the Receive Machine gives up
+    /// (Defaulted): `None` means "the administrative default". While
+    /// `Expired` it is kept (Synchronization/Collecting cleared), like Linux.
     pub partner: Option<PortInfo>,
     pub actor_churn: ChurnState,
     pub partner_churn: ChurnState,
@@ -75,6 +77,15 @@ impl PortObservation {
 
     pub fn current(&self) -> bool {
         self.receive_state == ReceiveState::Current
+    }
+
+    /// May take part in selection: `Current`, or `Expired` with a partner
+    /// actually learned from a LACPDU (kept through one missed PDU, 802.1AX
+    /// §6.4.12). A never-heard (Expired from start) or `Defaulted` port has
+    /// `partner == None` and is never selectable, so defaulted ports cannot
+    /// form a bogus all-default partner group.
+    pub fn selectable(&self) -> bool {
+        self.current() || (self.receive_state == ReceiveState::Expired && self.partner.is_some())
     }
 }
 
@@ -290,7 +301,16 @@ impl Port {
         self.receive_state = rs;
         apply_receive_action(action, &mut self.current_while_deadline);
         if self.receive_state != ReceiveState::Current {
-            self.partner = None;
+            // Expired keeps the partner (only its Sync/Collecting drop, its
+            // timeout turns short); Defaulted records the admin default.
+            self.partner = match self.receive_state {
+                ReceiveState::Expired => self.partner.map(|mut p| {
+                    p.state &= !(state_bit::SYNCHRONIZATION | state_bit::COLLECTING);
+                    p.state |= state_bit::TIMEOUT;
+                    p
+                }),
+                _ => None,
+            };
             let (ms, mux_action) = mux_machine::step(
                 self.mux_state,
                 mux_machine::Event::PartnerStateChanged {
@@ -635,16 +655,8 @@ fn build_pdu(
         port: port_number,
         state: actor_state_byte(receive_state, mux_state, config.rate, config.actor_active),
     };
-    // Before any LACPDU has ever been received, our own view of the
-    // partner is all-zero/defaulted — 802.1AX's administrative default.
-    let partner = partner.unwrap_or(PortInfo {
-        system_priority: 0,
-        system: [0; 6],
-        key: 0,
-        port_priority: 0,
-        port: 0,
-        state: 0,
-    });
+    // No (or a given-up) partner: advertise 802.1AX's administrative default.
+    let partner = partner.unwrap_or(PortInfo::ADMINISTRATIVE_DEFAULT);
     Lacpdu {
         actor,
         partner,
