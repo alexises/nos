@@ -148,6 +148,45 @@ fn held(rib: &BgpRib, family: AddressFamily) -> Vec<(IpAddr, VpnKey<IpNet>, Vec<
         .collect()
 }
 
+/// #723: the paging keys list the same paths in the same order as the old
+/// unpaged `vpn_routes`, honour the family and RD filters, and resolve to
+/// their path (with `best`); a vanished path resolves to `None`.
+#[test]
+fn vpn_keys_match_the_unpaged_order_filter_and_resolve() {
+    let (mut rib, _rx) = setup();
+    let u = reach(
+        SRC,
+        vec![65001],
+        vec![
+            nlri(RD2, P, 200),
+            nlri(RD1, "10.20.0.0/24", 101),
+            nlri(RD1, P, 100),
+        ],
+    );
+    feed(&mut rib, SRC, false, &u);
+    let v4 = AddressFamily::Vpnv4Unicast;
+    let keys = rib.vpn_keys(v4, None);
+    let want: Vec<_> = rib
+        .vpn_routes(v4)
+        .into_iter()
+        .map(|(p, k, ..)| (p, k.0, k.1))
+        .collect();
+    let got: Vec<_> = keys.iter().map(|c| (c.peer, c.rd, c.prefix)).collect();
+    assert_eq!((got.len(), &got), (3, &want));
+    for c in &keys {
+        let (k, r, best) = rib.vpn_at(c).unwrap();
+        assert_eq!((k.0, k.1, best), (c.rd, c.prefix, true));
+        assert_eq!(r.labels.len(), 1);
+    }
+    assert_eq!(rib.vpn_keys(v4, Some(Some(RD1))).len(), 2);
+    assert_eq!(rib.vpn_keys(v4, Some(Some(RD2))).len(), 1);
+    // An unparsable RD matches nothing, and so does the other family.
+    assert_eq!(rib.vpn_keys(v4, Some(None)).len(), 0);
+    assert_eq!(rib.vpn_keys(AddressFamily::Vpnv6Unicast, None).len(), 0);
+    rib.peer_disconnected(addr(SRC), Disconnect::Transport);
+    assert!(keys.iter().all(|c| rib.vpn_at(c).is_none()));
+}
+
 #[test]
 fn one_prefix_under_two_rds_is_two_routes_both_reflected_labels_unchanged() {
     let (mut rib, mut rx) = setup();

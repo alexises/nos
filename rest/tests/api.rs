@@ -1252,8 +1252,13 @@ async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
     let dir = tempfile::tempdir().unwrap();
     let bgpd = dir.path().join("bgp.sock");
     serve(&bgpd, ("bgpd", "r1"), |req: BgpRequest| match req {
-        BgpRequest::GetVpnRoutes { family, rd } => {
-            BgpEvent::VpnRoutes(vec![nos_proto::VpnRouteSummary {
+        BgpRequest::GetVpnRoutesPage {
+            family,
+            rd,
+            after,
+            limit,
+        } => BgpEvent::VpnRoutesPage {
+            routes: vec![nos_proto::VpnRouteSummary {
                 peer: "192.0.2.1".parse().unwrap(),
                 rd: rd.unwrap_or_default(),
                 prefix: family.to_string(),
@@ -1261,11 +1266,17 @@ async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
                 next_hop: "192.0.2.1".parse().unwrap(),
                 route_targets: vec!["RT:65000:1".into()],
                 as_path: "65001".into(),
-                local_pref: 100,
+                local_pref: limit,
                 best: true,
                 site_of_origin: None,
-            }])
-        }
+            }],
+            // A first page has a next one, the continuation is the last.
+            next: after.is_none().then(|| nos_proto::VpnRouteCursor {
+                peer: "192.0.2.1".parse().unwrap(),
+                rd: [0, 0, 0xfd, 0xe9, 0, 0, 0, 1],
+                prefix: "10.0.0.0/24".parse().unwrap(),
+            }),
+        },
         _ => BgpEvent::PeerNotFound,
     });
     let f = fixture(vec![(ServiceRef::BgpInstance("r1".into()), bgpd)]).await;
@@ -1282,7 +1293,7 @@ async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
 
     let (s, v) = send(app, Method::GET, "/v1/bgp/vpnv4?rd=65001:1", None).await;
     assert_eq!(s, StatusCode::OK);
-    let r = &v[0]["result"][0];
+    let r = &v[0]["result"]["items"][0];
     assert_eq!(
         (&v[0]["instance"], &r["rd"], &r["prefix"], &r["labels"]),
         (
@@ -1292,10 +1303,33 @@ async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
             &json!([100])
         )
     );
+    // The cursor continues the same walk, with the same filter, to the end.
+    let next = v[0]["result"]["pagination"]["next"].as_str().unwrap();
+    assert!(!next.contains(['/', '.', ':']), "opaque, URL-safe: {next}");
+    let (s, v) = send(
+        app,
+        Method::GET,
+        &format!("/v1/bgp/vpnv4?rd=65001:1&instance=r1&limit=7&after={next}"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let r = &v[0]["result"];
+    assert_eq!(r["items"][0]["rd"], json!("65001:1"));
+    assert_eq!(r["items"][0]["local_pref"], json!(7));
+    assert_eq!(r["pagination"], json!({"limit": 7, "next": null}));
     let (_, v) = send(app, Method::GET, "/v1/bgp/vpnv6", None).await;
-    assert_eq!(v[0]["result"][0]["prefix"], json!("vpnv6"));
-    let (s, _) = send(app, Method::GET, "/v1/bgp/vpnv4?rd=nope", None).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(v[0]["result"]["items"][0]["prefix"], json!("vpnv6"));
+    for bad in [
+        "/v1/bgp/vpnv4?rd=nope",
+        "/v1/bgp/vpnv4?limit=2",
+        "/v1/bgp/vpnv6?instance=r1&after=nope",
+    ] {
+        let (s, _) = send(app, Method::GET, bad, None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (s, _) = send(app, Method::GET, "/v1/bgp/vpnv4?instance=zz", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -2096,4 +2130,92 @@ async fn bgp_routes_are_paged_per_instance_with_an_opaque_cursor() {
     }
     let (s, _) = send(app, Method::GET, "/v1/bgp/routes?instance=zz", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// #723: `/v1/bgp/evpn` and `/v1/bgp/flowspec` use the same envelope, opaque
+/// cursor and `?instance=` rule as `/v1/bgp/routes`.
+#[tokio::test]
+async fn bgp_evpn_and_flowspec_are_paged_per_instance_with_an_opaque_cursor() {
+    use nos_proto::{EvpnRouteCursor, EvpnRouteSummary, FlowspecRouteCursor, FlowspecRouteSummary};
+    let peer: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let bgpd = dir.path().join("bgp.sock");
+    serve(&bgpd, ("bgpd", "r1"), move |req: BgpRequest| match req {
+        BgpRequest::GetEvpnRoutesPage { after, limit } => BgpEvent::EvpnRoutesPage {
+            routes: vec![EvpnRouteSummary {
+                peer,
+                route_type: 2,
+                route: after.as_ref().map_or("first", |_| "second").into(),
+                next_hop: peer,
+                extended_communities: vec![limit.to_string()],
+            }],
+            next: after.is_none().then(|| EvpnRouteCursor {
+                peer,
+                route: "first".into(),
+            }),
+        },
+        BgpRequest::GetFlowspecRoutesPage { after, .. } => BgpEvent::FlowspecRoutesPage {
+            routes: vec![FlowspecRouteSummary {
+                peer,
+                nlri: after.as_ref().map_or("first", |_| "second").into(),
+                extended_communities: vec![],
+                validity: "valid".into(),
+                actions: vec![],
+                dataplane: None,
+            }],
+            next: after.is_none().then(|| FlowspecRouteCursor {
+                peer,
+                family: "ipv4-flowspec".into(),
+                nlri: "first".into(),
+            }),
+        },
+        _ => BgpEvent::PeerNotFound,
+    });
+    let f = fixture(vec![(ServiceRef::BgpInstance("r1".into()), bgpd)]).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/v1?base=current", None).await;
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/v1/bgp-instance/r1",
+        Some(bgp_instance("r1", 1)),
+    )
+    .await;
+    send(app, Method::POST, "/v1/transactions/v1/commit", None).await;
+
+    for (path, field) in [("evpn", "route"), ("flowspec", "nlri")] {
+        // No parameters: the first page of every instance, with a next.
+        let (s, v) = send(app, Method::GET, &format!("/v1/bgp/{path}"), None).await;
+        assert_eq!(s, StatusCode::OK);
+        let r = &v[0]["result"];
+        assert_eq!(r["items"][0][field], json!("first"), "{path}");
+        let next = r["pagination"]["next"].as_str().unwrap().to_string();
+        assert_eq!(r["pagination"]["limit"], json!(1000));
+        assert!(!next.contains(['/', '.', ':']), "opaque, URL-safe: {next}");
+        let (_, v) = send(
+            app,
+            Method::GET,
+            &format!("/v1/bgp/{path}?instance=r1&limit=5&after={next}"),
+            None,
+        )
+        .await;
+        let r = &v[0]["result"];
+        assert_eq!(r["items"][0][field], json!("second"), "{path}");
+        assert_eq!(r["pagination"], json!({"limit": 5, "next": null}));
+        for bad in [
+            format!("/v1/bgp/{path}?limit=2"),
+            format!("/v1/bgp/{path}?instance=r1&after=nope"),
+        ] {
+            let (s, _) = send(app, Method::GET, &bad, None).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let (s, _) = send(
+            app,
+            Method::GET,
+            &format!("/v1/bgp/{path}?instance=zz"),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+    }
 }

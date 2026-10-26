@@ -55,10 +55,10 @@ pub use bfd::{
     ReflectorView, SessionKey,
 };
 pub use bgp::{
-    BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, BgpSessionState, EvpnRouteSummary,
-    FlowspecRouteSummary, GrSummary, PeerSummary, RedistributeUpdate, RedistributedRoute,
-    RpkiCacheStatus, RpkiSessionState, RpkiValidationState, VpnPrefix, VpnPrefixUpdate,
-    VpnRouteSummary, BGP_PAGE_MAX,
+    BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, BgpSessionState, EvpnRouteCursor,
+    EvpnRouteSummary, FlowspecRouteCursor, FlowspecRouteSummary, GrSummary, PeerSummary,
+    RedistributeUpdate, RedistributedRoute, RpkiCacheStatus, RpkiSessionState, RpkiValidationState,
+    VpnPrefix, VpnPrefixUpdate, VpnRouteCursor, VpnRouteSummary, BGP_PAGE_MAX,
 };
 pub use broker::{
     Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY,

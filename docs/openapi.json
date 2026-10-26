@@ -2232,6 +2232,44 @@
         ],
         "type": "object"
       },
+      "EvpnRouteSummary": {
+        "description": "One received EVPN (RFC 7432) route, for `show bgp evpn`. `route` is the\nNLRI rendered by `nos-bgpd` (`[2]:[65000:1]:[<esi>]:[<tag>]:...`) — nothing\ndownstream interprets it.",
+        "properties": {
+          "extended_communities": {
+            "description": "Extended communities rendered as `RT:65000:10000`, `encap:8`, ...",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "next_hop": {
+            "description": "The route's BGP next hop.",
+            "type": "string"
+          },
+          "peer": {
+            "description": "The advertising peer.",
+            "type": "string"
+          },
+          "route": {
+            "description": "The NLRI rendered as text.",
+            "type": "string"
+          },
+          "route_type": {
+            "description": "EVPN route type (RFC 7432 section 7).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "peer",
+          "route_type",
+          "route",
+          "next_hop",
+          "extended_communities"
+        ],
+        "type": "object"
+      },
       "FdbTable": {
         "description": "A broadcast domain's forwarding table, for `show fdb`.",
         "properties": {
@@ -2327,6 +2365,52 @@
         },
         "required": [
           "label"
+        ],
+        "type": "object"
+      },
+      "FlowspecRouteSummary": {
+        "description": "One received Flowspec (RFC 8955) route, for `show bgp flowspec`. `nlri` is\nthe component list rendered by `nos-bgpd`; nothing downstream interprets it.",
+        "properties": {
+          "actions": {
+            "description": "The traffic actions decoded from the extended communities, one text\neach (`discard`, `redirect rt 65000:10`, `dscp 10`); a traffic-rate\nshadowed by an earlier one is suffixed `(ignored)`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "dataplane": {
+            "description": "For the selected copy of a rule only, its state in `nos-acld`:\n`installed`, `unsupported (<why>)`, `not-attached` (no `flowspec`\ndevice in this instance's table) or `unknown` (`nos-acld` did not\nanswer); `None` for any other copy.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extended_communities": {
+            "description": "Extended communities rendered as `traffic-rate:0:0`, ...",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "nlri": {
+            "description": "The NLRI rendered as text (`dest 192.0.2.0/24 proto =6 dst-port =25`).",
+            "type": "string"
+          },
+          "peer": {
+            "description": "The advertising peer.",
+            "type": "string"
+          },
+          "validity": {
+            "description": "RFC 8955 section 6 validation: `valid`, or `invalid:<reason>` (for\nexample `invalid:no-covering-unicast-route`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer",
+          "nlri",
+          "extended_communities",
+          "validity",
+          "actions"
         ],
         "type": "object"
       },
@@ -6254,6 +6338,76 @@
           "rd"
         ],
         "type": "object"
+      },
+      "VpnRouteSummary": {
+        "description": "One received VPN-IPv4/VPN-IPv6 path (RFC 4364/4659, SAFI 128), for\n`show bgp vpnv4|vpnv6`. RD and Route Targets are rendered by `nos-bgpd`.",
+        "properties": {
+          "as_path": {
+            "description": "The AS path as text (`65001 65002`).",
+            "type": "string"
+          },
+          "best": {
+            "description": "This path is the best one for its (RD, prefix), the one reflected.",
+            "type": "boolean"
+          },
+          "labels": {
+            "description": "The MPLS label stack as received (RFC 8277), outermost first.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "local_pref": {
+            "description": "Effective `LOCAL_PREF`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_hop": {
+            "description": "The BGP next hop (the egress PE).",
+            "type": "string"
+          },
+          "peer": {
+            "description": "The advertising peer.",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "The customer prefix, `10.10.0.0/24`.",
+            "type": "string"
+          },
+          "rd": {
+            "description": "The Route Distinguisher, `65001:1` or `192.0.2.1:7`.",
+            "type": "string"
+          },
+          "route_targets": {
+            "description": "The Route Targets, `RT:65000:1`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "site_of_origin": {
+            "description": "The Site of Origin the path carries (RFC 4364 section 7), `65001:77`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "peer",
+          "rd",
+          "prefix",
+          "labels",
+          "next_hop",
+          "route_targets",
+          "as_path",
+          "local_pref",
+          "best"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -6448,7 +6602,39 @@
     },
     "/v1/bgp/evpn": {
       "get": {
+        "description": "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops.",
         "operationId": "bgp_evpn",
+        "parameters": [
+          {
+            "description": "only this BGP instance; required with after or limit",
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "cursor: the previous page's pagination.next (opaque)",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "page size, 1 to 1000 (default 1000)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -6459,6 +6645,26 @@
               }
             },
             "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "after is not a cursor, or after/limit without instance"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such bgp instance"
           },
           "503": {
             "content": {
@@ -6471,7 +6677,7 @@
             "description": "a daemon this query needs is not running"
           }
         },
-        "summary": "Received EVPN routes, per instance",
+        "summary": "One page of received EVPN routes, per instance",
         "tags": [
           "show"
         ]
@@ -6479,7 +6685,39 @@
     },
     "/v1/bgp/flowspec": {
       "get": {
+        "description": "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops.",
         "operationId": "bgp_flowspec",
+        "parameters": [
+          {
+            "description": "only this BGP instance; required with after or limit",
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "cursor: the previous page's pagination.next (opaque)",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "page size, 1 to 1000 (default 1000)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -6490,6 +6728,26 @@
               }
             },
             "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "after is not a cursor, or after/limit without instance"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such bgp instance"
           },
           "503": {
             "content": {
@@ -6502,7 +6760,7 @@
             "description": "a daemon this query needs is not running"
           }
         },
-        "summary": "Received Flowspec routes, per instance",
+        "summary": "One page of received Flowspec routes, per instance",
         "tags": [
           "show"
         ]
@@ -6655,6 +6913,7 @@
     },
     "/v1/bgp/vpnv4": {
       "get": {
+        "description": "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops. `rd` filters every page the same way; a walk must keep it constant.",
         "operationId": "bgp_vpnv4",
         "parameters": [
           {
@@ -6665,57 +6924,34 @@
             "schema": {
               "type": "string"
             }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Vec"
-                }
-              }
-            },
-            "description": ""
           },
-          "400": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "rd is not a Route Distinguisher"
-          },
-          "503": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "a daemon this query needs is not running"
-          }
-        },
-        "summary": "Received VPN-IPv4 routes (SAFI 128), per instance, optionally of one Route Distinguisher",
-        "tags": [
-          "show"
-        ]
-      }
-    },
-    "/v1/bgp/vpnv6": {
-      "get": {
-        "operationId": "bgp_vpnv6",
-        "parameters": [
           {
-            "description": "only routes with this Route Distinguisher (65001:1)",
+            "description": "only this BGP instance; required with after or limit",
             "in": "query",
-            "name": "rd",
+            "name": "instance",
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "cursor: the previous page's pagination.next (opaque)",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "page size, 1 to 1000 (default 1000)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
             }
           }
         ],
@@ -6738,7 +6974,17 @@
                 }
               }
             },
-            "description": "rd is not a Route Distinguisher"
+            "description": "rd is not a Route Distinguisher, after is not a cursor, or after/limit without instance"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such bgp instance"
           },
           "503": {
             "content": {
@@ -6751,7 +6997,99 @@
             "description": "a daemon this query needs is not running"
           }
         },
-        "summary": "Received VPN-IPv6 routes (SAFI 128), per instance, optionally of one Route Distinguisher",
+        "summary": "One page of received VPN-IPv4 routes (SAFI 128), per instance, optionally of one Route Distinguisher",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/bgp/vpnv6": {
+      "get": {
+        "description": "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops. `rd` filters every page the same way; a walk must keep it constant.",
+        "operationId": "bgp_vpnv6",
+        "parameters": [
+          {
+            "description": "only routes with this Route Distinguisher (65001:1)",
+            "in": "query",
+            "name": "rd",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "only this BGP instance; required with after or limit",
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "cursor: the previous page's pagination.next (opaque)",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "page size, 1 to 1000 (default 1000)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rd is not a Route Distinguisher, after is not a cursor, or after/limit without instance"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such bgp instance"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "One page of received VPN-IPv6 routes (SAFI 128), per instance, optionally of one Route Distinguisher",
         "tags": [
           "show"
         ]

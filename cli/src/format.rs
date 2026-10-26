@@ -1221,17 +1221,28 @@ pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
     if routes.is_empty() {
         return format!("bgp instance {instance}: no evpn routes");
     }
-    let mut lines = vec![format!("bgp instance {instance}:")];
-    for r in routes {
-        lines.push(format!(
-            "  from {} next-hop {} {} [{}]",
-            r.peer,
-            r.next_hop,
-            r.route,
-            r.extended_communities.join(" ")
-        ));
-    }
-    lines.join("\n")
+    format!(
+        "{}\n{}",
+        render_bgp_routes_header(instance),
+        render_bgp_evpn_lines(routes)
+    )
+}
+
+/// One line per EVPN route (no header), so a page renders on its own.
+pub fn render_bgp_evpn_lines(routes: &[EvpnRouteSummary]) -> String {
+    routes
+        .iter()
+        .map(|r| {
+            format!(
+                "  from {} next-hop {} {} [{}]",
+                r.peer,
+                r.next_hop,
+                r.route,
+                r.extended_communities.join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Render one BGP instance's received VPN paths of `family`, one line per
@@ -1245,26 +1256,37 @@ pub fn render_bgp_vpn(
     if routes.is_empty() {
         return format!("bgp instance {instance}: no {family} routes");
     }
-    let mut lines = vec![format!("bgp instance {instance}:")];
-    for r in routes {
-        let labels: Vec<String> = r.labels.iter().map(u32::to_string).collect();
-        lines.push(format!(
-            "  {} rd {} {} label {} next-hop {} from {} [{}]",
-            if r.best { ">" } else { " " },
-            r.rd,
-            r.prefix,
-            labels.join("/"),
-            r.next_hop,
-            r.peer,
-            r.route_targets.join(" ")
-        ));
-        if let Some(soo) = &r.site_of_origin {
-            let last = lines.last_mut().expect("just pushed");
-            last.push_str(" soo ");
-            last.push_str(soo);
-        }
-    }
-    lines.join("\n")
+    format!(
+        "{}\n{}",
+        render_bgp_routes_header(instance),
+        render_bgp_vpn_lines(routes)
+    )
+}
+
+/// One line per VPN path (no header), so a page renders on its own.
+pub fn render_bgp_vpn_lines(routes: &[nos_proto::VpnRouteSummary]) -> String {
+    routes
+        .iter()
+        .map(|r| {
+            let labels: Vec<String> = r.labels.iter().map(u32::to_string).collect();
+            let mut line = format!(
+                "  {} rd {} {} label {} next-hop {} from {} [{}]",
+                if r.best { ">" } else { " " },
+                r.rd,
+                r.prefix,
+                labels.join("/"),
+                r.next_hop,
+                r.peer,
+                r.route_targets.join(" ")
+            );
+            if let Some(soo) = &r.site_of_origin {
+                line.push_str(" soo ");
+                line.push_str(soo);
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Render one BGP instance's received Flowspec rules, one line per rule —
@@ -1273,28 +1295,39 @@ pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> S
     if routes.is_empty() {
         return format!("bgp instance {instance}: no flowspec routes");
     }
-    let mut lines = vec![format!("bgp instance {instance}:")];
-    for r in routes {
-        lines.push(format!(
-            "  from {} {} [{}] {} actions: {}",
-            r.peer,
-            r.nlri,
-            r.extended_communities.join(" "),
-            r.validity,
-            if r.actions.is_empty() {
-                "none".to_string()
-            } else {
-                r.actions.join(", ")
+    format!(
+        "{}\n{}",
+        render_bgp_routes_header(instance),
+        render_bgp_flowspec_lines(routes)
+    )
+}
+
+/// One line per Flowspec rule (no header), so a page renders on its own.
+pub fn render_bgp_flowspec_lines(routes: &[FlowspecRouteSummary]) -> String {
+    routes
+        .iter()
+        .map(|r| {
+            let mut line = format!(
+                "  from {} {} [{}] {} actions: {}",
+                r.peer,
+                r.nlri,
+                r.extended_communities.join(" "),
+                r.validity,
+                if r.actions.is_empty() {
+                    "none".to_string()
+                } else {
+                    r.actions.join(", ")
+                }
+            );
+            if let Some(d) = &r.dataplane {
+                // The selected copy: what nos-acld made of it (#562).
+                line.push_str(" dataplane: ");
+                line.push_str(d);
             }
-        ));
-        if let Some(d) = &r.dataplane {
-            // The selected copy: what nos-acld made of it (#562).
-            let last = lines.last_mut().expect("just pushed");
-            last.push_str(" dataplane: ");
-            last.push_str(d);
-        }
-    }
-    lines.join("\n")
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One BGP instance's unicast routes, one line per path — `show bgp routes`.

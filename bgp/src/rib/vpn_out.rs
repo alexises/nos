@@ -364,6 +364,49 @@ impl BgpRib {
         out
     }
 
+    /// The sort key of every received VPN path of `family` (only those of
+    /// RD `rd` when set; `Some(None)`, an unparsable RD, matches nothing),
+    /// sorted: the snapshot a paged `show bgp vpnv4|vpnv6` walk searches
+    /// (#723). Keys only.
+    pub fn vpn_keys(
+        &self,
+        family: AddressFamily,
+        rd: Option<Option<[u8; 8]>>,
+    ) -> Vec<nos_proto::VpnRouteCursor> {
+        let mut keys: Vec<_> = self
+            .vpn_adj_rib_in
+            .iter()
+            .flat_map(|(peer, t)| {
+                t.keys().map(move |k| nos_proto::VpnRouteCursor {
+                    peer: *peer,
+                    rd: k.0,
+                    prefix: k.1,
+                })
+            })
+            .filter(|c| vpn_family(c.prefix) == family)
+            .filter(|c| rd.is_none_or(|want| want == Some(c.rd)))
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The path for one `vpn_keys` key, with whether it is the selected one;
+    /// `None` when it is gone.
+    pub fn vpn_at(
+        &self,
+        c: &nos_proto::VpnRouteCursor,
+    ) -> Option<(&VpnKey<IpNet>, &VpnRoute, bool)> {
+        let (k, r) = self
+            .vpn_adj_rib_in
+            .get(&c.peer)?
+            .get_key_value(&(c.rd, c.prefix))?;
+        let best = self
+            .vpn_loc
+            .get(k)
+            .is_some_and(|(o, _)| *o == RouteOrigin::Peer(c.peer));
+        Some((k, r, best))
+    }
+
     /// VPN paths held from `peer`, `[vpnv4, vpnv6]` (RFC 4486 counts).
     pub(super) fn accepted_vpn(&self, peer: IpAddr) -> [u32; 2] {
         let mut n = [0u32; 2];

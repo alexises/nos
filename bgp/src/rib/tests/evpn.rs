@@ -18,6 +18,54 @@ fn evpn_afs() -> HashSet<AddressFamily> {
     HashSet::from([AddressFamily::Ipv4Unicast, AddressFamily::L2vpnEvpn])
 }
 
+/// #723: the paging keys list the same routes in the same order as the old
+/// unpaged `evpn_routes`, each key resolves to its route, a vanished one to
+/// `None`.
+#[test]
+fn evpn_keys_match_the_unpaged_order_and_resolve_to_their_routes() {
+    let mut rib = new_rib(65000);
+    let (p1, p2) = (addr("10.0.0.2"), addr("10.0.0.1"));
+    let _rx1 = register_peer(&mut rib, p1, false, addr("10.0.0.254"));
+    let _rx2 = register_peer(&mut rib, p2, false, addr("10.0.0.253"));
+    for (p, macs) in [(p1, vec![3, 1]), (p2, vec![2, 9])] {
+        rib.handle_update(
+            p,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(macs.into_iter().map(evpn_nlri).collect(), vec![65001]),
+            &deny_all_policy(),
+        );
+    }
+    let keys = rib.evpn_keys();
+    let want: Vec<_> = rib
+        .evpn_routes()
+        .into_iter()
+        .map(|(peer, n, _)| (peer, n.to_string()))
+        .collect();
+    let got: Vec<_> = keys
+        .iter()
+        .map(|k| (k.cursor.peer, k.cursor.route.clone()))
+        .collect();
+    assert_eq!((got.len(), &got), (4, &want));
+    for k in &keys {
+        let (peer, r) = rib.evpn_at(k).unwrap();
+        assert_eq!(
+            (peer, r.nlri.to_string()),
+            (k.cursor.peer, k.cursor.route.clone())
+        );
+    }
+    // A client's `after` has no table key: it resolves to nothing.
+    assert!(rib
+        .evpn_at(&crate::page::Keyed::at(keys[0].cursor.clone()))
+        .is_none());
+    rib.peer_disconnected(p1, Disconnect::Transport);
+    assert!(keys
+        .iter()
+        .filter(|k| k.cursor.peer == p1)
+        .all(|k| rib.evpn_at(k).is_none()));
+    assert_eq!(rib.evpn_keys().len(), 2);
+}
+
 #[test]
 fn local_evpn_route_to_a_local_as_peer_carries_both_ases() {
     let mut rib = new_rib(65000);

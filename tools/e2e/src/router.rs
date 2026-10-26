@@ -359,6 +359,19 @@ impl Router {
         instance: &str,
         limit: Option<u32>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.bgp_walk("/v1/bgp/routes", instance, limit).await
+    }
+
+    /// Every item of a paged BGP show endpoint (`/v1/bgp/routes`, `evpn`,
+    /// `flowspec`, `vpnv4`, `vpnv6`; #722/#723) for `instance`, walking
+    /// `pagination.next` until it is null. `path` may carry a query already
+    /// (`/v1/bgp/vpnv4?rd=65001:2`), the walk appends its own parameters.
+    pub async fn bgp_walk(
+        &self,
+        path: &str,
+        instance: &str,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
         let mut out = Vec::new();
         let mut after: Option<String> = None;
         loop {
@@ -369,7 +382,8 @@ impl Router {
             if let Some(a) = &after {
                 query.push(format!("after={a}"));
             }
-            let path = format!("/v1/bgp/routes?{}", query.join("&"));
+            let sep = if path.contains('?') { '&' } else { '?' };
+            let path = format!("{path}{sep}{}", query.join("&"));
             let body = self.rest_expect(Method::GET, &path, None, 200).await?;
             let report: serde_json::Value = serde_json::from_str(&body)?;
             let page = &report[0]["result"];

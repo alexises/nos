@@ -96,6 +96,7 @@ use crate::flowspec::FlowSpec;
 use crate::gr::{Disconnect, PeerGr};
 use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
+use crate::page::Keyed;
 use crate::vpn::VpnKey;
 
 mod adj_in;
@@ -280,6 +281,11 @@ impl FlowspecRoute {
         self.validity == Some(FlowValidity::Valid)
     }
 }
+
+/// A snapshot key of a paged `show bgp evpn` walk (#723).
+pub type EvpnKey = Keyed<nos_proto::EvpnRouteCursor, EvpnNlri>;
+/// A snapshot key of a paged `show bgp flowspec` walk (#723).
+pub type FlowKey = Keyed<nos_proto::FlowspecRouteCursor, FlowspecKey>;
 
 /// A Flowspec Adj-RIB-In key: the NLRI itself, per family.
 pub(crate) type FlowspecKey = (AddressFamily, FlowSpec);
@@ -1093,6 +1099,63 @@ impl BgpRib {
             .collect();
         out.sort_by_cached_key(|(peer, n, _)| (*peer, n.to_string()));
         out
+    }
+
+    /// The sort key of every received EVPN route, sorted: the snapshot a
+    /// paged `show bgp evpn` walk searches (#723). Keys only.
+    pub fn evpn_keys(&self) -> Vec<EvpnKey> {
+        let mut keys: Vec<_> = self
+            .evpn_adj_rib_in
+            .iter()
+            .flat_map(|(peer, t)| {
+                t.iter().map(move |(k, r)| Keyed {
+                    cursor: nos_proto::EvpnRouteCursor {
+                        peer: *peer,
+                        route: r.nlri.to_string(),
+                    },
+                    row: Some(k.clone()),
+                })
+            })
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The route for one `evpn_keys` key; `None` when it is gone.
+    pub fn evpn_at(&self, key: &EvpnKey) -> Option<(IpAddr, &EvpnRoute)> {
+        let peer = key.cursor.peer;
+        let route = self.evpn_adj_rib_in.get(&peer)?.get(key.row.as_ref()?)?;
+        Some((peer, route))
+    }
+
+    /// The sort key of every received Flowspec route, sorted (#723).
+    pub fn flowspec_keys(&self) -> Vec<FlowKey> {
+        let mut keys: Vec<_> = self
+            .flowspec_adj_rib_in
+            .iter()
+            .flat_map(|(peer, t)| {
+                t.iter().map(move |(k, r)| Keyed {
+                    cursor: nos_proto::FlowspecRouteCursor {
+                        peer: *peer,
+                        family: r.family.to_string(),
+                        nlri: r.nlri.to_string(),
+                    },
+                    row: Some(k.clone()),
+                })
+            })
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The route for one `flowspec_keys` key; `None` when it is gone.
+    pub fn flowspec_at(&self, key: &FlowKey) -> Option<(IpAddr, &FlowspecRoute)> {
+        let peer = key.cursor.peer;
+        let route = self
+            .flowspec_adj_rib_in
+            .get(&peer)?
+            .get(key.row.as_ref()?)?;
+        Some((peer, route))
     }
 
     /// Every received Flowspec route, ordered by peer then rule.

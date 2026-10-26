@@ -177,8 +177,10 @@ async fn two_instances_peer_exchange_a_route_and_follow_config_changes() {
         .set_igp(std::collections::HashMap::default())
         .await;
     assert_eq!(
-        b.manager.evpn_route_summaries().await,
-        [] as [nos_proto::EvpnRouteSummary; 0]
+        b.manager
+            .evpn_page(&mut nos_bgp::page::Snapshot::default(), None, 0, usize::MAX)
+            .await,
+        (vec![], None)
     );
     assert_eq!(
         b.manager.evpn_feed_snapshot(false).await.0,
