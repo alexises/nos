@@ -166,6 +166,10 @@ fn lab() -> Lab {
                     BgpRequest::GetFlowspecRoutes => BgpEvent::FlowspecRoutes(Vec::new()),
                     BgpRequest::GetVpnRoutes { .. } => BgpEvent::VpnRoutes(Vec::new()),
                     BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
+                    BgpRequest::GetRoutesPage { .. } => BgpEvent::RoutesPage {
+                        routes: Vec::new(),
+                        next: None,
+                    },
                     BgpRequest::SendRouteRefresh { .. } => BgpEvent::RouteRefreshSent,
                     BgpRequest::ClearPeer { .. } => BgpEvent::PeerCleared,
                     _ => BgpEvent::Summary(Vec::new()),

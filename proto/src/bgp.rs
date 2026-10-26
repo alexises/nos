@@ -363,7 +363,8 @@ pub enum BgpRequest {
         /// The EVPN route change.
         update: crate::fdb::EvpnUpdate,
     },
-    /// One-shot: every IPv4/IPv6 unicast route held (`show bgp routes`).
+    /// Removed in #722 (answered with `BgpEvent::Error`); the slot stays
+    /// because postcard indexes by position. Use `GetRoutesPage`.
     GetRoutes,
     /// One-shot: every Flowspec route received from any peer.
     GetFlowspecRoutes,
@@ -385,6 +386,50 @@ pub enum BgpRequest {
         /// The export change.
         update: VpnPrefixUpdate,
     },
+    /// One-shot: up to `limit` unicast routes strictly after `after` (`None`:
+    /// from the start), in `(prefix, peer, path id)` order; answered by
+    /// `BgpEvent::RoutesPage` (#722). `nos-bgpd` keeps a sorted key snapshot
+    /// per connection (see `docs/ipc-protocols.md`) and clamps `limit` to
+    /// [`BGP_PAGE_MAX`] (0 means the maximum).
+    GetRoutesPage {
+        /// Cursor: the last key of the previous page.
+        after: Option<BgpRouteCursor>,
+        /// Most routes wanted.
+        limit: u32,
+    },
+}
+
+/// Most routes `nos-bgpd` returns in one page of any paged query, and the
+/// default page size of `show bgp routes` and `GET /v1/bgp/routes`.
+pub const BGP_PAGE_MAX: u32 = 1000;
+
+/// Position in `show bgp routes`: the existing sort key of a path. `None`
+/// peer (a locally redistributed route) sorts first. Its text form (REST
+/// `after` / `pagination.next`) is opaque, see [`crate::page`].
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct BgpRouteCursor {
+    /// The prefix.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub prefix: IpNet,
+    /// The advertising peer; `None` for a locally redistributed route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub peer: Option<IpAddr>,
+    /// The RFC 7911 path id (0 without ADD-PATH).
+    pub path_id: u32,
+}
+
+impl std::fmt::Display for BgpRouteCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&crate::page::encode(self))
+    }
+}
+
+impl std::str::FromStr for BgpRouteCursor {
+    type Err = crate::page::BadCursor;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        crate::page::decode(s)
+    }
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
@@ -404,10 +449,20 @@ pub enum BgpEvent {
     PeerCleared,
     /// Reply to `GetRpkiSummary`.
     RpkiSummary(Vec<RpkiCacheStatus>),
-    /// Reply to `GetRoutes`.
+    /// Unused since #722; the slot stays for the wire indexes.
     Routes(Vec<BgpRouteSummary>),
     /// Reply to `GetFlowspecRoutes`.
     FlowspecRoutes(Vec<FlowspecRouteSummary>),
     /// Reply to `GetVpnRoutes`, sorted by peer, RD, prefix.
     VpnRoutes(Vec<VpnRouteSummary>),
+    /// Reply to `GetRoutesPage`: routes in key order; `next` is the cursor of
+    /// the following page, `None` on the last.
+    RoutesPage {
+        /// The page.
+        routes: Vec<BgpRouteSummary>,
+        /// Pass back as `after`; `None` when this was the last page.
+        next: Option<BgpRouteCursor>,
+    },
+    /// A human-readable error (the removed unpaged queries answer with it).
+    Error(String),
 }

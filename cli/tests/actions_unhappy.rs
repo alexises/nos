@@ -388,6 +388,19 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                         BgpRequest::GetFlowspecRoutes => BgpEvent::FlowspecRoutes(Vec::new()),
                         BgpRequest::GetVpnRoutes { .. } => BgpEvent::VpnRoutes(Vec::new()),
                         BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
+                        BgpRequest::GetRoutesPage { .. } => BgpEvent::RoutesPage {
+                            routes: vec![nos_proto::BgpRouteSummary {
+                                prefix: "192.0.2.0/24".into(),
+                                peer: None,
+                                next_hop: None,
+                                as_path: String::new(),
+                                origin_as: None,
+                                local_pref: 100,
+                                best: true,
+                                validation_state: nos_proto::RpkiValidationState::NotFound,
+                            }],
+                            next: None,
+                        },
                         _ => BgpEvent::Summary(Vec::new()),
                     }]
                 }),

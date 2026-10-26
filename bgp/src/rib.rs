@@ -1110,37 +1110,59 @@ impl BgpRib {
     /// ones, plus the locally redistributed routes) for `show bgp routes`,
     /// ordered by prefix then peer (local first).
     pub fn routes(&self) -> Vec<nos_proto::BgpRouteSummary> {
-        use nos_proto::RpkiValidationState as S;
-        let local = self.confed_id.unwrap_or(self.local_asn);
-        let summary =
-            |prefix: IpNet, peer: Option<IpAddr>, r: &RibRoute| nos_proto::BgpRouteSummary {
-                prefix: prefix.to_string(),
-                peer,
-                next_hop: r.next_hop,
-                as_path: r.as_path.to_string(),
-                origin_as: crate::rpki::origin_as(&r.as_path, local),
-                local_pref: r.local_pref,
-                best: self.loc_rib.get(&prefix) == Some(r),
-                validation_state: match r.validation_state {
-                    nos_rpl::ValidationState::Valid => S::Valid,
-                    nos_rpl::ValidationState::Invalid => S::Invalid,
-                    nos_rpl::ValidationState::NotFound => S::NotFound,
-                },
-            };
-        let mut out: Vec<(IpNet, Option<IpAddr>, u32, nos_proto::BgpRouteSummary)> = self
-            .redistributed
+        self.route_keys()
             .iter()
-            .map(|(p, r)| (*p, None, 0, summary(*p, None, r)))
+            .filter_map(|k| self.route_at(k))
+            .collect()
+    }
+
+    /// The sort key of every path `routes` lists, sorted: the snapshot a
+    /// paged walk searches (#722). Keys only, no summaries.
+    pub fn route_keys(&self) -> Vec<nos_proto::BgpRouteCursor> {
+        let mut keys: Vec<_> = self
+            .redistributed
+            .keys()
+            .map(|p| nos_proto::BgpRouteCursor {
+                prefix: *p,
+                peer: None,
+                path_id: 0,
+            })
             .collect();
         for (peer, table) in &self.adj_rib_in {
             for (prefix, paths) in table {
-                for (id, r) in paths {
-                    out.push((*prefix, Some(*peer), *id, summary(*prefix, Some(*peer), r)));
-                }
+                keys.extend(paths.iter().map(|(id, _)| nos_proto::BgpRouteCursor {
+                    prefix: *prefix,
+                    peer: Some(*peer),
+                    path_id: *id,
+                }));
             }
         }
-        out.sort_by_key(|(p, peer, id, _)| (*p, *peer, *id));
-        out.into_iter().map(|(.., s)| s).collect()
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The summary for one `route_keys` key; `None` when the path is gone.
+    pub fn route_at(&self, key: &nos_proto::BgpRouteCursor) -> Option<nos_proto::BgpRouteSummary> {
+        use nos_proto::RpkiValidationState as S;
+        let r = match key.peer {
+            None => self.redistributed.get(&key.prefix)?,
+            Some(peer) => adj_in::get_path(self.adj_rib_in.get(&peer)?, key.prefix, key.path_id)?,
+        };
+        let local = self.confed_id.unwrap_or(self.local_asn);
+        Some(nos_proto::BgpRouteSummary {
+            prefix: key.prefix.to_string(),
+            peer: key.peer,
+            next_hop: r.next_hop,
+            as_path: r.as_path.to_string(),
+            origin_as: crate::rpki::origin_as(&r.as_path, local),
+            local_pref: r.local_pref,
+            best: self.loc_rib.get(&key.prefix) == Some(r),
+            validation_state: match r.validation_state {
+                nos_rpl::ValidationState::Valid => S::Valid,
+                nos_rpl::ValidationState::Invalid => S::Invalid,
+                nos_rpl::ValidationState::NotFound => S::NotFound,
+            },
+        })
     }
 
     /// Enables (or with `None` disables) RFC 2439 damping of routes from `peer`.

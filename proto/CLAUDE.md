@@ -17,12 +17,13 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 | `derive` | `sync_routing_table_refs` recomputes every `BgpInstance.routing_table` from `RoutingTable.bgp_instance`. Pure; called by `nos-config`, never by a client. |
 | `validators` | Reusable helpers (`unique_in`, `unique_addresses`, `routing_table_reference_valid`, `bfd_reference_valid`); cross-collection or type-specific checks live next to their schema type. |
 | `ops/` | Section-scoped edit types (`BgpInstanceOp`, `RoutingTableOp`, …) wrapped by `ConfigOp`, applied to a transaction. Never validated; only `garde` at commit is. Nested ops carry the parent key; `SubinterfaceOp::AddAddress`/`SetRoutingTable` cascade-create the subinterface and its parent `Interface`. |
-| `diff/` | Generated from the CLI tree (#116, `diff/generate.rs`): `diff_configs` walks both configs' JSON through `cli::root()`. `put` maps each `Config` field to a `ConfigDiff` slot (a test fails when one has none). `REST_API_LABEL`/`VNI_LABEL` are the labels `nos-watchdogd` keys on (a test pins them to the CLI words). `ConfigDiff::scoped` serves `SubscribeDiff`. |
+| `diff/` | Generated from the CLI tree (#116, `diff/generate.rs`): `diff_configs` walks both configs' JSON through `cli::root()`. `put` maps each `Config` field to a `ConfigDiff` slot. `REST_API_LABEL`/`VNI_LABEL` are the labels `nos-watchdogd` keys on (a test pins them to the CLI words). |
 | `ipc`, `broker`, `rib`, `interface`, `bgp`, `log`, `ospf`, `lacp`, `lldp`, `stp`, `fdb` | Wire types per daemon family: `docs/ipc-protocols.md`. |
 | `evpn_id` | RD/RT text ⇄ bytes, ESI, EVPN extended communities, `vxlan_name`; RFC detail in the function docs and the schema reference. |
 | `config_path` | URL-style addressing of a config subsection, shared by `nos-config` and `nos-restd`. `ELEMENT_KEYS` must be extended for a new list keyed by another field; `field_segment`/`key_field`/`field_matches` are shared with the OpenAPI generator, so spec and behaviour can't drift. The `openapi` feature adds `utoipa::ToSchema` (`IpAddr`/`IpNet` need `schema(value_type = String)`, recursive `SectionDiff.subsections` `schema(no_recursion)`). |
-| `version` | `VERSION`/`REVISION` constants (`build.rs` bakes env `NOS_BUILD_REV`, default `unknown`; the Docker build sets it, so a changed rev recompiles every crate) and the `VersionInfo` shared by `show version` and `GET /v1/version`. |
+| `version` | `VERSION`/`REVISION` constants (`build.rs` bakes env `NOS_BUILD_REV`) and the `VersionInfo` shared by `show version` and `GET /v1/version`. |
 | `paths` | The two bootstrap socket defaults that stay fixed (config, watchdog) plus the PKI ones. |
+| `page` | Opaque keyset cursors (#714): `encode`/`decode`, `wire_len`. |
 | `codec` | `IpcCodec<T>`: 4-byte LE length prefix + postcard payload, generic over any `Serialize + DeserializeOwned`. |
 
 ## Schema pitfalls

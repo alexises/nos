@@ -351,6 +351,36 @@ impl Router {
         }
     }
 
+    /// Every route of BGP instance `instance` over REST, walking
+    /// `pagination.next` from `?after=` until it is null (`GET /v1/bgp/routes`
+    /// is paginated, #722). `limit` is the page size to ask for.
+    pub async fn bgp_routes_walk(
+        &self,
+        instance: &str,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut out = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut query = vec![format!("instance={instance}")];
+            if let Some(l) = limit {
+                query.push(format!("limit={l}"));
+            }
+            if let Some(a) = &after {
+                query.push(format!("after={a}"));
+            }
+            let path = format!("/v1/bgp/routes?{}", query.join("&"));
+            let body = self.rest_expect(Method::GET, &path, None, 200).await?;
+            let report: serde_json::Value = serde_json::from_str(&body)?;
+            let page = &report[0]["result"];
+            out.extend(page["items"].as_array().cloned().unwrap_or_default());
+            match page["pagination"]["next"].as_str() {
+                Some(n) => after = Some(n.to_string()),
+                None => return Ok(out),
+            }
+        }
+    }
+
     /// `routes_walk` of `rt1`, as the JSON array the old endpoint returned.
     async fn rt1_table(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::Value::Array(

@@ -33,6 +33,8 @@ pub mod log;
 pub mod ops;
 pub mod ospf;
 pub mod ospfv3;
+/// Opaque keyset-pagination cursors shared by the paged queries (#714).
+pub mod page;
 pub mod paths;
 /// Wire types spoken to and by `nos-ribd`: route sources, pushes, lookups.
 pub mod rib;
@@ -53,9 +55,10 @@ pub use bfd::{
     ReflectorView, SessionKey,
 };
 pub use bgp::{
-    BgpEvent, BgpRequest, BgpRouteSummary, BgpSessionState, EvpnRouteSummary, FlowspecRouteSummary,
-    GrSummary, PeerSummary, RedistributeUpdate, RedistributedRoute, RpkiCacheStatus,
-    RpkiSessionState, RpkiValidationState, VpnPrefix, VpnPrefixUpdate, VpnRouteSummary,
+    BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, BgpSessionState, EvpnRouteSummary,
+    FlowspecRouteSummary, GrSummary, PeerSummary, RedistributeUpdate, RedistributedRoute,
+    RpkiCacheStatus, RpkiSessionState, RpkiValidationState, VpnPrefix, VpnPrefixUpdate,
+    VpnRouteSummary, BGP_PAGE_MAX,
 };
 pub use broker::{
     Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY,

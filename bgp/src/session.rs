@@ -897,9 +897,32 @@ impl SessionManager {
             .collect()
     }
 
-    /// Every unicast route held, for `BgpRequest::GetRoutes` (`show bgp routes`).
-    pub async fn route_summaries(&self) -> Vec<nos_proto::BgpRouteSummary> {
-        self.bgp_rib.lock().await.routes()
+    /// One page of unicast routes after `after`, for `BgpRequest::GetRoutesPage`
+    /// (`show bgp routes`), through the connection's `snapshot` (#722). The RIB
+    /// lock is held for this page only.
+    pub async fn route_page(
+        &self,
+        snapshot: &mut crate::page::Snapshot<nos_proto::BgpRouteCursor>,
+        after: Option<&nos_proto::BgpRouteCursor>,
+        limit: u32,
+        budget: usize,
+    ) -> (
+        Vec<nos_proto::BgpRouteSummary>,
+        Option<nos_proto::BgpRouteCursor>,
+    ) {
+        let rib = self.bgp_rib.lock().await;
+        crate::page::page(
+            snapshot,
+            &crate::page::Ask {
+                after,
+                limit: crate::page::clamp_limit(limit, nos_proto::BGP_PAGE_MAX),
+                budget,
+                now: std::time::Instant::now(),
+            },
+            || rib.route_keys(),
+            |k| rib.route_at(k),
+            nos_proto::page::wire_len,
+        )
     }
 
     /// Tells every established peer we're going (Cease/Administrative

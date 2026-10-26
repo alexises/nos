@@ -17,6 +17,7 @@ thiserror  = { workspace = true }
 postcard   = { workspace = true }
 tokio-util = { workspace = true }
 bytes      = { workspace = true }
+base64     = { workspace = true }
 futures    = { workspace = true }
 nos-rpl    = { workspace = true }
 nos-proto-derive = { workspace = true }

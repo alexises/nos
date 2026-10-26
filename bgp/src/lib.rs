@@ -16,6 +16,7 @@ pub mod interface_client;
 pub mod mac_mobility;
 pub mod message;
 pub mod mrai;
+pub mod page;
 pub mod policy;
 pub mod reconcile;
 mod refresh_limit;

@@ -1299,31 +1299,48 @@ pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> S
 
 /// One BGP instance's unicast routes, one line per path — `show bgp routes`.
 pub fn render_bgp_routes(instance: &str, routes: &[nos_proto::BgpRouteSummary]) -> String {
-    use nos_proto::RpkiValidationState as S;
     if routes.is_empty() {
         return format!("bgp instance {instance}: no routes");
     }
-    let mut lines = vec![format!("bgp instance {instance}:")];
-    for r in routes {
-        let state = match r.validation_state {
-            S::Valid => "valid",
-            S::Invalid => "invalid",
-            S::NotFound => "not-found",
-        };
-        let opt = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
-        lines.push(format!(
-            "  {} {} from {} next-hop {} as-path [{}] origin-as {} local-pref {} {}",
-            if r.best { ">" } else { " " },
-            r.prefix,
-            r.peer.map_or("local".to_string(), |p| p.to_string()),
-            opt(r.next_hop.map(|p| p.to_string())),
-            r.as_path,
-            opt(r.origin_as.map(|a| a.to_string())),
-            r.local_pref,
-            state
-        ));
-    }
-    lines.join("\n")
+    format!(
+        "{}\n{}",
+        render_bgp_routes_header(instance),
+        render_bgp_route_lines(routes)
+    )
+}
+
+/// The `show bgp routes` header, printed once ahead of the pages.
+pub fn render_bgp_routes_header(instance: &str) -> String {
+    format!("bgp instance {instance}:")
+}
+
+/// One line per route (no header), so a page renders on its own: the lines
+/// have no column widths that depend on the whole table.
+pub fn render_bgp_route_lines(routes: &[nos_proto::BgpRouteSummary]) -> String {
+    use nos_proto::RpkiValidationState as S;
+    let opt = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
+    routes
+        .iter()
+        .map(|r| {
+            let state = match r.validation_state {
+                S::Valid => "valid",
+                S::Invalid => "invalid",
+                S::NotFound => "not-found",
+            };
+            format!(
+                "  {} {} from {} next-hop {} as-path [{}] origin-as {} local-pref {} {}",
+                if r.best { ">" } else { " " },
+                r.prefix,
+                r.peer.map_or("local".to_string(), |p| p.to_string()),
+                opt(r.next_hop.map(|p| p.to_string())),
+                r.as_path,
+                opt(r.origin_as.map(|a| a.to_string())),
+                r.local_pref,
+                state
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One BGP instance's RPKI caches, one line each — `show bgp rpki`.

@@ -22,6 +22,10 @@ pub enum BgpClientError {
     Io(#[from] std::io::Error),
     #[error("unexpected reply from nos-bgpd: {0:?}")]
     UnexpectedReply(BgpEvent),
+    #[error("nos-bgpd: {0}")]
+    Daemon(String),
+    #[error("route page cursor did not advance")]
+    CursorStuck,
 }
 
 async fn connect(
@@ -106,17 +110,39 @@ pub async fn get_vpn_routes(
     }
 }
 
-/// Every unicast route the instance holds.
-pub async fn get_routes(
+/// Walks the instance's unicast routes page by page over one connection (the
+/// daemon keeps its key snapshot per connection), handing each page to
+/// `on_page` as it arrives so nothing holds the whole table. A cursor that
+/// does not advance is an error, never a loop.
+pub async fn for_each_routes_page(
     bgp_socket: &Path,
-) -> Result<Vec<nos_proto::BgpRouteSummary>, BgpClientError> {
+    mut on_page: impl FnMut(&[nos_proto::BgpRouteSummary]),
+) -> Result<(), BgpClientError> {
     let (mut reader, mut writer) = connect(bgp_socket).await?;
-    writer.send(BgpRequest::GetRoutes).await?;
-    match reader.next().await {
-        Some(Ok(BgpEvent::Routes(routes))) => Ok(routes),
-        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
-        Some(Err(e)) => Err(BgpClientError::Io(e)),
-        None => Err(BgpClientError::ConnectionClosed),
+    let mut after: Option<nos_proto::BgpRouteCursor> = None;
+    loop {
+        writer
+            .send(BgpRequest::GetRoutesPage {
+                after,
+                limit: nos_proto::BGP_PAGE_MAX,
+            })
+            .await?;
+        match reader.next().await {
+            Some(Ok(BgpEvent::RoutesPage { routes, next })) => {
+                on_page(&routes);
+                match next {
+                    None => return Ok(()),
+                    Some(n) if after.is_some_and(|a| n <= a) => {
+                        return Err(BgpClientError::CursorStuck);
+                    }
+                    Some(n) => after = Some(n),
+                }
+            }
+            Some(Ok(BgpEvent::Error(msg))) => return Err(BgpClientError::Daemon(msg)),
+            Some(Ok(other)) => return Err(BgpClientError::UnexpectedReply(other)),
+            Some(Err(e)) => return Err(BgpClientError::Io(e)),
+            None => return Err(BgpClientError::ConnectionClosed),
+        }
     }
 }
 
