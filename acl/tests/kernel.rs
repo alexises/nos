@@ -135,7 +135,7 @@ fn attach_replace_detach_leave_foreign_filters() {
     assert!(show("acl0", "egress", 0).contains("goto chain 1000"));
     let chain = show("acl0", "egress", ACL_CHAIN_A);
     assert!(
-        chain.contains("sample rate 1/1 group 5132115 trunc_size 128") && chain.contains("drop"),
+        chain.contains("sample rate 1/100 group 5132115 trunc_size 128") && chain.contains("drop"),
         "{chain}"
     );
     d.detach(i, Direction::Out).unwrap();
@@ -271,4 +271,85 @@ fn flowspec_rules_sit_between_foreign_filters_and_the_acl() {
         "{left}"
     );
     run(&["ip", "link", "del", "fs0"]);
+}
+
+/// A flood through a `log` rule (#699): about one packet in `SAMPLE_RATE`
+/// reaches psample, while the verdict counts every packet exactly.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn a_flood_through_a_log_rule_is_sampled_sparsely_and_still_counted() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const SENT: u64 = 3000;
+
+    run(&["ip", "link", "set", "lo", "up"]);
+    run(&[
+        "ip",
+        "link",
+        "add",
+        "v0",
+        "address",
+        "02:00:00:00:00:01",
+        "type",
+        "veth",
+        "peer",
+        "name",
+        "v1",
+        "address",
+        "02:00:00:00:00:02",
+    ]);
+    run(&["ip", "link", "set", "v0", "up"]);
+    run(&["ip", "link", "set", "v1", "up"]);
+    run(&["ip", "addr", "add", "192.0.2.1/24", "dev", "v0"]);
+    run(&[
+        "ip",
+        "neigh",
+        "add",
+        "192.0.2.9",
+        "lladdr",
+        "02:00:00:00:00:02",
+        "dev",
+        "v0",
+        "nud",
+        "permanent",
+    ]);
+    let i = idx("v1");
+    let logged = compile(&acl(vec![AclRule {
+        name: "flood".into(),
+        action: AclAction::Deny,
+        protocol: Some(AclProtocol::Udp),
+        log: true,
+        ..Default::default()
+    }]))
+    .unwrap();
+    let mut d = LinuxDriver;
+    d.install(i, Direction::In, ACL_CHAIN_A, &logged).unwrap();
+    d.switch(i, Direction::In, ACL_CHAIN_A, None).unwrap();
+
+    let p = nos_tc::psample().unwrap();
+    let mut socket = nos_tc::SampleSocket::open(&p).unwrap();
+    let samples = Arc::new(AtomicUsize::new(0));
+    let n = samples.clone();
+    std::thread::spawn(move || loop {
+        if let Ok(v) = socket.recv() {
+            n.fetch_add(v.len(), Ordering::Relaxed);
+        }
+    });
+
+    let sock = std::net::UdpSocket::bind("192.0.2.1:0").unwrap();
+    for _ in 0..SENT {
+        sock.send_to(b"flood", ("192.0.2.9", 5000)).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    let got = samples.load(Ordering::Relaxed);
+    assert!((5..=150).contains(&got), "{got} samples of {SENT}");
+    let rows = d.counters(i, Direction::In, ACL_CHAIN_A).unwrap();
+    let decided: u64 = rows
+        .iter()
+        .filter(|c| c.cookie == 0)
+        .map(|c| c.packets)
+        .sum();
+    assert_eq!(decided, SENT, "{rows:?}");
 }

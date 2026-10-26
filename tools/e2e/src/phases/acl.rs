@@ -261,6 +261,27 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let (compiled, logged) = (a.count(COMPILED_2), a.count(LOGGED));
     put_d_bgp(a, "before=p-bgp", true).await?;
     a.wait_new(COMPILED_2, compiled, 30).await?;
+    // The kernel samples one packet in 100 (#699): the session's few retries
+    // would rarely log, so router-b opens 800 TCP connections to router-a
+    // (each a denied SYN; P(none sampled) = 0.99^800, under 0.04%). The new
+    // chain lands a moment after `compiled`: repeat until a line shows.
+    for _ in 0..6 {
+        w.dock
+            .exec(
+                "router-b",
+                &[
+                    "bash",
+                    "-c",
+                    &format!(
+                        "for i in $(seq 800); do (echo > /dev/tcp/{IP_A}/179) 2>/dev/null & done; sleep 2"
+                    ),
+                ],
+            )
+            .await?;
+        if a.count(LOGGED) > logged {
+            break;
+        }
+    }
     a.wait_new(LOGGED, logged, 30).await?;
 
     log("step 3: d-bgp moved after p-bgp: the session comes back");

@@ -172,18 +172,33 @@ pub fn check_log(p: &nos_tc::Psample) -> io::Result<()> {
     }
 }
 
+/// One packet in this many is handed to psample by a `log` rule or a
+/// flowspec S bit (#699). The kernel builds and multicasts a message per
+/// sampled packet, so sampling every packet made a flood cost CPU and
+/// overflowed the psample socket. A gate (`police` plus a twin filter) was
+/// tried and the kernel refuses it: two flower filters with the same keys at
+/// one priority give `EEXIST`. The price: a lone denied packet logs only
+/// about 1 time in this many, and sampled counts are statistical (the
+/// verdict counters stay exact).
+pub const SAMPLE_RATE: u32 = 100;
+
+/// The `sample` action shared by `log` rules and flowspec S.
+pub fn sample_kind(trunc: u32, group: u32) -> ActionKind {
+    ActionKind::Sample {
+        rate: SAMPLE_RATE,
+        trunc,
+        group,
+    }
+}
+
 /// The filters of `chain` for `acl`, levels then defaults. A `log` rule's
-/// filters sample every packet (rate 1, the daemon rate-limits the lines)
-/// before the verdict, with the same cookie.
+/// filters sample one packet in [`SAMPLE_RATE`] (the daemon rate-limits the
+/// lines) before the verdict, with the same cookie.
 pub fn chain_requests(ifindex: u32, dir: Direction, chain: u32, acl: &Compiled) -> Vec<Request> {
     let filter = |level, protocol, keys, action, cookie: u32, log: bool| {
         let cookie = cookie.to_be_bytes().to_vec();
         let sample = log.then(|| Action {
-            kind: ActionKind::Sample {
-                rate: 1,
-                trunc: LOG_TRUNC,
-                group: ACL_PSAMPLE_GROUP,
-            },
+            kind: sample_kind(LOG_TRUNC, ACL_PSAMPLE_GROUP),
             cookie: cookie.clone(),
         });
         let gact = Action {
@@ -269,15 +284,22 @@ pub fn exit_request(ifindex: u32, dir: Direction, chain: u32) -> Request {
 }
 
 /// The filters of flowspec priority `prio` for `rule`; the cookie (the rule
-/// index) is on the first action only, so a dump counts each filter once.
+/// index) is on the first action only, so a dump counts each filter once;
+/// a leading `sample` (S bit, 1 in [`SAMPLE_RATE`]) never carries it, the
+/// next action does, so the counts stay exact.
 pub fn flowspec_requests(ifindex: u32, prio: u16, cookie: u32, rule: &Lowered) -> Vec<Request> {
+    let first = rule
+        .actions
+        .iter()
+        .position(|k| !matches!(k, ActionKind::Sample { .. }))
+        .unwrap_or(0);
     let actions: Vec<Action> = rule
         .actions
         .iter()
         .enumerate()
         .map(|(i, kind)| Action {
             kind: kind.clone(),
-            cookie: if i == 0 {
+            cookie: if i == first {
                 cookie.to_be_bytes().to_vec()
             } else {
                 Vec::new()
@@ -437,6 +459,22 @@ mod tests {
     }
 
     #[test]
+    fn a_flowspec_sample_is_sparse_and_the_cookie_sits_on_the_next_action() {
+        let rule = Lowered {
+            protocol: Protocol::Ip,
+            filters: vec![FlowerKeys::default()],
+            actions: vec![sample_kind(128, 7), ActionKind::Gact(Verdict::Unspec)],
+        };
+        let Request::AddFilter(f) = &flowspec_requests(4, 12, 3, &rule)[0] else {
+            panic!()
+        };
+        assert_eq!(f.actions[0].kind, sample_kind(128, 7));
+        assert_eq!(f.actions[0].cookie, Vec::<u8>::new());
+        assert_eq!(f.actions[1].cookie, vec![0, 0, 0, 3]);
+        assert_eq!(SAMPLE_RATE, 100);
+    }
+
+    #[test]
     fn idle_alternates() {
         assert_eq!(idle(None), ACL_CHAIN_A);
         assert_eq!(idle(Some(ACL_CHAIN_A)), ACL_CHAIN_B);
@@ -512,11 +550,7 @@ mod tests {
             })
             .collect();
         let sample = Action {
-            kind: ActionKind::Sample {
-                rate: 1,
-                trunc: LOG_TRUNC,
-                group: ACL_PSAMPLE_GROUP,
-            },
+            kind: sample_kind(LOG_TRUNC, ACL_PSAMPLE_GROUP),
             cookie: vec![0; 4],
         };
         let gact = |v, c: u32| Action {

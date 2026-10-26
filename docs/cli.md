@@ -168,7 +168,7 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
   - `established` is stateless: it means TCP ACK or RST is set.
 - **Log what a rule matches:** `set acl EDGE rule d-bgp log`.
   - Each matching packet gives `acl log acl=EDGE rule=d-bgp interface=eth0 direction=in src=.. dst=.. proto=6 sport=.. dport=.. suppressed=0` in `show log` (ICMP: `sport` is the type, `dport` the code; `-` when unknown).
-  - At most 10 lines per second per rule, interface and direction; the next line after a burst says how many were dropped (`suppressed=N`). Every matching packet is still copied to `nos-acld`, so a flood costs CPU. `acl log overrun overruns=N` means the kernel dropped samples.
+  - At most 10 lines per second per rule, interface and direction; the next line after a burst says how many were dropped (`suppressed=N`). The kernel copies only about one matching packet in 100 to `nos-acld`, so a flood is cheap but a single denied packet is logged only about 1 time in 100; `show acl` counters stay exact. `acl log overrun overruns=N` means the kernel dropped samples.
   - Needs Linux 6.11 or later (the kernel must name the rule in each sample). On an older kernel the ACL is not applied: `acl not applied, keeping the previous state ... error=acl log needs a kernel passing the psample cookie`. Remove `log` to apply it.
   - A `log` rule is never dropped as trailing; a shadowed one never logs (it cannot match).
 

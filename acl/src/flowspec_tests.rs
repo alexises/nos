@@ -378,7 +378,7 @@ fn actions_in_order_with_the_verdict_from_the_t_bit() {
         ),
         [
             ActionKind::Sample {
-                rate: 1,
+                rate: 100,
                 trunc: 128,
                 group: PSAMPLE_GROUP
             },
