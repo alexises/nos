@@ -131,7 +131,7 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 
 **LACP negotiation.** In `lacp` mode each member runs the LACP state machines. `show lacp` shows, per member, two of them:
 
-- `receive` is whether the partner is heard: `current` when LACPDUs arrive in time, `expired` right after they stop, then `defaulted`.
+- `receive` is whether the partner is heard: `current` when LACPDUs arrive in time, `expired` right after they stop, then `defaulted`. While `expired` the member keeps its partner and stays selected, so a single lost LACPDU does not detach it; `defaulted` shows `partner none (defaulted)`, and the REST fields then carry the administrative default (all-zero system, key 1, port 1, priorities 65535/255).
 - `mux` is how far the member is into the bond: `detached`, `waiting` (a two-second settling time), `attached`, `collecting`, and finally `distributing`. Only a `distributing` member carries traffic, and NOS adds a member to the bond only in that state.
 
 `selected` and `synchronized` say whether the member is chosen for the aggregate and in sync with the partner. `churn` reports `actor` or `partner` when one side has stayed out of sync for too long, which usually means a misconfiguration at that end; the member is kept out of the bond until it clears.

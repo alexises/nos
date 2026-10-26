@@ -92,6 +92,19 @@ pub struct PortInfo {
 }
 
 impl PortInfo {
+    /// The `Partner_Admin` defaults a Defaulted / never-heard port records
+    /// (802.1AX `recordDefault`), the values Linux `bond_3ad.c`
+    /// `ad_initialize_port` uses: `system_priority = 0xffff, key = 1,
+    /// port_number = 1, port_priority = 0xff, port_state = 0`, system MAC zero.
+    pub const ADMINISTRATIVE_DEFAULT: Self = Self {
+        system_priority: 0xffff,
+        system: [0; 6],
+        key: 1,
+        port_priority: 0xff,
+        port: 1,
+        state: 0,
+    };
+
     pub fn has_state(&self, bit: u8) -> bool {
         self.state & bit != 0
     }

@@ -2637,7 +2637,7 @@
             "type": "boolean"
           },
           "partner_key": {
-            "description": "Partner Operational Key, once heard.",
+            "description": "Partner Operational Key; the administrative default (1) while defaulted.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2646,7 +2646,7 @@
             ]
           },
           "partner_port_number": {
-            "description": "Partner Port number, once heard.",
+            "description": "Partner Port number; the administrative default (1) while defaulted.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2655,7 +2655,7 @@
             ]
           },
           "partner_port_priority": {
-            "description": "Partner Port Priority, once heard.",
+            "description": "Partner Port Priority; the administrative default (0xff) while defaulted.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -2664,7 +2664,7 @@
             ]
           },
           "partner_system_id": {
-            "description": "Known only once a valid LACPDU has been received at least once\n(i.e. `receive_state` has reached `Current` at some point).",
+            "description": "The partner's system id as last heard; the administrative default\n(system all-zero, key 1, port 1, priorities 0xffff/0xff, as Linux\n`bond_3ad.c`) while `Defaulted` or before any LACPDU was received.\nKept (not reset) while `Expired`.",
             "items": {
               "format": "int32",
               "minimum": 0,
@@ -2676,7 +2676,7 @@
             ]
           },
           "partner_system_priority": {
-            "description": "Partner System Priority, once heard.",
+            "description": "Partner System Priority; the administrative default (0xffff) while defaulted.",
             "format": "int32",
             "minimum": 0,
             "type": [

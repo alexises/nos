@@ -56,20 +56,22 @@ pub struct LacpPortStatus {
     pub receive_state: LacpReceiveState,
     /// Mux machine state.
     pub mux_state: LacpMuxState,
-    /// Known only once a valid LACPDU has been received at least once
-    /// (i.e. `receive_state` has reached `Current` at some point).
+    /// The partner's system id as last heard; the administrative default
+    /// (system all-zero, key 1, port 1, priorities 0xffff/0xff, as Linux
+    /// `bond_3ad.c`) while `Defaulted` or before any LACPDU was received.
+    /// Kept (not reset) while `Expired`.
     pub partner_system_id: Option<[u8; 6]>,
-    /// Partner Operational Key, once heard.
+    /// Partner Operational Key; the administrative default (1) while defaulted.
     pub partner_key: Option<u16>,
-    /// Partner Port number, once heard.
+    /// Partner Port number; the administrative default (1) while defaulted.
     pub partner_port_number: Option<u16>,
     /// This port's advertised Actor Port Priority.
     pub actor_port_priority: u16,
     /// This port's configured `lacp-mode` (`Actor_State.LACP_Activity`).
     pub mode: crate::schema::LacpMode,
-    /// Partner System Priority, once heard.
+    /// Partner System Priority; the administrative default (0xffff) while defaulted.
     pub partner_system_priority: Option<u16>,
-    /// Partner Port Priority, once heard.
+    /// Partner Port Priority; the administrative default (0xff) while defaulted.
     pub partner_port_priority: Option<u16>,
     /// This port's Selection Logic outcome (`selection.rs`) — `true` iff it
     /// agrees with the aggregate's other `Current` ports on partner
