@@ -255,6 +255,27 @@ async fn get_interfaces_returns_every_interface_sorted_by_name() {
 }
 
 #[tokio::test]
+async fn get_interfaces_reports_the_err_disabled_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("interface.sock");
+    let mut held = sample_interfaces().await;
+    held.set_err_disabled("eth0", true);
+    let _server = server::start(
+        &path,
+        Arc::new(RwLock::new(held)),
+        Arc::new(NoopInterfaceDriver),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(InterfaceRequest::GetInterfaces).await.unwrap();
+    let InterfaceEvent::Interfaces(statuses) = next_event(&mut reader).await else {
+        panic!("expected Interfaces");
+    };
+    assert!(statuses[0].err_disabled && !statuses[1].err_disabled);
+}
+
+#[tokio::test]
 async fn get_interface_returns_matching_status() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
@@ -517,6 +538,7 @@ async fn queries_and_pushes_are_gated_by_role_over_the_live_server() {
         Role::Ospfd,
         Role::Ospfv3d,
         Role::Fdbd,
+        Role::Stpd,
     ];
     for role in Role::ALL {
         // A query: a real reply for the allow list, a closed connection else.

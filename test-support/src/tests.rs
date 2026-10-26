@@ -70,6 +70,7 @@ fn iface(name: &str) -> InterfaceStatus {
         mtu: 1500,
         subinterfaces: vec![],
         link_local_address: None,
+        err_disabled: false,
     }
 }
 
@@ -286,6 +287,7 @@ async fn interfaced_lookups_links_and_pushed() {
             subinterfaces: vec![],
             link_local_address: None,
             bond_name: None,
+            err_disabled: false,
         },
     );
     assert!(matches!(q(pa()).await, InterfaceEvent::PortAggregate(_)));

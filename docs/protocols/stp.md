@@ -80,6 +80,7 @@ Field values follow the message in the order shown. The strings are frozen by a 
 | `port role changed` / `port state changed` | `port`, `role` / `state` | The CIST role or state of a port |
 | `topology change` | `port`, `cause=local\|received` (`msti=<n>` or `domain=<bd>` first in a tree other than the CIST) | A topology change, see above; `port` is where it came in or started |
 | `port migrated to STP` / `to RSTP` | `port` | The port speaks 802.1D / RSTP to its peer |
+| `cannot read the err-disabled ports from nos-interfaced, releasing none` | - | A restarted `nos-stpd` could not reach `nos-interfaced` for 10 s; no port is released |
 | `port err-disabled` / `port err-disabled recovered` | `port`, `reason=bpdu-guard` | BPDU guard shut the link, or it came back |
 | `port root-inconsistent` / `port root-consistent`, `port loop-inconsistent` / `port loop-consistent` | `port` | Root guard or loop guard holds the port discarding, or released it |
 | `mst configuration`, `mst region match`, `mst boundary port` | see [Use MSTP](#read-it-and-compare-with-a-peer) | MST region identity and boundary changes |
@@ -156,7 +157,7 @@ set bpdu-guard-recovery 300
 - `show spanning-tree` adds a `Flags` column when a port has any: `Edge`, `BpduGuard`, `BpduFilter`, `RootGuard`, `LoopGuard`, `RestrictedTcn`, then what holds the port now: `Root-inconsistent`, `Loop-inconsistent`, `Err-disabled (recovers in 12s)` or `Err-disabled (manual clear)`. `GET /v1/spanning-tree` has the same fields per port.
 - Logs: `port err-disabled port=<if> reason=bpdu-guard`, `port err-disabled recovered`, `port root-inconsistent` / `port root-consistent`, `port loop-inconsistent` / `port loop-consistent`.
 - Recover an err-disabled port at once with `clear spanning-tree err-disabled <if>` (REST: `POST /v1/spanning-tree/port/<if>/err-disabled/clear`). It answers an error if the port is not err-disabled. If the BPDU source is still there the port is shut again.
-- Removing `bpdu-guard` from the profile also brings the port back. Other config changes restart the protocol but keep an err-disabled port down.
+- Removing `bpdu-guard` from the profile also brings the port back. Other config changes, and a restart of `nos-stpd`, keep an err-disabled port down; after a restart the recovery timer starts again from its full `bpdu-guard-recovery`.
 - An err-disabled link is administratively down: LLDP and LACP on it stop too. Never put the guard on the interface that carries management traffic.
 
 ## Use MSTP

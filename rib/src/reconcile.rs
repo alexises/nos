@@ -629,6 +629,7 @@ mod tests {
                 })
                 .collect(),
             link_local_address: None,
+            err_disabled: false,
         }
     }
 
@@ -677,6 +678,7 @@ mod tests {
             .subinterfaces,
             link_local_address: None,
             bond_name: None,
+            err_disabled: false,
         }];
         let mut got: Vec<(String, String)> =
             connected_entries("rt1", &interfaces, &aggregates, &domains)

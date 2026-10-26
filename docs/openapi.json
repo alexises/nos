@@ -2524,6 +2524,10 @@
             },
             "type": "array"
           },
+          "err_disabled": {
+            "description": "Observed: held administratively down by `nos-stpd`'s BPDU guard\n(err-disabled). Read back by a restarting `nos-stpd`.",
+            "type": "boolean"
+          },
           "link_local_address": {
             "description": "This interface's kernel-assigned IPv6 link-local address (`fe80::/10`\nscope), if the Linux driver has observed one — `None` until the\nkernel auto-assigns it (or under the `noop` driver, always). Unlike\nevery other field here, this reflects **observed kernel state**, not\ndesired config: `nos-interfaced` never writes a link-local address\nitself (see `interface/CLAUDE.md`'s \"never touch kernel-auto-assigned\naddresses\" note) — it only surfaces what the kernel already assigned,\npurely so a consumer like `nos-ospfv3d` can source real RFC 5340\nHello/Link-LSA traffic from it without its own kernel access.",
             "type": [
@@ -2574,7 +2578,8 @@
           "name",
           "addresses",
           "mtu",
-          "subinterfaces"
+          "subinterfaces",
+          "err_disabled"
         ],
         "type": "object"
       },
@@ -4107,6 +4112,10 @@
               "null"
             ]
           },
+          "err_disabled": {
+            "description": "Observed: held administratively down by `nos-stpd`'s BPDU guard\n(err-disabled). Read back by a restarting `nos-stpd`.",
+            "type": "boolean"
+          },
           "link_local_address": {
             "description": "See `InterfaceStatus.link_local_address` — same observed-kernel-state\nsemantics, scoped to this bond's own kernel device.",
             "type": [
@@ -4147,7 +4156,8 @@
           "name",
           "mode",
           "mtu",
-          "subinterfaces"
+          "subinterfaces",
+          "err_disabled"
         ],
         "type": "object"
       },

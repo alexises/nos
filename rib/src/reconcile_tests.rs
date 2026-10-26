@@ -149,6 +149,7 @@ fn if_status(name: &str, flat: &[&str], tag0: &[&str]) -> InterfaceStatus {
             }]
         },
         link_local_address: None,
+        err_disabled: false,
     }
 }
 
@@ -705,6 +706,7 @@ async fn fetch_connected_asks_for_aggregates_and_domains_only_when_the_table_use
             subinterfaces: if_status("bond1", &[], &["198.51.100.1/29"]).subinterfaces,
             link_local_address: None,
             bond_name: None,
+            err_disabled: false,
         },
     );
     ifaced.set_broadcast_domain(

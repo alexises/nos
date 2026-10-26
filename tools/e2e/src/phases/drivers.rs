@@ -1708,7 +1708,7 @@ pub async fn stp_protections(w: &mut World) -> anyhow::Result<()> {
     // Recovery off: only `clear` (or removing the guard) lifts it.
     log("recovery off: manual clear");
     stp_prot_provision(a, "32768", &["bpdu-guard-recovery="]).await?;
-    let up = a.count(RECOVERED);
+    let _up = a.count(RECOVERED);
     stp_wait_port(a, "eth1", 40, |p| {
         p.err_disabled && p.err_recovery_secs.is_none()
     })
@@ -1719,6 +1719,25 @@ pub async fn stp_protections(w: &mut World) -> anyhow::Result<()> {
         None,
         404,
     )
+    .await?;
+    // A restarted nos-stpd must not release what nos-interfaced still holds
+    // down (#697): the full (here: manual) recovery applies again.
+    log("nos-stpd restart: the err-disabled port stays down");
+    let (applied, up) = (a.count("spanning tree plan applied"), a.count(RECOVERED));
+    w.dock.kill_process("router-a", "nos-stpd").await?;
+    a.wait_new("spanning tree plan applied", applied, 40)
+        .await?;
+    a.assert_quiet(RECOVERED, up, 8).await?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/interfaces/eth1", None, 200)
+        .await?;
+    let iface: serde_json::Value = serde_json::from_str(&body)?;
+    if iface["err_disabled"] != true {
+        bail!("eth1 must still be err_disabled after the restart: {body}");
+    }
+    stp_wait_port(a, "eth1", 20, |p| {
+        p.err_disabled && p.err_recovery_secs.is_none()
+    })
     .await?;
     let down = a.count(DISABLED);
     a.rest_expect(Method::POST, CLEAR, None, 200).await?;

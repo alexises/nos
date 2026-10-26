@@ -151,6 +151,7 @@ fn status(name: &str, mtu: u32, subs: Vec<SubinterfaceStatus>) -> InterfaceStatu
         mtu,
         subinterfaces: subs,
         link_local_address: None,
+        err_disabled: false,
     }
 }
 

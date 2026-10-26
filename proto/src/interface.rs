@@ -44,6 +44,9 @@ pub struct InterfaceStatus {
     /// Hello/Link-LSA traffic from it without its own kernel access.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub link_local_address: Option<Ipv6Addr>,
+    /// Observed: held administratively down by `nos-stpd`'s BPDU guard
+    /// (err-disabled). Read back by a restarting `nos-stpd`.
+    pub err_disabled: bool,
 }
 
 /// The wire twin of `schema::Subinterface` — one VLAN-scoped L3 attachment
@@ -114,6 +117,9 @@ pub struct PortAggregateStatus {
     /// aggregate (e.g. `bond1`) — `None` until the driver has actually
     /// created it (or under the `noop` driver, a synthesized placeholder).
     pub bond_name: Option<String>,
+    /// Observed: held administratively down by `nos-stpd`'s BPDU guard
+    /// (err-disabled). Read back by a restarting `nos-stpd`.
+    pub err_disabled: bool,
 }
 
 /// One `PortAggregate`'s current 802.1AX-negotiated active-member set,
