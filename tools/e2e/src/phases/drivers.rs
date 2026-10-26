@@ -3694,3 +3694,84 @@ fn expect_body(body: &str, needle: &str) -> anyhow::Result<()> {
         bail!("body lacks '{needle}': {body}")
     }
 }
+
+/// #691: an `AF_PACKET` socket created with a protocol is hooked on every
+/// device until it is bound, so a frame arriving on *another* interface in
+/// that window used to be queued on it. router-b floods eth2 with LLDPDUs
+/// (port id `race-eth2`) while router-a's `nos-lldpd` reopens its eth1 socket
+/// again and again (every tx-interval change restarts the link); router-a
+/// must never learn that neighbor on eth1.
+pub async fn l2_socket_race(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    w.link_veths().await?;
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:bookworm-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    // eth2 carries no config in this phase: bring both ends up by hand.
+    for router in ["router-a", "router-b"] {
+        w.dock
+            .ip(
+                NETNS_HELPER_IMAGE,
+                Some(router),
+                false,
+                &["link", "set", "eth2", "up"],
+            )
+            .await?;
+    }
+    let on = [
+        "--hostname",
+        "router-a",
+        "--lldp-transmit-interface",
+        "eth1",
+        "--lldp-receive-interface",
+        "eth1",
+    ];
+    a.provision(&on).await?;
+    let link = "lldp link started interface=eth1 transmit=true receive=true";
+    a.wait(link).await?;
+
+    let leaked = "lldp neighbor learned interface=eth1 .* port_id=race-eth2";
+    let (base, started) = (a.count(leaked), a.count(link));
+    log("flooding eth2 while router-a's nos-lldpd reopens its eth1 socket");
+    let flood = w.dock.in_netns(
+        PYTHON_HELPER_IMAGE,
+        "router-b",
+        &["python3", "-c", include_str!("lldp_flood.py")],
+    );
+    let restarts = async {
+        for i in 0..30 {
+            let interval = (31 + i % 2).to_string();
+            a.provision(&["--hostname", "router-a", "--lldp-tx-interval", &interval])
+                .await?;
+        }
+        anyhow::Ok(())
+    };
+    let (flooded, restarted) = tokio::join!(flood, restarts);
+    flooded?;
+    restarted?;
+    // Every provision above restarted the link: the socket really was reopened.
+    if a.count(link) < started + 10 {
+        bail!("router-a's lldp link was not restarted under the flood");
+    }
+    if a.count(leaked) != base {
+        bail!("router-a learned an eth2 frame on its eth1 socket (#691)");
+    }
+
+    // Back to the default interval (the `lldp` phase expects ttl=120).
+    a.provision(&[
+        "--lldp-tx-interval",
+        "30",
+        "--no-lldp-transmit-interface",
+        "eth1",
+        "--no-lldp-receive-interface",
+        "eth1",
+    ])
+    .await?;
+    w.unlink_veths().await;
+    Ok(())
+}

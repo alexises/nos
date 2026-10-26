@@ -845,9 +845,8 @@ impl UdpNet {
             .ok_or_else(|| io::Error::other("micro-BFD session without a source address"))?;
         let ethertype = if local.is_ipv4() { 0x0800 } else { 0x86dd };
         let ip = Arc::new(
-            L2Socket::open(&member, ethertype, micro::GROUP, RX_FRAME)?
-                .accept_own_unicast()
-                .udp_dst_port(micro::PORT)?,
+            L2Socket::open_udp(&member, ethertype, micro::GROUP, RX_FRAME, micro::PORT)?
+                .accept_own_unicast(),
         );
         // ponytail: no kernel filter on the tagged socket: it wakes for every
         // VLAN frame of the member (RFC 7130 §2.3 wants tag 0 received).
