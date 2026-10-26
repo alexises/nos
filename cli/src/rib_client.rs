@@ -1,9 +1,11 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+use futures::{SinkExt, StreamExt};
 use nos_daemon::ipc::{self, IpcError};
-use nos_proto::{PrefixRoutes, RibEvent, RibRequest, Role};
+use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, Role, ROUTES_PAGE_MAX};
 use thiserror::Error;
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
 pub enum RibClientError {
@@ -31,15 +33,54 @@ async fn ask(rib_socket: &Path, req: RibRequest) -> Result<RibEvent, RibClientEr
         })
 }
 
-/// Fetches the whole table: every prefix, each with its full candidate list
-/// ordered best to worst, prefixes in ascending CIDR order.
-pub async fn get_routes(rib_socket: &Path) -> Result<Vec<PrefixRoutes>, RibClientError> {
-    match ask(rib_socket, RibRequest::GetRoutes).await? {
-        RibEvent::Routes(routes) => Ok(routes),
-        RibEvent::Error(msg) => Err(RibClientError::Daemon(msg)),
-        _ => Err(RibClientError::Daemon(
-            "unexpected event in reply to GetRoutes".to_string(),
-        )),
+/// Walks the whole table page by page over one connection, handing each page
+/// (prefixes ascending, each with its candidates best to worst) to `on_page`
+/// as it arrives, so nothing holds the full table. The table may change
+/// mid-walk (keyset paging, no snapshot); a cursor that does not advance is
+/// an error, never a loop.
+pub async fn for_each_routes_page(
+    rib_socket: &Path,
+    mut on_page: impl FnMut(&[PrefixRoutes]),
+) -> Result<(), RibClientError> {
+    let stream = nos_pki::connect_role(rib_socket, Role::Ribd)
+        .await
+        .map_err(|source| RibClientError::Connect {
+            path: rib_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
+    let mut after = None;
+    loop {
+        writer
+            .send(RibRequest::GetRoutesPage {
+                after,
+                limit: ROUTES_PAGE_MAX,
+            })
+            .await?;
+        match reader.next().await {
+            Some(Ok(RibEvent::RoutesPage { routes, next })) => {
+                on_page(&routes);
+                match next {
+                    None => return Ok(()),
+                    Some(n) if after.is_some_and(|a| n <= a) => {
+                        return Err(RibClientError::Daemon(
+                            "route page cursor did not advance".to_string(),
+                        ));
+                    }
+                    Some(n) => after = Some(n),
+                }
+            }
+            Some(Ok(RibEvent::Error(msg))) => return Err(RibClientError::Daemon(msg)),
+            Some(Ok(_)) => {
+                return Err(RibClientError::Daemon(
+                    "unexpected event in reply to GetRoutesPage".to_string(),
+                ));
+            }
+            Some(Err(e)) => return Err(RibClientError::Io(e)),
+            None => return Err(RibClientError::ConnectionClosed),
+        }
     }
 }
 

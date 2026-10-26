@@ -3869,3 +3869,72 @@ pub async fn l2_socket_race(w: &mut World) -> anyhow::Result<()> {
     w.unlink_veths().await;
     Ok(())
 }
+
+/// `routes-paging` (#713): `GET /v1/routes/<table>` is paged. 25 extra
+/// statics against a page size of 10 force three pages; the walk over
+/// `pagination.next` must return each exactly once, in ascending order, and
+/// a cursor past the end is an empty last page. (The 1000-prefix server
+/// default is covered by unit tests; 1M routes are too heavy for CI.)
+pub async fn routes_paging(w: &mut World) -> anyhow::Result<()> {
+    const N: usize = 25;
+    let a = w.a()?;
+    let prefixes: Vec<String> = (0..N).map(|i| format!("10.88.{i}.0/24")).collect();
+    let flags = |flag: &str| -> Vec<String> {
+        prefixes
+            .iter()
+            .flat_map(|p| [flag.to_string(), p.clone()])
+            .collect()
+    };
+    let mut add = flags("--static-route");
+    add.extend(strings(&["--static-gateway", REDISTRIBUTE_GATEWAY]));
+    a.provision(&add).await?;
+
+    let ours = |items: &[serde_json::Value]| -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|p| p["prefix"].as_str())
+            .filter(|p| p.starts_with("10.88."))
+            .map(String::from)
+            .collect()
+    };
+    let mut seen = Vec::new();
+    for _ in 0..30 {
+        seen = ours(&a.routes_walk("rt1", Some(10)).await?);
+        if seen.len() == N {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if seen != prefixes {
+        bail!("paged walk of rt1 returned {seen:?}, expected {prefixes:?}");
+    }
+
+    log("the first page is full and points at the next one");
+    let body = a
+        .rest_expect(Method::GET, "/v1/routes/rt1?limit=10", None, 200)
+        .await?;
+    let page: serde_json::Value = serde_json::from_str(&body)?;
+    if page["items"].as_array().map(Vec::len) != Some(10)
+        || page["pagination"]["limit"] != 10
+        || !page["pagination"]["next"].is_string()
+    {
+        bail!("first page of GET /v1/routes/rt1?limit=10 is wrong: {body}");
+    }
+    let body = a
+        .rest_expect(
+            Method::GET,
+            "/v1/routes/rt1?after=255.255.255.255/32",
+            None,
+            200,
+        )
+        .await?;
+    let page: serde_json::Value = serde_json::from_str(&body)?;
+    if page["items"] != serde_json::json!([]) || !page["pagination"]["next"].is_null() {
+        bail!("a cursor past the end must be an empty last page: {body}");
+    }
+    a.rest_expect(Method::GET, "/v1/routes/rt1?after=nope", None, 400)
+        .await?;
+
+    a.provision(&flags("--remove-static-route")).await?;
+    Ok(())
+}

@@ -677,19 +677,25 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
     let dir = tempfile::tempdir().unwrap();
     let rib = dir.path().join("rib.sock");
     serve(&rib, ("ribd", "rt1"), |req: RibRequest| match req {
-        RibRequest::GetRoutes => RibEvent::Routes(vec![PrefixRoutes {
-            prefix: "10.0.0.0/8".parse().unwrap(),
-            candidates: vec![RouteEntry {
-                gateways: vec!["192.0.2.1".parse().unwrap()],
-                source: RouteSourceKind::Static,
-                backup: None,
-                discard: false,
-                evpn: None,
-                backup_tunnel: false,
-                mpls_labels: vec![],
-                vpn: vec![],
-            }],
-        }]),
+        RibRequest::GetRoutesPage { after, limit } => {
+            assert_eq!((after, limit), (None, 1000));
+            RibEvent::RoutesPage {
+                routes: vec![PrefixRoutes {
+                    prefix: "10.0.0.0/8".parse().unwrap(),
+                    candidates: vec![RouteEntry {
+                        gateways: vec!["192.0.2.1".parse().unwrap()],
+                        source: RouteSourceKind::Static,
+                        backup: None,
+                        discard: false,
+                        evpn: None,
+                        backup_tunnel: false,
+                        mpls_labels: vec![],
+                        vpn: vec![],
+                    }],
+                }],
+                next: Some("10.0.0.0/8".parse().unwrap()),
+            }
+        }
         RibRequest::Lookup { .. } => RibEvent::NoMatch,
         _ => RibEvent::Error("unsupported".into()),
     });
@@ -697,7 +703,9 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
 
     let (s, v) = send(&f.app, Method::GET, "/v1/routes/rt1", None).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v[0]["prefix"], "10.0.0.0/8");
+    assert_eq!(v["items"][0]["prefix"], "10.0.0.0/8");
+    assert_eq!(v["pagination"]["limit"], 1000);
+    assert_eq!(v["pagination"]["next"], "10.0.0.0/8");
     assert_eq!(
         send(&f.app, Method::GET, "/v1/routes/rt1/192.0.2.9", None)
             .await
@@ -1688,10 +1696,13 @@ async fn renewal_is_for_the_user_the_certificate_names() {
 #[allow(clippy::needless_pass_by_value)]
 fn rib_with_one_route(req: RibRequest) -> RibEvent {
     match req {
-        RibRequest::GetRoutes => RibEvent::Routes(vec![PrefixRoutes {
-            prefix: "10.0.0.0/8".parse().unwrap(),
-            candidates: vec![],
-        }]),
+        RibRequest::GetRoutesPage { .. } => RibEvent::RoutesPage {
+            routes: vec![PrefixRoutes {
+                prefix: "10.0.0.0/8".parse().unwrap(),
+                candidates: vec![],
+            }],
+            next: None,
+        },
         _ => RibEvent::Error("unsupported".into()),
     }
 }
@@ -1730,6 +1741,55 @@ async fn a_stale_pooled_connection_is_retried_on_a_fresh_one() {
         assert_eq!(s, StatusCode::OK);
     }
     assert_eq!(ribd.load(Ordering::SeqCst), 3);
+}
+
+/// `after`/`limit` reach `nos-ribd` (limit clamped), a bad cursor is a 400,
+/// and the last page's `next` is null.
+#[tokio::test]
+async fn routes_pagination_params_are_forwarded_and_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let rib = dir.path().join("rib.sock");
+    serve(&rib, ("ribd", "rt1"), |req: RibRequest| match req {
+        RibRequest::GetRoutesPage { after, limit } => {
+            assert_eq!(after, Some("10.0.0.0/8".parse().unwrap()));
+            RibEvent::RoutesPage {
+                routes: vec![],
+                next: (limit == 5).then(|| "11.0.0.0/8".parse().unwrap()),
+            }
+        }
+        _ => RibEvent::Error("unsupported".into()),
+    });
+    let f = fixture(vec![(ServiceRef::RibTable("rt1".into()), rib)]).await;
+    let (s, v) = send(
+        &f.app,
+        Method::GET,
+        "/v1/routes/rt1?after=10.0.0.0/8&limit=5",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["pagination"]["limit"], 5);
+    assert_eq!(v["pagination"]["next"], "11.0.0.0/8");
+    // 0 and over-large limits are clamped to 1 and 1000.
+    let (_, v) = send(
+        &f.app,
+        Method::GET,
+        "/v1/routes/rt1?after=10.0.0.0/8&limit=0",
+        None,
+    )
+    .await;
+    assert_eq!(v["pagination"]["limit"], 1);
+    assert!(v["pagination"]["next"].is_null());
+    let (_, v) = send(
+        &f.app,
+        Method::GET,
+        "/v1/routes/rt1?after=10.0.0.0/8&limit=99999",
+        None,
+    )
+    .await;
+    assert_eq!(v["pagination"]["limit"], 1000);
+    let (s, _) = send(&f.app, Method::GET, "/v1/routes/rt1?after=nope", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
 mod over_tls {

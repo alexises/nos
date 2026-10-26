@@ -127,6 +127,14 @@ pub struct PrefixRoutes {
     pub candidates: Vec<RouteEntry>,
 }
 
+impl PrefixRoutes {
+    /// Encoded size on the wire, for budgeting a `RoutesPage` reply.
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
+        postcard::to_allocvec(self).map_or(0, |v| v.len())
+    }
+}
+
 /// One BGP-learned best-path route, pushed by the owning `nos-bgpd`
 /// instance for kernel installation. Always peer-learned — a `Local`-origin
 /// (redistributed-from-static) loc-rib entry has no real next-hop and is
@@ -346,8 +354,8 @@ pub struct ResolvedNextHop {
 /// already-built binaries.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RibRequest {
-    /// One-shot: every prefix currently in the table, each with its full
-    /// candidate list, prefixes in ascending CIDR order.
+    /// Deprecated (#713): answered with `RibEvent::Error`; use
+    /// `GetRoutesPage`. The slot stays because postcard indexes by position.
     GetRoutes,
     /// One-shot: longest-prefix-match lookup for one destination address.
     Lookup {
@@ -417,7 +425,23 @@ pub enum RibRequest {
     /// One-shot: this table's VPN label (`show route`'s header), the
     /// explicit `vpn.label` or the one allocated; `None` without `vpn`.
     GetVpnLabel,
+    /// One-shot: up to `limit` prefixes strictly after `after` (`None`: from
+    /// the start), each with its full candidate list, in ascending CIDR
+    /// order; answered by `RibEvent::RoutesPage` (#713). Keyset paging, no
+    /// snapshot: a table that changes mid-walk never loops or repeats a
+    /// prefix, but may skip or include a concurrent change. `nos-ribd`
+    /// clamps `limit` to [`ROUTES_PAGE_MAX`] (0 means the maximum).
+    GetRoutesPage {
+        /// Cursor: the last prefix of the previous page.
+        after: Option<IpNet>,
+        /// Most prefixes wanted.
+        limit: u32,
+    },
 }
+
+/// Most prefixes `nos-ribd` returns in one `RoutesPage`, and the default
+/// page size of `show route` and `GET /v1/routes/{table}`.
+pub const ROUTES_PAGE_MAX: u32 = 1000;
 
 /// Reply to `GetEvpnIrb`: what a MAC+IP route needs to be symmetric.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -433,7 +457,8 @@ pub struct EvpnIrb {
 /// Messages sent from a `nos-ribd` instance to a client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RibEvent {
-    /// Reply to `GetRoutes`.
+    /// Unused since #713 (`GetRoutes` is gone); the slot stays for the
+    /// wire indexes.
     Routes(Vec<PrefixRoutes>),
     /// Reply to `Lookup` when a covering prefix exists.
     Match(PrefixRoutes),
@@ -462,6 +487,15 @@ pub enum RibEvent {
     NextHops(Vec<Option<ResolvedNextHop>>),
     /// Reply to `GetVpnLabel`.
     VpnLabel(Option<u32>),
+    /// Reply to `GetRoutesPage`: up to `limit` prefixes (fewer when the
+    /// reply hit its byte budget) in ascending CIDR order. `next` is the last
+    /// prefix returned, to pass back as `after`; `None` on the last page.
+    RoutesPage {
+        /// The page, ascending CIDR order.
+        routes: Vec<PrefixRoutes>,
+        /// Cursor for the next page; `None` on the last.
+        next: Option<IpNet>,
+    },
 }
 
 #[cfg(test)]

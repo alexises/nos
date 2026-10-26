@@ -532,15 +532,25 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
     };
 
     match address {
-        None => match rib_client::get_routes(&rib_socket).await {
-            Ok(routes) => {
-                if let Some(label) = rib_client::get_vpn_label(&rib_socket).await {
-                    println!("VPN label: {label}");
-                }
-                println!("{}", format::render_prefix_routes(&routes));
+        None => {
+            if let Some(label) = rib_client::get_vpn_label(&rib_socket).await {
+                println!("VPN label: {label}");
             }
-            Err(e) => eprintln!("error: {e}"),
-        },
+            // Each page prints as it arrives; an empty table is one empty page.
+            let mut any = false;
+            let walked = rib_client::for_each_routes_page(&rib_socket, |page| {
+                if !page.is_empty() {
+                    any = true;
+                    println!("{}", format::render_prefix_routes(page));
+                }
+            })
+            .await;
+            match walked {
+                Ok(()) if !any => println!("{}", format::render_prefix_routes(&[])),
+                Ok(()) => {}
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
         Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
             Ok(Some(matched)) => println!("{}", format::render_prefix_routes(&[matched])),
             Ok(None) => println!("no route matches {addr}"),

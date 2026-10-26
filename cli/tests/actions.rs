@@ -116,7 +116,10 @@ fn lab() -> Lab {
             "rib" => serve(role, name, &path, |r: RibRequest| {
                 vec![match r {
                     RibRequest::Lookup { .. } => RibEvent::NoMatch,
-                    _ => RibEvent::Routes(Vec::new()),
+                    _ => RibEvent::RoutesPage {
+                        routes: Vec::new(),
+                        next: None,
+                    },
                 }]
             }),
             "fdb" => serve(role, name, &path, |_: FdbRequest| {

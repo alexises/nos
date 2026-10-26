@@ -322,13 +322,46 @@ impl Router {
         Ok(text)
     }
 
+    /// Every prefix of `table` over REST, walking `pagination.next` from
+    /// `?after=` until it is null (`GET /v1/routes/<table>` is paginated, #713).
+    /// `limit` is the page size to ask for (`None`: the server default).
+    pub async fn routes_walk(
+        &self,
+        table: &str,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut out = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut query = Vec::new();
+            if let Some(l) = limit {
+                query.push(format!("limit={l}"));
+            }
+            if let Some(a) = &after {
+                query.push(format!("after={a}"));
+            }
+            let path = format!("/v1/routes/{table}?{}", query.join("&"));
+            let body = self.rest_expect(Method::GET, &path, None, 200).await?;
+            let page: serde_json::Value = serde_json::from_str(&body)?;
+            out.extend(page["items"].as_array().cloned().unwrap_or_default());
+            match page["pagination"]["next"].as_str() {
+                Some(n) => after = Some(n.to_string()),
+                None => return Ok(out),
+            }
+        }
+    }
+
+    /// `routes_walk` of `rt1`, as the JSON array the old endpoint returned.
+    async fn rt1_table(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::Value::Array(
+            self.routes_walk("rt1", None).await?,
+        ))
+    }
+
     /// Whether nos-ribd's `rt1` lists a `source` candidate (`"Ospf"`,
     /// `"Connected"`, …) for `prefix`, read over REST.
     pub async fn rt1_has(&self, prefix: &str, source: &str) -> anyhow::Result<bool> {
-        let body = self
-            .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
-            .await?;
-        let table: serde_json::Value = serde_json::from_str(&body)?;
+        let table = self.rt1_table().await?;
         Ok(table.as_array().into_iter().flatten().any(|p| {
             p["prefix"] == prefix
                 && p["candidates"]
@@ -341,10 +374,7 @@ impl Router {
 
     /// How many prefixes nos-ribd's `rt1` lists with a `source` candidate.
     pub async fn rt1_count(&self, source: &str) -> anyhow::Result<usize> {
-        let body = self
-            .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
-            .await?;
-        let table: serde_json::Value = serde_json::from_str(&body)?;
+        let table = self.rt1_table().await?;
         Ok(table
             .as_array()
             .into_iter()

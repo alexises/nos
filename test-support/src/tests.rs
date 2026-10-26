@@ -194,7 +194,10 @@ async fn ribd_defaults_values_and_pushed() {
         q(RibRequest::GetEvpnIrb).await,
         RibEvent::EvpnIrb(None)
     ));
-    assert!(matches!(q(RibRequest::GetRoutes).await, RibEvent::Routes(v) if v.is_empty()));
+    assert!(matches!(
+        q(RibRequest::GetRoutesPage { after: None, limit: 0 }).await,
+        RibEvent::RoutesPage { routes, next: None } if routes.is_empty()
+    ));
     let lookup = RibRequest::Lookup {
         addr: "10.0.0.1".parse().unwrap(),
     };

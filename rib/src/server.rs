@@ -7,7 +7,7 @@ use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{
     BgpRoute, BgpRouteUpdate, EvpnRouteInfo, EvpnUpdate, IpNet, IpcCodec, NextHop, OspfRoute,
     OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest, Role, RouteEntry, RouteSourceKind,
-    VpnRoute, VpnRouteInfo, VpnRouteUpdate,
+    VpnRoute, VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
 };
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -51,7 +51,10 @@ pub fn start(
 // an instance to its table needs a config lookup — add it if that matters.
 fn allowed(role: Role, req: &RibRequest) -> bool {
     match req {
-        RibRequest::GetRoutes | RibRequest::Lookup { .. } | RibRequest::GetVpnLabel => {
+        RibRequest::GetRoutes
+        | RibRequest::GetRoutesPage { .. }
+        | RibRequest::Lookup { .. }
+        | RibRequest::GetVpnLabel => {
             matches!(role, Role::User | Role::Restd)
         }
         // `ribd`/`fdbd` name a loopback VTEP's device (`lo<table id>`) of
@@ -180,18 +183,42 @@ impl FullStaging {
     }
 }
 
+/// Byte budget of one `RoutesPage`: half the codec's `MAX_FRAME`.
+const PAGE_BYTES: usize = nos_proto::codec::MAX_FRAME / 2;
+
+/// One `RoutesPage` reply: at most `limit` (0 or over [`ROUTES_PAGE_MAX`]:
+/// the maximum) prefixes, cut early once their encoding passes `budget`
+/// bytes (a page always holds at least one prefix, so a walk advances).
+fn routes_page(rib: &Rib, after: Option<IpNet>, limit: u32, budget: usize) -> RibEvent {
+    let limit = match limit {
+        0 => ROUTES_PAGE_MAX,
+        n => n.min(ROUTES_PAGE_MAX),
+    };
+    let (page, mut more) = rib.routes_page(after, limit as usize);
+    let mut routes = Vec::with_capacity(page.len());
+    let mut bytes = 0;
+    for (prefix, candidates) in page {
+        let pr = to_prefix_routes(prefix, &candidates, rib);
+        bytes += pr.wire_len();
+        if bytes > budget && !routes.is_empty() {
+            more = true;
+            break;
+        }
+        routes.push(pr);
+    }
+    let next = more.then(|| routes.last().map(|r| r.prefix)).flatten();
+    RibEvent::RoutesPage { routes, next }
+}
+
 async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
     trace!(table = %ctx.table, request = ?req, "serving RIB query");
     match req {
-        RibRequest::GetRoutes => {
+        RibRequest::GetRoutes => Some(RibEvent::Error(
+            "GetRoutes removed, use GetRoutesPage".to_string(),
+        )),
+        RibRequest::GetRoutesPage { after, limit } => {
             let guard = ctx.rib.read().await;
-            Some(RibEvent::Routes(
-                guard
-                    .all_routes()
-                    .into_iter()
-                    .map(|(prefix, candidates)| to_prefix_routes(prefix, &candidates, &guard))
-                    .collect(),
-            ))
+            Some(routes_page(&guard, after, limit, PAGE_BYTES))
         }
         RibRequest::Lookup { addr } => {
             let guard = ctx.rib.read().await;
@@ -734,7 +761,15 @@ mod authz_tests {
         .await;
         // A delta that changes nothing in the kernel is a no-op.
         apply_vpn_route_update(&ctx, vec![VpnRouteUpdate::Remove(a.prefix)]).await;
-        let Some(RibEvent::Routes(routes)) = dispatch(&ctx, RibRequest::GetRoutes).await else {
+        let Some(RibEvent::RoutesPage { routes, next: None }) = dispatch(
+            &ctx,
+            RibRequest::GetRoutesPage {
+                after: None,
+                limit: 0,
+            },
+        )
+        .await
+        else {
             panic!("no routes");
         };
         assert_eq!(routes.len(), 1);
@@ -763,11 +798,84 @@ mod authz_tests {
         ));
     }
 
+    fn static_rib(n: u8) -> Rib {
+        let mut rib = Rib::new();
+        for i in 0..n {
+            rib.insert(RibEntry {
+                prefix: format!("10.0.{i}.0/24").parse().unwrap(),
+                next_hops: vec![("10.9.9.9".parse().unwrap(), None).into()],
+                source: RouteSource::Static,
+                backup: None,
+                backup_interface_id: None,
+                backup_tunnel: false,
+            });
+        }
+        rib
+    }
+
+    fn page_of(e: RibEvent) -> (Vec<String>, Option<String>) {
+        let RibEvent::RoutesPage { routes, next } = e else {
+            panic!("not a page");
+        };
+        (
+            routes.iter().map(|r| r.prefix.to_string()).collect(),
+            next.map(|n| n.to_string()),
+        )
+    }
+
+    #[test]
+    fn routes_pages_walk_the_table_by_cursor() {
+        let rib = static_rib(5);
+        let (p, next) = page_of(routes_page(&rib, None, 2, usize::MAX));
+        assert_eq!(
+            (p.as_slice(), next.as_deref()),
+            (
+                &["10.0.0.0/24".into(), "10.0.1.0/24".into()][..],
+                Some("10.0.1.0/24")
+            )
+        );
+        let (p, next) = page_of(routes_page(&rib, "10.0.1.0/24".parse().ok(), 2, usize::MAX));
+        assert_eq!((p.len(), next.as_deref()), (2, Some("10.0.3.0/24")));
+        // The last, short page ends the walk; limit 0 means the maximum.
+        let (p, next) = page_of(routes_page(&rib, "10.0.3.0/24".parse().ok(), 0, usize::MAX));
+        assert_eq!((p, next), (vec!["10.0.4.0/24".to_string()], None));
+    }
+
+    #[test]
+    fn a_byte_budget_cuts_a_page_but_always_advances() {
+        let rib = static_rib(5);
+        // A 1-byte budget still returns one prefix and a cursor.
+        let (p, next) = page_of(routes_page(&rib, None, 100, 1));
+        assert_eq!((p.len(), next.as_deref()), (1, Some("10.0.0.0/24")));
+        let one = rib.routes_page(None, 1).0;
+        let len = to_prefix_routes(one[0].0, &one[0].1, &rib).wire_len();
+        let (p, next) = page_of(routes_page(&rib, None, 100, len * 2));
+        assert_eq!((p.len(), next.as_deref()), (2, Some("10.0.1.0/24")));
+    }
+
+    #[tokio::test]
+    async fn the_removed_get_routes_answers_with_an_error() {
+        let ctx = Context {
+            table: "t".to_string(),
+            rib: Arc::new(RwLock::new(Rib::new())),
+            driver: Arc::new(crate::driver::NoopRibDriver::default()),
+        };
+        assert!(matches!(
+            dispatch(&ctx, RibRequest::GetRoutes).await,
+            Some(RibEvent::Error(m)) if m.contains("GetRoutesPage")
+        ));
+    }
+
     #[test]
     fn route_queries_are_for_people_and_the_rest_api() {
         for role in Role::ALL {
             let expected = matches!(role, Role::User | Role::Restd);
             assert_eq!(allowed(role, &RibRequest::GetRoutes), expected, "{role:?}");
+            let page = RibRequest::GetRoutesPage {
+                after: None,
+                limit: 1,
+            };
+            assert_eq!(allowed(role, &page), expected, "{role:?}");
             assert_eq!(
                 allowed(role, &RibRequest::GetVpnLabel),
                 expected,

@@ -278,6 +278,38 @@ impl Rib {
         out
     }
 
+    /// The `limit` smallest prefixes strictly after `after` (all of them from
+    /// the start when `None`), as `all_routes` would list them, and whether
+    /// more follow. `entries` is a `HashMap`, so this is one O(n) pass with a
+    /// bounded heap plus a sort of just the page, never a full sort.
+    // ponytail: O(n) per page (~100 pages at 1M prefixes under the read
+    // lock); a `BTreeMap` makes it a range scan if that is measured too slow.
+    pub fn routes_page(
+        &self,
+        after: Option<IpNet>,
+        limit: usize,
+    ) -> (Vec<(IpNet, Vec<RibEntry>)>, bool) {
+        let mut heap = std::collections::BinaryHeap::with_capacity(limit + 1);
+        for prefix in self
+            .entries
+            .keys()
+            .filter(|p| after.is_none_or(|a| **p > a))
+        {
+            heap.push(*prefix);
+            if heap.len() > limit + 1 {
+                heap.pop();
+            }
+        }
+        let mut prefixes = heap.into_sorted_vec();
+        let more = prefixes.len() > limit;
+        prefixes.truncate(limit);
+        let page = prefixes
+            .into_iter()
+            .map(|p| (p, sorted_by_preference(&self.entries[&p])))
+            .collect();
+        (page, more)
+    }
+
     /// Longest-prefix-match lookup: the most specific configured prefix that
     /// covers `addr`, with its full candidate list sorted best to worst.
     /// `None` if no configured prefix covers `addr` (no default route).
@@ -804,6 +836,47 @@ mod tests {
             backup_tunnel: false,
         });
         assert_eq!(rib.best_routes().len(), 2);
+    }
+
+    #[test]
+    fn routes_page_concatenated_equals_all_routes() {
+        let mut rib = Rib::new();
+        for (i, p) in [
+            "10.0.1.0/24",
+            "10.0.0.0/8",
+            "2001:db8::/32",
+            "10.0.0.0/24",
+            "192.168.0.0/16",
+        ]
+        .iter()
+        .enumerate()
+        {
+            rib.insert(entry(p, "10.0.0.1", RouteSource::Static));
+            if i % 2 == 0 {
+                rib.insert(entry(p, "10.0.0.2", RouteSource::Bgp));
+            }
+        }
+        let all = rib.all_routes();
+        for limit in 1..=6 {
+            let (mut got, mut after) = (Vec::new(), None);
+            loop {
+                let (page, more) = rib.routes_page(after, limit);
+                assert!(page.len() <= limit);
+                after = page.last().map(|(p, _)| *p);
+                got.extend(page);
+                if !more {
+                    break;
+                }
+            }
+            assert_eq!(got, all, "limit {limit}");
+        }
+        // Empty table, a cursor past the end, a cursor on a removed prefix.
+        assert_eq!(Rib::new().routes_page(None, 3), (vec![], false));
+        let last = all.last().unwrap().0;
+        assert_eq!(rib.routes_page(Some(last), 3), (vec![], false));
+        let gone: IpNet = "10.0.0.128/25".parse().unwrap();
+        let want = all.iter().map(|a| a.0).find(|p| *p > gone).unwrap();
+        assert_eq!(rib.routes_page(Some(gone), 1).0[0].0, want);
     }
 
     #[test]

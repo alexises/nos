@@ -1001,14 +1001,9 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
         format!("added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_B},{IP_C} next_hops=2 ");
     log("waiting for router-a to install one kernel route over both next hops");
     a.wait(&both).await?;
-    let body = a
-        .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
-        .await?;
-    let table: serde_json::Value = serde_json::from_str(&body)?;
+    let table = a.routes_walk("rt1", None).await?;
     let gateways = table
-        .as_array()
-        .into_iter()
-        .flatten()
+        .iter()
         .find(|p| p["prefix"] == REDISTRIBUTE_PREFIX)
         .map(|p| p["candidates"][0]["gateways"].clone());
     if gateways != Some(serde_json::json!([IP_B, IP_C])) {
@@ -6757,11 +6752,8 @@ fn l3_pe_flags(id: Id, rd: &str, gw: &str) -> Vec<String> {
 
 /// Whether `r`'s `L3_TABLE` lists `prefix` as an `Evpn` route, over REST.
 async fn tenant_has_evpn(r: &Router, prefix: &str) -> anyhow::Result<bool> {
-    let body = r
-        .rest_expect(Method::GET, &format!("/v1/routes/{L3_TABLE}"), None, 200)
-        .await?;
-    let table: serde_json::Value = serde_json::from_str(&body)?;
-    Ok(table.as_array().into_iter().flatten().any(|p| {
+    let table = r.routes_walk(L3_TABLE, None).await?;
+    Ok(table.iter().any(|p| {
         p["prefix"] == prefix
             && p["candidates"].as_array().into_iter().flatten().any(|c| {
                 c["source"] == "Evpn" && c["evpn"]["vni"] == L3_VNI && c["evpn"]["router_mac"] != ""

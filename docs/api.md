@@ -143,7 +143,7 @@ All are `GET`, and each returns the same data as the matching shell command, as 
 
 - `/v1/version`: `{version, revision}` of the running build; `revision` is `unknown` unless built by `make docker-build`. No daemon is queried.
 - `/v1/config`: the running config. Secrets are masked: a user's `password` and every admin key `secret` read `<hidden>` here and in every transaction response (see [Secrets](#secrets-are-write-only)).
-- `/v1/routes/{table}`: every prefix with every candidate route, best first. `/v1/routes/{table}/{addr}` is the longest-prefix match for one address, or `404` if nothing covers it.
+- `/v1/routes/{table}`: one page of prefixes (ascending) with every candidate route, best first: `{"items": [...], "pagination": {"limit": 1000, "next": "10.0.0.0/8"}}`. `?limit=` (1 to 1000, default 1000) sets the page size; pass `pagination.next` back as `?after=` until it is `null`. A malformed `after` is `400`. There is no snapshot: a table that changes mid-walk never repeats a prefix, but a walk may miss or include a concurrent change. Other paged endpoints use the same `items`/`pagination` envelope and `after`/`limit` params. `/v1/routes/{table}/{addr}` is the longest-prefix match for one address, or `404` if nothing covers it.
 - `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.
 - `/v1/interfaces[/{name}]` and `/v1/port-aggregates[/{name}]` carry `err_disabled: true` while `nos-stpd`'s BPDU guard holds the port down.
 - `/v1/port-aggregates[/{name}]` and `/v1/lacp[/{name}]`: bonds, their members and LACP state.
@@ -163,8 +163,9 @@ The shell command for each is listed in [CLI ↔ API mapping](cli-api-mapping.md
 
 ```sh
 $ $C $B/v1/routes/rt1
-[{"prefix":"10.50.0.0/24","candidates":[{"gateways":["10.50.0.2"],"source":"Connected","backup":null}]},
- {"prefix":"192.0.2.0/24","candidates":[{"gateways":["10.50.0.3"],"source":"Static","backup":null}]}]
+{"items":[{"prefix":"10.50.0.0/24","candidates":[{"gateways":["10.50.0.2"],"source":"Connected","backup":null}]},
+          {"prefix":"192.0.2.0/24","candidates":[{"gateways":["10.50.0.3"],"source":"Static","backup":null}]}],
+ "pagination":{"limit":1000,"next":null}}
 $ $C $B/v1/routes/rt1/192.0.2.7
 {"prefix":"192.0.2.0/24","candidates":[{"gateways":["10.50.0.3"],"source":"Static","backup":null}]}
 $ $C "$B/v1/logs?source=nos-bgpd%5Br1%5D&limit=1" | jq '.[0].source'
