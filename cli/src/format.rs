@@ -63,6 +63,9 @@ pub fn render_interface_status(status: &InterfaceStatus) -> String {
         "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}, mtu {}",
         status.name, status.mtu
     )];
+    if status.err_disabled {
+        lines.push("  Err-disabled: yes".to_string());
+    }
     for sub in &status.subinterfaces {
         lines.push(format!("  {}", render_subinterface_status(sub)));
     }
@@ -90,6 +93,9 @@ pub fn render_port_aggregate_status(status: &PortAggregateStatus) -> String {
         "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {}",
         status.name, status.mode, status.mtu
     )];
+    if status.err_disabled {
+        lines.push("  Err-disabled: yes".to_string());
+    }
     for sub in &status.subinterfaces {
         lines.push(format!("  {}", render_subinterface_status(sub)));
     }
@@ -3012,8 +3018,9 @@ mod tests {
                 sub_status(5, Vec::new()),
             ],
             link_local_address: None,
+            err_disabled: false,
         };
-        let out = render_interface_statuses(&[iface.clone(), iface]);
+        let out = render_interface_statuses(&[iface.clone(), iface.clone()]);
         assert_eq!(
             out.lines().take(3).collect::<Vec<_>>(),
             [
@@ -3030,11 +3037,25 @@ mod tests {
             subinterfaces: vec![sub_status(0, Vec::new())],
             link_local_address: None,
             bond_name: None,
+            err_disabled: false,
         };
         assert_eq!(
-            render_port_aggregate_statuses(&[agg]),
+            render_port_aggregate_statuses(std::slice::from_ref(&agg)),
             "port-aggregate bond1: mode Xor, switching-profile unset, mtu 9000\n  \
              subinterface 0: address [none], routing-table rt1"
+        );
+        let held = PortAggregateStatus {
+            err_disabled: true,
+            ..agg.clone()
+        };
+        assert!(render_port_aggregate_status(&held).contains("\n  Err-disabled: yes"));
+        let held = InterfaceStatus {
+            err_disabled: true,
+            ..iface.clone()
+        };
+        assert_eq!(
+            render_interface_status(&held).lines().nth(1),
+            Some("  Err-disabled: yes")
         );
     }
 

@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::SinkExt;
-use nos_proto::{InterfaceRequest, IpcCodec, Role, ServiceRef, StpPortAssignment, StpPortState};
+use nos_proto::{
+    InterfaceEvent, InterfaceRequest, IpcCodec, Role, ServiceRef, StpPortAssignment, StpPortState,
+};
 use tokio::sync::{mpsc, watch};
 use tokio_util::codec::FramedWrite;
 use tracing::{info, warn};
@@ -22,6 +24,56 @@ pub enum Push {
     States(Vec<StpPortAssignment>),
     Flush(Vec<(String, String)>),
     ErrDisabled { port: String, disabled: bool },
+}
+
+/// How long a restarting `nos-stpd` keeps asking `nos-interfaced` which ports
+/// it holds err-disabled before giving up (#697).
+pub const READ_BACK_BUDGET: Duration = Duration::from_secs(10);
+
+/// The ports `nos-interfaced` holds err-disabled (interfaces and port
+/// aggregates), or `None` when it stays unreachable for [`READ_BACK_BUDGET`]:
+/// the caller then releases nothing (fail closed).
+pub async fn read_err_disabled(watchdog_socket: &std::path::Path) -> Option<HashSet<String>> {
+    let deadline = tokio::time::Instant::now() + READ_BACK_BUDGET;
+    loop {
+        if let Some(held) = try_read(watchdog_socket).await {
+            return Some(held);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(RECONNECT_DELAY).await;
+    }
+}
+
+async fn try_read(watchdog_socket: &std::path::Path) -> Option<HashSet<String>> {
+    let socket =
+        nos_daemon::watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let ifaces =
+        nos_daemon::ipc::one_shot(&socket, Role::Interfaced, InterfaceRequest::GetInterfaces)
+            .await?;
+    let aggs = nos_daemon::ipc::one_shot(
+        &socket,
+        Role::Interfaced,
+        InterfaceRequest::GetPortAggregates,
+    )
+    .await?;
+    held_names(&ifaces, &aggs)
+}
+
+/// The names flagged `err_disabled` in the two replies; `None` on any other
+/// reply.
+fn held_names(ifaces: &InterfaceEvent, aggs: &InterfaceEvent) -> Option<HashSet<String>> {
+    let (InterfaceEvent::Interfaces(i), InterfaceEvent::PortAggregates(a)) = (ifaces, aggs) else {
+        return None;
+    };
+    Some(
+        i.iter()
+            .filter(|s| s.err_disabled)
+            .map(|s| s.name.clone())
+            .chain(a.iter().filter(|s| s.err_disabled).map(|s| s.name.clone()))
+            .collect(),
+    )
 }
 
 /// Runs for the process's lifetime.
@@ -139,6 +191,42 @@ async fn flush_all(w: &mut Writer, list: Vec<(String, String)>) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_names_unions_interfaces_and_aggregates() {
+        use nos_proto::{InterfaceStatus, PortAggregateStatus};
+        let i = |n: &str, d| InterfaceStatus {
+            name: n.into(),
+            addresses: vec![],
+            routing_table: None,
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: 1500,
+            subinterfaces: vec![],
+            link_local_address: None,
+            err_disabled: d,
+        };
+        let a = |n: &str, d| PortAggregateStatus {
+            name: n.into(),
+            mode: nos_proto::PortAggregateMode::Xor,
+            switching_profile: None,
+            mtu: 1500,
+            subinterfaces: vec![],
+            link_local_address: None,
+            bond_name: None,
+            err_disabled: d,
+        };
+        let held = held_names(
+            &InterfaceEvent::Interfaces(vec![i("eth1", true), i("eth2", false)]),
+            &InterfaceEvent::PortAggregates(vec![a("bond1", true), a("bond2", false)]),
+        )
+        .unwrap();
+        assert_eq!(
+            held,
+            HashSet::from(["eth1".to_string(), "bond1".to_string()])
+        );
+        assert!(held_names(&InterfaceEvent::NotFound, &InterfaceEvent::NotFound).is_none());
+    }
 
     #[test]
     fn cache_resends_every_domain_of_a_port() {

@@ -49,6 +49,9 @@ struct Fakes {
     opens: Opens,
     deny: Arc<AtomicBool>,
     short_lived: Arc<AtomicBool>,
+    /// What the interfaced read-back answers; `unreachable` makes it `None`.
+    held: Arc<Mutex<Vec<String>>>,
+    unreachable: Arc<AtomicBool>,
 }
 
 impl Fakes {
@@ -72,6 +75,16 @@ impl Fakes {
                 tokio::spawn(std::future::pending())
             };
             Ok(Io { socket, reader })
+        })
+    }
+    fn held_reader(&self) -> HeldReader {
+        let f = self.clone();
+        Arc::new(move || {
+            let f = f.clone();
+            Box::pin(async move {
+                (!f.unreachable.load(Ordering::SeqCst))
+                    .then(|| f.held.lock().unwrap().iter().cloned().collect())
+            })
         })
     }
     fn io(&self, name: &str) -> Arc<FakeIo> {
@@ -110,6 +123,7 @@ impl Lab {
             push_tx,
             frames_tx,
             opener: fakes.opener(),
+            held_reader: fakes.held_reader(),
             ticks: 0,
             snapshot: Arc::new(RwLock::new(StpSummary::default())),
         };
@@ -264,7 +278,7 @@ async fn err_disabled_ports_survive_a_rebuild_and_release_when_dropped() {
     };
 
     l.d.apply_plan(Some(p.clone())).await;
-    assert_eq!(released(&l.pushes()), 1, "first start releases the guard");
+    assert_eq!(released(&l.pushes()), 0, "nothing held, nothing released");
 
     l.d.receive("eth1", &peer_frame(&plan(&["eth1"]))).await;
     assert!(l
@@ -280,6 +294,54 @@ async fn err_disabled_ports_survive_a_rebuild_and_release_when_dropped() {
 
     l.d.apply_plan(Some(plan(&["eth2"]))).await;
     assert_eq!(released(&l.pushes()), 1, "dropped: released");
+}
+
+fn guarded_plan() -> Plan {
+    let mut p = plan(&["eth1", "eth2"]);
+    p.ports[0].prot.bpdu_guard = true;
+    p.ports[0].prot.recovery = Some(300);
+    p.ports[0].edge = EdgePort::Admin;
+    p
+}
+
+fn err_pushes(pushes: &[Push], disabled_flag: bool, name: &str) -> usize {
+    pushes
+        .iter()
+        .filter(|x| matches!(x, Push::ErrDisabled { port, disabled } if port == name && *disabled == disabled_flag))
+        .count()
+}
+
+#[tokio::test]
+async fn a_restart_keeps_held_guarded_ports_down_with_the_full_timer() {
+    let mut l = Lab::new();
+    *l.fakes.held.lock().unwrap() = vec!["eth1".into(), "eth2".into(), "gone".into()];
+    l.d.apply_plan(Some(guarded_plan())).await;
+    let pushes = l.pushes();
+    assert_eq!(err_pushes(&pushes, false, "eth1"), 0, "stays down");
+    assert_eq!(err_pushes(&pushes, true, "eth1"), 1, "cache seeded");
+    assert_eq!(
+        l.d.engine.as_ref().unwrap().err_disabled(),
+        [("eth1".to_string(), Some(300))]
+    );
+    // Held but unguarded or gone from the plan: released.
+    assert_eq!(err_pushes(&pushes, false, "eth2"), 1);
+    assert_eq!(err_pushes(&pushes, false, "gone"), 1);
+}
+
+#[tokio::test]
+async fn an_unreachable_interfaced_releases_nothing() {
+    let mut l = Lab::new();
+    l.fakes.unreachable.store(true, Ordering::SeqCst);
+    *l.fakes.held.lock().unwrap() = vec!["eth1".into()];
+    l.d.apply_plan(Some(guarded_plan())).await;
+    assert!(!l
+        .pushes()
+        .iter()
+        .any(|x| matches!(x, Push::ErrDisabled { .. })));
+    assert_eq!(
+        l.d.engine.as_ref().unwrap().err_disabled(),
+        [] as [(std::string::String, std::option::Option<u32>); 0]
+    );
 }
 
 #[tokio::test]
@@ -601,6 +663,7 @@ async fn run_with_applies_plans_serves_commands_and_stops() {
     let (stop_tx, stop_rx) = watch::channel(false);
     let task = tokio::spawn(run_with(
         fakes.opener(),
+        fakes.held_reader(),
         OWN_MAC,
         plan_rx,
         links_rx,

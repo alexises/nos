@@ -23,7 +23,7 @@ The pure core (`bpdu`, `vector`, `cost`, `timers`, `machines`, `bridge`, `action
 - Test seam (#346): the actor reaches a port's socket through `BpduIo` (`send_frame`, `own_hw_addr`) and opens it through an injectable `Opener` (production `open_l2`: raw socket plus reader task), so `daemon/tests.rs` drives `Daemon` with fake sockets and no `CAP_NET_RAW`; `run` is `run_with(open_l2, local_mac(), ..)`.
 - `reconcile.rs` (diff resync to a `Plan`), `link_client.rs` (`SubscribeLinks`), `interface_client.rs` (push + resend cache); config/watchdog clients and the `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`).
 - `server.rs` (`--listen-socket`, `GetSummary` from an `Arc<RwLock<StpSummary>>` the actor refreshes after every event via `Engine::summary`) and `authz.rs` (`allowed`: `User`/`Restd`, no wildcard arm): backs `show spanning-tree` and its `instance`/`mst-config` views (#328, #321: one `StpSummary.mst`, no extra request) and `StpRequest::Mcheck` (#319) / `ClearErrDisabled` (#320), forwarded to the actor as `server::Cmd`.
-- An err-disabled port (BPDU guard) is pushed as `SetErrDisabled` to `nos-interfaced`, which holds its link down; a plan rebuild keeps it down (`Engine::restore_err_disabled`).
+- An err-disabled port (BPDU guard) is pushed as `SetErrDisabled` to `nos-interfaced`, which holds its link down; a plan rebuild keeps it down (`Engine::restore_err_disabled`), and so does a restart: the first plan apply reads the held set back from `nos-interfaced` (`interface_client::read_err_disabled`, `HeldReader` test seam), fail closed after 10 s (#697).
 - A changed plan rebuilds the bridge. Log lines are the e2e contract (`docs/internals/stp.md`): change them with `phases::stp`.
 
 ## Invariants

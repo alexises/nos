@@ -17,6 +17,8 @@ pub const PVST_PORT_MIGRATED_RSTP: &str = "pvst port migrated to RSTP";
 pub const PVST_PORT_MIGRATED_STP: &str = "pvst port migrated to STP";
 pub const PORT_ERR_DISABLED: &str = "port err-disabled";
 pub const PORT_ERR_RECOVERED: &str = "port err-disabled recovered";
+pub const ERR_DISABLED_READ_FAILED: &str =
+    "cannot read the err-disabled ports from nos-interfaced, releasing none";
 pub const PORT_ROOT_INCONSISTENT: &str = "port root-inconsistent";
 pub const PORT_ROOT_CONSISTENT: &str = "port root-consistent";
 pub const PORT_LOOP_INCONSISTENT: &str = "port loop-inconsistent";
@@ -53,6 +55,10 @@ mod tests {
             (PVST_PORT_MIGRATED_STP, "pvst port migrated to STP"),
             (PORT_ERR_DISABLED, "port err-disabled"),
             (PORT_ERR_RECOVERED, "port err-disabled recovered"),
+            (
+                ERR_DISABLED_READ_FAILED,
+                "cannot read the err-disabled ports from nos-interfaced, releasing none",
+            ),
             (PORT_ROOT_INCONSISTENT, "port root-inconsistent"),
             (PORT_ROOT_CONSISTENT, "port root-consistent"),
             (PORT_LOOP_INCONSISTENT, "port loop-inconsistent"),

@@ -77,6 +77,7 @@ mod tests {
                 port_aggregate: None,
                 mtu: 1500,
                 subinterfaces: vec![],
+                err_disabled: false,
             }))
         });
 

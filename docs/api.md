@@ -145,6 +145,7 @@ All are `GET`, and each returns the same data as the matching shell command, as 
 - `/v1/config`: the running config. Secrets are masked: a user's `password` and every admin key `secret` read `<hidden>` here and in every transaction response (see [Secrets](#secrets-are-write-only)).
 - `/v1/routes/{table}`: every prefix with every candidate route, best first. `/v1/routes/{table}/{addr}` is the longest-prefix match for one address, or `404` if nothing covers it.
 - `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.
+- `/v1/interfaces[/{name}]` and `/v1/port-aggregates[/{name}]` carry `err_disabled: true` while `nos-stpd`'s BPDU guard holds the port down.
 - `/v1/port-aggregates[/{name}]` and `/v1/lacp[/{name}]`: bonds, their members and LACP state.
 - `/v1/acl` and `/v1/acl/{name}`: every ACL (or one) with its attachments and, per rule, packets and bytes summed over its filters and devices; `default_packets`/`default_bytes` count what hit the default action. A rule the optimiser dropped has `dropped` (`shadowed` or `trailing`) and stays at 0. An unknown name is `404`, `nos-acld` not running is `503`.
 - `/v1/flowspec`: every flowspec rule `nos-acld` holds, per BGP instance in order: `flow`, `actions`, `unsupported` (why it is not installed, `null` when it is) and packets/bytes summed over its devices.

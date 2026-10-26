@@ -62,6 +62,7 @@ fn status(
             })
             .collect(),
         link_local_address: None,
+        err_disabled: false,
     }
 }
 

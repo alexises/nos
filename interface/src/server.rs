@@ -53,10 +53,23 @@ pub fn start(
 /// request must be classified.
 fn allowed(role: Role, req: &InterfaceRequest) -> bool {
     match req {
-        InterfaceRequest::GetInterfaces
-        | InterfaceRequest::GetInterface { .. }
+        // `nos-stpd` reads the err-disabled flag back on a restart (#697):
+        // the two list queries only.
+        InterfaceRequest::GetInterfaces | InterfaceRequest::GetPortAggregates => {
+            matches!(
+                role,
+                Role::User
+                    | Role::Restd
+                    | Role::Bgpd
+                    | Role::Ribd
+                    | Role::Ospfd
+                    | Role::Ospfv3d
+                    | Role::Fdbd
+                    | Role::Stpd
+            )
+        }
+        InterfaceRequest::GetInterface { .. }
         | InterfaceRequest::GetBroadcastDomain { .. }
-        | InterfaceRequest::GetPortAggregates
         | InterfaceRequest::GetPortAggregate { .. } => {
             matches!(
                 role,
@@ -331,6 +344,7 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         // Hello exchange to source (see `InterfaceState`'s doc comment) —
         // never populated for this attach-point kind.
         link_local_address: None,
+        err_disabled: iface.stp.err_disabled,
     }
 }
 
@@ -362,6 +376,7 @@ fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
             .collect(),
         link_local_address: agg.link_local_address,
         bond_name: agg.bond_name,
+        err_disabled: agg.stp.err_disabled,
     }
 }
 
@@ -389,8 +404,33 @@ mod authz_tests {
             );
             assert_eq!(
                 allowed(role, &InterfaceRequest::GetInterfaces),
-                query,
+                query || role == Role::Stpd,
                 "{role:?} query"
+            );
+            assert_eq!(
+                allowed(role, &InterfaceRequest::GetPortAggregates),
+                query || role == Role::Stpd,
+                "{role:?} aggregates query"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &InterfaceRequest::GetInterface {
+                        name: String::new()
+                    }
+                ),
+                query,
+                "{role:?} single query"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &InterfaceRequest::GetPortAggregate {
+                        name: String::new()
+                    }
+                ),
+                query,
+                "{role:?} single aggregate query"
             );
             assert_eq!(
                 allowed(

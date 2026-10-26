@@ -8,8 +8,11 @@
 //! costs one reconvergence; add `set_bridge_id`/`set_path_cost` calls if
 //! live tuning matters.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +25,7 @@ use nos_proto::schema::VlanTag;
 
 use crate::bpdu::{decode_frame_any, encode_frame, encode_mst_frame};
 use crate::engine::{Engine, Out};
+use crate::events;
 use crate::identity;
 use crate::interface_client::Push;
 use crate::link;
@@ -80,6 +84,11 @@ fn open_l2(name: &str, pvst: Option<bool>, frames: &Frames) -> io::Result<Io> {
     Ok(Io { socket, reader })
 }
 
+/// Which ports `nos-interfaced` holds err-disabled; `None`: unreachable. The
+/// test seam of the start-up read-back (#697).
+type HeldReader =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<HashSet<String>>> + Send>> + Send + Sync>;
+
 #[derive(Default)]
 struct PortRt {
     /// Last carrier verdict logged; `None` before the first.
@@ -105,12 +114,14 @@ struct Daemon {
     push_tx: mpsc::Sender<Push>,
     frames_tx: Frames,
     opener: Opener,
+    held_reader: HeldReader,
     ticks: u32,
     /// What `show spanning-tree` serves; refreshed after every event.
     snapshot: Snapshot,
 }
 
 pub async fn run(
+    watchdog_socket: PathBuf,
     plan_rx: watch::Receiver<Option<Plan>>,
     links_rx: watch::Receiver<LinkTable>,
     push_tx: mpsc::Sender<Push>,
@@ -118,8 +129,13 @@ pub async fn run(
     cmds: mpsc::Receiver<Cmd>,
     shutdown: watch::Receiver<bool>,
 ) {
+    let held_reader: HeldReader = Arc::new(move || {
+        let socket = watchdog_socket.clone();
+        Box::pin(async move { crate::interface_client::read_err_disabled(&socket).await })
+    });
     run_with(
         Arc::new(open_l2),
+        held_reader,
         identity::local_mac(),
         plan_rx,
         links_rx,
@@ -131,9 +147,10 @@ pub async fn run(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)] // `run`'s six plus the two test seams
+#[allow(clippy::too_many_arguments)] // `run`'s six plus the three test seams
 async fn run_with(
     opener: Opener,
+    held_reader: HeldReader,
     mac: [u8; 6],
     mut plan_rx: watch::Receiver<Option<Plan>>,
     mut links_rx: watch::Receiver<LinkTable>,
@@ -156,6 +173,7 @@ async fn run_with(
         push_tx,
         frames_tx,
         opener,
+        held_reader,
         ticks: 0,
         snapshot,
     };
@@ -246,12 +264,22 @@ impl Daemon {
             .flat_map(|p| p.ports.iter().map(|_| PortRt::default()))
             .collect();
         // A rebuilt bridge must not silently recover err-disabled ports.
-        let carried = self
+        let mut carried = self
             .engine
             .as_ref()
             .map(Engine::err_disabled)
             .unwrap_or_default();
         let first = self.engine.is_none() && self.pvst.is_none();
+        // A fresh start asks `nos-interfaced` which ports it still holds down
+        // (#697): they stay down with the full recovery timer; unreachable,
+        // nothing is released.
+        if first && plan.is_some() {
+            if let Some(held) = (self.held_reader)().await {
+                carried.extend(held.into_iter().map(|p| (p, None)));
+            } else {
+                warn!("{}", events::ERR_DISABLED_READ_FAILED);
+            }
+        }
         self.engine = None;
         self.pvst = None;
         self.prt.clear();
@@ -287,22 +315,18 @@ impl Daemon {
                 .engine
                 .as_mut()
                 .is_some_and(|e| e.restore_err_disabled(&port, remaining));
-            if !kept {
-                info!(port = %port, "port err-disabled recovered");
+            if kept {
+                // Seeds the push client's resend cache after a restart.
+                if first {
+                    init.push(Out::ErrDisabled {
+                        port,
+                        disabled: true,
+                    });
+                }
+            } else {
+                info!(port = %port, "{}", events::PORT_ERR_RECOVERED);
                 init.push(release(port));
             }
-        }
-        // ponytail: a fresh start cannot know which links an earlier nos-stpd
-        // left down, so it releases every guarded port once; a still-wrong
-        // port is err-disabled again by its next BPDU.
-        if let (true, Some(p), true) = (first, &plan, self.engine.is_some() || self.pvst.is_some())
-        {
-            init.extend(
-                p.ports
-                    .iter()
-                    .filter(|p| p.prot.bpdu_guard)
-                    .map(|p| release(p.name.clone())),
-            );
         }
         self.plan = plan;
         self.emit(init).await;

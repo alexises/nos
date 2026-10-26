@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         .inspect_err(|e| tracing::error!(error = %e, "failed to start stp IPC server"))
         .context("starting stp IPC server")?;
     let daemon_task = tokio::spawn(daemon::run(
+        args.watchdog_socket.clone(),
         plan_rx,
         links_rx,
         push_tx,

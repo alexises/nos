@@ -17,6 +17,7 @@ fn sample_status() -> InterfaceStatus {
         port_aggregate: None,
         mtu: 1500,
         subinterfaces: vec![],
+        err_disabled: false,
     }
 }
 

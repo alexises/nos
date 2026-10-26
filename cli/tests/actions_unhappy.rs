@@ -80,6 +80,7 @@ fn interface_status() -> InterfaceStatus {
         port_aggregate: None,
         mtu: 1500,
         subinterfaces: Vec::new(),
+        err_disabled: false,
     }
 }
 
@@ -296,6 +297,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                                 subinterfaces: Vec::new(),
                                 link_local_address: None,
                                 bond_name: None,
+                                err_disabled: false,
                             })
                         }
                         _ => InterfaceEvent::NotFound,
