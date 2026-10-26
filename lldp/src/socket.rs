@@ -15,5 +15,5 @@ const ETH_P_LLDP: u16 = 0x88CC;
 const RECV_BUF_LEN: usize = 2048;
 
 pub fn open(interface: &str, group: [u8; 6]) -> io::Result<LldpSocket> {
-    LldpSocket::open(interface, ETH_P_LLDP, group, RECV_BUF_LEN)
+    LldpSocket::open_untagged(interface, ETH_P_LLDP, group, RECV_BUF_LEN)
 }

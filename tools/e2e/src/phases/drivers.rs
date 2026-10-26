@@ -522,6 +522,20 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
             && rm -rf /var/lib/apt/lists/*\n",
         )
         .await?;
+    log("the same LACPDUs behind an 802.1Q tag are ignored (#690)");
+    w.dock
+        .in_netns(
+            PYTHON_HELPER_IMAGE,
+            "router-b",
+            &["python3", "-c", include_str!("individual.py"), "tagged"],
+        )
+        .await?;
+    let eth2 = lacp_port(a, "eth2").await?;
+    if eth2["individual"] != false
+        || eth2["partner_system_id"] == serde_json::json!([2, 0, 0, 0, 12, 1])
+    {
+        bail!("a tagged LACPDU reached nos-lacpd on eth2 (#690): {eth2}");
+    }
     let inject = w.dock.in_netns(
         PYTHON_HELPER_IMAGE,
         "router-b",
@@ -831,6 +845,8 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(burst_done, burst_a, 15).await?;
     b.wait_new(burst_done, burst_b, 15).await?;
 
+    lldp_tagged(w).await?;
+
     // Tunable timers + Management Address TLVs: tx-interval 5 x tx-hold 3 must
     // show up as the TTL the neighbor learned (15), and each router's own
     // address as a management address carrying its eth0's real ifIndex
@@ -1014,6 +1030,38 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
 /// domain and profile are `switching`'s own `bd1`/`sp1`: bridge ids are
 /// allocated once per name and never freed, so a new domain here would take
 /// the `br1` that phase expects for `bd1`.
+/// #690: an LLDPDU behind an 802.1Q tag is not a neighbor of the physical port.
+/// The untagged copy sent right after it must be learned, so the check is not
+/// vacuous.
+async fn lldp_tagged(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:bookworm-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    let learned = |port: &str| format!("lldp neighbor learned interface=eth1 .* port_id={port} ");
+    let (base_tagged, base_ctl) = (
+        a.count(&learned("tagged-vlan")),
+        a.count(&learned("untagged-ctl")),
+    );
+    w.dock
+        .in_netns(
+            PYTHON_HELPER_IMAGE,
+            "router-b",
+            &["python3", "-c", include_str!("lldp_tagged.py")],
+        )
+        .await?;
+    a.wait_new(&learned("untagged-ctl"), base_ctl, 15).await?;
+    if a.count(&learned("tagged-vlan")) != base_tagged {
+        bail!("router-a learned an 802.1Q-tagged LLDPDU on eth1 (#690)");
+    }
+    Ok(())
+}
+
 async fn lldp_org_tlvs(w: &World) -> anyhow::Result<()> {
     let host = |name: &str, extra: &[&str]| {
         let mut f = vec!["--hostname", name];

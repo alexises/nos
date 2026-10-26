@@ -8,6 +8,7 @@ whose own eth2 is out of the aggregate at that point.
 """
 import socket
 import struct
+import sys
 import time
 
 mac = bytes.fromhex(open("/sys/class/net/eth2/address").read().strip().replace(":", ""))
@@ -28,6 +29,9 @@ pdu = pdu.ljust(110, b"\0")
 
 s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x8809))
 s.bind(("eth2", 0x8809))
-for _ in range(10):
-    s.send(dst + mac + struct.pack(">H", 0x8809) + pdu)
+# With argument "tagged" the same LACPDUs carry an in-band 802.1Q tag (vlan 100),
+# which the veth moves into skb metadata: nos-lacpd must ignore them (#690).
+tag = struct.pack(">HH", 0x8100, 100) if sys.argv[1:] == ["tagged"] else b""
+for _ in range(4 if tag else 10):
+    s.send(dst + mac + tag + struct.pack(">H", 0x8809) + pdu)
     time.sleep(1)

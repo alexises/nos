@@ -153,6 +153,20 @@ impl L2Socket {
         Self::open_filtered(interface, ethertype, group, recv_buf_len, None)
     }
 
+    /// Like [`Self::open`], but a frame that carried an 802.1Q tag is dropped in
+    /// the kernel, even when the NIC/veth offloaded the tag into skb metadata
+    /// (invisible in the bytes `read` returns, so it would pass for an untagged
+    /// frame of this link). For LACP/LLDP (#690).
+    pub fn open_untagged(
+        interface: &str,
+        ethertype: u16,
+        group: [u8; 6],
+        recv_buf_len: usize,
+    ) -> io::Result<Self> {
+        let prog = drop_tagged(vec![ins(0x06, 0, 0, 0xffff)]); // body: accept all
+        Self::open_filtered(interface, ethertype, group, recv_buf_len, Some(prog))
+    }
+
     /// Like [`Self::open`], also kernel-filtering received frames to UDP
     /// datagrams for `udp_dst_port` (IPv4 or IPv6 `ethertype` only), so a raw
     /// IP socket does not wake for all the port's other traffic. The filter is
@@ -220,7 +234,7 @@ impl L2Socket {
         if sstp {
             blocks.push((SSTP_GROUP, [0xAA, 0xAA, 0x03]));
         }
-        let socket = open_raw(ifindex, ETH_P_ALL, Some(bpdu_program(&blocks, sstp)))?;
+        let socket = open_raw(ifindex, ETH_P_ALL, Some(bpdu_program(&blocks, true)))?;
         for (group, _) in &blocks {
             join_multicast(&socket, ifindex, *group)?;
         }
@@ -354,6 +368,7 @@ impl L2Unicast {
     pub fn open(interface: &str, ethertype: u16, udp_dst_port: u16) -> io::Result<Self> {
         let own_hw_addr = read_hw_addr(interface)?;
         let prog = udp_port_program(ethertype, udp_dst_port)
+            .map(drop_tagged)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ethertype is not IP"))?;
         let socket = open_raw(if_index(interface)?, ethertype, Some(prog))?;
         socket.set_nonblocking(true)?;
@@ -405,10 +420,42 @@ fn payload_of_unicast_frame(frame: &[u8], own: [u8; 6]) -> Option<&[u8]> {
     Some(&frame[ETH_HEADER_LEN..])
 }
 
+/// `SKF_AD_OFF + SKF_AD_VLAN_TAG_PRESENT` (`linux/filter.h`).
+const VLAN_TAG_PRESENT: u32 = 0xFFFF_F030;
+/// `SKF_AD_OFF + SKF_AD_PKTTYPE`.
+const PKTTYPE: u32 = 0xFFFF_F004;
+const PACKET_OTHERHOST: u32 = 3;
+
+fn ins(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+    libc::sock_filter { code, jt, jf, k }
+}
+
+/// Wraps a classic-BPF `body` (relative jumps, a mismatch falls off its end)
+/// so a frame that carried an 802.1Q tag is dropped first (#690). Two checks:
+/// - the skb's VLAN-tag metadata (a NIC with rx-vlan-offload);
+/// - `pkt_type == PACKET_OTHERHOST`: on a veth pair (kernel 7.2.11) the tag is
+///   stripped from the bytes and invisible to BPF, yet the frame arrives as
+///   OTHERHOST (the kernel's "tag with no VLAN device" marking), which a
+///   group-multicast or own-MAC socket never sees otherwise.
+///
+/// ponytail: real-NIC offload was not tested; the `pkt_type` check is what is
+/// proven (`nos-e2e lldp`/`lacp`).
+fn drop_tagged(body: Vec<libc::sock_filter>) -> Vec<libc::sock_filter> {
+    let n = u8::try_from(body.len()).expect("a short program");
+    let mut p = vec![
+        ins(0x20, 0, 0, VLAN_TAG_PRESENT), // ld  vlan_tag_present
+        ins(0x15, 0, n + 2, 0),            // jeq 0, else the drop below
+        ins(0x20, 0, 0, PKTTYPE),          // ld  pkt_type
+        ins(0x15, n, 0, PACKET_OTHERHOST), // jeq OTHERHOST: drop
+    ];
+    p.extend(body);
+    p.push(ins(0x06, 0, 0, 0)); // drop
+    p
+}
+
 /// Classic BPF (offsets include the 14-byte Ethernet header: a packet socket
 /// of type `SOCK_RAW` filters the whole frame).
 fn udp_port_program(ethertype: u16, port: u16) -> Option<Vec<libc::sock_filter>> {
-    let ins = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
     let port = u32::from(port);
     match ethertype {
         // ldb [protocol]; jeq UDP; ldh [frag]; jset MF|offset; ldxb 4*ihl;
@@ -440,21 +487,13 @@ fn udp_port_program(ethertype: u16, port: u16) -> Option<Vec<libc::sock_filter>>
 /// Classic BPF accepting a frame to one of the `(group, llc)` pairs whose
 /// first three bytes after the 802.3 length field are that LLC. Each block
 /// is 11 instructions and a mismatch jumps to its end (the next block, or
-/// the final drop). With `untagged` a frame that carried an 802.1Q tag is
+/// the final drop). With `untagged` (always, from `open_stp`) a frame that carried an 802.1Q tag is
 /// dropped first: a tag in the skb metadata (veth, offloading NICs) is not in
 /// the bytes a raw socket reads, so the tagged BPDUs of a VLAN would pass for
 /// the untagged (native) ones of the link. A VLAN sub-link's own socket sees
 /// the tag already removed.
 fn bpdu_program(blocks: &[([u8; 6], [u8; 3])], untagged: bool) -> Vec<libc::sock_filter> {
-    /// `SKF_AD_OFF + SKF_AD_VLAN_TAG_PRESENT` (`linux/filter.h`).
-    const VLAN_TAG_PRESENT: u32 = 0xFFFF_F030;
-    let ins = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
     let mut p = Vec::new();
-    if untagged {
-        let skip = u8::try_from(11 * blocks.len()).expect("a few blocks");
-        p.push(ins(0x20, 0, 0, VLAN_TAG_PRESENT)); // ld  vlan_tag_present
-        p.push(ins(0x15, 0, skip, 0)); // jeq 0, else drop
-    }
     for (g, llc) in blocks {
         p.extend([
             ins(0x20, 0, 0, 0), // ld  [0]
@@ -469,6 +508,9 @@ fn bpdu_program(blocks: &[([u8; 6], [u8; 3])], untagged: bool) -> Vec<libc::sock
             ins(0x15, 0, 1, u32::from(llc[2])),
             ins(0x06, 0, 0, 0xffff), // accept
         ]);
+    }
+    if untagged {
+        return drop_tagged(p);
     }
     p.push(ins(0x06, 0, 0, 0)); // drop
     p
@@ -750,13 +792,19 @@ mod tests {
 
     /// `tagged`: the frame carried a VLAN tag in its metadata.
     fn bpf_runs(prog: &[libc::sock_filter], frame: &[u8], tagged: bool) -> bool {
+        bpf_runs_pkt(prog, frame, tagged, 2)
+    }
+
+    /// `pkt_type`: 2 = multicast, 3 = otherhost.
+    fn bpf_runs_pkt(prog: &[libc::sock_filter], frame: &[u8], tagged: bool, pkt_type: u32) -> bool {
         let (mut pc, mut a) = (0usize, 0u32);
         loop {
             let i = &prog[pc];
             let k = i.k as usize;
             let get = |n: usize| frame.get(k..k + n);
             match i.code {
-                0x20 if i.k == 0xFFFF_F030 => a = u32::from(tagged),
+                0x20 if i.k == VLAN_TAG_PRESENT => a = u32::from(tagged),
+                0x20 if i.k == PKTTYPE => a = pkt_type,
                 0x20 => a = get(4).map_or(u32::MAX, |b| u32::from_be_bytes(b.try_into().unwrap())),
                 0x28 => {
                     a = get(2).map_or(u32::MAX, |b| {
@@ -827,6 +875,38 @@ mod tests {
         assert!(bpf_runs(&sstp_only, &sstp, false));
         assert!(!bpf_runs(&sstp_only, &sstp, true));
         assert!(!bpf_runs(&prog, &sstp, true));
+    }
+
+    #[test]
+    fn drop_tagged_wrapper_drops_tagged_and_keeps_untagged() {
+        let frame = [0u8; 20];
+        let p = drop_tagged(vec![ins(0x06, 0, 0, 0xffff)]);
+        assert!(bpf_runs(&p, &frame, false));
+        assert!(!bpf_runs(&p, &frame, true));
+        // tag invisible to BPF (veth), frame marked OTHERHOST
+        assert!(!bpf_runs_pkt(&p, &frame, false, 3));
+        // the wrapped UDP programs keep every jump in range
+        for et in [ETH_P_IP, ETH_P_IPV6] {
+            let p = drop_tagged(udp_port_program(et, 3785).unwrap());
+            for (i, x) in p.iter().enumerate() {
+                if x.code & 0x07 == 0x05 {
+                    assert!(i + 1 + usize::from(x.jt.max(x.jf)) < p.len());
+                }
+            }
+            assert_eq!(p[1].jf as usize, p.len() - 3);
+            assert_eq!(usize::from(p[3].jt), p.len() - 5);
+        }
+    }
+
+    #[test]
+    fn plain_bpdu_filter_drops_tagged_frames() {
+        let prog = bpdu_program(&[IEEE_BLOCK], true);
+        let mut f = vec![0u8; 20];
+        f[..6].copy_from_slice(&BPDU_GROUP);
+        f[14..17].copy_from_slice(&[0x42, 0x42, 0x03]);
+        assert!(bpf_runs(&prog, &f, false));
+        assert!(!bpf_runs(&prog, &f, true));
+        assert!(!bpf_runs_pkt(&prog, &f, false, 3));
     }
 
     #[test]
