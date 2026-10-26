@@ -21,7 +21,7 @@ pub const SLOW_PROTOCOLS_MULTICAST: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x0
 const RECV_BUF_LEN: usize = 256;
 
 pub fn open(interface: &str) -> io::Result<LacpSocket> {
-    LacpSocket::open(
+    LacpSocket::open_untagged(
         interface,
         ETH_P_SLOW,
         SLOW_PROTOCOLS_MULTICAST,
