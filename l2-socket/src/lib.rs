@@ -4,7 +4,7 @@
 //! no NOS dependencies, like `nos-tcp-auth`, so both daemons can use it
 //! without depending on each other.
 //!
-//! `L2Socket::accept_own_unicast` and `udp_dst_port` are the opt-ins of `nos-bfd`'s
+//! `L2Socket::accept_own_unicast` and `open_udp` are the opt-ins of `nos-bfd`'s
 //! RFC 7130 micro-BFD (IP/UDP frames to a multicast MAC, also accepted when
 //! unicast to our own MAC); LACP/LLDP leave them off.
 //!
@@ -69,13 +69,25 @@ const PACKET_MR_MULTICAST: u16 = 0;
 const LINK_DOWN_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A raw `AF_PACKET` socket bound to `ifindex`, receiving `ethertype` only.
-fn open_raw(ifindex: i32, ethertype: u16) -> io::Result<Socket> {
-    let protocol = i32::from(ethertype.to_be());
+///
+/// Order matters (#691): a socket created with a non-zero protocol is hooked
+/// on *every* device and queues matching frames from all of them until `bind`
+/// re-hooks it, and neither `bind` nor a later `SO_ATTACH_FILTER` flushes that
+/// queue. So create with protocol 0 (hooked nowhere), attach the filter, and
+/// only then `bind` with the ethertype, which hooks it on `ifindex` alone.
+fn open_raw(
+    ifindex: i32,
+    ethertype: u16,
+    mut filter: Option<Vec<libc::sock_filter>>,
+) -> io::Result<Socket> {
     let socket = Socket::new(
         Domain::from(libc::AF_PACKET),
         Type::RAW,
-        Some(Protocol::from(protocol)),
+        Some(Protocol::from(0)),
     )?;
+    if let Some(prog) = filter.as_mut() {
+        attach_filter(&socket, prog)?;
+    }
 
     // SAFETY: `addr` is a plain, fully-initialized `sockaddr_ll`; `bind`
     // is called with its own correct size, matching the kernel's
@@ -138,10 +150,36 @@ impl L2Socket {
         group: [u8; 6],
         recv_buf_len: usize,
     ) -> io::Result<Self> {
+        Self::open_filtered(interface, ethertype, group, recv_buf_len, None)
+    }
+
+    /// Like [`Self::open`], also kernel-filtering received frames to UDP
+    /// datagrams for `udp_dst_port` (IPv4 or IPv6 `ethertype` only), so a raw
+    /// IP socket does not wake for all the port's other traffic. The filter is
+    /// attached before the bind, so no frame ever bypasses it.
+    pub fn open_udp(
+        interface: &str,
+        ethertype: u16,
+        group: [u8; 6],
+        recv_buf_len: usize,
+        udp_dst_port: u16,
+    ) -> io::Result<Self> {
+        let prog = udp_port_program(ethertype, udp_dst_port)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ethertype is not IP"))?;
+        Self::open_filtered(interface, ethertype, group, recv_buf_len, Some(prog))
+    }
+
+    fn open_filtered(
+        interface: &str,
+        ethertype: u16,
+        group: [u8; 6],
+        recv_buf_len: usize,
+        filter: Option<Vec<libc::sock_filter>>,
+    ) -> io::Result<Self> {
         let own_hw_addr = read_hw_addr(interface)?;
         let ifindex = if_index(interface)?;
 
-        let socket = open_raw(ifindex, ethertype)?;
+        let socket = open_raw(ifindex, ethertype, filter)?;
         join_multicast(&socket, ifindex, group)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
@@ -175,17 +213,17 @@ impl L2Socket {
     fn open_stp(interface: &str, ieee: bool, sstp: bool) -> io::Result<Self> {
         let own_hw_addr = read_hw_addr(interface)?;
         let ifindex = if_index(interface)?;
-        let socket = open_raw(ifindex, ETH_P_ALL)?;
         let mut blocks = Vec::new();
         if ieee {
-            join_multicast(&socket, ifindex, BPDU_GROUP)?;
             blocks.push((BPDU_GROUP, [0x42, 0x42, 0x03]));
         }
         if sstp {
-            join_multicast(&socket, ifindex, SSTP_GROUP)?;
             blocks.push((SSTP_GROUP, [0xAA, 0xAA, 0x03]));
         }
-        attach_filter(&socket, &mut bpdu_program(&blocks, sstp))?;
+        let socket = open_raw(ifindex, ETH_P_ALL, Some(bpdu_program(&blocks, sstp)))?;
+        for (group, _) in &blocks {
+            join_multicast(&socket, ifindex, *group)?;
+        }
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,
@@ -240,14 +278,6 @@ impl L2Socket {
     pub fn accept_own_unicast(mut self) -> Self {
         self.accept_own_unicast = true;
         self
-    }
-
-    /// Kernel-filters received frames to UDP datagrams for `udp_dst_port`
-    /// (IPv4 or IPv6 `ethertype` only), so a raw IP socket does not wake for
-    /// all the port's other traffic.
-    pub fn udp_dst_port(self, udp_dst_port: u16) -> io::Result<Self> {
-        attach_udp_port_filter(self.inner.get_ref(), self.ethertype, udp_dst_port)?;
-        Ok(self)
     }
 
     /// This port's own real MAC address — this socket's Ethernet source.
@@ -323,8 +353,9 @@ impl L2Unicast {
     /// whose destination port is `udp_dst_port`.
     pub fn open(interface: &str, ethertype: u16, udp_dst_port: u16) -> io::Result<Self> {
         let own_hw_addr = read_hw_addr(interface)?;
-        let socket = open_raw(if_index(interface)?, ethertype)?;
-        attach_udp_port_filter(&socket, ethertype, udp_dst_port)?;
+        let prog = udp_port_program(ethertype, udp_dst_port)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ethertype is not IP"))?;
+        let socket = open_raw(if_index(interface)?, ethertype, Some(prog))?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,
@@ -441,12 +472,6 @@ fn bpdu_program(blocks: &[([u8; 6], [u8; 3])], untagged: bool) -> Vec<libc::sock
     }
     p.push(ins(0x06, 0, 0, 0)); // drop
     p
-}
-
-fn attach_udp_port_filter(socket: &Socket, ethertype: u16, port: u16) -> io::Result<()> {
-    let mut prog = udp_port_program(ethertype, port)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ethertype is not IP"))?;
-    attach_filter(socket, &mut prog)
 }
 
 fn attach_filter(socket: &Socket, prog: &mut [libc::sock_filter]) -> io::Result<()> {
