@@ -145,10 +145,7 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
 /// reaches the `Rib` until the closing `Full`, so the table never shows half
 /// a snapshot, and a connection lost mid-snapshot simply drops it.
 #[derive(Default)]
-struct FullStaging {
-    routes: Vec<BgpRoute>,
-    parts: usize,
-}
+struct FullStaging(nos_proto::chunk::FullStaging<BgpRoute>);
 
 impl FullStaging {
     /// Stages every `FullPart` of a `PushBgpRoutes` and folds the staged
@@ -160,20 +157,15 @@ impl FullStaging {
         let mut out = Vec::with_capacity(updates.len());
         for update in updates {
             match update {
-                BgpRouteUpdate::FullPart(mut routes) => {
-                    self.routes.append(&mut routes);
-                    self.parts += 1;
-                }
-                BgpRouteUpdate::Full(mut routes) if self.parts > 0 => {
-                    let mut all = std::mem::take(&mut self.routes);
-                    all.append(&mut routes);
+                BgpRouteUpdate::FullPart(routes) => self.0.part(routes),
+                BgpRouteUpdate::Full(routes) if self.0.is_staging() => {
+                    let (all, parts) = self.0.close(routes);
                     info!(
                         table = %table,
                         routes = all.len(),
-                        parts = self.parts + 1,
+                        parts,
                         "assembled chunked bgp route snapshot"
                     );
-                    self.parts = 0;
                     out.push(BgpRouteUpdate::Full(all));
                 }
                 update => out.push(update),
@@ -364,6 +356,8 @@ async fn apply_evpn_route_update(ctx: &Context, update: EvpnUpdate) {
             EvpnUpdate::Remove(key) => {
                 received.remove(&key);
             }
+            // Staged by the connection handler (#720); nothing to apply yet.
+            EvpnUpdate::FullPart(_) => return,
         }
         guard.refresh_evpn();
     }

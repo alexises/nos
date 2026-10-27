@@ -199,17 +199,9 @@ impl BgpRouteUpdate {
         let mut split = Vec::with_capacity(updates.len());
         for u in updates {
             match u {
-                Self::Full(mut routes) if routes.len() > BGP_PUSH_CHUNK => {
-                    let last =
-                        routes.split_off((routes.len() - 1) / BGP_PUSH_CHUNK * BGP_PUSH_CHUNK);
-                    let mut rest = routes.into_iter();
-                    loop {
-                        let part: Vec<_> = rest.by_ref().take(BGP_PUSH_CHUNK).collect();
-                        if part.is_empty() {
-                            break;
-                        }
-                        split.push(Self::FullPart(part));
-                    }
+                Self::Full(routes) if routes.len() > BGP_PUSH_CHUNK => {
+                    let (parts, last) = crate::chunk::split_full(routes, BGP_PUSH_CHUNK, |_| 1);
+                    split.extend(parts.into_iter().map(Self::FullPart));
                     split.push(Self::Full(last));
                 }
                 u => split.push(u),
