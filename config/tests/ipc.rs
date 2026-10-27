@@ -1562,3 +1562,43 @@ fn a_listen_address_displays_with_its_scheme() {
     let addr = ListenAddr::Unix("/run/nos/config.sock".into());
     assert_eq!(addr.to_string(), "unix:/run/nos/config.sock");
 }
+
+/// #755: the auth probe answers present/absent, only for `Restd`; anyone
+/// else is refused and disconnected.
+#[tokio::test]
+async fn user_exists_round_trips_for_restd_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let cfg = Config {
+        users: vec![nos_proto::User {
+            name: "alice".into(),
+            password: "pw".into(),
+        }],
+        ..Config::default()
+    };
+    let store = ConfigStore::new(cfg, None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+
+    let (mut reader, mut writer) = connect_as(&path, "restd", "rt1").await;
+    for (name, want) in [("alice", true), ("bob", false)] {
+        writer
+            .send(Request::UserExists { name: name.into() })
+            .await
+            .unwrap();
+        assert!(matches!(next_event(&mut reader).await, Event::UserExists(b) if b == want));
+    }
+
+    let (mut reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
+    writer
+        .send(Request::UserExists {
+            name: "alice".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Error(m) if m == "permission denied"
+    ));
+}

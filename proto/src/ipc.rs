@@ -127,6 +127,12 @@ pub enum Request {
         /// consumer must pass it.
         position: Option<crate::config_path::ListPosition>,
     },
+    /// Cheap auth probe (#755): is there a user called `name` in the running
+    /// config? Replies `Event::UserExists`, carrying no config data.
+    UserExists {
+        /// User name to look for.
+        name: String,
+    },
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -159,6 +165,8 @@ pub enum Event {
     /// The structural difference between the running config and a named
     /// transaction's in-progress config, in reply to `DiffTransaction`.
     Diff(ConfigDiff),
+    /// Reply to `UserExists`: whether the user is in the running config.
+    UserExists(bool),
 }
 
 /// What a newly opened transaction's in-progress config should start from.

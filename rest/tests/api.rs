@@ -76,6 +76,12 @@ where
     accepted
 }
 
+/// The process-wide IPC identity is `nos-restd`'s (the real configd only answers
+/// `UserExists` to that role); first call wins, later ones are no-ops.
+fn as_restd() {
+    shared().install("restd", "rt1");
+}
+
 /// The one user every fixture's config starts with (clear text here —
 /// `ConfigStore::new` hashes it, like a seeded config file).
 const USER: &str = "tester";
@@ -96,6 +102,7 @@ async fn fixture(services: Vec<(ServiceRef, PathBuf)>) -> Fixture {
 /// fixture's temp dir) — `None` means no `--config-file`, so `Save` fails.
 #[allow(clippy::unused_async)]
 async fn fixture_with(services: Vec<(ServiceRef, PathBuf)>, config_file: Option<&str>) -> Fixture {
+    as_restd();
     let dir = tempfile::tempdir().unwrap();
     let config_file = config_file.map(|f| dir.path().join(f));
     let config_socket = dir.path().join("config.sock");
@@ -2317,4 +2324,58 @@ async fn a_large_list_goes_in_as_one_subsection_put() {
     )
     .await;
     assert_eq!(v.as_array().map(Vec::len), Some(3));
+}
+
+/// #755: authentication probes `UserExists`; it never fetches the config
+/// (`Request::Get`), and an unreachable `nos-configd` fails closed (503).
+#[tokio::test]
+async fn client_auth_probes_user_exists_and_never_fetches_the_config() {
+    use nos_proto::{Event, Request};
+    as_restd();
+    let dir = tempfile::tempdir().unwrap();
+    let (config_socket, watchdog_socket) = (dir.path().join("c.sock"), dir.path().join("w.sock"));
+    let (gets, probes) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (g, p) = (gets.clone(), probes.clone());
+    serve(
+        &config_socket,
+        ("configd", ""),
+        move |req: Request| match req {
+            Request::UserExists { name } => {
+                p.fetch_add(1, Ordering::SeqCst);
+                Event::UserExists(name == USER)
+            }
+            Request::Get => {
+                g.fetch_add(1, Ordering::SeqCst);
+                Event::Error("no".into())
+            }
+            _ => Event::Error("unsupported".into()),
+        },
+    );
+    serve(&watchdog_socket, ("watchdog", ""), |_: WatchdogRequest| {
+        WatchdogEvent::Ok
+    });
+    let app = api::router(Daemons::new(watchdog_socket, config_socket));
+
+    for _ in 0..5 {
+        let (s, _) = send(&app, Method::GET, "/openapi.json", None).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    let (s, _) = send_as(&app, Method::GET, "/openapi.json", None, Some("mallory")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        gets.load(Ordering::SeqCst),
+        0,
+        "auth must not fetch the config"
+    );
+    assert_eq!(probes.load(Ordering::SeqCst), 6);
+
+    // configd unreachable: fail closed.
+    let dir2 = tempfile::tempdir().unwrap();
+    let watchdog = dir2.path().join("w.sock");
+    serve(&watchdog, ("watchdog", ""), |_: WatchdogRequest| {
+        WatchdogEvent::Ok
+    });
+    let app = api::router(Daemons::new(watchdog, dir2.path().join("missing.sock")));
+    let (s, _) = send(&app, Method::GET, "/openapi.json", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }

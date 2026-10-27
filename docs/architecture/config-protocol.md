@@ -16,6 +16,7 @@ Client → Server:
   Request::DiscardTransaction  delete a named transaction without touching running config (if_match as above)
   Request::Describe            one-shot fetch of one operation's documentation, by Topic
   Request::SetTransactionPath  set/remove one subsection of a named transaction by URL-style path (whole config for an empty path) — see nos_proto::config_path (if_match as above); an optional `position` (`ListPosition`: First/Last/Before(k)/After(k)) inserts or moves the list element the path names (#539)
+  Request::UserExists          cheap auth probe (#755): is this name in `Config.users`? `Restd` only; replies with no config data
 
 Server → Client:
   Event::Config(Config)             config snapshot (initial + on every commit, incl. via a transaction commit)
@@ -25,6 +26,7 @@ Server → Client:
   Event::Committed { warnings }     confirms a commit, with non-blocking advice (#501)
   Event::Discarded                  confirms a transaction was discarded
   Event::Description(CommandDoc)    one operation's documentation (reply to Describe)
+  Event::UserExists(bool)           reply to UserExists
 ```
 
 `Describe`/`Description` exist so that the shell's help text (what a command does, in human terms, for the CLI's user) is authored once in `nos-config` and shared by every client, rather than duplicated per-client. A `Topic` is one config-tree node or field — named by the mandatory `#[cli(topic = …)]` on every schema field (`nos-proto-derive`, see [Schema reference](../schema-reference.md)), so a field can't exist without its CLI help — or one show/shell command (`nos-cli`'s `spec.rs` rows). `nos-cli`'s config commands (`edit`/`set`/`delete`), their help, `?`, Tab and usage are all generated from that schema tree (`cli/src/config_grammar.rs`, #109) and sent as `SetTransactionPath`, the same generic write REST uses. The schema's `///` comments are the REST API's (Swagger) text, deliberately separate. It's scoped to a single `Topic` per request (not a bulk catalog fetch) so a client only ever fetches the docs it actually displays.

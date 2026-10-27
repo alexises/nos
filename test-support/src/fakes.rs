@@ -63,6 +63,14 @@ impl FakeConfigd {
                 s.gets += 1;
                 Reply::One(Event::Config(s.config.clone()))
             }
+            Request::UserExists { name } => Reply::One(Event::UserExists(
+                s.lock()
+                    .unwrap()
+                    .config
+                    .users
+                    .iter()
+                    .any(|u| &u.name == name),
+            )),
             Request::SubscribeDiff { .. } => Reply::Stream(
                 vec![Event::Diff(ConfigDiff::default())],
                 feed(&d, Event::Diff),

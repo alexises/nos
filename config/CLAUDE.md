@@ -35,6 +35,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 - `Request::Subscribe` → send the current full snapshot, then spawn a forwarder task that bridges `broadcast::Receiver<Arc<CommitUpdate>>` → `mpsc::Sender<Event>`, building `Event::Config(update.config.clone())` per commit. The select loop drains the `mpsc::Receiver` and forwards whatever `Event` it built to the client.
 - `Request::SubscribeDiff { scopes }` → send `store.initial_diff(role).await.scoped(&scopes)` first, then a forwarder sending `CommitUpdate::diff_for(role)` (one `Arc<ConfigDiff>` per visibility class per commit, #751), scoped, skipped when empty.
 - `Request::Unsubscribe` → abort whichever forwarder task (`Subscribe` or `SubscribeDiff`) is active.
+- `UserExists` → `Event::UserExists(bool)`, `Restd` only (#755).
 - `Request::Save` → serializes the running config as YAML and atomically writes it to the daemon's `--config-file` path; replies `Event::Saved` on success, `Event::Error` if no `--config-file` was configured or the write fails.
 - `Request::OpenTransaction`/`ApplyOp`/`GetTransaction`/`CommitTransaction`/`DiscardTransaction`/`DiffTransaction` → thin calls into the matching `ConfigStore` method (see `dispatch_request` in `server.rs`), replying `Event::Transaction`/`Event::Committed { warnings }` (advice from `warnings::commit_warnings`, #501)/`Event::Discarded`/`Event::Diff`/`Event::Error`.
 - Connection drop → forwarder task is aborted, connection task exits. **Transactions have no lifecycle tie to connections** — they live purely in `ConfigStore`, keyed by name, so a dropped connection never loses or discards one; only an explicit `DiscardTransaction` does.
@@ -43,7 +44,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 
 ## Socket path convention
 
-By convention (not yet enforced by code), the socket lives at `/run/nos/config.sock`. In tests, use a `tempfile::tempdir()` path.
+By convention the socket is `/run/nos/config.sock`; tests use a tempdir.
 
 ## Config file convention
 
