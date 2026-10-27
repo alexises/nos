@@ -12,6 +12,7 @@ use super::{BgpAuth, Config, OspfAuth};
 /// Which key families a role may read. Exhaustive `match` on [`Role`]: a
 /// new role must be classified here before it compiles.
 #[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Visible {
     users: bool,
     /// Everything in the keystore, referenced or not (people and the REST bridge).
@@ -67,6 +68,20 @@ fn visible(role: Role) -> Visible {
         | Role::Fdbd
         | Role::Stpd
         | Role::Acld => none,
+    }
+}
+
+/// What a role sees of a config: two roles with the same class get the same
+/// [`Config::for_role`] output, so a caller can compute one diff per class
+/// instead of one per subscriber (#751).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ViewClass(Visible);
+
+impl ViewClass {
+    /// The class of `role`.
+    #[must_use]
+    pub fn of(role: Role) -> Self {
+        Self(visible(role))
     }
 }
 

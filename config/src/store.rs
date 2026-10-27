@@ -6,11 +6,13 @@ use std::time::{Duration, Instant};
 use garde::Validate as _;
 use nos_proto::{
     config_path::{self, ListPosition},
-    diff_configs, sync_routing_table_refs, Config, ConfigDiff, ConfigOp, TransactionBase,
+    diff_configs,
+    schema::redact::ViewClass,
+    sync_routing_table_refs, Config, ConfigDiff, ConfigOp, Role, TransactionBase,
     TransactionSnapshot,
 };
-use tokio::sync::{broadcast, Mutex, RwLock};
-use tracing::{debug, info};
+use tokio::sync::{broadcast, Mutex, OnceCell, RwLock};
+use tracing::{debug, info, warn};
 
 use crate::error::ConfigError;
 use crate::secrets::{restore_masked, unmask_op};
@@ -59,13 +61,57 @@ impl Transaction {
 }
 
 /// One committed change, broadcast to every subscriber connection — the new
-/// and previous running config. Each connection projects both for its role
-/// (`Config::for_role`) and, for `SubscribeDiff`, diffs them. Internal only — never sent over the wire directly;
-/// `server.rs` unwraps this into `Event::Config`/`Event::Diff` per connection.
+/// and previous running config. `Subscribe` projects the new one for its role
+/// (`Config::for_role`); `SubscribeDiff` takes [`CommitUpdate::diff_for`].
+/// Internal only — never sent over the wire directly; `server.rs` unwraps
+/// this into `Event::Config`/`Event::Diff` per connection.
 pub(crate) struct CommitUpdate {
     pub config: Config,
     /// The running config before this commit, for per-role diffs (#384).
     pub prev: Config,
+    /// One diff per visibility class, computed once for all subscribers (#751).
+    diffs: std::sync::Mutex<HashMap<ViewClass, Arc<OnceCell<Arc<ConfigDiff>>>>>,
+}
+
+impl CommitUpdate {
+    pub(crate) fn new(config: Config, prev: Config) -> Self {
+        Self {
+            config,
+            prev,
+            diffs: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The diff of `role`'s own view (a key it may not see never shows up as
+    /// an Added/Modified field), shared by every role of its visibility
+    /// class and computed off the runtime threads. `None` when the
+    /// computation panicked: that subscriber skips this commit.
+    pub(crate) async fn diff_for(self: &Arc<Self>, role: Role) -> Option<Arc<ConfigDiff>> {
+        let cell = Arc::clone(
+            self.diffs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(ViewClass::of(role))
+                .or_default(),
+        );
+        let this = Arc::clone(self);
+        let init = || async move {
+            tokio::task::spawn_blocking(move || {
+                Arc::new(diff_configs(
+                    &this.prev.for_role(role),
+                    &this.config.for_role(role),
+                ))
+            })
+            .await
+        };
+        match cell.get_or_try_init(init).await {
+            Ok(d) => Some(Arc::clone(d)),
+            Err(e) => {
+                warn!(error = %e, "commit diff failed, subscribers skip this commit");
+                None
+            }
+        }
+    }
 }
 
 struct Inner {
@@ -323,7 +369,7 @@ impl ConfigStore {
         drop(running);
         info!(transaction = %name, "config committed");
         // Ignore send errors — no active receivers is not a failure.
-        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, prev }));
+        let _ = self.0.tx.send(Arc::new(CommitUpdate::new(config, prev)));
         Ok(warnings)
     }
 
@@ -351,7 +397,7 @@ impl ConfigStore {
         let prev = std::mem::replace(&mut *running, config.clone());
         drop(running);
         info!(user = ?user, "password hash upgraded");
-        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, prev }));
+        let _ = self.0.tx.send(Arc::new(CommitUpdate::new(config, prev)));
         Ok(())
     }
 
@@ -434,6 +480,49 @@ mod tests {
     use nos_proto::{BgpInstance, BgpInstanceOp};
 
     use super::*;
+
+    fn update_adding_a_user() -> Arc<CommitUpdate> {
+        let user = nos_proto::User {
+            name: "u".into(),
+            password: "hash".into(),
+        };
+        Arc::new(CommitUpdate::new(
+            Config {
+                users: vec![user],
+                ..Config::default()
+            },
+            Config::default(),
+        ))
+    }
+
+    /// #751: concurrent subscribers of one visibility class share one
+    /// computation; a role that cannot see `users` never sees the change.
+    #[tokio::test]
+    async fn diff_for_is_computed_once_per_visibility_class() {
+        let u = update_adding_a_user();
+        let (user, restd, bgpd1, bgpd2, wd) = tokio::join!(
+            u.diff_for(Role::User),
+            u.diff_for(Role::Restd),
+            u.diff_for(Role::Bgpd),
+            u.diff_for(Role::Bgpd),
+            u.diff_for(Role::Watchdog),
+        );
+        let (user, restd) = (user.unwrap(), restd.unwrap());
+        let (bgpd1, bgpd2, wd) = (bgpd1.unwrap(), bgpd2.unwrap(), wd.unwrap());
+        assert!(
+            Arc::ptr_eq(&user, &restd),
+            "User and Restd see the same config"
+        );
+        assert!(Arc::ptr_eq(&bgpd1, &bgpd2));
+        assert!(!Arc::ptr_eq(&user, &bgpd1));
+        assert_eq!(user.users.len(), 1);
+        assert_eq!(wd.users.len(), 1);
+        assert!(
+            bgpd1.is_empty(),
+            "bgpd must not see a user change: {bgpd1:?}"
+        );
+        assert_eq!(u.diffs.lock().unwrap().len(), 3);
+    }
 
     fn instance(name: &str, asn: u32) -> BgpInstance {
         BgpInstance {

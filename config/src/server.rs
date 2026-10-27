@@ -2,10 +2,11 @@ use std::fmt;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, PeerId};
-use nos_proto::{diff_configs, Event, IpcCodec, Request, Role};
+use nos_proto::{Event, IpcCodec, Request, Role};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -304,7 +305,7 @@ where
     let reply = match req {
         Request::Subscribe => {
             let role = caller.role;
-            let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| {
+            let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| async move {
                 Some(Event::Config(u.config.for_role(role)))
             });
             set_forwarder(sub_task, Some(forwarder));
@@ -315,11 +316,11 @@ where
             let task_scopes = scopes.clone();
             let role = caller.role;
             let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| {
-                // The diff of the role's own view: a key it may not see
-                // never shows up as an Added/Modified field.
-                let scoped = diff_configs(&u.prev.for_role(role), &u.config.for_role(role))
-                    .scoped(&task_scopes);
-                (!scoped.is_empty()).then_some(Event::Diff(scoped))
+                let wanted = task_scopes.clone();
+                async move {
+                    let scoped = u.diff_for(role).await?.scoped(&wanted);
+                    (!scoped.is_empty()).then_some(Event::Diff(scoped))
+                }
             });
             set_forwarder(sub_task, Some(forwarder));
             debug!(?scopes, "IPC client subscribed to diff");
@@ -354,17 +355,20 @@ fn set_forwarder(slot: &mut Option<JoinHandle<()>>, next: Option<JoinHandle<()>>
 /// `to_event` builds the event this subscriber wants from each commit, and
 /// returning `None` skips it — which is how a `SubscribeDiff` subscriber is
 /// never woken for a commit outside its scopes.
-fn spawn_forwarder(
+fn spawn_forwarder<Fut>(
     store: &ConfigStore,
     tx: mpsc::Sender<Event>,
-    to_event: impl Fn(&CommitUpdate) -> Option<Event> + Send + 'static,
-) -> JoinHandle<()> {
+    to_event: impl Fn(Arc<CommitUpdate>) -> Fut + Send + 'static,
+) -> JoinHandle<()>
+where
+    Fut: std::future::Future<Output = Option<Event>> + Send,
+{
     let mut bcast_rx = store.subscribe();
     tokio::spawn(async move {
         loop {
             match bcast_rx.recv().await {
                 Ok(update) => {
-                    let Some(event) = to_event(&update) else {
+                    let Some(event) = to_event(update).await else {
                         continue;
                     };
                     if tx.send(event).await.is_err() {

@@ -115,7 +115,6 @@ fn field(
             if let Kind::Struct(n) = elem()
                 && let Some(key) = key_of(n)
             {
-                let items = |v: Option<&Value>| v.and_then(Value::as_array).cloned();
                 return list(
                     &Ctx {
                         f,
@@ -124,8 +123,8 @@ fn field(
                         label: &label,
                         flat,
                     },
-                    &items(bv).unwrap_or_default(),
-                    &items(cv).unwrap_or_default(),
+                    items(bv),
+                    items(cv),
                     fields,
                     subs,
                 );
@@ -152,6 +151,10 @@ fn field(
     fields.push(FieldDiff { label, old, new });
 }
 
+fn items(v: Option<&Value>) -> &[Value] {
+    v.and_then(Value::as_array).map_or(&[][..], Vec::as_slice)
+}
+
 fn get<'v>(o: Option<&'v Value>, f: &Field) -> Option<&'v Value> {
     o.map(|o| o.get(f.name).unwrap_or(&Value::Null))
 }
@@ -171,18 +174,31 @@ fn list(
     fields: &mut Vec<FieldDiff>,
     subs: &mut Vec<SectionDiff>,
 ) {
-    let find =
-        |l: &'_ [Value], e: &Value| l.iter().find(|x| x[cx.key.name] == e[cx.key.name]).cloned();
+    // Each side indexed by key once (first element wins on a duplicate key,
+    // as the linear scan did): O(n) in the list length, no element cloned.
+    type Index = std::collections::HashMap<String, usize>;
+    fn find<'l>(l: &'l [Value], m: &Index, name: &str, e: &Value) -> Option<&'l Value> {
+        m.get(&e[name].to_string()).map(|&i| &l[i])
+    }
+    let index = |l: &[Value]| -> Index {
+        let mut m = Index::with_capacity(l.len());
+        for (i, e) in l.iter().enumerate() {
+            m.entry(e[cx.key.name].to_string()).or_insert(i);
+        }
+        m
+    };
+    let (bi, ci) = (index(base), index(cand));
+    let kn = cx.key.name;
     // Pairing by key hides a pure reorder (#539); report the order of the
     // elements both sides have. ponytail: a root-level list (`acls` itself)
     // has no `fields` slot in `put`, so only nested lists report order.
-    let common = |l: &[Value], other: &[Value]| -> Vec<String> {
+    let common = |l: &[Value], other: &Index| -> Vec<String> {
         l.iter()
-            .filter(|e| find(other, e).is_some())
+            .filter(|e| other.contains_key(&e[cx.key.name].to_string()))
             .map(|e| key_words(cx.key, e))
             .collect()
     };
-    let (old_order, new_order) = (common(base, cand), common(cand, base));
+    let (old_order, new_order) = (common(base, &ci), common(cand, &bi));
     if old_order != new_order {
         fields.push(FieldDiff {
             label: format!("{} order", cx.label),
@@ -190,16 +206,22 @@ fn list(
             new: Some(new_order.join(", ")),
         });
     }
-    let pairs = base.iter().map(|b| (Some(b.clone()), find(cand, b))).chain(
-        cand.iter()
-            .filter(|c| find(base, c).is_none())
-            .map(|c| (None, Some(c.clone()))),
-    );
+    let pairs = base
+        .iter()
+        .map(|b| (Some(b), find(cand, &ci, kn, b)))
+        .chain(
+            cand.iter()
+                .filter(|c| find(base, &bi, kn, c).is_none())
+                .map(|c| (None, Some(c))),
+        );
     for (b, c) in pairs {
-        let key = key_words(cx.key, b.as_ref().or(c.as_ref()).expect("one side"));
+        if b.is_some() && b == c {
+            continue; // unchanged: the dominant case in a big list
+        }
+        let key = key_words(cx.key, b.or(c).expect("one side"));
         if cx.flat {
             let prefix = format!("{} {key}", cx.label);
-            object(cx.n, &prefix, b.as_ref(), c.as_ref(), true, fields, subs);
+            object(cx.n, &prefix, b, c, true, fields, subs);
             continue;
         }
         let status = match (&b, &c) {
@@ -208,7 +230,7 @@ fn list(
             _ => DiffStatus::Modified,
         };
         let (mut f, mut s) = (Vec::new(), Vec::new());
-        object(cx.n, "", b.as_ref(), c.as_ref(), false, &mut f, &mut s);
+        object(cx.n, "", b, c, false, &mut f, &mut s);
         if status == DiffStatus::Modified && f.is_empty() && s.is_empty() {
             continue;
         }
@@ -440,6 +462,104 @@ mod tests {
         // Adding or removing alone is not a reorder.
         assert_eq!(order(&diff_configs(&ab, &cfg(&["a", "b", "c"]))), none);
         assert_eq!(order(&diff_configs(&ab, &cfg(&["b"]))), none);
+    }
+
+    fn statics(routes: impl IntoIterator<Item = (u32, u8)>) -> Config {
+        use crate::schema::{StaticRoute, StaticRoutingInstance};
+        Config {
+            static_routing_instances: vec![StaticRoutingInstance {
+                name: "s".into(),
+                routes: routes
+                    .into_iter()
+                    .map(|(n, gw)| StaticRoute {
+                        subnet: format!("10.{}.{}.0/24", n / 256, n % 256).parse().unwrap(),
+                        gateway: format!("192.0.2.{gw}").parse().unwrap(),
+                        ..dflt()
+                    })
+                    .collect(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn route_sections(d: &ConfigDiff) -> Vec<(String, DiffStatus)> {
+        d.static_routing_instances[0]
+            .subsections
+            .iter()
+            .map(|s| (s.name.clone(), s.status))
+            .collect()
+    }
+
+    /// #751: one changed, one added, one removed in 20 000 routes, found by
+    /// key index (the old linear `find` was O(n^2) and cloned every element).
+    #[test]
+    fn a_large_list_diffs_to_exactly_its_changes() {
+        let n = 20_000;
+        let base = statics((0..n).map(|i| (i, 1)));
+        // Route 5 repointed, 7 removed, `n` added; the rest identical.
+        let cand = statics(
+            (0..n)
+                .filter(|&i| i != 7)
+                .map(|i| (i, if i == 5 { 2 } else { 1 }))
+                .chain([(n, 1)]),
+        );
+        let d = diff_configs(&base, &cand);
+        assert_eq!(d.static_routing_instances[0].fields, vec![]);
+        let mut got = route_sections(&d);
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut want = vec![
+            ("10.0.5.0/24".to_string(), DiffStatus::Modified),
+            ("10.0.7.0/24".to_string(), DiffStatus::Removed),
+            (
+                format!("10.{}.{}.0/24", n / 256, n % 256),
+                DiffStatus::Added,
+            ),
+        ];
+        want.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got, want);
+    }
+
+    /// A key listed twice: every base element pairs with the candidate's
+    /// first match, as the linear scan did.
+    #[test]
+    fn a_duplicate_key_pairs_with_its_first_occurrence() {
+        let base = statics([(1, 1), (1, 9)]);
+        let d = diff_configs(&base, &statics([(1, 2)]));
+        let secs = &d.static_routing_instances[0].subsections;
+        let olds: Vec<_> = secs.iter().map(|s| s.fields[0].old.as_deref()).collect();
+        assert_eq!(olds, [Some("192.0.2.1"), Some("192.0.2.9")]);
+        assert!(secs
+            .iter()
+            .all(|s| s.fields[0].new.as_deref() == Some("192.0.2.2")));
+    }
+
+    #[test]
+    fn reorder_add_and_remove_in_one_list() {
+        let cfg = |names: &[&str]| Config {
+            bgp_instances: vec![BgpInstance {
+                name: "r1".into(),
+                peer_groups: names
+                    .iter()
+                    .map(|n| BgpPeerGroup {
+                        name: (*n).into(),
+                        ..dflt()
+                    })
+                    .collect(),
+                ..dflt()
+            }],
+            ..Default::default()
+        };
+        let d = diff_configs(&cfg(&["a", "b", "c"]), &cfg(&["c", "d", "a"]));
+        let inst = &d.bgp_instances[0];
+        assert_eq!(inst.fields.len(), 1);
+        assert_eq!(inst.fields[0].old.as_deref(), Some("a, c"));
+        assert_eq!(inst.fields[0].new.as_deref(), Some("c, a"));
+        let st: Vec<_> = inst
+            .subsections
+            .iter()
+            .map(|s| (s.name.as_str(), s.status))
+            .collect();
+        assert_eq!(st, [("b", DiffStatus::Removed), ("d", DiffStatus::Added)]);
     }
 
     #[test]
