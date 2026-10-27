@@ -13,6 +13,7 @@
 
 mod consts;
 mod docker;
+mod logd_mem;
 mod logs;
 mod phases;
 mod rest;
@@ -38,6 +39,7 @@ async fn dispatch(cmd: &str, n: usize) -> anyhow::Result<()> {
             Ok(())
         }
         "logs" => w.print_logs(n).await,
+        "logd-mem" => logd_mem::run(&w).await,
         "all" => run_all(&mut w, phases::ALL).await,
         group if phases::group(group).is_some() => {
             let result = run_all(&mut w, phases::group(group).unwrap_or_default()).await;

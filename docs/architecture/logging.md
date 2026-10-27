@@ -10,6 +10,13 @@ Every daemon (`nos-configd`, each `nos-bgpd`/`nos-ribd` instance, `nos-interface
 - A `GetLogs`/`Tail` reply is capped at `store::REPLY_BYTES` (16 MiB less 1 KiB of estimated entry size) so it always fits one IPC frame: past it the oldest matching entries are left out, the newest kept. With the 16 MiB ring this can only drop a few of the oldest entries; `show log`/`GET /v1/logs` need no change.
 
 
+**Memory profiling `nos-logd` (#756/#757)**
+- Live-heap bound: `cargo test -p nos-log --test resident -- --nocapture` runs a counting global allocator over REST-shaped entries (byte cap binding, 5x overfill) and asserts live heap <= 1.5 x `MAX_MEMORY_BYTES`; it also prints the transient peak of one `snapshot()` (`limit=20000`).
+- dhat: `docker build --build-arg CARGO_FEATURES=nos-log/dhat-heap -t nos:local .`, then pass `--logd-arg=--profile-memory-out=/tmp/dhat-logd.json` to the watchdog; the report is written when `nos-logd` exits on SIGINT (load it in dh_view). The feature is off in every default and release build.
+- Lab load: `cargo run -p nos-e2e -- up`, then `LOGD_MEM_ROUTES=20000 [LOGD_MEM_POLL=1] cargo run -p nos-e2e -- logd-mem`: sequential per-route `PUT`s into an uncommitted transaction on router-a, `VmRSS`/`VmHWM` sampled every 2000 requests and after an idle wait, then SIGINT to `nos-logd` and the dhat `t-gmax`/`t-end` totals. It needs the dhat image above; it is not a phase.
+- The harness runs `nos-logd` with `--capacity=200000` (`router.rs`), so the 16 MiB byte cap, not the entry count, bounds the ring there; production defaults to 10,000.
+- The watchdog hands children only `RUST_LOG`/`PATH`/`TZ`/`NOS_LACP_CHURN_SECS`: to try `MALLOC_ARENA_MAX` in the lab, wrap the `nos-logd` binary in an image-only shell script that exports it before `exec`.
+
 `nos_log_client::install_panic_hook()` routes panics through the same layers (stderr and `nos-logd`) before aborting; the flush is a fixed ~200 ms sleep, best effort since the channel is `try_send`. See [supervision](supervision.md).
 
 - **Source is stamped by `nos-logd` from the pushing daemon's certificate** (`nos-<daemon>` plus `[<name>]` when the certificate has one: `nos-bgpd[r1]`, `nos-interfaced`); the `source` a client wrote in a `Push` is overwritten, so a daemon cannot pass itself off as another (#400).

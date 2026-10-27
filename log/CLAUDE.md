@@ -29,4 +29,6 @@ There is an external query API: `server.rs` serves `nos_proto::log::{LogRequest,
 
 `nos_proto::log`'s `LogRequest`/`LogEvent` share one socket for three shapes, distinguished by request variant rather than three separate listeners: `Push(LogEntry)` (fire-and-forget, from every other daemon), `GetLogs { source, limit }` and `Tail { source }` (`nos-cli`'s snapshot and live-tail queries respectively). See `docs/ipc-protocols.md` for the exact types.
 
+Memory profiling (#757): optional `dhat-heap` feature (`--profile-memory-out`), `tests/resident.rs` counting-allocator bound, `nos-e2e logd-mem` lab load — see the logging page.
+
 Details: [logging architecture](../docs/architecture/logging.md), [system guide](../docs/protocols/system.md).

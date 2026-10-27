@@ -15,6 +15,10 @@ use tracing::info;
 /// entries over IPC.
 const DEFAULT_LOG_STORE_PATH: &str = "/var/lib/nos/logd/entries.jsonl";
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[derive(Parser)]
 #[command(name = "nos-logd", about = "NOS log collection daemon")]
 struct Args {
@@ -40,12 +44,23 @@ struct Args {
     /// Resolved in the background: startup never waits for it.
     #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
+
+    /// Only present when built with `--features dhat-heap`. Path to write
+    /// the dhat heap-profile report to on exit — load it at
+    /// <https://nnethercote.github.io/dh_view/dh_view.html>.
+    #[cfg(feature = "dhat-heap")]
+    #[arg(long, default_value = "dhat-heap.json")]
+    profile_memory_out: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::builder()
+        .file_name(args.profile_memory_out.clone())
+        .build();
     // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
     let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
     info!(peer = ?identity.peer(), "ipc identity loaded");

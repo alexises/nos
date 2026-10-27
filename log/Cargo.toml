@@ -23,6 +23,10 @@ tokio-util         = { workspace = true }
 futures            = { workspace = true }
 tempfile           = { workspace = true }
 socket2            = { workspace = true }
+dhat               = { version = "0.3", optional = true }
+
+[features]
+dhat-heap = ["dep:dhat"]
 
 [[bin]]
 name = "nos-logd"

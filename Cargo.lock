@@ -1978,6 +1978,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "dhat",
  "futures",
  "nos-pki",
  "nos-proto",
