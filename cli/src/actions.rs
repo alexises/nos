@@ -958,6 +958,42 @@ async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
     }
 }
 
+/// Prints a paged `show bgp ...` walk as the pages arrive: the instance
+/// header once ahead of the first non-empty page, each page's lines, and the
+/// "no routes" text only when nothing came.
+struct PagedOut<'a> {
+    instance: &'a str,
+    any: bool,
+}
+
+impl<'a> PagedOut<'a> {
+    fn new(instance: &'a str) -> Self {
+        Self {
+            instance,
+            any: false,
+        }
+    }
+
+    fn page(&mut self, empty: bool, lines: impl FnOnce() -> String) {
+        if empty {
+            return;
+        }
+        if !self.any {
+            println!("{}", format::render_bgp_routes_header(self.instance));
+        }
+        self.any = true;
+        println!("{}", lines());
+    }
+
+    fn finish<E: std::fmt::Display>(self, walked: Result<(), E>, none: &str) {
+        match walked {
+            Ok(()) if !self.any => println!("{none}"),
+            Ok(()) => {}
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
 /// `show bgp evpn` — same shape as `show_bgp_brief`, asking each instance
 /// for its received EVPN routes instead of its peer summaries.
 async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
@@ -981,10 +1017,14 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
         )
         .await
         {
-            Ok(Some(bgp_socket)) => match bgp_client::get_evpn_routes(&bgp_socket).await {
-                Ok(routes) => println!("{}", format::render_bgp_evpn(&instance.name, &routes)),
-                Err(e) => eprintln!("error: {e}"),
-            },
+            Ok(Some(bgp_socket)) => {
+                let mut out = PagedOut::new(&instance.name);
+                let walked = bgp_client::for_each_evpn_routes_page(&bgp_socket, |page| {
+                    out.page(page.is_empty(), || format::render_bgp_evpn_lines(page));
+                })
+                .await;
+                out.finish(walked, &format::render_bgp_evpn(&instance.name, &[]));
+            }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),
         }
@@ -1013,10 +1053,14 @@ async fn show_bgp_flowspec(config_socket: &Path, watchdog_socket: &Path) {
         )
         .await
         {
-            Ok(Some(bgp_socket)) => match bgp_client::get_flowspec_routes(&bgp_socket).await {
-                Ok(routes) => println!("{}", format::render_bgp_flowspec(&instance.name, &routes)),
-                Err(e) => eprintln!("error: {e}"),
-            },
+            Ok(Some(bgp_socket)) => {
+                let mut out = PagedOut::new(&instance.name);
+                let walked = bgp_client::for_each_flowspec_routes_page(&bgp_socket, |page| {
+                    out.page(page.is_empty(), || format::render_bgp_flowspec_lines(page));
+                })
+                .await;
+                out.finish(walked, &format::render_bgp_flowspec(&instance.name, &[]));
+            }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),
         }
@@ -1050,14 +1094,15 @@ async fn show_bgp_vpn(
         )
         .await
         {
-            Ok(Some(bgp_socket)) => match bgp_client::get_vpn_routes(&bgp_socket, family, rd).await
-            {
-                Ok(routes) => println!(
-                    "{}",
-                    format::render_bgp_vpn(&instance.name, family, &routes)
-                ),
-                Err(e) => eprintln!("error: {e}"),
-            },
+            Ok(Some(bgp_socket)) => {
+                let mut out = PagedOut::new(&instance.name);
+                let walked =
+                    bgp_client::for_each_vpn_routes_page(&bgp_socket, family, rd, |page| {
+                        out.page(page.is_empty(), || format::render_bgp_vpn_lines(page));
+                    })
+                    .await;
+                out.finish(walked, &format::render_bgp_vpn(&instance.name, family, &[]));
+            }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),
         }
@@ -1085,25 +1130,12 @@ async fn show_bgp_routes(config_socket: &Path, watchdog_socket: &Path) {
         .await
         {
             Ok(Some(bgp_socket)) => {
-                // Each page prints as it arrives; the header goes out once.
-                let mut any = false;
+                let mut out = PagedOut::new(&instance.name);
                 let walked = bgp_client::for_each_routes_page(&bgp_socket, |page| {
-                    if !page.is_empty() {
-                        if !any {
-                            println!("{}", format::render_bgp_routes_header(&instance.name));
-                        }
-                        any = true;
-                        println!("{}", format::render_bgp_route_lines(page));
-                    }
+                    out.page(page.is_empty(), || format::render_bgp_route_lines(page));
                 })
                 .await;
-                match walked {
-                    Ok(()) if !any => {
-                        println!("{}", format::render_bgp_routes(&instance.name, &[]));
-                    }
-                    Ok(()) => {}
-                    Err(e) => eprintln!("error: {e}"),
-                }
+                out.finish(walked, &format::render_bgp_routes(&instance.name, &[]));
             }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),

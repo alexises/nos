@@ -1175,3 +1175,5 @@ Created with `set bgp instance <i> peer <address> peer-group <g>` (or `set peer 
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` | Route refresh request to one peer |
 | `clear bgp <instance> <peer>` | `POST /v1/bgp/{instance}/peer/{peer}/clear` | Releases a maximum-prefix hold; resets an Established session |
 | `show log nos-bgpd[<instance>]` | `GET /v1/logs?source=nos-bgpd%5B<instance>%5D` | The instance's log: sessions, NOTIFICATIONs, learned routes, damping |
+
+- `show bgp routes|evpn|flowspec|vpnv4|vpnv6` are paged, in the CLI and over REST: the CLI prints each page as it arrives; REST returns `{"items": [...], "pagination": {"limit", "next"}}` per instance, and you continue with `?instance=<name>&after=<pagination.next>` until `next` is `null` (`?limit=` 1 to 1000; `after`/`limit` without `?instance=` are `400`). Details: [REST API guide](../api.md).

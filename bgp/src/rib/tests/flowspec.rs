@@ -67,6 +67,47 @@ fn texts(rib: &BgpRib) -> Vec<String> {
         .collect()
 }
 
+/// #723: the paging keys list the same rules in the same order as the old
+/// unpaged `flowspec_routes`, each resolves to its rule, a vanished one to
+/// `None`.
+#[test]
+fn flowspec_keys_match_the_unpaged_order_and_resolve_to_their_rules() {
+    let mut rib = new_rib(65000);
+    let peer = addr("10.0.0.1");
+    let _rx = register_mp_peer(&mut rib, peer, false, addr("10.0.0.254"), fs_afs());
+    feed(&mut rib, peer, &reach(1, vec![rule(9), rule(1), rule(5)]));
+    feed(&mut rib, peer, &reach(2, vec![rule6()]));
+    let keys = rib.flowspec_keys();
+    let want: Vec<_> = rib
+        .flowspec_routes()
+        .into_iter()
+        .map(|(p, r)| (p, r.family.to_string(), r.nlri.to_string()))
+        .collect();
+    let got: Vec<_> = keys
+        .iter()
+        .map(|k| {
+            (
+                k.cursor.peer,
+                k.cursor.family.clone(),
+                k.cursor.nlri.clone(),
+            )
+        })
+        .collect();
+    assert_eq!((got.len(), &got), (4, &want));
+    for k in &keys {
+        let (p, r) = rib.flowspec_at(k).unwrap();
+        assert_eq!((p, r.nlri.to_string()), (peer, k.cursor.nlri.clone()));
+    }
+    assert!(rib
+        .flowspec_at(&crate::page::Keyed::at(keys[0].cursor.clone()))
+        .is_none());
+    feed(&mut rib, peer, &unreach(1, vec![rule(1)]));
+    assert_eq!(
+        keys.iter().filter(|k| rib.flowspec_at(k).is_none()).count(),
+        1
+    );
+}
+
 #[test]
 fn learns_replaces_and_withdraws_per_family() {
     let mut rib = new_rib(65000);

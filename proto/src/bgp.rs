@@ -331,7 +331,8 @@ pub enum BgpRequest {
         /// The advertising peer.
         peer: IpAddr,
     },
-    /// One-shot: every EVPN route received from any peer.
+    /// Removed in #723 (answered with `BgpEvent::Error`); the slot stays.
+    /// Use `GetEvpnRoutesPage`.
     GetEvpnRoutes,
     /// Fire-and-forget, no reply: one `nos-fdbd`'s local MACs, originated as
     /// EVPN Type-2 (and its flood-list Type-3) routes. `domain` scopes a
@@ -366,11 +367,11 @@ pub enum BgpRequest {
     /// Removed in #722 (answered with `BgpEvent::Error`); the slot stays
     /// because postcard indexes by position. Use `GetRoutesPage`.
     GetRoutes,
-    /// One-shot: every Flowspec route received from any peer.
+    /// Removed in #723 (answered with `BgpEvent::Error`); the slot stays.
+    /// Use `GetFlowspecRoutesPage`.
     GetFlowspecRoutes,
-    /// One-shot: every VPN route of `family` (`Vpnv4Unicast` or
-    /// `Vpnv6Unicast`) received from any peer, only those with Route
-    /// Distinguisher `rd` when set (`show bgp vpnv4|vpnv6 [rd <rd>]`).
+    /// Removed in #723 (answered with `BgpEvent::Error`); the slot stays.
+    /// Use `GetVpnRoutesPage`.
     GetVpnRoutes {
         /// `Vpnv4Unicast` or `Vpnv6Unicast`; any other family has none.
         family: crate::AddressFamily,
@@ -395,6 +396,39 @@ pub enum BgpRequest {
         /// Cursor: the last key of the previous page.
         after: Option<BgpRouteCursor>,
         /// Most routes wanted.
+        limit: u32,
+    },
+    /// One-shot: up to `limit` received EVPN routes strictly after `after`,
+    /// in `(peer, route text)` order; answered by `BgpEvent::EvpnRoutesPage`
+    /// (#723). Same snapshot and clamping rules as `GetRoutesPage`.
+    GetEvpnRoutesPage {
+        /// Cursor: the last key of the previous page.
+        after: Option<EvpnRouteCursor>,
+        /// Most routes wanted.
+        limit: u32,
+    },
+    /// One-shot: up to `limit` received Flowspec routes strictly after
+    /// `after`, in `(peer, family, rule text)` order; answered by
+    /// `BgpEvent::FlowspecRoutesPage` (#723).
+    GetFlowspecRoutesPage {
+        /// Cursor: the last key of the previous page.
+        after: Option<FlowspecRouteCursor>,
+        /// Most routes wanted.
+        limit: u32,
+    },
+    /// One-shot: up to `limit` received VPN paths of `family` (only those of
+    /// Route Distinguisher `rd` when set) strictly after `after`, in
+    /// `(peer, RD, prefix)` order; answered by `BgpEvent::VpnRoutesPage`
+    /// (#723). The snapshot is rebuilt when `family` or `rd` differ from the
+    /// previous page request on the connection.
+    GetVpnRoutesPage {
+        /// `Vpnv4Unicast` or `Vpnv6Unicast`; any other family has none.
+        family: crate::AddressFamily,
+        /// The Route Distinguisher text (`65001:1`) to filter on.
+        rd: Option<String>,
+        /// Cursor: the last key of the previous page.
+        after: Option<VpnRouteCursor>,
+        /// Most paths wanted.
         limit: u32,
     },
 }
@@ -432,6 +466,63 @@ impl std::str::FromStr for BgpRouteCursor {
     }
 }
 
+/// Position in `show bgp evpn`: the existing sort key of a route, the
+/// advertising peer then the NLRI text. Opaque text form, see [`crate::page`].
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EvpnRouteCursor {
+    /// The advertising peer.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub peer: IpAddr,
+    /// The NLRI rendered as text (`EvpnRouteSummary::route`).
+    pub route: String,
+}
+
+/// Position in `show bgp flowspec`: peer, address family text, rule text.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FlowspecRouteCursor {
+    /// The advertising peer.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub peer: IpAddr,
+    /// The address family, rendered as text.
+    pub family: String,
+    /// The rule rendered as text (`FlowspecRouteSummary::nlri`).
+    pub nlri: String,
+}
+
+/// Position in `show bgp vpnv4|vpnv6`: peer, RD (8 wire bytes), prefix.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VpnRouteCursor {
+    /// The advertising peer.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub peer: IpAddr,
+    /// The Route Distinguisher in its 8-byte wire form.
+    pub rd: [u8; 8],
+    /// The customer prefix.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub prefix: IpNet,
+}
+
+/// `Display`/`FromStr` of a cursor: its opaque text form.
+macro_rules! cursor_text {
+    ($($t:ty),*) => {$(
+        impl std::fmt::Display for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&crate::page::encode(self))
+            }
+        }
+        impl std::str::FromStr for $t {
+            type Err = crate::page::BadCursor;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                crate::page::decode(s)
+            }
+        }
+    )*};
+}
+cursor_text!(EvpnRouteCursor, FlowspecRouteCursor, VpnRouteCursor);
+
 /// Messages sent from `nos-bgpd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BgpEvent {
@@ -443,7 +534,7 @@ pub enum BgpEvent {
     /// Reply to `SendRouteRefresh`: no `Established` session with that peer
     /// exists right now. Reply to `ClearPeer`: that peer isn't configured.
     PeerNotFound,
-    /// Reply to `GetEvpnRoutes`.
+    /// Unused since #723; the slot stays for the wire indexes.
     EvpnRoutes(Vec<EvpnRouteSummary>),
     /// Reply to `ClearPeer`.
     PeerCleared,
@@ -451,9 +542,9 @@ pub enum BgpEvent {
     RpkiSummary(Vec<RpkiCacheStatus>),
     /// Unused since #722; the slot stays for the wire indexes.
     Routes(Vec<BgpRouteSummary>),
-    /// Reply to `GetFlowspecRoutes`.
+    /// Unused since #723; the slot stays for the wire indexes.
     FlowspecRoutes(Vec<FlowspecRouteSummary>),
-    /// Reply to `GetVpnRoutes`, sorted by peer, RD, prefix.
+    /// Unused since #723; the slot stays for the wire indexes.
     VpnRoutes(Vec<VpnRouteSummary>),
     /// Reply to `GetRoutesPage`: routes in key order; `next` is the cursor of
     /// the following page, `None` on the last.
@@ -465,4 +556,25 @@ pub enum BgpEvent {
     },
     /// A human-readable error (the removed unpaged queries answer with it).
     Error(String),
+    /// Reply to `GetEvpnRoutesPage`.
+    EvpnRoutesPage {
+        /// The page.
+        routes: Vec<EvpnRouteSummary>,
+        /// Pass back as `after`; `None` when this was the last page.
+        next: Option<EvpnRouteCursor>,
+    },
+    /// Reply to `GetFlowspecRoutesPage`.
+    FlowspecRoutesPage {
+        /// The page.
+        routes: Vec<FlowspecRouteSummary>,
+        /// Pass back as `after`; `None` when this was the last page.
+        next: Option<FlowspecRouteCursor>,
+    },
+    /// Reply to `GetVpnRoutesPage`.
+    VpnRoutesPage {
+        /// The page.
+        routes: Vec<VpnRouteSummary>,
+        /// Pass back as `after`; `None` when this was the last page.
+        next: Option<VpnRouteCursor>,
+    },
 }

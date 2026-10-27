@@ -23,6 +23,42 @@ pub fn clamp_limit(limit: u32, max: u32) -> usize {
     }
 }
 
+/// A snapshot key ordered by its wire `cursor` alone, carrying the live
+/// table's own key `row` so a page can read its rows without scanning (the
+/// text-keyed EVPN/Flowspec cursors cannot be inverted). A client's `after`
+/// has no `row` (see [`Keyed::at`]); it is only ever compared.
+#[derive(Debug, Clone)]
+pub struct Keyed<C, R> {
+    /// The wire cursor, the sort key.
+    pub cursor: C,
+    /// The table key of the row, `None` on a client's `after`.
+    pub row: Option<R>,
+}
+
+impl<C, R> Keyed<C, R> {
+    /// A client's `after` cursor, for searching a snapshot.
+    pub fn at(cursor: C) -> Self {
+        Self { cursor, row: None }
+    }
+}
+
+impl<C: PartialEq, R> PartialEq for Keyed<C, R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cursor == other.cursor
+    }
+}
+impl<C: Eq, R> Eq for Keyed<C, R> {}
+impl<C: Ord, R> PartialOrd for Keyed<C, R> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<C: Ord, R> Ord for Keyed<C, R> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.cursor.cmp(&other.cursor)
+    }
+}
+
 /// One query kind's snapshot on one connection.
 #[derive(Debug)]
 pub struct Snapshot<K> {
@@ -234,6 +270,17 @@ mod tests {
         assert!(!snap.is_held());
         assert_eq!(ask(&mut snap, Some(0), later), vec![1, 2]);
         assert_eq!(builds, 4);
+    }
+
+    #[test]
+    fn keyed_orders_by_cursor_and_ignores_the_row() {
+        let a = Keyed {
+            cursor: 1,
+            row: Some("x"),
+        };
+        assert_eq!(a, Keyed::at(1));
+        assert!(a < Keyed::at(2));
+        assert!(Keyed::<_, ()>::at(3) > Keyed::at(2));
     }
 
     #[test]

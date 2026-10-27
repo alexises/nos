@@ -264,6 +264,24 @@ pub async fn bgp_routes_paging(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #723: walking `path` (a paged BGP show endpoint, instance `r1`) one item
+/// per page returns exactly the items of the single full page, in the same
+/// order, and at least `min` of them: every route once, none lost or
+/// repeated across the cursors.
+async fn expect_paged_walk(r: &Router, path: &str, min: usize) -> anyhow::Result<()> {
+    let full = r.bgp_walk(path, "r1", None).await?;
+    let paged = r.bgp_walk(path, "r1", Some(1)).await?;
+    if paged.len() < min || paged != full {
+        bail!(
+            "{}: {path} walked at limit=1 returned {} items, the full page {} (want >= {min} and equal): {paged:?} vs {full:?}",
+            r.name(),
+            paged.len(),
+            full.len()
+        );
+    }
+    Ok(())
+}
+
 /// Whether, among `r`'s log lines matching `first`, `then` or `not`, the one
 /// right after the last `first` is a `then` — i.e. no `not` came between.
 fn followed_by(r: &Router, first: &str, then: &str, not: &str) -> anyhow::Result<()> {
@@ -3197,6 +3215,8 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
             bail!("show bgp flowspec is missing {want}: {body}");
         }
     }
+    log("flowspec rules walked one per page come back once each (#723)");
+    expect_paged_walk(a, "/v1/bgp/flowspec", rules.len()).await?;
 
     // RFC 8955 section 6: no unicast route covers either destination yet.
     let changed = |family: &str, validity: &str| {
@@ -3459,6 +3479,10 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         ))
         .await?;
     }
+    // Before the later steps add more: GoBGP's two RDs of 10.10.0.0/24.
+    log("vpn paths walked one per page come back once each, the RD filter kept (#723)");
+    expect_paged_walk(a, "/v1/bgp/vpnv4", 2).await?;
+    expect_paged_walk(a, "/v1/bgp/vpnv4?rd=65001:2", 1).await?;
     vrf_import(w, &vpn_flags).await?;
     vpn_soo_and_policy(w, &vpn_flags).await?;
 
@@ -3700,8 +3724,8 @@ async fn two_pes(w: &mut World) -> anyhow::Result<()> {
 
 /// `GET /v1/routes/<VPN_TABLE>` on router-a.
 async fn vrf_routes(a: &Router) -> anyhow::Result<String> {
-    a.rest_expect(Method::GET, &format!("/v1/routes/{VPN_TABLE}"), None, 200)
-        .await
+    // `GET /v1/routes/<table>` is paged (#713): walk it into the old array.
+    Ok(serde_json::Value::Array(a.routes_walk(VPN_TABLE, None).await?).to_string())
 }
 
 /// `vpn-dataplane` (#581): RFC 4364 forwarding for real. router-a and
@@ -4580,6 +4604,8 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
             bail!("show bgp evpn is missing {want}: {body}");
         }
     }
+    log("evpn routes walked one per page come back once each (#723)");
+    expect_paged_walk(a, "/v1/bgp/evpn", 2).await?;
 
     log("withdrawing the Type-2 route explicitly");
     let base = a.count(&withdrawn(2));

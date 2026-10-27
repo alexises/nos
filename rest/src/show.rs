@@ -429,11 +429,11 @@ pub async fn logs(
 
 /// Named so `#[utoipa::path]` can take them as a `body` (it cannot parse nested generics).
 pub type BgpSummaryReport = Vec<InstanceReport<Vec<PeerSummary>>>;
-pub type BgpEvpnReport = Vec<InstanceReport<Vec<EvpnRouteSummary>>>;
+pub type BgpEvpnReport = Vec<InstanceReport<BgpEvpnPage>>;
 /// `GET /v1/bgp/flowspec`.
-pub type BgpFlowspecReport = Vec<InstanceReport<Vec<FlowspecRouteSummary>>>;
+pub type BgpFlowspecReport = Vec<InstanceReport<BgpFlowspecPage>>;
 /// `GET /v1/bgp/vpnv4` and `/v1/bgp/vpnv6`.
-pub type BgpVpnReport = Vec<InstanceReport<Vec<nos_proto::VpnRouteSummary>>>;
+pub type BgpVpnReport = Vec<InstanceReport<BgpVpnPage>>;
 pub type BgpRoutesReport = Vec<InstanceReport<BgpRoutesPage>>;
 pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
@@ -572,23 +572,91 @@ pub async fn bgp_summary(State(d): State<Daemons>) -> ApiResult<Json<BgpSummaryR
     ))
 }
 
-#[utoipa::path(get, path = "/v1/bgp/evpn", tag = "show", summary = "Received EVPN routes, per instance", responses((status = 200, body = BgpEvpnReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
-pub async fn bgp_evpn(State(d): State<Daemons>) -> ApiResult<Json<BgpEvpnReport>> {
-    let names = d
+/// One page of one instance's `GET /v1/bgp/evpn`.
+#[derive(Serialize, ToSchema)]
+pub struct BgpEvpnPage {
+    /// Routes in (peer, route text) order.
+    items: Vec<EvpnRouteSummary>,
+    pagination: Pagination,
+}
+
+/// One page of one instance's `GET /v1/bgp/flowspec`.
+#[derive(Serialize, ToSchema)]
+pub struct BgpFlowspecPage {
+    /// Rules in (peer, family, rule text) order.
+    items: Vec<FlowspecRouteSummary>,
+    pagination: Pagination,
+}
+
+/// One page of one instance's `GET /v1/bgp/vpnv4` or `/v1/bgp/vpnv6`.
+#[derive(Serialize, ToSchema)]
+pub struct BgpVpnPage {
+    /// Paths in (peer, route distinguisher, prefix) order.
+    items: Vec<nos_proto::VpnRouteSummary>,
+    pagination: Pagination,
+}
+
+/// The instances a paged BGP query asks and its page size. `after`/`limit`
+/// without `instance` is `400`; an unknown `instance` is `404`.
+async fn bgp_page_scope(d: &Daemons, q: &BgpPageQuery) -> ApiResult<(Vec<String>, u32)> {
+    if q.instance.is_none() && (q.after.is_some() || q.limit.is_some()) {
+        return Err(ApiError::BadRequest(
+            "pagination requires ?instance=".to_string(),
+        ));
+    }
+    let mut names: Vec<String> = d
         .running_config()
         .await?
         .bgp_instances
         .into_iter()
         .map(|i| i.name)
         .collect();
+    if let Some(want) = &q.instance {
+        names.retain(|n| n == want);
+        if names.is_empty() {
+            return Err(ApiError::NotFound(format!("no bgp instance '{want}'")));
+        }
+    }
+    Ok((
+        names,
+        q.limit.unwrap_or(BGP_PAGE_MAX).clamp(1, BGP_PAGE_MAX),
+    ))
+}
+
+/// Parses the opaque `after` cursor of a paged BGP query.
+fn bgp_after<C: std::str::FromStr>(after: Option<&str>) -> ApiResult<Option<C>> {
+    after
+        .map(|a| {
+            a.parse()
+                .map_err(|_| ApiError::BadRequest(format!("after '{a}' is not a cursor")))
+        })
+        .transpose()
+}
+
+#[utoipa::path(get, path = "/v1/bgp/evpn", tag = "show", summary = "One page of received EVPN routes, per instance", description = "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops.", params(("instance" = Option<String>, Query, description = "only this BGP instance; required with after or limit"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (opaque)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = BgpEvpnReport), (status = 400, body = ErrorBody, description = "after is not a cursor, or after/limit without instance"), (status = 404, body = ErrorBody, description = "no such bgp instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_evpn(
+    State(d): State<Daemons>,
+    Query(q): Query<BgpPageQuery>,
+) -> ApiResult<Json<BgpEvpnReport>> {
+    let (names, limit) = bgp_page_scope(&d, &q).await?;
+    let after: Option<nos_proto::EvpnRouteCursor> = bgp_after(q.after.as_deref())?;
     Ok(Json(
         per_instance(
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetEvpnRoutes,
+            || BgpRequest::GetEvpnRoutesPage {
+                after: after.clone(),
+                limit,
+            },
             |e| match e {
-                BgpEvent::EvpnRoutes(v) => Some(v),
+                BgpEvent::EvpnRoutesPage { routes, next } => Some(BgpEvpnPage {
+                    items: routes,
+                    pagination: Pagination {
+                        limit,
+                        next: next.map(|n| n.to_string()),
+                    },
+                }),
                 _ => None,
             },
         )
@@ -596,23 +664,30 @@ pub async fn bgp_evpn(State(d): State<Daemons>) -> ApiResult<Json<BgpEvpnReport>
     ))
 }
 
-#[utoipa::path(get, path = "/v1/bgp/flowspec", tag = "show", summary = "Received Flowspec routes, per instance", responses((status = 200, body = BgpFlowspecReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
-pub async fn bgp_flowspec(State(d): State<Daemons>) -> ApiResult<Json<BgpFlowspecReport>> {
-    let names = d
-        .running_config()
-        .await?
-        .bgp_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+#[utoipa::path(get, path = "/v1/bgp/flowspec", tag = "show", summary = "One page of received Flowspec routes, per instance", description = "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops.", params(("instance" = Option<String>, Query, description = "only this BGP instance; required with after or limit"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (opaque)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = BgpFlowspecReport), (status = 400, body = ErrorBody, description = "after is not a cursor, or after/limit without instance"), (status = 404, body = ErrorBody, description = "no such bgp instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_flowspec(
+    State(d): State<Daemons>,
+    Query(q): Query<BgpPageQuery>,
+) -> ApiResult<Json<BgpFlowspecReport>> {
+    let (names, limit) = bgp_page_scope(&d, &q).await?;
+    let after: Option<nos_proto::FlowspecRouteCursor> = bgp_after(q.after.as_deref())?;
     Ok(Json(
         per_instance(
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetFlowspecRoutes,
+            || BgpRequest::GetFlowspecRoutesPage {
+                after: after.clone(),
+                limit,
+            },
             |e| match e {
-                BgpEvent::FlowspecRoutes(v) => Some(v),
+                BgpEvent::FlowspecRoutesPage { routes, next } => Some(BgpFlowspecPage {
+                    items: routes,
+                    pagination: Pagination {
+                        limit,
+                        next: next.map(|n| n.to_string()),
+                    },
+                }),
                 _ => None,
             },
         )
@@ -621,56 +696,67 @@ pub async fn bgp_flowspec(State(d): State<Daemons>) -> ApiResult<Json<BgpFlowspe
 }
 
 #[derive(Deserialize)]
-pub struct RdQuery {
+pub struct VpnPageQuery {
     rd: Option<String>,
+    instance: Option<String>,
+    after: Option<String>,
+    limit: Option<u32>,
 }
 
-#[utoipa::path(get, path = "/v1/bgp/vpnv4", tag = "show", summary = "Received VPN-IPv4 routes (SAFI 128), per instance, optionally of one Route Distinguisher", params(("rd" = Option<String>, Query, description = "only routes with this Route Distinguisher (65001:1)")), responses((status = 200, body = BgpVpnReport), (status = 400, body = ErrorBody, description = "rd is not a Route Distinguisher"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+#[utoipa::path(get, path = "/v1/bgp/vpnv4", tag = "show", summary = "One page of received VPN-IPv4 routes (SAFI 128), per instance, optionally of one Route Distinguisher", description = "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops. `rd` filters every page the same way; a walk must keep it constant.", params(("rd" = Option<String>, Query, description = "only routes with this Route Distinguisher (65001:1)"), ("instance" = Option<String>, Query, description = "only this BGP instance; required with after or limit"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (opaque)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = BgpVpnReport), (status = 400, body = ErrorBody, description = "rd is not a Route Distinguisher, after is not a cursor, or after/limit without instance"), (status = 404, body = ErrorBody, description = "no such bgp instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn bgp_vpnv4(
     State(d): State<Daemons>,
-    Query(q): Query<RdQuery>,
+    Query(q): Query<VpnPageQuery>,
 ) -> ApiResult<Json<BgpVpnReport>> {
-    bgp_vpn(&d, nos_proto::AddressFamily::Vpnv4Unicast, q.rd).await
+    bgp_vpn(&d, nos_proto::AddressFamily::Vpnv4Unicast, q).await
 }
 
-#[utoipa::path(get, path = "/v1/bgp/vpnv6", tag = "show", summary = "Received VPN-IPv6 routes (SAFI 128), per instance, optionally of one Route Distinguisher", params(("rd" = Option<String>, Query, description = "only routes with this Route Distinguisher (65001:1)")), responses((status = 200, body = BgpVpnReport), (status = 400, body = ErrorBody, description = "rd is not a Route Distinguisher"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+#[utoipa::path(get, path = "/v1/bgp/vpnv6", tag = "show", summary = "One page of received VPN-IPv6 routes (SAFI 128), per instance, optionally of one Route Distinguisher", description = "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops. `rd` filters every page the same way; a walk must keep it constant.", params(("rd" = Option<String>, Query, description = "only routes with this Route Distinguisher (65001:1)"), ("instance" = Option<String>, Query, description = "only this BGP instance; required with after or limit"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (opaque)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = BgpVpnReport), (status = 400, body = ErrorBody, description = "rd is not a Route Distinguisher, after is not a cursor, or after/limit without instance"), (status = 404, body = ErrorBody, description = "no such bgp instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn bgp_vpnv6(
     State(d): State<Daemons>,
-    Query(q): Query<RdQuery>,
+    Query(q): Query<VpnPageQuery>,
 ) -> ApiResult<Json<BgpVpnReport>> {
-    bgp_vpn(&d, nos_proto::AddressFamily::Vpnv6Unicast, q.rd).await
+    bgp_vpn(&d, nos_proto::AddressFamily::Vpnv6Unicast, q).await
 }
 
 async fn bgp_vpn(
     d: &Daemons,
     family: nos_proto::AddressFamily,
-    rd: Option<String>,
+    q: VpnPageQuery,
 ) -> ApiResult<Json<BgpVpnReport>> {
-    if let Some(rd) = rd.as_deref()
+    if let Some(rd) = q.rd.as_deref()
         && nos_proto::evpn_id::parse_rd(rd).is_none()
     {
         return Err(ApiError::BadRequest(format!(
             "rd '{rd}' is not a Route Distinguisher"
         )));
     }
-    let names = d
-        .running_config()
-        .await?
-        .bgp_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let scope = BgpPageQuery {
+        instance: q.instance,
+        after: q.after,
+        limit: q.limit,
+    };
+    let (names, limit) = bgp_page_scope(d, &scope).await?;
+    let after: Option<nos_proto::VpnRouteCursor> = bgp_after(scope.after.as_deref())?;
     Ok(Json(
         per_instance(
             d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetVpnRoutes {
+            || BgpRequest::GetVpnRoutesPage {
                 family,
-                rd: rd.clone(),
+                rd: q.rd.clone(),
+                after,
+                limit,
             },
             |e| match e {
-                BgpEvent::VpnRoutes(v) => Some(v),
+                BgpEvent::VpnRoutesPage { routes, next } => Some(BgpVpnPage {
+                    items: routes,
+                    pagination: Pagination {
+                        limit,
+                        next: next.map(|n| n.to_string()),
+                    },
+                }),
                 _ => None,
             },
         )
@@ -698,32 +784,8 @@ pub async fn bgp_routes(
     State(d): State<Daemons>,
     Query(q): Query<BgpPageQuery>,
 ) -> ApiResult<Json<BgpRoutesReport>> {
-    if q.instance.is_none() && (q.after.is_some() || q.limit.is_some()) {
-        return Err(ApiError::BadRequest(
-            "pagination requires ?instance=".to_string(),
-        ));
-    }
-    let after: Option<nos_proto::BgpRouteCursor> = q
-        .after
-        .map(|a| {
-            a.parse()
-                .map_err(|_| ApiError::BadRequest(format!("after '{a}' is not a cursor")))
-        })
-        .transpose()?;
-    let limit = q.limit.unwrap_or(BGP_PAGE_MAX).clamp(1, BGP_PAGE_MAX);
-    let mut names: Vec<String> = d
-        .running_config()
-        .await?
-        .bgp_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
-    if let Some(want) = &q.instance {
-        names.retain(|n| n == want);
-        if names.is_empty() {
-            return Err(ApiError::NotFound(format!("no bgp instance '{want}'")));
-        }
-    }
+    let (names, limit) = bgp_page_scope(&d, &q).await?;
+    let after: Option<nos_proto::BgpRouteCursor> = bgp_after(q.after.as_deref())?;
     Ok(Json(
         per_instance(
             &d,

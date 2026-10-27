@@ -21,7 +21,8 @@ use crate::collision::{FsmCommand, PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
 use crate::gr::Disconnect;
 use crate::message::CeaseSubcode;
-use crate::rib::{BgpRib, SharedRib};
+use crate::page::{Keyed, Snapshot};
+use crate::rib::{BgpRib, EvpnKey, FlowKey, SharedRib};
 use crate::rpki;
 use crate::status::{PeerState, PeerStatus};
 use crate::tcp;
@@ -337,6 +338,21 @@ struct Listeners {
     /// later peer removal/change knows what to uninstall before installing
     /// the new state.
     applied_auth: HashMap<IpAddr, ResolvedAuth>,
+}
+
+/// A connection's `show bgp vpnv4|vpnv6` snapshot and the `(family, rd)` it
+/// was built for.
+pub type VpnSnapshot = (
+    Option<(nos_proto::AddressFamily, Option<String>)>,
+    Snapshot<nos_proto::VpnRouteCursor>,
+);
+
+/// What one `GetVpnRoutesPage` asks for.
+pub struct VpnAsk<'a> {
+    pub family: nos_proto::AddressFamily,
+    pub rd: Option<&'a str>,
+    pub after: Option<&'a nos_proto::VpnRouteCursor>,
+    pub limit: u32,
 }
 
 /// Owns every raw-TCP + FSM session for one `nos-bgpd` process. `reconcile`
@@ -808,93 +824,159 @@ impl SessionManager {
             .collect()
     }
 
-    /// Every received EVPN route, for `BgpRequest::GetEvpnRoutes` — backs
-    /// `nos-cli`'s `show bgp evpn`.
-    pub async fn evpn_route_summaries(&self) -> Vec<nos_proto::EvpnRouteSummary> {
-        self.bgp_rib
-            .lock()
-            .await
-            .evpn_routes()
-            .into_iter()
-            .map(|(peer, nlri, route)| nos_proto::EvpnRouteSummary {
-                peer,
-                route_type: nlri.route_type(),
-                route: nlri.to_string(),
-                next_hop: route.next_hop,
-                extended_communities: route
-                    .extended_communities
-                    .iter()
-                    .map(|&c| crate::evpn::format_ext_community(c))
-                    .collect(),
-            })
-            .collect()
+    /// One page of received EVPN routes after `after`, for
+    /// `BgpRequest::GetEvpnRoutesPage` — backs `nos-cli`'s `show bgp evpn`
+    /// (#723). Same snapshot rules as [`Self::route_page`].
+    pub async fn evpn_page(
+        &self,
+        snapshot: &mut Snapshot<EvpnKey>,
+        after: Option<&nos_proto::EvpnRouteCursor>,
+        limit: u32,
+        budget: usize,
+    ) -> (
+        Vec<nos_proto::EvpnRouteSummary>,
+        Option<nos_proto::EvpnRouteCursor>,
+    ) {
+        let rib = self.bgp_rib.lock().await;
+        let after = after.cloned().map(Keyed::at);
+        let (rows, next) = crate::page::page(
+            snapshot,
+            &crate::page::Ask {
+                after: after.as_ref(),
+                limit: crate::page::clamp_limit(limit, nos_proto::BGP_PAGE_MAX),
+                budget,
+                now: std::time::Instant::now(),
+            },
+            || rib.evpn_keys(),
+            |k| {
+                let (peer, route) = rib.evpn_at(k)?;
+                Some(nos_proto::EvpnRouteSummary {
+                    peer,
+                    route_type: route.nlri.route_type(),
+                    route: route.nlri.to_string(),
+                    next_hop: route.next_hop,
+                    extended_communities: route
+                        .extended_communities
+                        .iter()
+                        .map(|&c| crate::evpn::format_ext_community(c))
+                        .collect(),
+                })
+            },
+            nos_proto::page::wire_len,
+        );
+        (rows, next.map(|k| k.cursor))
     }
 
-    /// Every received Flowspec route, for `BgpRequest::GetFlowspecRoutes` —
-    /// backs `nos-cli`'s `show bgp flowspec`. `acld` is `nos-acld`'s
-    /// `ShowFlowspec` reply (`None`: unreachable), joined on this instance
-    /// and the flow text into each selected copy's `dataplane` (#562).
-    pub async fn flowspec_route_summaries(
+    /// One page of received Flowspec routes after `after`, for
+    /// `BgpRequest::GetFlowspecRoutesPage` — backs `nos-cli`'s `show bgp
+    /// flowspec` (#723). `acld` is `nos-acld`'s `ShowFlowspec` reply (`None`:
+    /// unreachable), joined on this instance and the flow text into each
+    /// selected copy's `dataplane` (#562), for this page's rows only.
+    pub async fn flowspec_page(
         &self,
+        snapshot: &mut Snapshot<FlowKey>,
+        after: Option<&nos_proto::FlowspecRouteCursor>,
+        limit: u32,
+        budget: usize,
         acld: Option<&[nos_proto::FlowspecRuleStatus]>,
-    ) -> Vec<nos_proto::FlowspecRouteSummary> {
+    ) -> (
+        Vec<nos_proto::FlowspecRouteSummary>,
+        Option<nos_proto::FlowspecRouteCursor>,
+    ) {
         let rib = self.bgp_rib.lock().await;
-        rib.flowspec_routes()
-            .into_iter()
-            .map(|(peer, route)| nos_proto::FlowspecRouteSummary {
-                dataplane: rib.flowspec_selected(peer, route).then(|| {
-                    crate::acl_push_client::dataplane(&self.instance, &route.nlri.to_string(), acld)
-                }),
-                peer,
-                nlri: route.nlri.to_string(),
-                extended_communities: route
-                    .attributes
-                    .extended_communities
-                    .iter()
-                    .map(|&c| crate::flowspec::format_action(c))
-                    .collect(),
-                validity: route
-                    .validity
-                    .map_or_else(|| "unknown".to_string(), |v| v.to_string()),
-                actions: crate::flowspec_action::describe(
-                    &route.attributes.extended_communities,
-                    &route.attributes.ipv6_extended_communities,
-                ),
-            })
-            .collect()
+        let after = after.cloned().map(Keyed::at);
+        let (rows, next) = crate::page::page(
+            snapshot,
+            &crate::page::Ask {
+                after: after.as_ref(),
+                limit: crate::page::clamp_limit(limit, nos_proto::BGP_PAGE_MAX),
+                budget,
+                now: std::time::Instant::now(),
+            },
+            || rib.flowspec_keys(),
+            |k| {
+                let (peer, route) = rib.flowspec_at(k)?;
+                Some(nos_proto::FlowspecRouteSummary {
+                    dataplane: rib.flowspec_selected(peer, route).then(|| {
+                        crate::acl_push_client::dataplane(
+                            &self.instance,
+                            &route.nlri.to_string(),
+                            acld,
+                        )
+                    }),
+                    peer,
+                    nlri: route.nlri.to_string(),
+                    extended_communities: route
+                        .attributes
+                        .extended_communities
+                        .iter()
+                        .map(|&c| crate::flowspec::format_action(c))
+                        .collect(),
+                    validity: route
+                        .validity
+                        .map_or_else(|| "unknown".to_string(), |v| v.to_string()),
+                    actions: crate::flowspec_action::describe(
+                        &route.attributes.extended_communities,
+                        &route.attributes.ipv6_extended_communities,
+                    ),
+                })
+            },
+            nos_proto::page::wire_len,
+        );
+        (rows, next.map(|k| k.cursor))
     }
 
-    /// Every received VPN path of `family`, only those with Route
-    /// Distinguisher `rd` when set (an unparsable one matches nothing), for
-    /// `BgpRequest::GetVpnRoutes` (`show bgp vpnv4|vpnv6`).
-    pub async fn vpn_route_summaries(
+    /// One page of received VPN paths of `family` after `after`, only those
+    /// with Route Distinguisher `rd` when set (an unparsable one matches
+    /// nothing), for `BgpRequest::GetVpnRoutesPage` (`show bgp
+    /// vpnv4|vpnv6`, #723). The snapshot also remembers the `(family, rd)`
+    /// it was built for and is rebuilt when a request asks for another.
+    pub async fn vpn_page(
         &self,
-        family: AddressFamily,
-        rd: Option<&str>,
-    ) -> Vec<nos_proto::VpnRouteSummary> {
-        let rd = rd.map(nos_proto::evpn_id::parse_rd);
+        snapshot: &mut VpnSnapshot,
+        ask: &VpnAsk<'_>,
+        budget: usize,
+    ) -> (
+        Vec<nos_proto::VpnRouteSummary>,
+        Option<nos_proto::VpnRouteCursor>,
+    ) {
+        let want = (ask.family, ask.rd.map(str::to_string));
+        if snapshot.0.as_ref() != Some(&want) {
+            *snapshot = (Some(want), Snapshot::default());
+        }
+        let rd = ask.rd.map(nos_proto::evpn_id::parse_rd);
         let rib = self.bgp_rib.lock().await;
-        rib.vpn_routes(family)
-            .into_iter()
-            .filter(|(_, k, ..)| rd.is_none_or(|want| want == Some(k.0)))
-            .map(|(peer, k, r, best)| nos_proto::VpnRouteSummary {
-                peer,
-                rd: crate::vpn::format_rd(&k.0),
-                prefix: k.1.to_string(),
-                labels: r.labels.clone(),
-                next_hop: r.route.next_hop.unwrap_or(peer),
-                route_targets: crate::vpn::route_targets(&r.route.extended_communities)
-                    .into_iter()
-                    .map(crate::vpn::format_ext_community)
-                    .collect(),
-                as_path: r.route.as_path.to_string(),
-                local_pref: r.route.local_pref,
-                best,
-                site_of_origin: crate::vpn::sites_of_origin(&r.route.extended_communities)
-                    .first()
-                    .map(|s| crate::vpn::format_soo(*s)),
-            })
-            .collect()
+        crate::page::page(
+            &mut snapshot.1,
+            &crate::page::Ask {
+                after: ask.after,
+                limit: crate::page::clamp_limit(ask.limit, nos_proto::BGP_PAGE_MAX),
+                budget,
+                now: std::time::Instant::now(),
+            },
+            || rib.vpn_keys(ask.family, rd),
+            |c| {
+                let (k, r, best) = rib.vpn_at(c)?;
+                Some(nos_proto::VpnRouteSummary {
+                    peer: c.peer,
+                    rd: crate::vpn::format_rd(&k.0),
+                    prefix: k.1.to_string(),
+                    labels: r.labels.clone(),
+                    next_hop: r.route.next_hop.unwrap_or(c.peer),
+                    route_targets: crate::vpn::route_targets(&r.route.extended_communities)
+                        .into_iter()
+                        .map(crate::vpn::format_ext_community)
+                        .collect(),
+                    as_path: r.route.as_path.to_string(),
+                    local_pref: r.route.local_pref,
+                    best,
+                    site_of_origin: crate::vpn::sites_of_origin(&r.route.extended_communities)
+                        .first()
+                        .map(|s| crate::vpn::format_soo(*s)),
+                })
+            },
+            nos_proto::page::wire_len,
+        )
     }
 
     /// One page of unicast routes after `after`, for `BgpRequest::GetRoutesPage`
@@ -1706,9 +1788,22 @@ mod tests {
             &update,
             &nos_rpl::ACCEPT_ALL,
         );
-        let all = m
-            .vpn_route_summaries(AddressFamily::Vpnv4Unicast, None)
-            .await;
+        let mgr = &m;
+        let vpn = |family, rd| async move {
+            mgr.vpn_page(
+                &mut VpnSnapshot::default(),
+                &VpnAsk {
+                    family,
+                    rd,
+                    after: None,
+                    limit: 0,
+                },
+                usize::MAX,
+            )
+            .await
+            .0
+        };
+        let all = vpn(AddressFamily::Vpnv4Unicast, None).await;
         assert_eq!(all.len(), 2);
         assert_eq!(
             all[0],
@@ -1725,15 +1820,170 @@ mod tests {
                 site_of_origin: None,
             }
         );
-        let one = m
-            .vpn_route_summaries(AddressFamily::Vpnv4Unicast, Some("65001:2"))
-            .await;
+        let one = vpn(AddressFamily::Vpnv4Unicast, Some("65001:2")).await;
         assert_eq!((one.len(), one[0].labels.clone()), (1, vec![200]));
         for (family, rd) in [
             (AddressFamily::Vpnv6Unicast, None),
             (AddressFamily::Vpnv4Unicast, Some("not-an-rd")),
         ] {
-            assert_eq!(m.vpn_route_summaries(family, rd).await.len(), 0);
+            assert_eq!(vpn(family, rd).await.len(), 0);
+        }
+
+        // Pages of one path each walk both paths once, in order; the RD
+        // filter holds across pages.
+        let walk = |rd: Option<&'static str>| async move {
+            let mut snap = VpnSnapshot::default();
+            let (mut after, mut seen) = (None, Vec::new());
+            loop {
+                let (rows, next) = mgr
+                    .vpn_page(
+                        &mut snap,
+                        &VpnAsk {
+                            family: AddressFamily::Vpnv4Unicast,
+                            rd,
+                            after: after.as_ref(),
+                            limit: 1,
+                        },
+                        usize::MAX,
+                    )
+                    .await;
+                assert_eq!(rows.len(), 1);
+                seen.push(rows[0].rd.clone());
+                match next {
+                    Some(n) => after = Some(n),
+                    None => return seen,
+                }
+            }
+        };
+        assert_eq!(walk(None).await, ["65001:1", "65001:2"]);
+        assert_eq!(walk(Some("65001:2")).await, ["65001:2"]);
+
+        // A page for other parameters on the same connection rebuilds the
+        // snapshot instead of reading the old one: after the first path of
+        // an unfiltered walk, a request filtered on that RD finds nothing
+        // further (the old snapshot would have served the second RD).
+        let mut snap = VpnSnapshot::default();
+        let ask = |rd, after| VpnAsk {
+            family: AddressFamily::Vpnv4Unicast,
+            rd,
+            after,
+            limit: 1,
+        };
+        let (_, next) = m.vpn_page(&mut snap, &ask(None, None), usize::MAX).await;
+        let (rows, next) = m
+            .vpn_page(&mut snap, &ask(Some("65001:1"), next.as_ref()), usize::MAX)
+            .await;
+        assert_eq!((rows.len(), next), (0, None));
+    }
+
+    /// #723: EVPN and Flowspec pages of one row each walk every row once, in
+    /// the old unpaged order, and a byte budget below one row still serves
+    /// one row per page.
+    #[tokio::test]
+    async fn evpn_and_flowspec_pages_walk_every_row_once() {
+        let m = SessionManager::new("r1".into());
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let update = |mp| crate::message::UpdateMessage {
+            withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
+            nlri: vec![],
+            nlri_path_ids: vec![],
+            attributes: Some(crate::message::PathAttributes {
+                origin: crate::message::Origin::Igp,
+                as_path: vec![65001].into(),
+                next_hop: std::net::Ipv4Addr::UNSPECIFIED,
+                local_pref: None,
+                med: None,
+                originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                otc: None,
+                cluster_list: vec![],
+                communities: vec![],
+                extended_communities: vec![0x0002_fde8_0000_2710],
+                large_communities: vec![],
+                ipv6_extended_communities: vec![],
+                pmsi: None,
+            }),
+            mp_reach: vec![mp],
+            mp_unreach: vec![],
+        };
+        let mp = |afi, safi| crate::message::MpReachNlri {
+            afi,
+            safi,
+            next_hop: peer,
+            nlri: vec![],
+            nlri_path_ids: vec![],
+            evpn: vec![],
+            flowspec: vec![],
+            vpn: vec![],
+        };
+        let mut evpn = mp(crate::message::AFI_L2VPN, crate::message::SAFI_EVPN);
+        evpn.evpn = [3u8, 1, 2]
+            .map(|n| crate::evpn::EvpnNlri::MacIp {
+                rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+                esi: [0; 10],
+                tag: 0,
+                mac: [0xaa, 0, 0, 0, 0, n],
+                ip: None,
+                labels: vec![10_000],
+            })
+            .to_vec();
+        let mut flow = mp(1, crate::message::SAFI_FLOWSPEC);
+        flow.flowspec = [3u8, 1, 2]
+            .map(|n| {
+                crate::flowspec::FlowSpec::decode(crate::flowspec::Afi::V4, &[5, 1, 24, 10, n, 0])
+                    .unwrap()
+                    .0
+            })
+            .to_vec();
+        let mut rib = m.bgp_rib.lock().await;
+        for mp in [evpn, flow] {
+            rib.handle_update(
+                peer,
+                false,
+                "2.2.2.2".parse().unwrap(),
+                &update(mp),
+                &nos_rpl::ACCEPT_ALL,
+            );
+        }
+        let want_evpn: Vec<String> = rib
+            .evpn_routes()
+            .iter()
+            .map(|(_, n, _)| n.to_string())
+            .collect();
+        let want_flow: Vec<String> = rib
+            .flowspec_routes()
+            .iter()
+            .map(|(_, r)| r.nlri.to_string())
+            .collect();
+        drop(rib);
+        assert_eq!((want_evpn.len(), want_flow.len()), (3, 3));
+
+        for (limit, budget) in [(1, usize::MAX), (0, 0), (2, usize::MAX)] {
+            let (mut snap, mut after, mut seen) = (Snapshot::default(), None, Vec::new());
+            loop {
+                let (rows, next) = m.evpn_page(&mut snap, after.as_ref(), limit, budget).await;
+                seen.extend(rows.into_iter().map(|r| r.route));
+                match next {
+                    Some(n) => after = Some(n),
+                    None => break,
+                }
+            }
+            assert_eq!(seen, want_evpn, "evpn limit {limit} budget {budget}");
+
+            let (mut snap, mut after, mut seen) = (Snapshot::default(), None, Vec::new());
+            loop {
+                let (rows, next) = m
+                    .flowspec_page(&mut snap, after.as_ref(), limit, budget, None)
+                    .await;
+                seen.extend(rows.into_iter().map(|r| r.nlri));
+                match next {
+                    Some(n) => after = Some(n),
+                    None => break,
+                }
+            }
+            assert_eq!(seen, want_flow, "flowspec limit {limit} budget {budget}");
         }
     }
 

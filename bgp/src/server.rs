@@ -10,7 +10,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::collision::FsmCommand;
 use crate::page::{Snapshot, PAGE_BYTES};
-use crate::session::SessionManager;
+use crate::session::{SessionManager, VpnAsk, VpnSnapshot};
 
 /// Binds `listen_socket` and spawns the IPC accept loop for session
 /// summaries.
@@ -46,6 +46,9 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
         | BgpRequest::ClearPeer { .. }
         | BgpRequest::GetRoutes
         | BgpRequest::GetRoutesPage { .. }
+        | BgpRequest::GetEvpnRoutesPage { .. }
+        | BgpRequest::GetFlowspecRoutesPage { .. }
+        | BgpRequest::GetVpnRoutesPage { .. }
         | BgpRequest::GetRpkiSummary => {
             matches!(role, Role::User | Role::Restd)
         }
@@ -82,14 +85,76 @@ async fn serve(incoming: Incoming, ctx: Ctx) {
     }
 }
 
+/// One sorted key snapshot per paged query kind, dropped with the connection.
+#[derive(Default)]
+struct Snapshots {
+    routes: Snapshot<nos_proto::BgpRouteCursor>,
+    evpn: Snapshot<crate::rib::EvpnKey>,
+    flowspec: Snapshot<crate::rib::FlowKey>,
+    vpn: VpnSnapshot,
+}
+
+impl Snapshots {
+    /// The reply to a paged query (#722, #723); `None` for any other request.
+    async fn page(
+        &mut self,
+        req: &BgpRequest,
+        sessions: &SessionManager,
+        watchdog_socket: &Path,
+    ) -> Option<BgpEvent> {
+        Some(match req {
+            BgpRequest::GetRoutesPage { after, limit } => {
+                let (routes, next) = sessions
+                    .route_page(&mut self.routes, after.as_ref(), *limit, PAGE_BYTES)
+                    .await;
+                BgpEvent::RoutesPage { routes, next }
+            }
+            BgpRequest::GetEvpnRoutesPage { after, limit } => {
+                let (routes, next) = sessions
+                    .evpn_page(&mut self.evpn, after.as_ref(), *limit, PAGE_BYTES)
+                    .await;
+                BgpEvent::EvpnRoutesPage { routes, next }
+            }
+            BgpRequest::GetFlowspecRoutesPage { after, limit } => {
+                let acld = crate::acl_push_client::show(watchdog_socket).await;
+                let (routes, next) = sessions
+                    .flowspec_page(
+                        &mut self.flowspec,
+                        after.as_ref(),
+                        *limit,
+                        PAGE_BYTES,
+                        acld.as_deref(),
+                    )
+                    .await;
+                BgpEvent::FlowspecRoutesPage { routes, next }
+            }
+            BgpRequest::GetVpnRoutesPage {
+                family,
+                rd,
+                after,
+                limit,
+            } => {
+                let ask = VpnAsk {
+                    family: *family,
+                    rd: rd.as_deref(),
+                    after: after.as_ref(),
+                    limit: *limit,
+                };
+                let (routes, next) = sessions.vpn_page(&mut self.vpn, &ask, PAGE_BYTES).await;
+                BgpEvent::VpnRoutesPage { routes, next }
+            }
+            _ => return None,
+        })
+    }
+}
+
 async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
     let (instance, sessions, watchdog_socket) = &*ctx;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<BgpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<BgpEvent>::default());
 
-    // One sorted key snapshot per query kind, dropped with the connection.
-    let mut routes_snapshot = Snapshot::default();
+    let mut snapshots = Snapshots::default();
     while let Some(msg) = reader.next().await {
         let req = match msg {
             Ok(req) => req,
@@ -106,6 +171,12 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
             break;
         }
         trace!(instance = %instance, request = ?req, "serving BGP query");
+        if let Some(event) = snapshots.page(&req, sessions, watchdog_socket).await {
+            if writer.send(event).await.is_err() {
+                break;
+            }
+            continue;
+        }
         match req {
             BgpRequest::GetSummary => {
                 let event = BgpEvent::Summary(sessions.peer_summaries().await);
@@ -113,46 +184,20 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                     break;
                 }
             }
-            BgpRequest::GetEvpnRoutes => {
-                let event = BgpEvent::EvpnRoutes(sessions.evpn_route_summaries().await);
+            BgpRequest::GetRoutes
+            | BgpRequest::GetEvpnRoutes
+            | BgpRequest::GetFlowspecRoutes
+            | BgpRequest::GetVpnRoutes { .. } => {
+                let event = BgpEvent::Error("removed (#722, #723): use GetRoutesPage, GetEvpnRoutesPage, GetFlowspecRoutesPage or GetVpnRoutesPage".into());
                 if writer.send(event).await.is_err() {
                     break;
                 }
             }
-            BgpRequest::GetFlowspecRoutes => {
-                let acld = crate::acl_push_client::show(watchdog_socket).await;
-                let event = BgpEvent::FlowspecRoutes(
-                    sessions.flowspec_route_summaries(acld.as_deref()).await,
-                );
-                if writer.send(event).await.is_err() {
-                    break;
-                }
-            }
-            BgpRequest::GetVpnRoutes { family, rd } => {
-                let event =
-                    BgpEvent::VpnRoutes(sessions.vpn_route_summaries(family, rd.as_deref()).await);
-                if writer.send(event).await.is_err() {
-                    break;
-                }
-            }
-            BgpRequest::GetRoutes => {
-                let event = BgpEvent::Error("GetRoutes removed, use GetRoutesPage".to_string());
-                if writer.send(event).await.is_err() {
-                    break;
-                }
-            }
-            BgpRequest::GetRoutesPage { after, limit } => {
-                let (routes, next) = sessions
-                    .route_page(&mut routes_snapshot, after.as_ref(), limit, PAGE_BYTES)
-                    .await;
-                if writer
-                    .send(BgpEvent::RoutesPage { routes, next })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
+            // Answered above, through the connection's snapshots.
+            BgpRequest::GetRoutesPage { .. }
+            | BgpRequest::GetEvpnRoutesPage { .. }
+            | BgpRequest::GetFlowspecRoutesPage { .. }
+            | BgpRequest::GetVpnRoutesPage { .. } => {}
             BgpRequest::GetRpkiSummary => {
                 let event = BgpEvent::RpkiSummary(sessions.rpki_summaries().await);
                 if writer.send(event).await.is_err() {
@@ -287,6 +332,33 @@ mod authz_tests {
                 matches!(role, Role::User | Role::Restd),
                 "{role:?} evpn routes"
             );
+            assert_eq!(
+                allowed(role, &BgpRequest::GetFlowspecRoutes),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} flowspec routes"
+            );
+            for req in [
+                BgpRequest::GetEvpnRoutesPage {
+                    after: None,
+                    limit: 10,
+                },
+                BgpRequest::GetFlowspecRoutesPage {
+                    after: None,
+                    limit: 10,
+                },
+                BgpRequest::GetVpnRoutesPage {
+                    family: nos_proto::AddressFamily::Vpnv4Unicast,
+                    rd: None,
+                    after: None,
+                    limit: 10,
+                },
+            ] {
+                assert_eq!(
+                    allowed(role, &req),
+                    matches!(role, Role::User | Role::Restd),
+                    "{role:?} {req:?}"
+                );
+            }
             assert_eq!(
                 allowed(
                     role,

@@ -162,9 +162,18 @@ fn lab() -> Lab {
             }),
             "bgp" => serve(role, name, &path, |r: BgpRequest| {
                 vec![match r {
-                    BgpRequest::GetEvpnRoutes => BgpEvent::EvpnRoutes(Vec::new()),
-                    BgpRequest::GetFlowspecRoutes => BgpEvent::FlowspecRoutes(Vec::new()),
-                    BgpRequest::GetVpnRoutes { .. } => BgpEvent::VpnRoutes(Vec::new()),
+                    BgpRequest::GetEvpnRoutesPage { .. } => BgpEvent::EvpnRoutesPage {
+                        routes: Vec::new(),
+                        next: None,
+                    },
+                    BgpRequest::GetFlowspecRoutesPage { .. } => BgpEvent::FlowspecRoutesPage {
+                        routes: Vec::new(),
+                        next: None,
+                    },
+                    BgpRequest::GetVpnRoutesPage { .. } => BgpEvent::VpnRoutesPage {
+                        routes: Vec::new(),
+                        next: None,
+                    },
                     BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
                     BgpRequest::GetRoutesPage { .. } => BgpEvent::RoutesPage {
                         routes: Vec::new(),

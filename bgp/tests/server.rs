@@ -74,11 +74,19 @@ async fn only_people_get_the_show_queries_answered() {
             let (mut r, mut w) = connect_as(&path, role).await;
             let req = match query {
                 0 => BgpRequest::GetSummary,
-                1 => BgpRequest::GetEvpnRoutes,
-                3 => BgpRequest::GetFlowspecRoutes,
-                4 => BgpRequest::GetVpnRoutes {
+                1 => BgpRequest::GetEvpnRoutesPage {
+                    after: None,
+                    limit: 10,
+                },
+                3 => BgpRequest::GetFlowspecRoutesPage {
+                    after: None,
+                    limit: 10,
+                },
+                4 => BgpRequest::GetVpnRoutesPage {
                     family: nos_proto::AddressFamily::Vpnv4Unicast,
                     rd: Some("65001:1".into()),
+                    after: None,
+                    limit: 10,
                 },
                 _ => BgpRequest::GetRpkiSummary,
             };
@@ -90,14 +98,39 @@ async fn only_people_get_the_show_queries_answered() {
             }
             let empty = match reply {
                 Some(BgpEvent::Summary(v)) if query == 0 => v.is_empty(),
-                Some(BgpEvent::EvpnRoutes(v)) if query == 1 => v.is_empty(),
+                Some(BgpEvent::EvpnRoutesPage { routes, next }) if query == 1 => {
+                    routes.is_empty() && next.is_none()
+                }
                 Some(BgpEvent::RpkiSummary(v)) if query == 2 => v.is_empty(),
-                Some(BgpEvent::FlowspecRoutes(v)) if query == 3 => v.is_empty(),
-                Some(BgpEvent::VpnRoutes(v)) if query == 4 => v.is_empty(),
+                Some(BgpEvent::FlowspecRoutesPage { routes, next }) if query == 3 => {
+                    routes.is_empty() && next.is_none()
+                }
+                Some(BgpEvent::VpnRoutesPage { routes, next }) if query == 4 => {
+                    routes.is_empty() && next.is_none()
+                }
                 other => panic!("{role:?} query {query}: unexpected {other:?}"),
             };
             assert!(empty, "{role:?} query {query}: nothing is configured");
         }
+    }
+}
+
+/// #723: the removed unpaged EVPN/Flowspec/VPN queries answer with an error
+/// and keep the connection usable.
+#[tokio::test]
+async fn the_removed_unpaged_queries_answer_with_an_error() {
+    let (_tmp, path, _server) = start();
+    let (mut r, mut w) = connect_as(&path, Role::User).await;
+    for req in [
+        BgpRequest::GetEvpnRoutes,
+        BgpRequest::GetFlowspecRoutes,
+        BgpRequest::GetVpnRoutes {
+            family: nos_proto::AddressFamily::Vpnv4Unicast,
+            rd: None,
+        },
+    ] {
+        w.send(req).await.unwrap();
+        assert!(matches!(next_event(&mut r).await, Some(BgpEvent::Error(_))));
     }
 }
 

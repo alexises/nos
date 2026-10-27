@@ -62,88 +62,122 @@ pub async fn get_summary(bgp_socket: &Path) -> Result<Vec<PeerSummary>, BgpClien
     }
 }
 
-/// Fetches every EVPN route the instance has received from any peer.
-pub async fn get_evpn_routes(bgp_socket: &Path) -> Result<Vec<EvpnRouteSummary>, BgpClientError> {
-    let (mut reader, mut writer) = connect(bgp_socket).await?;
-    writer.send(BgpRequest::GetEvpnRoutes).await?;
-    match reader.next().await {
-        Some(Ok(BgpEvent::EvpnRoutes(routes))) => Ok(routes),
-        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
-        Some(Err(e)) => Err(BgpClientError::Io(e)),
-        None => Err(BgpClientError::ConnectionClosed),
-    }
-}
-
-/// Fetches every Flowspec rule the instance has received from any peer.
-pub async fn get_flowspec_routes(
+/// Walks a paged query page by page over one connection (the daemon keeps
+/// its key snapshot per connection), handing each page to `on_page` as it
+/// arrives so nothing holds the whole table. `ask` builds the request for an
+/// `after` cursor, `split` takes a reply apart (`Err`: not this query's
+/// reply). A cursor that does not advance is an error, never a loop.
+async fn walk<C: Ord + Clone, T>(
     bgp_socket: &Path,
-) -> Result<Vec<FlowspecRouteSummary>, BgpClientError> {
+    ask: impl Fn(Option<C>) -> BgpRequest,
+    split: impl Fn(BgpEvent) -> Result<(Vec<T>, Option<C>), BgpEvent>,
+    mut on_page: impl FnMut(&[T]),
+) -> Result<(), BgpClientError> {
     let (mut reader, mut writer) = connect(bgp_socket).await?;
-    writer.send(BgpRequest::GetFlowspecRoutes).await?;
-    match reader.next().await {
-        Some(Ok(BgpEvent::FlowspecRoutes(routes))) => Ok(routes),
-        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
-        Some(Err(e)) => Err(BgpClientError::Io(e)),
-        None => Err(BgpClientError::ConnectionClosed),
+    let mut after: Option<C> = None;
+    loop {
+        writer.send(ask(after.clone())).await?;
+        let reply = match reader.next().await {
+            Some(Ok(BgpEvent::Error(msg))) => return Err(BgpClientError::Daemon(msg)),
+            Some(Ok(reply)) => reply,
+            Some(Err(e)) => return Err(BgpClientError::Io(e)),
+            None => return Err(BgpClientError::ConnectionClosed),
+        };
+        let (rows, next) = split(reply).map_err(BgpClientError::UnexpectedReply)?;
+        on_page(&rows);
+        match next {
+            None => return Ok(()),
+            Some(n) if after.as_ref().is_some_and(|a| &n <= a) => {
+                return Err(BgpClientError::CursorStuck);
+            }
+            Some(n) => after = Some(n),
+        }
     }
 }
 
-/// Fetches every VPN path of `family` the instance has received, only those
-/// of Route Distinguisher `rd` when set.
-pub async fn get_vpn_routes(
+/// Walks the instance's received EVPN routes (`show bgp evpn`).
+pub async fn for_each_evpn_routes_page(
+    bgp_socket: &Path,
+    on_page: impl FnMut(&[EvpnRouteSummary]),
+) -> Result<(), BgpClientError> {
+    walk(
+        bgp_socket,
+        |after| BgpRequest::GetEvpnRoutesPage {
+            after,
+            limit: nos_proto::BGP_PAGE_MAX,
+        },
+        |e| match e {
+            BgpEvent::EvpnRoutesPage { routes, next } => Ok((routes, next)),
+            other => Err(other),
+        },
+        on_page,
+    )
+    .await
+}
+
+/// Walks the instance's received Flowspec rules (`show bgp flowspec`).
+pub async fn for_each_flowspec_routes_page(
+    bgp_socket: &Path,
+    on_page: impl FnMut(&[FlowspecRouteSummary]),
+) -> Result<(), BgpClientError> {
+    walk(
+        bgp_socket,
+        |after| BgpRequest::GetFlowspecRoutesPage {
+            after,
+            limit: nos_proto::BGP_PAGE_MAX,
+        },
+        |e| match e {
+            BgpEvent::FlowspecRoutesPage { routes, next } => Ok((routes, next)),
+            other => Err(other),
+        },
+        on_page,
+    )
+    .await
+}
+
+/// Walks the instance's received VPN paths of `family`, only those of Route
+/// Distinguisher `rd` when set (`show bgp vpnv4|vpnv6 [rd <rd>]`).
+pub async fn for_each_vpn_routes_page(
     bgp_socket: &Path,
     family: nos_proto::AddressFamily,
     rd: Option<&str>,
-) -> Result<Vec<nos_proto::VpnRouteSummary>, BgpClientError> {
-    let (mut reader, mut writer) = connect(bgp_socket).await?;
-    writer
-        .send(BgpRequest::GetVpnRoutes {
+    on_page: impl FnMut(&[nos_proto::VpnRouteSummary]),
+) -> Result<(), BgpClientError> {
+    walk(
+        bgp_socket,
+        |after| BgpRequest::GetVpnRoutesPage {
             family,
             rd: rd.map(str::to_string),
-        })
-        .await?;
-    match reader.next().await {
-        Some(Ok(BgpEvent::VpnRoutes(routes))) => Ok(routes),
-        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
-        Some(Err(e)) => Err(BgpClientError::Io(e)),
-        None => Err(BgpClientError::ConnectionClosed),
-    }
+            after,
+            limit: nos_proto::BGP_PAGE_MAX,
+        },
+        |e| match e {
+            BgpEvent::VpnRoutesPage { routes, next } => Ok((routes, next)),
+            other => Err(other),
+        },
+        on_page,
+    )
+    .await
 }
 
-/// Walks the instance's unicast routes page by page over one connection (the
-/// daemon keeps its key snapshot per connection), handing each page to
-/// `on_page` as it arrives so nothing holds the whole table. A cursor that
-/// does not advance is an error, never a loop.
+/// Walks the instance's unicast routes (`show bgp routes`).
 pub async fn for_each_routes_page(
     bgp_socket: &Path,
-    mut on_page: impl FnMut(&[nos_proto::BgpRouteSummary]),
+    on_page: impl FnMut(&[nos_proto::BgpRouteSummary]),
 ) -> Result<(), BgpClientError> {
-    let (mut reader, mut writer) = connect(bgp_socket).await?;
-    let mut after: Option<nos_proto::BgpRouteCursor> = None;
-    loop {
-        writer
-            .send(BgpRequest::GetRoutesPage {
-                after,
-                limit: nos_proto::BGP_PAGE_MAX,
-            })
-            .await?;
-        match reader.next().await {
-            Some(Ok(BgpEvent::RoutesPage { routes, next })) => {
-                on_page(&routes);
-                match next {
-                    None => return Ok(()),
-                    Some(n) if after.is_some_and(|a| n <= a) => {
-                        return Err(BgpClientError::CursorStuck);
-                    }
-                    Some(n) => after = Some(n),
-                }
-            }
-            Some(Ok(BgpEvent::Error(msg))) => return Err(BgpClientError::Daemon(msg)),
-            Some(Ok(other)) => return Err(BgpClientError::UnexpectedReply(other)),
-            Some(Err(e)) => return Err(BgpClientError::Io(e)),
-            None => return Err(BgpClientError::ConnectionClosed),
-        }
-    }
+    walk(
+        bgp_socket,
+        |after| BgpRequest::GetRoutesPage {
+            after,
+            limit: nos_proto::BGP_PAGE_MAX,
+        },
+        |e| match e {
+            BgpEvent::RoutesPage { routes, next } => Ok((routes, next)),
+            other => Err(other),
+        },
+        on_page,
+    )
+    .await
 }
 
 /// Every configured RPKI cache's RTR session.

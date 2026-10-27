@@ -48,10 +48,10 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - Encode rejects an over-cap payload too, so an oversize message fails at the sender.
 - Payloads that can legitimately grow past the cap are cut to fit:
   - `nos-bgpd` → `nos-ribd` `PushBgpRoutes` (a full IPv4 table is ~1M routes, 10 MB and up with backups, multipath and IPv6): `BgpRouteUpdate::frames` sends at most `BGP_PUSH_CHUNK` (2048) routes per frame. A larger `Full` goes as `FullPart`s closed by a `Full`; `nos-ribd` stages the parts per connection and swaps the whole set in at the closing `Full` (log: `assembled chunked bgp route snapshot … parts=N`), so it never publishes half a table. A connection lost mid-snapshot drops what was staged; the reconnect sends a fresh `Full`.
-  - `nos-bgpd` `GetRoutesPage` (`show bgp routes`, `GET /v1/bgp/routes`, #722): same count limit and byte budget, keyed by `BgpRouteCursor`, but over a per-connection sorted key snapshot (`bgp/src/page.rs`, [BGP internals](../protocols/bgp-internals.md)) because the BGP RIB is not ordered.
+  - `nos-bgpd` `GetRoutesPage`, `GetEvpnRoutesPage`, `GetFlowspecRoutesPage`, `GetVpnRoutesPage` (`show bgp routes|evpn|flowspec|vpnv4|vpnv6`, `GET /v1/bgp/...`, #722/#723): same count limit and byte budget, keyed by `BgpRouteCursor`, but over a per-connection sorted key snapshot (`bgp/src/page.rs`, [BGP internals](../protocols/bgp-internals.md)) because the BGP RIB is not ordered.
   - `nos-ribd` `GetRoutesPage` (`show route`, `GET /v1/routes/{table}`, #713): at most `ROUTES_PAGE_MAX` (1000) prefixes per reply and cut early at a ~8 MiB encoded estimate (half of `MAX_FRAME`); the cursor is the last prefix returned. Keyset paging, no snapshot: a table that changes mid-walk never loops or repeats a prefix, but a walk may miss or include a concurrent change. `Rib` stays a `HashMap`, so a page is one O(n) pass under the read lock.
   - `nos-logd` `GetLogs`/`Tail` replies: capped at `store::REPLY_BYTES` (just under 16 MiB), newest entries kept, oldest left out.
-- Known payloads still sent whole (fail past 16 MiB, the connection drops): the `nos-bgpd` RIB queries of a full table, and the `Full` snapshots of `PushVpnRoutes`/`PushEvpnRoutes`/`PushOspfRoutes`/`RedistributeRoutes`.
+- Known payloads still sent whole (fail past 16 MiB, the connection drops): the `Full` snapshots of `PushVpnRoutes`/`PushEvpnRoutes`/`PushOspfRoutes`/`RedistributeRoutes`.
 
 ### Config plane vs data plane
 
