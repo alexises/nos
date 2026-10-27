@@ -2219,3 +2219,102 @@ async fn bgp_evpn_and_flowspec_are_paged_per_instance_with_an_opaque_cursor() {
         assert_eq!(s, StatusCode::NOT_FOUND);
     }
 }
+
+/// `n` IPv4 /24 static routes from `10.<base>.0.0`, as the config's JSON.
+fn static_routes(base: u32, n: u32) -> Vec<Value> {
+    (0..n)
+        .map(|i| {
+            json!({
+                "subnet": format!("10.{}.{}.0/24", base + i / 256, i % 256),
+                "gateway": "192.0.2.1",
+                "bfd": null,
+            })
+        })
+        .collect()
+}
+
+/// Many routes go in as whole-subsection PUTs (#754): 20k in one list PUT, then
+/// the same count as four instances of 5k. A list PUT replaces the list, and a
+/// body past axum's 2 MiB default is refused with 413, not truncated.
+#[tokio::test]
+async fn a_large_list_goes_in_as_one_subsection_put() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    let tx = "/v1/transactions/big";
+    assert_eq!(
+        send(app, Method::POST, &format!("{tx}?base=blank"), None)
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+
+    // The instance first, then every route of its list in one request.
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        &format!("{tx}/static-routing-instance/s1"),
+        Some(json!({"name": "s1", "routes": []})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v) = send(
+        app,
+        Method::PUT,
+        &format!("{tx}/static-routing-instance/s1/route"),
+        Some(Value::Array(static_routes(0, 20_000))),
+    )
+    .await;
+    assert_eq!(
+        (s, v.as_array().map(Vec::len)),
+        (StatusCode::OK, Some(20_000))
+    );
+
+    // A second PUT of the list replaces it, it does not append.
+    let (s, v) = send(
+        app,
+        Method::PUT,
+        &format!("{tx}/static-routing-instance/s1/route"),
+        Some(Value::Array(static_routes(0, 3))),
+    )
+    .await;
+    assert_eq!((s, v.as_array().map(Vec::len)), (StatusCode::OK, Some(3)));
+
+    // The split structure: four instances (a list each) of 5k routes.
+    for (i, base) in [0u32, 30, 60, 90].into_iter().enumerate() {
+        let name = format!("part{i}");
+        let (s, _) = send(
+            app,
+            Method::PUT,
+            &format!("{tx}/static-routing-instance/{name}"),
+            Some(json!({"name": name, "routes": static_routes(base, 5_000)})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{name}");
+    }
+    let (_, whole) = send(app, Method::GET, tx, None).await;
+    let counts: Vec<_> = whole["config"]["static_routing_instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["routes"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(counts, [3, 5_000, 5_000, 5_000, 5_000]);
+
+    // Past the 2 MiB body limit the list is refused whole.
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        &format!("{tx}/static-routing-instance/s1/route"),
+        Some(Value::Array(static_routes(0, 40_000))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+    let (_, v) = send(
+        app,
+        Method::GET,
+        &format!("{tx}/static-routing-instance/s1/route"),
+        None,
+    )
+    .await;
+    assert_eq!(v.as_array().map(Vec::len), Some(3));
+}

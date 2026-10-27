@@ -7,6 +7,7 @@ use clap::Parser;
 use nos_proto::Config;
 use nos_provision::{apply_bfd, build_ops, Args};
 use reqwest::Method;
+use serde_json::Value;
 
 use crate::consts::*;
 use crate::docker::{ContainerSpec, Dock};
@@ -523,16 +524,27 @@ impl Router {
         let mut config: Config = serde_json::from_value(snapshot["config"].clone())
             .context("decoding the transaction's config")?;
         f(&mut config)?;
-        let (etag, _) = self
-            .rest_expect_full(
-                Method::PUT,
-                tx,
-                Some(&serde_json::to_string(&config)?),
-                Some(("if-match", &etag)),
-                200,
-            )
-            .await?;
-        let etag = etag.context("no ETag on the PUT reply")?;
+        // A config that fits goes back in one PUT; a huge one (tens of
+        // thousands of static routes) as whole-subsection PUTs (#754).
+        let mut puts = Vec::new();
+        plan_puts(&[], serde_json::to_value(&config)?, PUT_LIMIT, &mut puts)?;
+        let mut etag = etag;
+        for (path, body) in puts {
+            let url = std::iter::once(tx.to_string())
+                .chain(path.iter().map(|s| s.replace('/', "%2F")))
+                .collect::<Vec<_>>()
+                .join("/");
+            let (new, _) = self
+                .rest_expect_full(
+                    Method::PUT,
+                    &url,
+                    Some(&serde_json::to_string(&body)?),
+                    Some(("if-match", &etag)),
+                    200,
+                )
+                .await?;
+            etag = new.context("no ETag on the PUT reply")?;
+        }
         self.rest_expect_full(
             Method::POST,
             &format!("{tx}/commit"),
@@ -623,9 +635,101 @@ impl Router {
     }
 }
 
+/// Largest body one batched `PUT` sends: under `nos-restd`'s 2 MiB default
+/// body limit of 2 MiB (#754), with slack.
+const PUT_LIMIT: usize = 2_000_000;
+/// A list bigger than this is PUT on its own, apart from its parent.
+const SPLIT_ABOVE: usize = 64 * 1024;
+
+/// The `PUT`s (path, body) that set `value` at `path` with no body over
+/// `limit`, in the order to send them. A list `PUT` replaces the list, so a
+/// list is only split from its *parent* (one request per big list, or per
+/// keyed element when the list itself is too big), never into chunks of one
+/// list: a list that cannot fit in `limit` must be spread over several lists
+/// by the caller (e.g. several static routing instances).
+fn plan_puts(
+    path: &[String],
+    value: Value,
+    limit: usize,
+    out: &mut Vec<(Vec<String>, Value)>,
+) -> anyhow::Result<()> {
+    let size = |v: &Value| serde_json::to_string(v).map_or(usize::MAX, |s| s.len());
+    if size(&value) <= limit {
+        out.push((path.to_vec(), value));
+        return Ok(());
+    }
+    match value {
+        Value::Object(mut map) => {
+            let big: Vec<String> = map
+                .iter()
+                .filter(|(_, v)| v.is_array() && size(v) > SPLIT_ABOVE)
+                .map(|(k, _)| k.clone())
+                .collect();
+            let stripped: Vec<_> = big
+                .iter()
+                .map(|k| (k.clone(), map.insert(k.clone(), Value::Array(vec![]))))
+                .collect();
+            plan_puts(path, Value::Object(map), limit, out)?;
+            for (field, items) in stripped {
+                let mut p = path.to_vec();
+                p.push(nos_proto::config_path::field_segment(&field, true));
+                plan_puts(&p, items.unwrap_or_default(), limit, out)?;
+            }
+            Ok(())
+        }
+        // A list too big for one request: one request per keyed element.
+        Value::Array(items) => {
+            for item in items {
+                let key = item["name"]
+                    .as_str()
+                    .context("a list over the body limit needs elements with a `name` key")?
+                    .to_string();
+                let mut p = path.to_vec();
+                p.push(key);
+                plan_puts(&p, item, limit, out)?;
+            }
+            Ok(())
+        }
+        other => bail!("a {other} value over the body limit cannot be split"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn routes(n: usize) -> Vec<Value> {
+        (0..n)
+            .map(|i| serde_json::json!({"subnet": format!("10.{}.{}.0/24", i / 256, i % 256)}))
+            .collect()
+    }
+
+    #[test]
+    fn small_values_are_one_put_and_big_lists_split_from_their_parent() {
+        let mut out = Vec::new();
+        plan_puts(&[], serde_json::json!({"a": 1}), 1000, &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+
+        // Two instances of 4000 routes (~160 KB each) under a 150 KB limit:
+        // the root (lists emptied), then each instance whole (the list is too big).
+        let cfg = serde_json::json!({"static_routing_instances": [
+            {"name": "a", "routes": routes(4000)},
+            {"name": "b", "routes": routes(4000)},
+        ]});
+        let mut out = Vec::new();
+        plan_puts(&[], cfg, 150_000, &mut out).unwrap();
+        let paths: Vec<_> = out.iter().map(|(p, _)| p.join("/")).collect();
+        assert_eq!(
+            paths,
+            ["", "static-routing-instance/a", "static-routing-instance/b"]
+        );
+        assert!(out.iter().all(|(_, v)| v.to_string().len() <= 150_000));
+
+        // One list over the limit cannot be chunked: it is an error, not a
+        // silent truncation.
+        let cfg = serde_json::json!({"routes": routes(4000)});
+        assert!(plan_puts(&[], cfg, 100_000, &mut Vec::new()).is_err());
+    }
 
     /// The seed a router boots from: parses, builds, applies, pins REST on
     /// `rt1`, and survives the YAML round trip `nos-configd` loads it through.

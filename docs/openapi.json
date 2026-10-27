@@ -8653,6 +8653,7 @@
         ]
       },
       "put": {
+        "description": "Also the way to push many items in few requests: `PUT /v1/transactions/{tx}/{path}` takes a whole subsection or list. A list PUT REPLACES the list, so one PUT must carry every element of that list; the body is limited to 2 MiB (about 25-30k IPv4 static routes), larger gets 413. Split a bigger set across several lists (e.g. several static routing instances).",
         "operationId": "put",
         "parameters": [
           {
@@ -8727,9 +8728,19 @@
               }
             },
             "description": "If-Match did not match the transaction's current generation"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "body over 2 MiB: split the list across several lists"
           }
         },
-        "summary": "Set the whole config",
+        "summary": "Set the whole config (or one subsection)",
         "tags": [
           "transactions"
         ]

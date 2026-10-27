@@ -258,6 +258,18 @@ $ $C $B/v1/transactions/bad/no-such-section
 
 Like the shell's `set`/`delete`, none of this is validated until commit. The one check made immediately is that the edited config is still structurally valid JSON for the schema; a body with the wrong shape is refused with `400`.
 
+## Pushing many items in few requests
+
+Every request costs time proportional to the size of the whole transaction, so one request per static route does not scale (20k sequential per-route `PUT`s took about 692 s). Send a whole subsection or list instead:
+
+- **`PUT` the whole list.** `PUT .../static-routing-instance/s1/route` with a JSON array of routes, or `PUT .../static-routing-instance/s1` with `{"name":"s1","routes":[...]}`. One request, one rebuild of the transaction.
+- **A list `PUT` replaces the list.** Chunks do not append, so one `PUT` must carry every element of that list.
+- **The body limit is 2 MiB.** A static route is about 65 bytes of JSON (IPv4; about 90 for IPv6), so one list holds about 25-30k routes. Past it the reply is `413` and nothing changes. Split a bigger set across several lists, for example several static routing instances, each its own `PUT`.
+- **Order:** create the parent (`PUT .../static-routing-instance/s1` with an empty `routes`) before the list `PUT`, thread the `ETag` of each reply into the next `If-Match`, then commit once.
+- `nos-e2e`'s `Router::edit` does this for the harness: a config that fits goes back in one `PUT`, a bigger one as whole-subsection `PUT`s (parent with its big lists emptied, then each list).
+
+Measured on the lab router: 20k static routes in one batched edit plus commit took 0.27 s (`nos-restd` VmHWM 65 MB, `nos-configd` 173 MB).
+
 ## Secrets are write-only
 
 - A `#[cli(secret)]` field (a user's `password`, an admin key's `secret`) is never returned: `GET /v1/config`, the transaction GET and the PUT reply all show it as `<hidden>`.
