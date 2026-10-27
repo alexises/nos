@@ -160,6 +160,27 @@ impl EvpnUpdate {
         out.push(Self::Full(last));
         out
     }
+
+    /// Receiver side of [`Self::split_with`]: stages a `FullPart` (returns
+    /// `None`), folds the staged parts into the closing `Full`, passes
+    /// `Add`/`Remove` through. The `usize` is the frames the update took (1
+    /// when unchunked), for the receiver's log.
+    pub fn absorb(
+        self,
+        staging: &mut crate::chunk::FullStaging<EvpnRoute>,
+    ) -> Option<(Self, usize)> {
+        match self {
+            Self::FullPart(r) => {
+                staging.part(r);
+                None
+            }
+            Self::Full(r) => {
+                let (all, parts) = staging.close(r);
+                Some((Self::Full(all), parts))
+            }
+            other => Some((other, 1)),
+        }
+    }
 }
 
 /// Messages to one `nos-fdbd` instance's socket. Append-only (postcard).
@@ -334,6 +355,22 @@ mod tests {
                 _ => unreachable!(),
             })
             .collect()
+    }
+
+    #[test]
+    fn absorb_stages_parts_and_closes_with_the_full() {
+        let all: Vec<_> = (0..20).map(|i| route(i, 0)).collect();
+        let mut st = crate::chunk::FullStaging::default();
+        let mut got = None;
+        for f in EvpnUpdate::Full(all.clone()).split_with(200) {
+            assert!(got.is_none(), "nothing before the closing Full");
+            got = f.absorb(&mut st);
+        }
+        let (u, parts) = got.unwrap();
+        assert_eq!(u, EvpnUpdate::Full(all));
+        assert!(parts > 1);
+        let add = EvpnUpdate::Add(route(1, 0));
+        assert_eq!(add.clone().absorb(&mut st), Some((add, 1)));
     }
 
     #[test]

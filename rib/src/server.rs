@@ -126,7 +126,10 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
                 );
                 break;
             }
-            Ok(req) => dispatch(&ctx, staging.absorb(&ctx.table, req)).await,
+            Ok(req) => match staging.absorb(&ctx.table, req) {
+                Some(req) => dispatch(&ctx, req).await,
+                None => None,
+            },
             Err(e) => {
                 warn!(table = %ctx.table, error = %e, "RIB IPC read error");
                 break;
@@ -145,21 +148,40 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
 /// reaches the `Rib` until the closing `Full`, so the table never shows half
 /// a snapshot, and a connection lost mid-snapshot simply drops it.
 #[derive(Default)]
-struct FullStaging(nos_proto::chunk::FullStaging<BgpRoute>);
+struct FullStaging {
+    bgp: nos_proto::chunk::FullStaging<BgpRoute>,
+    evpn: nos_proto::chunk::FullStaging<nos_proto::EvpnRoute>,
+}
 
 impl FullStaging {
-    /// Stages every `FullPart` of a `PushBgpRoutes` and folds the staged
-    /// routes into the closing `Full`; any other request passes through.
-    fn absorb(&mut self, table: &str, req: RibRequest) -> RibRequest {
-        let RibRequest::PushBgpRoutes(updates) = req else {
-            return req;
+    /// Stages every `FullPart` of a `PushBgpRoutes`/`PushEvpnRoutes` and folds
+    /// the staged routes into the closing `Full` (`None`: a part, nothing to
+    /// dispatch yet); any other request passes through.
+    fn absorb(&mut self, table: &str, req: RibRequest) -> Option<RibRequest> {
+        let updates = match req {
+            RibRequest::PushBgpRoutes(u) => u,
+            RibRequest::PushEvpnRoutes(u) => {
+                let (u, parts) = u.absorb(&mut self.evpn)?;
+                if parts > 1
+                    && let EvpnUpdate::Full(r) = &u
+                {
+                    info!(
+                        table = %table,
+                        routes = r.len(),
+                        parts,
+                        "assembled chunked evpn route snapshot"
+                    );
+                }
+                return Some(RibRequest::PushEvpnRoutes(u));
+            }
+            req => return Some(req),
         };
         let mut out = Vec::with_capacity(updates.len());
         for update in updates {
             match update {
-                BgpRouteUpdate::FullPart(routes) => self.0.part(routes),
-                BgpRouteUpdate::Full(routes) if self.0.is_staging() => {
-                    let (all, parts) = self.0.close(routes);
+                BgpRouteUpdate::FullPart(routes) => self.bgp.part(routes),
+                BgpRouteUpdate::Full(routes) if self.bgp.is_staging() => {
+                    let (all, parts) = self.bgp.close(routes);
                     info!(
                         table = %table,
                         routes = all.len(),
@@ -171,7 +193,7 @@ impl FullStaging {
                 update => out.push(update),
             }
         }
-        RibRequest::PushBgpRoutes(out)
+        Some(RibRequest::PushBgpRoutes(out))
     }
 }
 
@@ -356,7 +378,7 @@ async fn apply_evpn_route_update(ctx: &Context, update: EvpnUpdate) {
             EvpnUpdate::Remove(key) => {
                 received.remove(&key);
             }
-            // Staged by the connection handler (#720); nothing to apply yet.
+            // Staged by the connection handler (`FullStaging::absorb`).
             EvpnUpdate::FullPart(_) => return,
         }
         guard.refresh_evpn();

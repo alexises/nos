@@ -1161,7 +1161,7 @@ impl Fdb {
                 g.received.remove(&k);
                 vec![k]
             }
-            // Staged by the connection handler (#720); nothing to apply yet.
+            // Staged by the connection handler (`EvpnUpdate::absorb`).
             EvpnUpdate::FullPart(_) => return,
         };
         let segments_changed = keys.iter().any(|k| {

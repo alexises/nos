@@ -64,6 +64,7 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<FdbRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<FdbEvent>::default());
+    let mut staging = nos_proto::chunk::FullStaging::default();
 
     while let Some(msg) = reader.next().await {
         let req = match msg {
@@ -92,7 +93,22 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
                 }
             }
             // Fire-and-forget, no reply.
-            FdbRequest::PushEvpnRoutes(update) => ctx.fdb.apply_push(update).await,
+            FdbRequest::PushEvpnRoutes(update) => {
+                // A chunked `Full` is applied once, on its closing frame.
+                if let Some((update, parts)) = update.absorb(&mut staging) {
+                    if parts > 1
+                        && let nos_proto::EvpnUpdate::Full(r) = &update
+                    {
+                        info!(
+                            domain = %ctx.domain,
+                            routes = r.len(),
+                            parts,
+                            "assembled chunked evpn route snapshot"
+                        );
+                    }
+                    ctx.fdb.apply_push(update).await;
+                }
+            }
         }
     }
 }
@@ -245,5 +261,94 @@ mod tests {
         })
         .await
         .expect("bgpd push applied");
+    }
+}
+
+#[cfg(test)]
+mod chunked_tests {
+    use std::time::Duration;
+
+    use nos_pki::PeerId;
+    use nos_proto::{EvpnKey, EvpnRoute, EvpnUpdate, MacSource};
+
+    use super::*;
+    use crate::driver::NoopFdbDriver;
+    use crate::fdb::Ready;
+
+    const RT: u64 = 0x0002_fde8_0000_2774;
+
+    async fn remote(fdb: Arc<Fdb>) -> usize {
+        fdb.table()
+            .await
+            .macs
+            .iter()
+            .filter(|m| m.source == MacSource::Remote)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_chunked_full_is_applied_only_on_its_closing_frame() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fdb.sock");
+        let fdb = Fdb::new("d1".into(), Arc::new(NoopFdbDriver), Duration::ZERO);
+        fdb.set_ready(Some(Ready {
+            vni: 10100,
+            bridge: "br1".into(),
+            vtep: "192.0.2.1".parse().unwrap(),
+            underlay: "eth0".into(),
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            rt_import: vec![RT],
+            rt_export: vec![RT],
+            bgp_instance: "r1".into(),
+            arp: false,
+            connected: Vec::new(),
+            es_ports: Vec::new(),
+            neigh_suppress: false,
+            max_remote_macs: None,
+            irb: None,
+        }))
+        .await;
+        let id = nos_pki::testing::shared().identity("fdbd", "");
+        let _srv = start(&path, "d1".into(), fdb.clone(), &id).unwrap();
+
+        let routes: Vec<EvpnRoute> = (0..30u8)
+            .map(|i| EvpnRoute {
+                key: EvpnKey::Mac {
+                    rd: [0; 8],
+                    mac: [0, 0, 0, 0, 0, i],
+                },
+                vni: 10100,
+                next_hop: "192.0.2.9".parse().unwrap(),
+                ext_communities: vec![RT],
+                esi: [0; 10],
+                l3_vni: None,
+            })
+            .collect();
+        let frames = EvpnUpdate::Full(routes).split_with(200);
+        assert!(frames.len() > 2);
+        let last = frames.len() - 1;
+
+        let s = nos_pki::testing::shared()
+            .identity("bgpd", "x")
+            .connect(&path, &PeerId::new("fdbd", ""))
+            .await
+            .unwrap();
+        let (_r, w) = tokio::io::split(s);
+        let mut w = FramedWrite::new(w, IpcCodec::<FdbRequest>::default());
+        for f in &frames[..last] {
+            w.send(FdbRequest::PushEvpnRoutes(f.clone())).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(remote(fdb.clone()).await, 0, "half a snapshot applied");
+        w.send(FdbRequest::PushEvpnRoutes(frames[last].clone()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while remote(fdb.clone()).await != 30 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("closing Full applied the whole set");
     }
 }
