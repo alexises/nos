@@ -8,7 +8,10 @@
 //! generation bumped whenever the shared RIB is mutated), waits
 //! [`HOLD_DOWN`] so a burst of UPDATEs becomes one diff, then snapshots and
 //! diffs [`SessionManager::bgp_push_snapshot`]. A [`FALLBACK_TICK`] re-diff
-//! is the safety net when no change was signalled.
+//! is the safety net when no change was signalled. The write-only connection
+//! is also watched for EOF (like `fdb_push_client`), so a restarted
+//! `nos-ribd` gets a fresh `Full` at once instead of at the next route
+//! change (#718).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,6 +26,7 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
 
+use crate::push_conn::{split, PushReader};
 use crate::session::SessionManager;
 use nos_daemon::watchdog::resolve_once;
 
@@ -54,7 +58,8 @@ async fn run(
         let (table, routes) = sessions.bgp_push_snapshot().await;
         let Some(table) = table else {
             // No owning routing table yet — idle until the RIB changes.
-            if wait_change(&mut changed, &mut shutdown).await {
+            if wait_change(&mut changed, &mut shutdown, None::<&mut PushReader>).await == Wake::Stop
+            {
                 break;
             }
             continue;
@@ -86,7 +91,8 @@ async fn run(
             }
         };
 
-        let mut writer = FramedWrite::new(stream, IpcCodec::<RibRequest>::default());
+        let (write_half, mut reader) = split(stream);
+        let mut writer = FramedWrite::new(write_half, IpcCodec::<RibRequest>::default());
         if send(&mut writer, vec![BgpRouteUpdate::Full(to_routes(&routes))])
             .await
             .is_err()
@@ -103,8 +109,18 @@ async fn run(
         // Inner loop: same connection, same owning table, until the table
         // changes to something else (including `None`) or a write fails.
         loop {
-            if wait_change(&mut changed, &mut shutdown).await {
-                return;
+            match wait_change(&mut changed, &mut shutdown, Some(&mut reader)).await {
+                Wake::Stop => return,
+                Wake::Closed => {
+                    warn!(table = %table, "nos-ribd closed the push connection, reconnecting");
+                    break;
+                }
+                Wake::Changed => {}
+            }
+            // A close that raced with the change: don't write into a dead socket.
+            if reader.closed() {
+                warn!(table = %table, "nos-ribd closed the push connection, reconnecting");
+                break;
             }
             let (new_table, new_routes) = sessions.bgp_push_snapshot().await;
             if new_table.as_deref() != Some(table.as_str()) {
@@ -142,12 +158,28 @@ where
     writer.flush().await
 }
 
-/// Waits for a RIB change (plus [`HOLD_DOWN`]) or [`FALLBACK_TICK`], whichever
-/// is first. Returns `true` if the caller should stop entirely.
-async fn wait_change(
+/// Why [`wait_change`] returned.
+#[derive(Debug, PartialEq, Eq)]
+enum Wake {
+    Changed,
+    /// The consumer closed the connection.
+    Closed,
+    Stop,
+}
+
+/// Waits for a RIB change (plus [`HOLD_DOWN`]), [`FALLBACK_TICK`], or the
+/// consumer closing `reader`, whichever is first.
+async fn wait_change<S: tokio::io::AsyncRead + Unpin>(
     changed: &mut watch::Receiver<u64>,
     shutdown: &mut watch::Receiver<bool>,
-) -> bool {
+    reader: Option<&mut PushReader<S>>,
+) -> Wake {
+    let eof = async {
+        match reader {
+            Some(r) => r.eof().await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         r = changed.changed() => {
             if r.is_ok() {
@@ -157,10 +189,11 @@ async fn wait_change(
             } else {
                 tokio::time::sleep(FALLBACK_TICK).await;
             }
-            false
+            Wake::Changed
         }
-        () = tokio::time::sleep(FALLBACK_TICK) => false,
-        _ = shutdown.changed() => *shutdown.borrow(),
+        () = tokio::time::sleep(FALLBACK_TICK) => Wake::Changed,
+        () = eof => Wake::Closed,
+        _ = shutdown.changed() => if *shutdown.borrow() { Wake::Stop } else { Wake::Changed },
     }
 }
 
@@ -238,10 +271,13 @@ mod tests {
         let (tx, mut rx) = watch::channel(0u64);
         let (_stx, mut srx) = watch::channel(false);
         let start = tokio::time::Instant::now();
-        let waiter = tokio::spawn(async move { wait_change(&mut rx, &mut srx).await });
+        let waiter =
+            tokio::spawn(
+                async move { wait_change(&mut rx, &mut srx, None::<&mut PushReader>).await },
+            );
         tokio::time::sleep(Duration::from_millis(5)).await;
         tx.send_modify(|g| *g += 1);
-        assert!(!waiter.await.unwrap());
+        assert_eq!(waiter.await.unwrap(), Wake::Changed);
         assert!(start.elapsed() < FALLBACK_TICK);
         assert!(start.elapsed() >= HOLD_DOWN);
     }
@@ -251,8 +287,37 @@ mod tests {
         let (_tx, mut rx) = watch::channel(0u64);
         let (_stx, mut srx) = watch::channel(false);
         let start = tokio::time::Instant::now();
-        assert!(!wait_change(&mut rx, &mut srx).await);
+        assert_eq!(
+            wait_change(&mut rx, &mut srx, None::<&mut PushReader>).await,
+            Wake::Changed
+        );
         assert_eq!(start.elapsed(), FALLBACK_TICK);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_close_wakes_immediately() {
+        let (_tx, mut rx) = watch::channel(0u64);
+        let (_stx, mut srx) = watch::channel(false);
+        let (a, b) = tokio::io::duplex(64);
+        let (_w, mut reader) = split(a);
+        drop(b);
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            wait_change(&mut rx, &mut srx, Some(&mut reader)).await,
+            Wake::Closed
+        );
+        assert!(start.elapsed() < FALLBACK_TICK);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_stops() {
+        let (_tx, mut rx) = watch::channel(0u64);
+        let (stx, mut srx) = watch::channel(false);
+        stx.send(true).unwrap();
+        assert_eq!(
+            wait_change(&mut rx, &mut srx, None::<&mut PushReader>).await,
+            Wake::Stop
+        );
     }
 
     #[test]

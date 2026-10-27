@@ -18,17 +18,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{FutureExt, SinkExt};
+use futures::SinkExt;
 use ipnet::IpNet;
 use nos_proto::{
     IpcCodec, ResolvedNextHop, RibRequest, Role, ServiceRef, VpnPath, VpnRoute, VpnRouteUpdate,
 };
-use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
+use tokio::io::WriteHalf;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, info, warn};
 
+use crate::push_conn::{any_eof, split, PushReader};
 use crate::rib::{SooSkip, VpnImports};
 use crate::rib_client::resolve_next_hops;
 use crate::session::SessionManager;
@@ -52,19 +53,8 @@ pub fn spawn(
 
 struct Conn {
     writer: FramedWrite<WriteHalf<nos_pki::Stream>, IpcCodec<RibRequest>>,
-    reader: ReadHalf<nos_pki::Stream>,
+    reader: PushReader,
     last_sent: Routes,
-}
-
-impl Conn {
-    /// Whether `nos-ribd` closed the connection (it never writes to it).
-    fn closed(&mut self) -> bool {
-        let mut buf = [0u8; 64];
-        matches!(
-            self.reader.read(&mut buf).now_or_never(),
-            Some(Ok(0) | Err(_))
-        )
-    }
 }
 
 async fn run(
@@ -90,7 +80,7 @@ async fn run(
             let tables = build(&imports, &resolved);
             log_changes(&shown, &tables);
             shown.clone_from(&tables);
-            conns.retain(|t, c| tables.contains_key(t) && !c.closed());
+            conns.retain(|t, c| tables.contains_key(t) && !c.reader.closed());
             for (table, routes) in tables {
                 if let Some(conn) = conns.get_mut(&table) {
                     let updates = diff(&conn.last_sent, &routes);
@@ -120,18 +110,7 @@ async fn run(
         } else {
             FALLBACK_TICK
         };
-        let eof = async {
-            if conns.is_empty() {
-                std::future::pending::<()>().await;
-            }
-            let reads = conns.values_mut().map(|c| {
-                Box::pin(async move {
-                    let mut buf = [0u8; 64];
-                    c.reader.read(&mut buf).await
-                })
-            });
-            let _ = futures::future::select_all(reads).await;
-        };
+        let eof = any_eof(conns.values_mut().map(|c| &mut c.reader));
         tokio::select! {
             () = tokio::time::sleep(tick) => {}
             r = changed.changed() => {
@@ -258,7 +237,7 @@ async fn connect(watchdog_socket: &Path, table: &str, routes: Routes) -> Option<
             return None;
         }
     };
-    let (reader, write_half) = tokio::io::split(stream);
+    let (write_half, reader) = split(stream);
     let mut writer = FramedWrite::new(write_half, IpcCodec::default());
     let full = VpnRouteUpdate::Full(routes.values().cloned().collect());
     if writer

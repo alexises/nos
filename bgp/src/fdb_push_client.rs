@@ -23,16 +23,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{FutureExt, SinkExt};
+use futures::SinkExt;
 use nos_proto::{
     EvpnKey, EvpnRoute, EvpnUpdate, FdbRequest, IpcCodec, RibRequest, Role, ServiceRef,
 };
-use tokio::io::{AsyncReadExt, ReadHalf};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, info, warn};
 
+use crate::push_conn::{any_eof, split, PushReader};
 use crate::session::SessionManager;
 use nos_daemon::watchdog::resolve_once;
 
@@ -100,19 +100,8 @@ pub fn spawn(
 
 struct Conn {
     writer: Writer,
-    reader: ReadHalf<nos_pki::Stream>,
+    reader: PushReader,
     last_sent: Routes,
-}
-
-impl Conn {
-    /// Whether the consumer closed the connection (it never writes to it).
-    fn closed(&mut self) -> bool {
-        let mut buf = [0u8; 64];
-        matches!(
-            self.reader.read(&mut buf).now_or_never(),
-            Some(Ok(0) | Err(_))
-        )
-    }
 }
 
 async fn run(
@@ -129,7 +118,7 @@ async fn run(
         // A consumer no longer attached (or whose write failed, or that
         // closed the connection) just loses it; the next tick reconnects
         // with a `Full`.
-        conns.retain(|t, c| targets.contains(t) && !c.closed());
+        conns.retain(|t, c| targets.contains(t) && !c.reader.closed());
         let mut unconnected = false;
         for target in targets {
             if let Some(conn) = conns.get_mut(&target) {
@@ -157,19 +146,7 @@ async fn run(
         } else {
             FALLBACK_TICK
         };
-        // A consumer closing its end (it never writes) also wakes the loop.
-        let eof = async {
-            if conns.is_empty() {
-                std::future::pending::<()>().await;
-            }
-            let reads = conns.values_mut().map(|c| {
-                Box::pin(async move {
-                    let mut buf = [0u8; 64];
-                    c.reader.read(&mut buf).await
-                })
-            });
-            let _ = futures::future::select_all(reads).await;
-        };
+        let eof = any_eof(conns.values_mut().map(|c| &mut c.reader));
         tokio::select! {
             () = tokio::time::sleep(tick) => {}
             r = changed.changed() => {
@@ -199,7 +176,7 @@ async fn connect(
             return None;
         }
     };
-    let (reader, write_half) = tokio::io::split(stream);
+    let (write_half, reader) = split(stream);
     let mut writer = match feed {
         Feed::Domains => Writer::Fdb(FramedWrite::new(write_half, IpcCodec::default())),
         Feed::Tables => Writer::Rib(FramedWrite::new(write_half, IpcCodec::default())),
