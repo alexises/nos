@@ -28,7 +28,7 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 
 ## IPC
 
-- `--listen-socket` `/run/nos/fdb-<domain>.sock` (`ServiceRef::FdbDomain`); `allowed`: `PushEvpnRoutes` is `bgpd`'s, `GetMacs` is `user`/`restd`.
+- `--listen-socket` `/run/nos/fdb-<domain>.sock` (`ServiceRef::FdbDomain`); `allowed`: `PushEvpnRoutes` is `bgpd`'s, `GetMacs` is `user`/`restd`. `server::handle_connection` stages `EvpnUpdate::FullPart`s per connection and applies the assembled `Full` once (#720).
 - `bgp_client.rs` originates this domain's Type-3, Type-2 (MAC and MAC+IP) into `ServiceRef::BgpInstance(mac_redistribute)`, `Full` on every (re)connect.
 - **Route-Target filtering is fdbd's** (`fdb::desired`): `nos-bgpd` pushes every received EVPN route.
 - Symmetric IRB (#188): `Ready.irb` from `RibRequest::GetEvpnIrb`.

@@ -799,3 +799,42 @@ async fn bgp_pushes_are_refused_to_every_other_role() {
     }
     assert_eq!(rib.read().await.all_routes().len(), 0);
 }
+
+fn evpn_routes(n: u8) -> Vec<nos_proto::EvpnRoute> {
+    (0..n)
+        .map(|i| nos_proto::EvpnRoute {
+            key: nos_proto::EvpnKey::Mac {
+                rd: [0; 8],
+                mac: [0, 0, 0, 0, 0, i],
+            },
+            vni: 10100,
+            next_hop: "192.0.2.9".parse().unwrap(),
+            ext_communities: vec![1; 8],
+            esi: [0; 10],
+            l3_vni: None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_chunked_evpn_full_is_applied_once_on_its_closing_frame() {
+    let (_tmp, path, rib, driver, _server) = gate_server();
+    let (_r, mut w) = connect_as(&path, "bgpd", "x").await;
+    let frames = nos_proto::EvpnUpdate::Full(evpn_routes(30)).split_with(200);
+    assert!(frames.len() > 2);
+    let last = frames.len() - 1;
+    for f in &frames[..last] {
+        w.send(RibRequest::PushEvpnRoutes(f.clone())).await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(driver.applied.lock().await.is_empty(), "applied early");
+    assert!(rib.read().await.evpn.received.is_empty(), "half a snapshot");
+    w.send(RibRequest::PushEvpnRoutes(frames[last].clone()))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), driver.notify.notified())
+        .await
+        .expect("closing Full not applied");
+    assert_eq!(rib.read().await.evpn.received.len(), 30);
+    assert_eq!(driver.applied.lock().await.len(), 1, "one apply");
+}
