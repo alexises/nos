@@ -54,6 +54,13 @@ Editing the config happens inside a **named transaction**, held server-side in `
   - `nos-bgpd` → `nos-ribd`/`nos-fdbd` `PushEvpnRoutes` (#719, #720): `EvpnUpdate::split()` cuts a `Full` by encoded bytes (`evpn_push_budget()`, 4 MiB). Receivers stage the `FullPart`s per connection (`EvpnUpdate::absorb`) and apply the whole set once, on the closing `Full` (log: `assembled chunked evpn route snapshot … parts=N`, `table=` on ribd, `domain=` on fdbd). Staged parts are uncapped; a lost connection drops them.
 - Known payloads still sent whole (fail past 16 MiB, the connection drops): the `Full` snapshots of `PushVpnRoutes`/`PushOspfRoutes`/`RedistributeRoutes`.
 
+### Commit diffs (#751)
+
+- A commit builds one `ConfigDiff` per visibility class (`ViewClass::of(role)`, what `Config::for_role` hides), not one per `SubscribeDiff` subscriber: `CommitUpdate::diff_for(role)` fills a lazy `OnceCell` per class, so concurrent subscribers wait for a single computation and share an `Arc<ConfigDiff>`.
+- The diff runs in `spawn_blocking`, off the runtime workers. If it panics, those subscribers skip that commit (warning logged).
+- `diff_configs` indexes each keyed list by key and skips equal elements: O(n) in the list length, no `Value` cloned. Duplicate keys still pair with the first match.
+- `Subscribe` (full config) keeps its per-subscriber `for_role` clone.
+
 ### Config plane vs data plane
 
 | Plane | Transport | Pattern |
