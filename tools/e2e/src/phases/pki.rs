@@ -299,12 +299,18 @@ async fn login_burst(w: &World) -> anyhow::Result<()> {
 /// exit and every other daemon applies the new CRL, while the replacement —
 /// a fresh certificate — is trusted as before.
 async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
+    // A learned route, so the restarted nos-ribd has something to be re-told.
+    w.b()?.provision(&bgp::redistribute()).await?;
     let a = w.a()?;
+    a.wait(&bgp::learned()).await?;
     let revoked = "certificates revoked role=ribd name=rt1 ";
-    let (revocations, updates, ribds) = (
+    let snapshot = "sent initial bgp route snapshot to nos-ribd";
+    let (revocations, updates, ribds, snapshots, kernel_routes) = (
         a.count(revoked),
         a.count("ipc crl updated entries="),
         a.count("nos-ribd starting"),
+        a.count(snapshot),
+        a.count("added route"),
     );
     log("killing router-a's nos-ribd; its certificate must be revoked");
     w.dock
@@ -314,6 +320,11 @@ async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
     a.wait_new(revoked, revocations, 30).await?;
     a.wait_new("ipc crl updated entries=", updates, 30).await?;
     a.wait_new("nos-ribd starting", ribds, 30).await?;
+    // #718: with no route change at all, nos-bgpd notices the closed push
+    // connection, reconnects, re-sends its snapshot and the route is
+    // reinstalled in the kernel.
+    a.wait_new(snapshot, snapshots, 30).await?;
+    a.wait_new("added route", kernel_routes, 30).await?;
     // nos-restd (holding the new CRL) dials the new nos-ribd: still trusted.
     // nos-restd lives in rt1's VRF, which the new nos-ribd recreates: its
     // listener may take a moment to come back, so a refused connect is retried.
@@ -351,10 +362,10 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
 
     // nos-bgpd is long-lived, so its handshake with the *restarted* nos-ribd
     // uses whatever certificate it holds now — which is only valid if the
-    // rotation reached it. It only notices its push connection died when it
-    // next has something to write (an existing quirk of the push client, not
-    // of TLS: with no route change it never writes), so give it a route change:
-    // router-b advertises a prefix to router-a.
+    // rotation reached it. Router-b advertises a prefix to router-a first;
+    // after the kill nos-bgpd notices the closed push connection by itself.
+    w.b()?.provision(&bgp::redistribute()).await?;
+    w.a()?.wait(&bgp::learned()).await?;
     let a = w.a()?;
     let snapshot = "sent initial bgp route snapshot to nos-ribd";
     let (snapshots, kernel_routes, ribds) = (
@@ -369,14 +380,10 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
         .context("killing nos-ribd")?;
     a.wait_new("nos-ribd starting", ribds, 30).await?;
 
-    // REST (a per-request client of nos-configd) provisions router-b with a
-    // certificate minted a lifetime ago and rotated since; router-a's nos-bgpd
-    // then learns the route, fails to write it to the dead socket, reconnects to
+    // Router-a's long-lived nos-bgpd sees the old socket close, reconnects to
     // the new nos-ribd with its rotated identity, and the route lands in the
     // kernel — the whole path, on rotated identities.
-    w.b()?.provision(&bgp::redistribute()).await?;
     let a = w.a()?;
-    a.wait(&bgp::learned()).await?;
     a.wait_new(snapshot, snapshots, 60).await?;
     a.wait_new("added route", kernel_routes, 60).await
 }

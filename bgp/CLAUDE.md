@@ -149,7 +149,7 @@ Run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles mem
 | `message.rs`, `evpn.rs`, `flowspec*.rs`, `vpn/`, `as_path.rs` | Wire codecs (`BgpCodec`) |
 | `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `vpn_out`, `vpn_import`, `shared` (`SharedRib`), `tests/` |
 | `page.rs` | Keyset paging (#722/#723), generic: `Snapshot<K>`, `Keyed`, `page` |
-| `rib_push_client.rs`, `fdb_push_client.rs`, `vpn_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); a `nos-ribd` restart goes unnoticed until the next change |
+| `rib_push_client.rs`, `fdb_push_client.rs`, `vpn_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); rib/fdb/vpn pushes EOF-watch via `push_conn` (#718); acl/igp do not |
 | `rib_client.rs`, `interface_client.rs` | One-shot queries (`nos_daemon::ipc::one_shot`) |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 
