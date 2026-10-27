@@ -115,6 +115,51 @@ pub enum EvpnUpdate {
     Add(EvpnRoute),
     /// One route withdrawn.
     Remove(EvpnKey),
+    /// A leading part of a `Full` too large for one frame: the receiver
+    /// stages it and applies nothing until the closing `Full`. Appended
+    /// (postcard indexes variants by position).
+    FullPart(Vec<EvpnRoute>),
+}
+
+/// Encoded-byte budget of one `EvpnUpdate` frame: a quarter of the codec's
+/// `MAX_FRAME`. A route's `ext_communities` is bounded only by the 64 KiB BGP
+/// attribute, so a route-count budget would not do; bytes do.
+pub const EVPN_PUSH_BYTES: usize = crate::codec::MAX_FRAME / 4;
+
+/// The budget every sender passes to [`EvpnUpdate::split_with`]:
+/// [`EVPN_PUSH_BYTES`], or `NOS_EVPN_PUSH_BYTES` when set (a test hook, so
+/// e2e needs hundreds of routes rather than millions).
+#[must_use]
+pub fn evpn_push_budget() -> usize {
+    parse_budget(std::env::var("NOS_EVPN_PUSH_BYTES").ok().as_deref())
+}
+
+fn parse_budget(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.trim().parse().ok())
+        .unwrap_or(EVPN_PUSH_BYTES)
+}
+
+impl EvpnUpdate {
+    /// [`Self::split_with`] at [`evpn_push_budget`].
+    #[must_use]
+    pub fn split(self) -> Vec<Self> {
+        self.split_with(evpn_push_budget())
+    }
+
+    /// The frames to send for this update: anything but a `Full` over
+    /// `budget` encoded bytes is itself; that one becomes `FullPart`s closed
+    /// by a `Full` holding the last chunk (see [`crate::chunk::split_full`]).
+    #[must_use]
+    pub fn split_with(self, budget: usize) -> Vec<Self> {
+        let Self::Full(routes) = self else {
+            return vec![self];
+        };
+        let weight = |r: &EvpnRoute| postcard::to_allocvec(r).map_or(usize::MAX, |v| v.len());
+        let (parts, last) = crate::chunk::split_full(routes, budget, weight);
+        let mut out: Vec<_> = parts.into_iter().map(Self::FullPart).collect();
+        out.push(Self::Full(last));
+        out
+    }
 }
 
 /// Messages to one `nos-fdbd` instance's socket. Append-only (postcard).
@@ -247,4 +292,126 @@ pub enum MacSource {
     Local,
     /// Learned from an EVPN Type-2 route.
     Remote,
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio_util::codec::Encoder;
+
+    use super::*;
+    use crate::codec::{IpcCodec, MAX_FRAME};
+
+    fn route(i: u32, communities: usize) -> EvpnRoute {
+        EvpnRoute {
+            key: EvpnKey::Mac {
+                rd: [0; 8],
+                mac: [
+                    0,
+                    0,
+                    i.to_be_bytes()[0],
+                    i.to_be_bytes()[1],
+                    i.to_be_bytes()[2],
+                    i.to_be_bytes()[3],
+                ],
+            },
+            vni: 10,
+            next_hop: IpAddr::from([10, 0, 0, 1]),
+            ext_communities: vec![u64::MAX; communities],
+            esi: Esi::default(),
+            l3_vni: None,
+        }
+    }
+
+    fn size(r: &EvpnRoute) -> usize {
+        postcard::to_allocvec(r).unwrap().len()
+    }
+
+    fn rejoin(frames: Vec<EvpnUpdate>) -> Vec<EvpnRoute> {
+        frames
+            .into_iter()
+            .flat_map(|u| match u {
+                EvpnUpdate::Full(r) | EvpnUpdate::FullPart(r) => r,
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn small_full_and_incrementals_are_not_split() {
+        let r = route(1, 0);
+        assert_eq!(
+            EvpnUpdate::Full(vec![]).split_with(100),
+            [EvpnUpdate::Full(vec![])]
+        );
+        let exact = vec![r.clone(), r.clone()];
+        let budget = 2 * size(&r);
+        assert_eq!(
+            EvpnUpdate::Full(exact.clone()).split_with(budget),
+            [EvpnUpdate::Full(exact)]
+        );
+        assert_eq!(
+            EvpnUpdate::Add(r.clone()).split_with(1),
+            [EvpnUpdate::Add(r.clone())]
+        );
+        let k = r.key;
+        assert_eq!(
+            EvpnUpdate::Remove(k.clone()).split_with(1),
+            [EvpnUpdate::Remove(k)]
+        );
+    }
+
+    #[test]
+    fn a_big_full_is_cut_by_encoded_bytes_in_order() {
+        let all: Vec<_> = (0..50).map(|i| route(i, (i % 7) as usize * 10)).collect();
+        let budget = 1024;
+        let frames = EvpnUpdate::Full(all.clone()).split_with(budget);
+        assert!(frames.len() > 2);
+        let (last, parts) = frames.split_last().unwrap();
+        assert!(matches!(last, EvpnUpdate::Full(_)));
+        assert!(parts.iter().all(|u| matches!(u, EvpnUpdate::FullPart(_))));
+        for f in &frames {
+            let (EvpnUpdate::Full(r) | EvpnUpdate::FullPart(r)) = f else {
+                unreachable!()
+            };
+            assert!(r.iter().map(size).sum::<usize>() <= budget);
+        }
+        assert_eq!(rejoin(frames), all);
+    }
+
+    #[test]
+    fn a_lone_oversized_route_travels_alone() {
+        let all = vec![route(1, 0), route(2, 500), route(3, 0)];
+        let frames = EvpnUpdate::Full(all.clone()).split_with(200);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(rejoin(frames), all);
+    }
+
+    #[test]
+    fn budget_env_parsing() {
+        assert_eq!(parse_budget(None), EVPN_PUSH_BYTES);
+        assert_eq!(parse_budget(Some("junk")), EVPN_PUSH_BYTES);
+        assert_eq!(parse_budget(Some(" 16384 ")), 16384);
+        assert!(evpn_push_budget() > 0);
+    }
+
+    /// The reason for the byte budget: a `Full` over `MAX_FRAME` is cut so
+    /// every frame, at the production budget, still encodes.
+    #[test]
+    fn a_full_over_max_frame_splits_under_it() {
+        let all: Vec<_> = (0..300).map(|i| route(i, 8000)).collect();
+        let whole =
+            postcard::to_allocvec(&FdbRequest::PushEvpnRoutes(EvpnUpdate::Full(all.clone())))
+                .unwrap();
+        assert!(whole.len() > MAX_FRAME, "{} bytes", whole.len());
+        let frames = EvpnUpdate::Full(all.clone()).split_with(EVPN_PUSH_BYTES);
+        assert!(frames.len() > 1);
+        for f in &frames {
+            let mut buf = bytes::BytesMut::new();
+            IpcCodec::<FdbRequest>::default()
+                .encode(FdbRequest::PushEvpnRoutes(f.clone()), &mut buf)
+                .unwrap();
+            assert!(buf.len() < MAX_FRAME);
+        }
+        assert_eq!(rejoin(frames), all);
+    }
 }

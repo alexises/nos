@@ -218,6 +218,8 @@ impl BgpRib {
                     self.withdraw_evpn(&nlri_of(&r));
                 }
             }
+            // Staged by the connection handler (#724); nothing to apply yet.
+            EvpnUpdate::FullPart(_) => {}
         }
     }
 

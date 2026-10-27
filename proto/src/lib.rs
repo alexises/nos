@@ -9,6 +9,7 @@ pub mod bfd;
 pub mod bgp;
 /// Watchdog endpoint broker: roles, service references and the watchdog wire types.
 pub mod broker;
+pub mod chunk;
 pub mod cli;
 /// IPC framing codec: 4-byte little-endian length prefix plus postcard payload.
 pub mod codec;
