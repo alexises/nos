@@ -310,6 +310,17 @@ impl Daemons {
         }
     }
 
+    /// Whether `name` is a user in the running config (cheap probe, #755).
+    pub async fn user_exists(&self, name: &str) -> ApiResult<bool> {
+        match self
+            .config(Request::UserExists { name: name.into() })
+            .await?
+        {
+            Event::UserExists(b) => Ok(b),
+            other => Err(unexpected("nos-configd", &other)),
+        }
+    }
+
     /// One request to `nos-watchdogd`'s broker.
     pub async fn broker(&self, req: WatchdogRequest) -> ApiResult<WatchdogEvent> {
         self.call(&self.watchdog_socket, Role::Watchdog, "", req)

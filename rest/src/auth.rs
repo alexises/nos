@@ -2,8 +2,8 @@
 //! `/swagger-ui/` and the SSE log stream). The TLS layer has already verified
 //! the certificate against the REST CA; `PeerUser` is the user its URI SAN
 //! names (`listen.rs` puts it on each connection's requests). Here the user
-//! must also *still exist* in `Config.users` — fetched from `nos-configd` per
-//! request like every handler's config read — so a deleted user is locked out
+//! must also *still exist* in `Config.users` — probed per request with the
+//! cheap `Request::UserExists` (no config transfer, #755) — so a deleted user is locked out
 //! on the very next request rather than when their certificate expires.
 //! The watchdog is asked too whether that very certificate is still live
 //! (`RestCertCheck`): a password change revokes it. Fails closed: a request with no verified user is 401, and if `nos-configd`
@@ -12,9 +12,8 @@
 //! The one exception is `POST /v1/login`, which is how a client with no
 //! certificate yet gets one (`login.rs`).
 //!
-//! ponytail: one config `Get` per request (a pooled IPC round trip, no
-//! handshake). Add a short-TTL cache of the user list only if that is measured
-//! to matter.
+//! ponytail: one pooled `UserExists` round trip per request, no cache (a cache
+//! would break "locked out on the very next request").
 
 use axum::extract::{Request, State};
 use axum::http::Method;
@@ -82,12 +81,12 @@ pub async fn client_auth(State(daemons): State<Daemons>, req: Request, next: Nex
         Ok(other) => return crate::ipc::unexpected("nos-watchdogd", &other).into_response(),
         Err(e) => return e.into_response(),
     }
-    match daemons.running_config().await {
-        Ok(config) if config.users.iter().any(|u| u.name == user) => {
+    match daemons.user_exists(&user).await {
+        Ok(true) => {
             tracing::info!(user = ?user, method = %req.method(), path = %req.uri().path(), "rest request");
             next.run(req).await
         }
-        Ok(_) => unauthorized(),
+        Ok(false) => unauthorized(),
         Err(e) => e.into_response(),
     }
 }

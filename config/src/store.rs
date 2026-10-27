@@ -153,6 +153,18 @@ impl ConfigStore {
         self.0.running.read().await.clone()
     }
 
+    /// Whether the running config has a user `name`; scans under the read
+    /// lock, no clone (#755).
+    pub async fn user_exists(&self, name: &str) -> bool {
+        self.0
+            .running
+            .read()
+            .await
+            .users
+            .iter()
+            .any(|u| u.name == name)
+    }
+
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<CommitUpdate>> {
         self.0.tx.subscribe()
     }
@@ -480,6 +492,55 @@ mod tests {
     use nos_proto::{BgpInstance, BgpInstanceOp};
 
     use super::*;
+
+    /// #755: `user_exists` follows the running config, not open transactions.
+    #[tokio::test]
+    async fn user_exists_tracks_the_running_config() {
+        let store = ConfigStore::new(
+            Config {
+                users: vec![nos_proto::User {
+                    name: "alice".into(),
+                    password: "pw".into(),
+                }],
+                ..Config::default()
+            },
+            None,
+        );
+        assert!(store.user_exists("alice").await);
+        assert!(!store.user_exists("bob").await);
+        store
+            .open_transaction("t", nos_proto::TransactionBase::Current)
+            .await
+            .unwrap();
+        store
+            .apply_op(
+                "t",
+                nos_proto::ConfigOp::User(nos_proto::UserOp::SetPassword {
+                    name: "bob".into(),
+                    password: "pw".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!store.user_exists("bob").await, "uncommitted");
+        store.commit_transaction("t", None).await.unwrap();
+        assert!(store.user_exists("bob").await);
+        store
+            .open_transaction("d", nos_proto::TransactionBase::Current)
+            .await
+            .unwrap();
+        store
+            .apply_op(
+                "d",
+                nos_proto::ConfigOp::User(nos_proto::UserOp::Delete {
+                    name: "alice".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        store.commit_transaction("d", None).await.unwrap();
+        assert!(!store.user_exists("alice").await);
+    }
 
     fn update_adding_a_user() -> Arc<CommitUpdate> {
         let user = nos_proto::User {

@@ -15,6 +15,7 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::SubscribeDiff { .. }
         | Request::Describe { .. } => true,
         Request::UpgradePasswordHash { .. } => role == Role::Watchdog,
+        Request::UserExists { .. } => role == Role::Restd,
         Request::Save
         | Request::OpenTransaction { .. }
         | Request::ApplyOp { .. }
@@ -57,6 +58,8 @@ mod tests {
                 new: "b".into(),
             };
             assert_eq!(allowed(role, &upgrade), role == Role::Watchdog, "{role:?}");
+            let probe = Request::UserExists { name: "u".into() };
+            assert_eq!(allowed(role, &probe), role == Role::Restd, "{role:?} probe");
         }
     }
 }
