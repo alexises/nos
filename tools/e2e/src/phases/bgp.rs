@@ -7181,6 +7181,8 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
 
+    l3_gobgp_burst(w).await?;
+
     log("router-b's evpn removed: its Type-5 is withdrawn and its devices deleted");
     let removed = format!("removed route prefix={L3_SUBNET_B} gateway={IP_B}");
     let base_removed = a.count(&removed);
@@ -7209,6 +7211,115 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
         w.dock.network_disconnect(net, router).await;
         w.dock.network_remove(net).await;
     }
+    Ok(())
+}
+
+/// `evpn-l3`'s burst stage (#763): GoBGP announces `L3_BURST_ROUTES` Type-5
+/// host routes (several `gobgp` CLI processes in parallel, so far faster than
+/// the 12 routes/s `nos-ribd` used to manage) into router-a's IP-VRF. They must
+/// all be installed in `L3_BURST_SECS`, with none of the kernel errors a stale
+/// whole-table dump-diff racing the previous push used to give, and one
+/// `del all` must remove them again.
+async fn l3_gobgp_burst(w: &World) -> anyhow::Result<()> {
+    log("burst: router-a also peers GoBGP, which announces many Type-5 routes at once");
+    let a = w.a()?;
+    a.provision_flags(&strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--peer-group",
+        "pg-gobgp",
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+        "--evpn",
+    ]))
+    .await?;
+    start_gobgp(w, &["l2vpn-evpn"]).await?;
+    let mut last = String::new();
+    for _ in 0..60 {
+        last = gobgp(w, &["neighbor", IP_A]).await.unwrap_or_default();
+        if last.contains("BGP state = SESSION_STATE_ESTABLISHED") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !last.contains("BGP state = SESSION_STATE_ESTABLISHED") {
+        bail!("GoBGP never established with router-a: {last}");
+    }
+
+    let installed =
+        format!("added route prefix=10\\.200\\..*gateway={IP_G} next_hops=1 .*source=Some(Evpn)");
+    let removed = format!("removed route prefix=10\\.200\\..*gateway={IP_G}");
+    let errors = [
+        "failed to apply routes to kernel",
+        "failed to apply evpn route delta to kernel",
+        "File exists",
+        "Device or resource busy",
+    ];
+    let error_base: Vec<usize> = errors.iter().map(|e| a.count(e)).collect();
+    let (installed_base, removed_base) = (a.count(&installed), a.count(&removed));
+
+    let n = L3_BURST_ROUTES;
+    let announce = format!(
+        "seq 0 {} | xargs -P 16 -I{{}} sh -c 'i={{}}; gobgp global rib add -a evpn prefix \
+         10.200.$((i/250)).$((i%250+1))/32 gw 0.0.0.0 etag 0 label {L3_VNI} rd 65010:7 \
+         rt {L3_RT} encap vxlan router-mac {L3_GOBGP_RMAC}'",
+        n - 1
+    );
+    let started = std::time::Instant::now();
+    let (code, out) = w.dock.exec("router-g", &["sh", "-c", &announce]).await?;
+    if code != 0 {
+        bail!("announcing the burst: exit {code}: {}", out.trim());
+    }
+    let mut seen = 0;
+    while started.elapsed() < Duration::from_secs(L3_BURST_SECS) {
+        seen = a.count(&installed) - installed_base;
+        if seen >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    log(format!(
+        "burst: {seen}/{n} routes installed in {}s",
+        started.elapsed().as_secs()
+    ));
+    if seen < n {
+        bail!("only {seen}/{n} burst routes installed within {L3_BURST_SECS}s");
+    }
+    let table = a.routes_walk(L3_TABLE, None).await?;
+    let listed = table
+        .iter()
+        .filter(|p| {
+            p["prefix"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("10.200."))
+        })
+        .count();
+    if listed != n {
+        bail!("{L3_TABLE} lists {listed} of the {n} burst routes over REST");
+    }
+
+    gobgp(w, &["global", "rib", "del", "all", "-a", "evpn"]).await?;
+    let started = std::time::Instant::now();
+    loop {
+        let gone = a.count(&removed) - removed_base;
+        if gone >= n {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(L3_BURST_SECS) {
+            bail!("only {gone}/{n} burst routes removed within {L3_BURST_SECS}s");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    for (e, base) in errors.iter().zip(error_base) {
+        a.assert_quiet(e, base, 1).await?;
+    }
+    w.dock.container_remove("router-g").await;
     Ok(())
 }
 

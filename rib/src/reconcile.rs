@@ -255,6 +255,15 @@ fn remote_lfa(cfg: &Config, table: &str) -> bool {
 /// first (`Evpn` routes leave through that bridge, and it gives our Router's
 /// MAC), then every best route. Shared with `server.rs`'s Type-5 push.
 pub(crate) async fn apply_to_kernel(table: &str, rib: &RwLock<Rib>, driver: &dyn RibDriver) {
+    sync_l3vni(table, rib, driver).await;
+    let routes = rib.read().await.best_routes_for_kernel();
+    if let Err(e) = driver.apply(table, &routes).await {
+        error!(table = %table, error = %e, "failed to apply routes to kernel");
+    }
+}
+
+/// The L3 VNI half of `apply_to_kernel`: devices, remote VTEPs, our Router's MAC.
+pub(crate) async fn sync_l3vni(table: &str, rib: &RwLock<Rib>, driver: &dyn RibDriver) {
     let (l3, remotes) = {
         let guard = rib.read().await;
         (guard.evpn.local.clone(), guard.evpn.remotes.clone())
@@ -262,10 +271,6 @@ pub(crate) async fn apply_to_kernel(table: &str, rib: &RwLock<Rib>, driver: &dyn
     match driver.sync_l3vni(table, l3.as_ref(), &remotes).await {
         Ok(rmac) => rib.write().await.evpn.rmac = rmac,
         Err(e) => warn!(table = %table, error = %e, "failed to build the l3 vni devices"),
-    }
-    let routes = rib.read().await.best_routes_for_kernel();
-    if let Err(e) = driver.apply(table, &routes).await {
-        error!(table = %table, error = %e, "failed to apply routes to kernel");
     }
 }
 

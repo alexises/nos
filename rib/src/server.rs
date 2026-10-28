@@ -258,7 +258,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             ctx.rib.read().await.count_source(RouteSource::Bgp),
         )),
         RibRequest::PushEvpnRoutes(update) => {
-            apply_evpn_route_update(ctx, update).await;
+            apply_evpn_route_update(&ctx.table, &ctx.rib, ctx.driver.as_ref(), update).await;
             None
         }
         RibRequest::GetEvpnIrb => Some(RibEvent::EvpnIrb(ctx.rib.read().await.evpn.irb())),
@@ -360,30 +360,57 @@ async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
     }
 }
 
-/// Applies one push of received Type-5 routes: the raw set is kept
-/// (`EvpnState.received`), filtered into the `Evpn` candidates
-/// (`Rib::refresh_evpn`), then the L3 VNI's remote VTEPs and the routes are
-/// brought in line — the same two driver calls `reconcile::resync` ends with.
-async fn apply_evpn_route_update(ctx: &Context, update: EvpnUpdate) {
-    {
-        let mut guard = ctx.rib.write().await;
-        let received = &mut guard.evpn.received;
-        match update {
-            EvpnUpdate::Full(routes) => {
-                *received = routes.into_iter().map(|r| (r.key.clone(), r)).collect();
+/// Applies one push of received Type-5 routes. `Full` keeps the raw set
+/// (`EvpnState.received`), rebuilds the `Evpn` candidates and resyncs the
+/// kernel (devices, remote VTEPs, every route). `Add`/`Remove` (#763) recompute
+/// only the touched prefix (`Rib::apply_evpn_diff`): the devices are synced
+/// only when the remote VTEP set changed, the routes through `apply_delta`.
+pub(crate) async fn apply_evpn_route_update(
+    table: &str,
+    rib: &RwLock<Rib>,
+    driver: &dyn RibDriver,
+    update: EvpnUpdate,
+) {
+    let (key, route) = match update {
+        EvpnUpdate::Full(routes) => {
+            {
+                let mut guard = rib.write().await;
+                guard.evpn.received = routes.into_iter().map(|r| (r.key.clone(), r)).collect();
+                guard.refresh_evpn();
             }
-            EvpnUpdate::Add(r) => {
-                received.insert(r.key.clone(), r);
-            }
-            EvpnUpdate::Remove(key) => {
-                received.remove(&key);
-            }
-            // Staged by the connection handler (`FullStaging::absorb`).
-            EvpnUpdate::FullPart(_) => return,
+            crate::reconcile::apply_to_kernel(table, rib, driver).await;
+            return;
         }
-        guard.refresh_evpn();
+        EvpnUpdate::Add(r) => (r.key.clone(), Some(r)),
+        EvpnUpdate::Remove(key) => (key, None),
+        // Staged by the connection handler (`FullStaging::absorb`).
+        EvpnUpdate::FullPart(_) => return,
+    };
+    let (change, first_sync) = {
+        let mut guard = rib.write().await;
+        let change = guard.apply_evpn_diff(&key, route);
+        // The bridge never built yet: its Router's MAC is still unknown.
+        (
+            change,
+            guard.evpn.local.is_some() && guard.evpn.rmac.is_none(),
+        )
+    };
+    let Some((prefix, change, remotes_changed)) = change else {
+        return;
+    };
+    if remotes_changed || first_sync {
+        crate::reconcile::sync_l3vni(table, rib, driver).await;
     }
-    crate::reconcile::apply_to_kernel(&ctx.table, &ctx.rib, ctx.driver.as_ref()).await;
+    let delta = match change {
+        BestPathChange::Unchanged => return,
+        BestPathChange::Installed(e) => Some(e),
+        BestPathChange::Removed => None,
+    };
+    let deltas = HashMap::from([(prefix, delta)]);
+    // On failure, wait for the next `Full` or the 10 s reconcile tick.
+    if let Err(e) = driver.apply_delta(table, &deltas).await {
+        error!(table = %table, error = %e, "failed to apply evpn route delta to kernel");
+    }
 }
 
 /// Applies one batch of BGP-pushed route updates (one poll tick's worth,
