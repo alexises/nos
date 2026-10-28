@@ -60,15 +60,22 @@ pub(crate) async fn sample_all(
     Ok(map)
 }
 
-/// `nos-x 123 VmRSS: 10 kB VmHWM: 20 kB` -> `("nos-x", (123, 10, 20))`.
+/// `nos-x 123 VmHWM: 20 kB VmRSS: 10 kB` (either order) -> `("nos-x", (123, 10, 20))`.
 fn parse_sample_line(line: &str) -> Option<(String, (u64, u64, u64))> {
     let t: Vec<&str> = line.split_whitespace().collect();
-    if t.len() < 7 || !t[0].starts_with("nos-") || t[2] != "VmRSS:" || t[5] != "VmHWM:" {
+    if !t.first()?.starts_with("nos-") {
         return None;
     }
+    let after = |key: &str| -> Option<u64> {
+        t.iter()
+            .position(|x| *x == key)
+            .and_then(|i| t.get(i + 1))?
+            .parse()
+            .ok()
+    };
     Some((
         t[0].to_string(),
-        (t[1].parse().ok()?, t[3].parse().ok()?, t[6].parse().ok()?),
+        (t.get(1)?.parse().ok()?, after("VmRSS:")?, after("VmHWM:")?),
     ))
 }
 
@@ -309,7 +316,12 @@ pub async fn wave(w: &World) -> anyhow::Result<()> {
         ("nos-restd", "/tmp/dhat-restd-rt1.json"),
     ] {
         let (_, json) = w.dock.exec_root(r.name(), &["cat", file]).await?;
-        let v: serde_json::Value = serde_json::from_str(json.trim())?;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(json.trim()) else {
+            log(format!(
+                "DHAT {daemon}: no report at {file} (not a dhat-heap image?)"
+            ));
+            continue;
+        };
         log(format!(
             "DHAT {daemon} t-gmax={} t-end={}",
             dhat_sum(&v, "gb"),
@@ -398,7 +410,7 @@ mod tests {
     #[test]
     fn parses_a_sample_line() {
         assert_eq!(
-            parse_sample_line("nos-configd 42 VmRSS: 1000 kB VmHWM: 2000 kB"),
+            parse_sample_line("nos-configd 42 VmHWM:\t 2000 kB VmRSS:\t 1000 kB "),
             Some(("nos-configd".to_string(), (42, 1000, 2000)))
         );
         assert_eq!(parse_sample_line("cgroup current=1 max=2"), None);

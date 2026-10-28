@@ -127,7 +127,7 @@ docker-lint: ## Lint the Dockerfile with hadolint
 	hadolint Dockerfile
 
 docker-build: docker-lint ## Lint, then build the nos Docker image (every daemon + the nos shell)
-	docker build --build-arg CARGO_FEATURES=$(CARGO_FEATURES) --build-arg NOS_BUILD_REV=$$(git rev-parse --short HEAD) -t $(IMAGE) .
+	docker build --build-arg CARGO_FEATURES="$(CARGO_FEATURES)" --build-arg NOS_BUILD_REV=$$(git rev-parse --short HEAD) -t $(IMAGE) .
 
 e2e-preflight: ## Kernel-module + image-capability checks nos-e2e needs (same script CI runs)
 	IMAGE=$(IMAGE) tools/ci/e2e-preflight.sh
