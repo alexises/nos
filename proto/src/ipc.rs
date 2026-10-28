@@ -133,6 +133,21 @@ pub enum Request {
         /// User name to look for.
         name: String,
     },
+    /// Names of the running config's BGP instances (#759). Replies
+    /// `Event::InstanceNames`, carrying no other config data.
+    ListBgpInstances,
+    /// Names of the running config's OSPF instances (#759). Replies
+    /// `Event::InstanceNames`.
+    ListOspfInstances,
+    /// Names of the running config's `OSPFv3` instances (#759). Replies
+    /// `Event::InstanceNames`.
+    ListOspfv3Instances,
+    /// The `rest_api` pinned to routing table `table` in the running config
+    /// (#759, #758). Replies `Event::RestApi`.
+    GetRestApi {
+        /// Routing table name.
+        table: String,
+    },
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -167,6 +182,10 @@ pub enum Event {
     Diff(ConfigDiff),
     /// Reply to `UserExists`: whether the user is in the running config.
     UserExists(bool),
+    /// Reply to `ListBgpInstances` / `ListOspfInstances` / `ListOspfv3Instances`.
+    InstanceNames(Vec<String>),
+    /// Reply to `GetRestApi`: `None` = table absent or not pinned.
+    RestApi(Option<crate::RestApi>),
 }
 
 /// What a newly opened transaction's in-progress config should start from.

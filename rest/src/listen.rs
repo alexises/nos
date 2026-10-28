@@ -160,13 +160,8 @@ impl Listener {
     /// `None` if the config couldn't be read, so a `nos-configd` blip never
     /// tears down a healthy listener.
     async fn wanted(&self) -> Option<Option<RestApi>> {
-        match self.daemons.running_config().await {
-            Ok(cfg) => Some(
-                cfg.routing_tables
-                    .into_iter()
-                    .find(|t| t.name == self.table)
-                    .and_then(|t| t.rest_api),
-            ),
+        match self.daemons.rest_api(&self.table).await {
+            Ok(api) => Some(api),
             Err(e) => {
                 debug!(error = ?e, "could not read config; keeping current listener");
                 None
@@ -258,6 +253,10 @@ pub async fn serve(
                 continue;
             }
         };
+        // Nagle off (#759): hyper writes a response's HEADERS and DATA frames
+        // separately, and Nagle holds the second until the client's delayed ACK
+        // (~40 ms) releases it, so every small response took 40 ms.
+        let _ = tcp.set_nodelay(true);
         // try_acquire, never an awaiting acquire: that would stall the stop path.
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             if let Some(n) = refused_log.allow(peer.ip(), Instant::now()) {

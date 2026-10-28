@@ -71,6 +71,42 @@ impl FakeConfigd {
                     .iter()
                     .any(|u| &u.name == name),
             )),
+            Request::ListBgpInstances => Reply::One(Event::InstanceNames(
+                s.lock()
+                    .unwrap()
+                    .config
+                    .bgp_instances
+                    .iter()
+                    .map(|i| i.name.clone())
+                    .collect(),
+            )),
+            Request::ListOspfInstances => Reply::One(Event::InstanceNames(
+                s.lock()
+                    .unwrap()
+                    .config
+                    .ospf_instances
+                    .iter()
+                    .map(|i| i.name.clone())
+                    .collect(),
+            )),
+            Request::ListOspfv3Instances => Reply::One(Event::InstanceNames(
+                s.lock()
+                    .unwrap()
+                    .config
+                    .ospfv3_instances
+                    .iter()
+                    .map(|i| i.name.clone())
+                    .collect(),
+            )),
+            Request::GetRestApi { table } => Reply::One(Event::RestApi(
+                s.lock()
+                    .unwrap()
+                    .config
+                    .routing_tables
+                    .iter()
+                    .find(|t| &t.name == table)
+                    .and_then(|t| t.rest_api.clone()),
+            )),
             Request::SubscribeDiff { .. } => Reply::Stream(
                 vec![Event::Diff(ConfigDiff::default())],
                 feed(&d, Event::Diff),
