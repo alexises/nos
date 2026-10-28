@@ -275,6 +275,12 @@ pub const L3_HOST_IP_B: &str = "198.18.2.10";
 pub const L3_GOBGP_PREFIX: &str = "198.18.9.0/24";
 pub const L3_GOBGP_RT: &str = "65010:5000";
 pub const L3_GOBGP_RMAC: &str = "aa:bb:cc:00:00:50";
+/// `evpn-l3`'s burst stage (#763): how many Type-5 host routes GoBGP announces
+/// at once, and the seconds to install (or remove) all of them. The old
+/// per-route whole-table reconcile managed about 12 routes/s, so 2000 took
+/// minutes; the incremental path is limited by GoBGP's announce rate.
+pub const L3_BURST_ROUTES: usize = 2000;
+pub const L3_BURST_SECS: u64 = 90;
 /// `evpn`'s symmetric IRB interop check: GoBGP's MAC+IP with Label2 = the L3
 /// VNI, installed by router-a's IP-VRF as a host route.
 pub const L3_GOBGP_HOST: &str = "198.18.8.9";

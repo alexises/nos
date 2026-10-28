@@ -27,6 +27,7 @@ use crate::evpn::Mac;
 #[derive(Default)]
 struct Rec {
     applies: Mutex<Vec<HashMap<IpNet, RibEntry>>>,
+    deltas: Mutex<Vec<HashMap<IpNet, Option<RibEntry>>>>,
     tunnels: Mutex<Vec<(String, bool)>>,
     l3: Mutex<Vec<Option<u32>>>,
     teardowns: AtomicUsize,
@@ -69,8 +70,9 @@ impl RibDriver for Rec {
     async fn apply_delta(
         &self,
         _table: &str,
-        _changes: &HashMap<IpNet, Option<RibEntry>>,
+        changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError> {
+        self.deltas.lock().unwrap().push(changes.clone());
         Ok(())
     }
     async fn teardown(&self, _table: &str) -> Result<(), DriverError> {
@@ -619,6 +621,66 @@ async fn an_l3_vni_with_a_resolvable_vtep_is_built_and_originated() {
     let target = e.evpn_rx.borrow().clone();
     assert_eq!(target.bgp_instance.as_deref(), Some("b1"));
     assert!(!target.routes.is_empty(), "the statics are originated");
+}
+
+#[tokio::test]
+async fn incremental_evpn_pushes_apply_deltas_and_sync_devices_only_on_remote_changes() {
+    use nos_proto::{EvpnKey, EvpnRoute, EvpnUpdate};
+    let e = Env::ready(evpn_cfg(SourceAddress::Interface {
+        interface: "eth0".into(),
+        label: None,
+    }));
+    *e.rec.rmac.lock().unwrap() = Some([0xaa, 0, 0, 0, 0, 1]);
+    e.resync().await;
+    let rt = nos_proto::evpn_id::parse_rt("65000:5000").unwrap();
+    let route = |p: &str| EvpnRoute {
+        key: EvpnKey::IpPrefix {
+            rd: [0; 8],
+            prefix: p.parse().unwrap(),
+        },
+        vni: 5000,
+        next_hop: "10.50.0.3".parse().unwrap(),
+        ext_communities: vec![rt, nos_proto::evpn_id::router_mac_ext([2; 6])],
+        esi: [0; 10],
+        l3_vni: None,
+    };
+    let push =
+        |u: EvpnUpdate| crate::server::apply_evpn_route_update("rt1", &e.rib, e.rec.as_ref(), u);
+    let counts = || {
+        (
+            e.rec.applies.lock().unwrap().len(),
+            e.rec.l3.lock().unwrap().len(),
+            e.rec.deltas.lock().unwrap().len(),
+        )
+    };
+    let (applies, l3, deltas) = counts();
+
+    // First route of the VTEP: devices synced, one delta, no table apply.
+    push(EvpnUpdate::Add(route("10.2.0.0/24"))).await;
+    assert_eq!(counts(), (applies, l3 + 1, deltas + 1));
+    // Same VTEP, another prefix: no device sync.
+    push(EvpnUpdate::Add(route("10.3.0.0/24"))).await;
+    assert_eq!(counts(), (applies, l3 + 1, deltas + 2));
+    // Identical resend: nothing at all.
+    push(EvpnUpdate::Add(route("10.3.0.0/24"))).await;
+    assert_eq!(counts(), (applies, l3 + 1, deltas + 2));
+    // Removing one of two: delta only; removing the last: the VTEP leaves too.
+    push(EvpnUpdate::Remove(route("10.2.0.0/24").key)).await;
+    assert_eq!(counts(), (applies, l3 + 1, deltas + 3));
+    push(EvpnUpdate::Remove(route("10.3.0.0/24").key)).await;
+    assert_eq!(counts(), (applies, l3 + 2, deltas + 4));
+    assert!(e
+        .rec
+        .deltas
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .values()
+        .all(Option::is_none));
+    // A Full still resyncs the whole table.
+    push(EvpnUpdate::Full(vec![route("10.2.0.0/24")])).await;
+    assert_eq!(counts(), (applies + 1, l3 + 3, deltas + 4));
 }
 
 #[tokio::test]

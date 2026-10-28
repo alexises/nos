@@ -342,12 +342,24 @@ impl Rib {
     /// Rebuilds the `Evpn` candidates from `evpn.received` and `evpn.local`
     /// (none without a local L3 VNI), and the remote VTEPs they need.
     pub fn refresh_evpn(&mut self) {
-        let (entries, remotes) = match &self.evpn.local {
-            Some(l3) => crate::evpn::desired(&self.evpn.received, l3),
-            None => (Vec::new(), std::collections::BTreeMap::new()),
-        };
-        self.evpn.remotes = remotes;
+        let entries = self.evpn.rebuild();
         self.replace_source(RouteSource::Evpn, entries);
+    }
+
+    /// Incremental `EvpnUpdate::Add`/`Remove` (#763): recomputes only the
+    /// touched prefix. Returns its `Evpn` winner change and whether the remote
+    /// VTEP set (or a VTEP's Router's MAC) changed; `None` if nothing changed.
+    pub fn apply_evpn_diff(
+        &mut self,
+        key: &nos_proto::EvpnKey,
+        route: Option<nos_proto::EvpnRoute>,
+    ) -> Option<(IpNet, BestPathChange, bool)> {
+        let (prefix, vtep, remotes_changed) = self.evpn.apply(key, route)?;
+        let change = match vtep {
+            Some(v) => self.upsert_and_diff(crate::evpn::entry_for(prefix, v)),
+            None => self.remove_and_diff(&prefix, RouteSource::Evpn),
+        };
+        Some((prefix, change, remotes_changed))
     }
 
     /// The best candidate of the longest prefix covering `addr` that has
