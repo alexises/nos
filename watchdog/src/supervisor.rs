@@ -33,6 +33,9 @@ pub struct ProcessSpec {
     /// `Some((uid, gid))`: the child runs as that user (set before exec, so
     /// its file capabilities still apply). `None`: it inherits ours.
     pub uid: Option<(u32, u32)>,
+    /// Extra variables for this child only, applied after the scrubbed
+    /// `CHILD_ENV` allowlist (which stays untouched for everyone else).
+    pub env: Vec<(String, String)>,
 }
 
 /// Which certificate a child is issued: `nos://<role>/<name>`.
@@ -57,7 +60,15 @@ impl ProcessSpec {
             args,
             identity: None,
             uid: None,
+            env: Vec::new(),
         }
+    }
+
+    /// Adds one environment variable to this child (on top of the allowlist).
+    #[must_use]
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
     }
 
     /// With `Some(gid)`, runs the child as its role's own uid (`uids::role_uid`)
@@ -157,6 +168,7 @@ pub async fn supervise_one(
             program = %spec.program.display(),
             uid = spec.uid.map(|i| i.0),
             gid = spec.uid.map(|i| i.1),
+            env = %spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(","),
             "starting"
         );
         let start = Instant::now();
@@ -164,6 +176,7 @@ pub async fn supervise_one(
         let mut command = Command::new(&spec.program);
         command.args(&spec.args);
         command.env_clear().envs(allowed_env(std::env::vars_os()));
+        command.envs(spec.env.iter().cloned());
         if let Some((uid, gid)) = spec.uid {
             command.uid(uid).gid(gid);
         }
@@ -421,5 +434,39 @@ mod backoff_tests {
         );
         let keys: Vec<_> = out.iter().map(|(k, _)| k.to_str().unwrap()).collect();
         assert_eq!(keys, ["RUST_LOG", "PATH"]);
+    }
+
+    #[tokio::test]
+    async fn with_env_reaches_the_child_only_when_asked() {
+        async fn seen(spec: ProcessSpec, out: &std::path::Path) -> String {
+            let (tx, rx) = watch::channel(false);
+            let task = tokio::spawn(supervise_one(spec, BackoffPolicy::default(), rx));
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            tx.send(true).unwrap();
+            task.await.unwrap();
+            std::fs::read_to_string(out)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let spec = |name: &str| {
+            let out = dir.path().join(name);
+            let args = vec![
+                "-c".into(),
+                format!(
+                    "echo \"x${{MALLOC_ARENA_MAX}}\" > {}; exec sleep 30",
+                    out.display()
+                ),
+            ];
+            (ProcessSpec::new("t", "/bin/sh", args), out)
+        };
+        let (with, out) = spec("with");
+        assert_eq!(
+            seen(with.with_env("MALLOC_ARENA_MAX", "1"), &out).await,
+            "x1"
+        );
+        let (without, out) = spec("without");
+        assert_eq!(seen(without, &out).await, "x");
     }
 }

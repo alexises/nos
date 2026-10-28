@@ -36,3 +36,5 @@ Interfaces are supervised differently: unlike `nos-bgpd`/`nos-ribd`, `nos-interf
 - The rtnetlink connection futures in the `fdb`/`interface`/`rib` Linux drivers are spawned with `nos_log_client::spawn_critical`: if one ever finishes (netlink socket died) the daemon logs and exits 1 rather than carrying on with a dead kernel handle.
 
 **User ids** (#512, #513): `nos-watchdogd` runs as `nos-wd`; `supervise_one` starts each child with `ProcessSpec.uid`, the role's own uid (`ProcessSpec::with_role_uid`, from `--child-gid` in the image) after creating `/var/lib/nos/<role>` and logs `uid=`/`gid=` in its `starting` line. The ids switch before exec, so the children's file capabilities are unaffected. See "uid model" in [IPC security](ipc-security.md).
+
+- Per-process env (#756): `ProcessSpec.env`/`with_env` is applied after the scrubbed `CHILD_ENV` allowlist, so a child gets extra variables only when its spec asks; only `nos-logd` uses it (`MALLOC_ARENA_MAX=1`).
