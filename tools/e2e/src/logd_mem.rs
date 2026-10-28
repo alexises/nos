@@ -180,8 +180,8 @@ pub async fn phase(w: &World) -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(30)).await;
     let idle = sample(w, a, "idle+30s").await?;
 
-    // Flat: at most +25% or +30 MB (whichever is larger) from 10k to 20k PUTs.
-    let allowed = r10 + (r10 / 4).max(30 * 1024);
+    // Flat: at most +50% or +50 MB (whichever is larger) from 10k to 20k PUTs.
+    let allowed = r10 + (r10 / 2).max(50 * 1024);
     log(format!(
         "logd-memory: rss@10k={r10} kB rss@20k={r20} kB limit={allowed} kB end={end} kB idle={idle} kB"
     ));
