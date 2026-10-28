@@ -9,6 +9,10 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[derive(Parser)]
 #[command(name = "nos-restd", about = "NOS REST API daemon")]
 struct Args {
@@ -25,11 +29,21 @@ struct Args {
     /// Unix socket to forward this process's log events to.
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
+
+    /// Only present when built with `--features dhat-heap`. Path to write
+    /// the dhat heap-profile report to on exit (SIGINT).
+    #[cfg(feature = "dhat-heap")]
+    #[arg(long, default_value = "dhat-heap.json")]
+    profile_memory_out: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::builder()
+        .file_name(args.profile_memory_out.clone())
+        .build();
     let identity = bootstrap::identity()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     bootstrap::init_tracing(
@@ -91,5 +105,19 @@ mod tests {
         Args::command().debug_assert();
         let args = Args::try_parse_from(["nos-restd", "--table", "rt1"]).unwrap();
         assert_eq!(args.table, "rt1");
+    }
+
+    #[cfg(feature = "dhat-heap")]
+    #[test]
+    fn profile_memory_out_parses() {
+        let args = Args::try_parse_from([
+            "nos-restd",
+            "--table",
+            "rt1",
+            "--profile-memory-out",
+            "/tmp/x.json",
+        ])
+        .unwrap();
+        assert_eq!(args.profile_memory_out, PathBuf::from("/tmp/x.json"));
     }
 }

@@ -67,6 +67,14 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - `diff_configs` indexes each keyed list by key and skips equal elements: O(n) in the list length, no `Value` cloned. Duplicate keys still pair with the first match.
 - `Subscribe` (full config) keeps its per-subscriber `for_role` clone.
 
+### Memory profiling (#766, #767)
+
+- Image: `CARGO_FEATURES="nos-config/dhat-heap nos-rest/dhat-heap" make docker-build` (the Dockerfile passes one `--features` to the multi-`--bin` build; cargo resolves both `pkg/feature` entries). Default and release builds are unchanged. The dhat image inflates RSS: read RSS only from a default image.
+- Watchdog args: `--configd-arg=--profile-memory-out=/tmp/dhat-configd.json --restd-arg=--profile-memory-out=/tmp/dhat-restd-{name}.json`. The watchdog replaces a literal `{name}` in pass-through flags with the instance name, so each `nos-restd` (one per table) gets its own file. The lab takes extra watchdog args from `NOS_E2E_WATCHDOG_ARGS` (space-separated) on `nos-e2e up`.
+- Wave load: `LOGD_MEM_ROUTER=b [WAVE_COUNT=12] [WAVE_ROUTES=5500] [WAVE_IDLE=0] cargo run -p nos-e2e -- mem-wave`. Each wave opens a transaction on running, `PUT`s `WAVE_ROUTES` static routes one per request (spread over `ceil(total/25000)` instances), commits, and logs every `nos-*` daemon's `VmRSS`/`VmHWM` plus the cgroup after the commit and after `WAVE_IDLE` seconds. It fails if `nos-configd` or `nos-restd` changes pid.
+- At the end it prints the running config's JSON size, SIGINTs `nos-configd` and `nos-restd`, and prints their dhat `t-gmax`/`t-end` and the top 8 program points by max and total bytes. Not a phase (asserts nothing, not in `phases::ALL`).
+- `cargo test -p nos-config --test resident -- --nocapture`: counting allocator over ~66k static routes, prints one `Config`'s live size, the per-`PUT` and per-commit transient peaks, and bounds live heap after a commit to 6x one `Config`.
+
 ### Config plane vs data plane
 
 | Plane | Transport | Pattern |
