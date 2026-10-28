@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::{BufRead, BufReader, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use nos_proto::LogEntry;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::store::entry_size;
+use crate::store::{entry_size, MAX_MEMORY_BYTES};
 
 /// Once the store file grows past `capacity * COMPACT_FACTOR` lines, it's
 /// rewritten down to the most recent `capacity` — bounds disk usage without
@@ -22,12 +22,32 @@ const COMPACT_FACTOR: usize = 2;
 /// `persistence::load_or_default`. A line that fails to parse (e.g. written
 /// by a future, incompatible version) is skipped rather than failing the
 /// whole load.
+///
+/// Only the last `MAX_MEMORY_BYTES` of the file are read (#756): a persisted
+/// line is no larger than its `entry_size` estimate, so that tail covers all
+/// the ring can hold, and a huge `--capacity` cannot spike the heap.
 pub fn load_recent(path: &Path, capacity: usize) -> Vec<LogEntry> {
-    let Ok(file) = File::open(path) else {
+    load_recent_with(path, capacity, MAX_MEMORY_BYTES as u64)
+}
+
+/// `load_recent` with an explicit tail window (tests use a small one).
+fn load_recent_with(path: &Path, capacity: usize, max_bytes: u64) -> Vec<LogEntry> {
+    let Ok(mut file) = File::open(path) else {
         return Vec::new();
     };
+    let len = file.metadata().map_or(0, |m| m.len());
+    let start = len.saturating_sub(max_bytes);
+    if start > 0 && file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut reader = BufReader::new(file);
+    if start > 0 {
+        // Landed mid-line: drop the partial first line.
+        let mut partial = Vec::new();
+        let _ = reader.read_until(b'\n', &mut partial);
+    }
     let mut lines: VecDeque<String> = VecDeque::with_capacity(capacity);
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         if lines.len() >= capacity {
             lines.pop_front();
         }
@@ -118,7 +138,11 @@ fn count_lines(path: &Path) -> std::io::Result<usize> {
 /// pattern as `nos-config`'s `persistence::save_to_disk`), then reopens it
 /// for appending.
 fn compact(path: &Path, capacity: usize) -> std::io::Result<File> {
-    let kept = load_recent(path, capacity);
+    compact_with(path, capacity, MAX_MEMORY_BYTES as u64)
+}
+
+fn compact_with(path: &Path, capacity: usize, max_bytes: u64) -> std::io::Result<File> {
+    let kept = load_recent_with(path, capacity, max_bytes);
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let mut tmp = match dir {
         Some(dir) => tempfile::NamedTempFile::new_in(dir),
@@ -199,5 +223,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["4"]
         );
+    }
+
+    fn write_lines(path: &Path, n: usize) {
+        let mut f = File::create(path).unwrap();
+        for i in 0..n {
+            writeln!(
+                f,
+                "{}",
+                serde_json::to_string(&entry(&format!("m{i:03}"))).unwrap()
+            )
+            .unwrap();
+        }
+    }
+
+    fn msgs(v: &[LogEntry]) -> Vec<&str> {
+        v.iter().map(|e| e.message.as_str()).collect()
+    }
+
+    #[test]
+    fn tail_window_returns_only_newest_without_a_malformed_cut_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("e.jsonl");
+        write_lines(&path, 100);
+        let line = std::fs::metadata(&path).unwrap().len() / 100;
+        let got = load_recent_with(&path, 1000, line * 10 + line / 2);
+        assert!(got.len() >= 9 && got.len() <= 10, "{}", got.len());
+        assert_eq!(msgs(&got).last(), Some(&"m099"));
+        assert_eq!(load_recent_with(&path, 1000, 1 << 30).len(), 100);
+        assert_eq!(
+            msgs(&load_recent_with(&path, 3, 1 << 30)),
+            ["m097", "m098", "m099"]
+        );
+        assert_eq!(load_recent_with(&path, 3, line * 10).len(), 3);
+    }
+
+    #[test]
+    fn compact_on_an_oversized_file_keeps_only_the_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("e.jsonl");
+        write_lines(&path, 100);
+        let line = std::fs::metadata(&path).unwrap().len() / 100;
+        compact_with(&path, 1000, line * 5 + line / 2).unwrap();
+        let kept = load_recent_with(&path, 1000, 1 << 30);
+        assert!(kept.len() <= 5 && !kept.is_empty());
+        assert_eq!(msgs(&kept).last(), Some(&"m099"));
     }
 }

@@ -334,7 +334,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin.clone(), logd_args)
         .with_identity(pki.clone(), Role::Logd, "")
-        .with_role_uid(child_gid);
+        .with_role_uid(child_gid)
+        // #756: glibc per-thread arenas fragment nos-logd's churn into
+        // 7-17x its live heap; one arena keeps RSS flat (measured, #757).
+        .with_env("MALLOC_ARENA_MAX", "1");
     tasks.push(tokio::spawn(supervise_one(
         logd_spec,
         policy,

@@ -131,6 +131,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospf-remote-lfa" => ospf::ospf_remote_lfa(w).await,
         "pki" => pki::pki(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
+        "logd-memory" => crate::logd_mem::phase(w).await,
         other => bail!("unknown phase '{other}'"),
     }
 }
@@ -271,6 +272,9 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
         "pki-suite" => &["up", "established", "pki", "pki-rotation"],
+        // Not run by CI (minutes of runtime, memory thresholds are the flakiest
+        // class): `cargo run -p nos-e2e -- logd-memory-lab` by hand (#756).
+        "logd-memory-lab" => &["up", "established", "logd-memory"],
         _ => return None,
     })
 }
@@ -390,6 +394,7 @@ pub const ALL: &[&str] = &[
     "ospf-remote-lfa",
     "pki",
     "pki-rotation",
+    "logd-memory",
 ];
 
 #[cfg(test)]
@@ -400,7 +405,15 @@ mod tests {
 
     /// Add new groups here. (`run`'s match is not introspectable, so a name in
     /// `ALL` that `run` does not dispatch only fails when run: "unknown phase".)
-    const GROUPS: [&str; 6] = ["base", "drivers", "rpl", "ospf-suite", "multi", "pki-suite"];
+    const GROUPS: [&str; 7] = [
+        "base",
+        "drivers",
+        "rpl",
+        "ospf-suite",
+        "multi",
+        "pki-suite",
+        "logd-memory-lab",
+    ];
 
     struct Row {
         phase: String,
