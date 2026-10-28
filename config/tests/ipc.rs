@@ -1602,3 +1602,58 @@ async fn user_exists_round_trips_for_restd_only() {
         Event::Error(m) if m == "permission denied"
     ));
 }
+
+/// #759: instance-name lists and the per-table `rest_api` probe, Restd only.
+#[tokio::test]
+async fn instance_lists_and_rest_api_round_trip_for_restd_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let api = nos_proto::RestApi {
+        address: "10.0.0.1".parse().unwrap(),
+        port: 8443,
+    };
+    let cfg = Config {
+        bgp_instances: vec![nos_proto::BgpInstance {
+            name: "b1".into(),
+            ..Default::default()
+        }],
+        routing_tables: vec![
+            nos_proto::RoutingTable {
+                name: "rt1".into(),
+                rest_api: Some(api.clone()),
+                ..Default::default()
+            },
+            nos_proto::RoutingTable {
+                name: "rt2".into(),
+                ..Default::default()
+            },
+        ],
+        ..Config::default()
+    };
+    let store = ConfigStore::new(cfg, None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+
+    let (mut reader, mut writer) = connect_as(&path, "restd", "rt1").await;
+    writer.send(Request::ListBgpInstances).await.unwrap();
+    assert!(matches!(next_event(&mut reader).await, Event::InstanceNames(n) if n == ["b1"]));
+    writer.send(Request::ListOspfInstances).await.unwrap();
+    assert!(matches!(next_event(&mut reader).await, Event::InstanceNames(n) if n.is_empty()));
+    writer.send(Request::ListOspfv3Instances).await.unwrap();
+    assert!(matches!(next_event(&mut reader).await, Event::InstanceNames(n) if n.is_empty()));
+    for (t, want) in [("rt1", Some(api)), ("rt2", None), ("nope", None)] {
+        writer
+            .send(Request::GetRestApi { table: t.into() })
+            .await
+            .unwrap();
+        assert!(matches!(next_event(&mut reader).await, Event::RestApi(r) if r == want));
+    }
+
+    let (mut reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
+    writer.send(Request::ListBgpInstances).await.unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Error(m) if m == "permission denied"
+    ));
+}

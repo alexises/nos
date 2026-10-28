@@ -550,13 +550,7 @@ where
 
 #[utoipa::path(get, path = "/v1/bgp/summary", tag = "show", summary = "BGP session summary, per instance", responses((status = 200, body = BgpSummaryReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn bgp_summary(State(d): State<Daemons>) -> ApiResult<Json<BgpSummaryReport>> {
-    let names = d
-        .running_config()
-        .await?
-        .bgp_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let names = d.bgp_instance_names().await?;
     Ok(Json(
         per_instance(
             &d,
@@ -604,13 +598,7 @@ async fn bgp_page_scope(d: &Daemons, q: &BgpPageQuery) -> ApiResult<(Vec<String>
             "pagination requires ?instance=".to_string(),
         ));
     }
-    let mut names: Vec<String> = d
-        .running_config()
-        .await?
-        .bgp_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let mut names: Vec<String> = d.bgp_instance_names().await?;
     if let Some(want) = &q.instance {
         names.retain(|n| n == want);
         if names.is_empty() {
@@ -809,13 +797,7 @@ pub async fn bgp_routes(
 
 #[utoipa::path(get, path = "/v1/bgp/rpki", tag = "show", summary = "RPKI cache sessions (RFC 8210), per instance", responses((status = 200, body = BgpRpkiReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn bgp_rpki(State(d): State<Daemons>) -> ApiResult<Json<BgpRpkiReport>> {
-    let names = d
-        .running_config()
-        .await?
-        .bgp_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let names = d.bgp_instance_names().await?;
     Ok(Json(
         per_instance(
             &d,
@@ -833,13 +815,7 @@ pub async fn bgp_rpki(State(d): State<Daemons>) -> ApiResult<Json<BgpRpkiReport>
 
 #[utoipa::path(get, path = "/v1/ospf/neighbors", tag = "show", summary = "OSPF neighbors, per instance", responses((status = 200, body = OspfNeighborsReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn ospf_neighbors(State(d): State<Daemons>) -> ApiResult<Json<OspfNeighborsReport>> {
-    let names = d
-        .running_config()
-        .await?
-        .ospf_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let names = d.ospf_instance_names().await?;
     Ok(Json(
         per_instance(
             &d,
@@ -857,13 +833,7 @@ pub async fn ospf_neighbors(State(d): State<Daemons>) -> ApiResult<Json<OspfNeig
 
 #[utoipa::path(get, path = "/v1/ospf/database", tag = "show", summary = "OSPF LSDB summary, per instance", responses((status = 200, body = OspfDatabaseReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn ospf_database(State(d): State<Daemons>) -> ApiResult<Json<OspfDatabaseReport>> {
-    let names = d
-        .running_config()
-        .await?
-        .ospf_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let names = d.ospf_instance_names().await?;
     Ok(Json(
         per_instance(
             &d,
@@ -881,13 +851,7 @@ pub async fn ospf_database(State(d): State<Daemons>) -> ApiResult<Json<OspfDatab
 
 #[utoipa::path(get, path = "/v1/ospfv3/neighbors", tag = "show", summary = "OSPFv3 neighbors, per instance", responses((status = 200, body = Ospfv3NeighborsReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn ospfv3_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3NeighborsReport>> {
-    let names = d
-        .running_config()
-        .await?
-        .ospfv3_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let names = d.ospfv3_instance_names().await?;
     Ok(Json(
         per_instance(
             &d,
@@ -905,13 +869,7 @@ pub async fn ospfv3_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3
 
 #[utoipa::path(get, path = "/v1/ospfv3/database", tag = "show", summary = "OSPFv3 LSDB summary, per instance", responses((status = 200, body = Ospfv3DatabaseReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn ospfv3_database(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3DatabaseReport>> {
-    let names = d
-        .running_config()
-        .await?
-        .ospfv3_instances
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
+    let names = d.ospfv3_instance_names().await?;
     Ok(Json(
         per_instance(
             &d,

@@ -2503,6 +2503,18 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
             .await?,
         "\"instance\":\"r1\"",
     )?;
+    // #759: router-wide show routes list instance names with the cheap
+    // `List*Instances` probes; the OSPF families have no instance here, so
+    // they answer 200 with an empty report.
+    for route in [
+        "/v1/bgp/rpki",
+        "/v1/ospf/neighbors",
+        "/v1/ospf/database",
+        "/v1/ospfv3/neighbors",
+        "/v1/ospfv3/database",
+    ] {
+        a.rest_expect(Method::GET, route, None, 200).await?;
+    }
     a.rest_expect(Method::GET, "/v1/routes/nonexistent-table", None, 503)
         .await?;
     expect_body(

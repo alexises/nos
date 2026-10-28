@@ -165,6 +165,33 @@ impl ConfigStore {
             .any(|u| u.name == name)
     }
 
+    /// BGP instance names of the running config (no config clone, #759).
+    pub async fn bgp_instance_names(&self) -> Vec<String> {
+        let r = self.0.running.read().await;
+        r.bgp_instances.iter().map(|i| i.name.clone()).collect()
+    }
+
+    /// OSPF instance names of the running config (no config clone, #759).
+    pub async fn ospf_instance_names(&self) -> Vec<String> {
+        let r = self.0.running.read().await;
+        r.ospf_instances.iter().map(|i| i.name.clone()).collect()
+    }
+
+    /// `OSPFv3` instance names of the running config (no config clone, #759).
+    pub async fn ospfv3_instance_names(&self) -> Vec<String> {
+        let r = self.0.running.read().await;
+        r.ospfv3_instances.iter().map(|i| i.name.clone()).collect()
+    }
+
+    /// `rest_api` pinned to routing table `table` in the running config (#759).
+    pub async fn rest_api(&self, table: &str) -> Option<nos_proto::RestApi> {
+        let r = self.0.running.read().await;
+        r.routing_tables
+            .iter()
+            .find(|t| t.name == table)
+            .and_then(|t| t.rest_api.clone())
+    }
+
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<CommitUpdate>> {
         self.0.tx.subscribe()
     }

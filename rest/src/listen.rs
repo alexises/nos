@@ -160,13 +160,8 @@ impl Listener {
     /// `None` if the config couldn't be read, so a `nos-configd` blip never
     /// tears down a healthy listener.
     async fn wanted(&self) -> Option<Option<RestApi>> {
-        match self.daemons.running_config().await {
-            Ok(cfg) => Some(
-                cfg.routing_tables
-                    .into_iter()
-                    .find(|t| t.name == self.table)
-                    .and_then(|t| t.rest_api),
-            ),
+        match self.daemons.rest_api(&self.table).await {
+            Ok(api) => Some(api),
             Err(e) => {
                 debug!(error = ?e, "could not read config; keeping current listener");
                 None

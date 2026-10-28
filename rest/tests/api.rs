@@ -2379,3 +2379,63 @@ async fn client_auth_probes_user_exists_and_never_fetches_the_config() {
     let (s, _) = send(&app, Method::GET, "/openapi.json", None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
+
+/// #759: the show routes list instances with `ListBgpInstances` /
+/// `ListOspfInstances` / `ListOspfv3Instances`, and the listener reads its
+/// table with `GetRestApi`; none of them sends `Request::Get`.
+#[tokio::test]
+async fn show_routes_and_listener_never_fetch_the_config() {
+    use nos_proto::{Event, Request};
+    as_restd();
+    let dir = tempfile::tempdir().unwrap();
+    let (config_socket, watchdog_socket) = (dir.path().join("c.sock"), dir.path().join("w.sock"));
+    let (gets, lists, apis) = (
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let (g, l, a) = (gets.clone(), lists.clone(), apis.clone());
+    serve(
+        &config_socket,
+        ("configd", ""),
+        move |req: Request| match req {
+            Request::UserExists { name } => Event::UserExists(name == USER),
+            Request::ListBgpInstances
+            | Request::ListOspfInstances
+            | Request::ListOspfv3Instances => {
+                l.fetch_add(1, Ordering::SeqCst);
+                Event::InstanceNames(vec![])
+            }
+            Request::GetRestApi { .. } => {
+                a.fetch_add(1, Ordering::SeqCst);
+                Event::RestApi(None)
+            }
+            Request::Get => {
+                g.fetch_add(1, Ordering::SeqCst);
+                Event::Error("no".into())
+            }
+            _ => Event::Error("unsupported".into()),
+        },
+    );
+    serve(&watchdog_socket, ("watchdog", ""), |_: WatchdogRequest| {
+        WatchdogEvent::Ok
+    });
+    let daemons = Daemons::new(watchdog_socket, config_socket);
+    let app = api::router(daemons.clone());
+    for uri in [
+        "/v1/bgp/summary",
+        "/v1/bgp/rpki",
+        "/v1/bgp/evpn",
+        "/v1/ospf/neighbors",
+        "/v1/ospf/database",
+        "/v1/ospfv3/neighbors",
+        "/v1/ospfv3/database",
+    ] {
+        let (s, _) = send(&app, Method::GET, uri, None).await;
+        assert_eq!(s, StatusCode::OK, "{uri}");
+    }
+    assert_eq!(lists.load(Ordering::SeqCst), 7);
+    assert_eq!(daemons.rest_api("rt1").await.unwrap(), None);
+    assert_eq!(apis.load(Ordering::SeqCst), 1);
+    assert_eq!(gets.load(Ordering::SeqCst), 0, "no Request::Get");
+}

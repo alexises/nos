@@ -321,6 +321,41 @@ impl Daemons {
         }
     }
 
+    async fn names(&self, req: Request) -> ApiResult<Vec<String>> {
+        match self.config(req).await? {
+            Event::InstanceNames(n) => Ok(n),
+            other => Err(unexpected("nos-configd", &other)),
+        }
+    }
+
+    /// Names of the running config's BGP instances (#759).
+    pub async fn bgp_instance_names(&self) -> ApiResult<Vec<String>> {
+        self.names(Request::ListBgpInstances).await
+    }
+
+    /// Names of the running config's OSPF instances (#759).
+    pub async fn ospf_instance_names(&self) -> ApiResult<Vec<String>> {
+        self.names(Request::ListOspfInstances).await
+    }
+
+    /// Names of the running config's `OSPFv3` instances (#759).
+    pub async fn ospfv3_instance_names(&self) -> ApiResult<Vec<String>> {
+        self.names(Request::ListOspfv3Instances).await
+    }
+
+    /// `rest_api` pinned to routing table `table` (#759, #758).
+    pub async fn rest_api(&self, table: &str) -> ApiResult<Option<nos_proto::RestApi>> {
+        match self
+            .config(Request::GetRestApi {
+                table: table.into(),
+            })
+            .await?
+        {
+            Event::RestApi(r) => Ok(r),
+            other => Err(unexpected("nos-configd", &other)),
+        }
+    }
+
     /// One request to `nos-watchdogd`'s broker.
     pub async fn broker(&self, req: WatchdogRequest) -> ApiResult<WatchdogEvent> {
         self.call(&self.watchdog_socket, Role::Watchdog, "", req)

@@ -107,6 +107,10 @@ async fn serve(incoming: Incoming, store: ConfigStore) {
 async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) -> Option<Event> {
     Some(match req {
         Request::Get => Event::Config(store.running_snapshot().await.for_role(caller.role)),
+        Request::ListBgpInstances => Event::InstanceNames(store.bgp_instance_names().await),
+        Request::ListOspfInstances => Event::InstanceNames(store.ospf_instance_names().await),
+        Request::ListOspfv3Instances => Event::InstanceNames(store.ospfv3_instance_names().await),
+        Request::GetRestApi { table } => Event::RestApi(store.rest_api(&table).await),
         Request::UserExists { name } => Event::UserExists(store.user_exists(&name).await),
         Request::Save => match store.save_to_disk().await {
             Ok(()) => Event::Saved,

@@ -15,7 +15,11 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::SubscribeDiff { .. }
         | Request::Describe { .. } => true,
         Request::UpgradePasswordHash { .. } => role == Role::Watchdog,
-        Request::UserExists { .. } => role == Role::Restd,
+        Request::UserExists { .. }
+        | Request::ListBgpInstances
+        | Request::ListOspfInstances
+        | Request::ListOspfv3Instances
+        | Request::GetRestApi { .. } => role == Role::Restd,
         Request::Save
         | Request::OpenTransaction { .. }
         | Request::ApplyOp { .. }
@@ -60,6 +64,14 @@ mod tests {
             assert_eq!(allowed(role, &upgrade), role == Role::Watchdog, "{role:?}");
             let probe = Request::UserExists { name: "u".into() };
             assert_eq!(allowed(role, &probe), role == Role::Restd, "{role:?} probe");
+            for r in [
+                Request::ListBgpInstances,
+                Request::ListOspfInstances,
+                Request::ListOspfv3Instances,
+                Request::GetRestApi { table: "t".into() },
+            ] {
+                assert_eq!(allowed(role, &r), role == Role::Restd, "{role:?} {r:?}");
+            }
         }
     }
 }
