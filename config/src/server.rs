@@ -197,6 +197,28 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
                 }
             }
         }
+        Request::EditTransactionPath {
+            name,
+            path,
+            value,
+            if_match,
+            position,
+        } => {
+            match store
+                .edit_transaction_path(&name, &path, value.as_deref(), if_match, position)
+                .await
+            {
+                Ok(e) => Event::TransactionEdit {
+                    generation: e.generation,
+                    dirty: e.dirty,
+                    value: e.value,
+                },
+                Err(e) => {
+                    debug!(transaction = %name, error = %e, "edit transaction path failed");
+                    Event::Error(e.to_string())
+                }
+            }
+        }
         Request::UpgradePasswordHash { user, old, new } => {
             match store.upgrade_password_hash(&user, &old, new).await {
                 Ok(()) => Event::Committed { warnings: vec![] },

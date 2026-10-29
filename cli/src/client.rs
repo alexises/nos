@@ -136,17 +136,19 @@ pub async fn apply_op(
 }
 
 /// Sets (`Some(json)`) or removes (`None`) one subsection of a named
-/// transaction by config path — the config grammar's writes.
-pub async fn set_transaction_path(
+/// transaction by config path — the config grammar's writes. Returns the
+/// transaction's `dirty` flag after the edit (the reply carries no config,
+/// #774).
+pub async fn edit_transaction_path(
     socket_path: &Path,
     name: &str,
     path: Vec<String>,
     value: Option<String>,
     position: Option<ListPosition>,
-) -> Result<TransactionSnapshot, ClientError> {
+) -> Result<bool, ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;
     writer
-        .send(Request::SetTransactionPath {
+        .send(Request::EditTransactionPath {
             name: name.to_string(),
             path,
             value,
@@ -154,7 +156,10 @@ pub async fn set_transaction_path(
             position,
         })
         .await?;
-    expect_transaction(reader.next().await)
+    match reader.next().await {
+        Some(Ok(Event::TransactionEdit { dirty, .. })) => Ok(dirty),
+        other => expect_transaction(other).map(|s| s.dirty),
+    }
 }
 
 /// Fetches a named transaction's current in-progress config.

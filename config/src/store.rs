@@ -26,6 +26,16 @@ const TX_IDLE_TTL: Duration = Duration::from_hours(4);
 /// Clear-text passwords one edit may carry: each costs an argon2id hash.
 pub const MAX_CLEAR_PASSWORDS_PER_EDIT: usize = 4;
 
+/// What [`ConfigStore::edit_transaction_path`] replies with
+/// (`Event::TransactionEdit`, #774).
+#[derive(Debug)]
+pub struct PathEdit {
+    pub generation: u64,
+    pub dirty: bool,
+    /// JSON text of the subsection at the edited path; `None` after a remove.
+    pub value: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct Transaction {
     /// Shared with running after `open(Current)` until the first edit.
@@ -421,7 +431,8 @@ impl ConfigStore {
     }
 
     /// [`Self::set_transaction_path`] without the full-config snapshot
-    /// reply: returns the transaction's new generation.
+    /// reply (#774): the new generation and the edited subsection, which
+    /// costs that subsection, not the config.
     pub async fn edit_transaction_path(
         &self,
         name: &str,
@@ -429,9 +440,18 @@ impl ConfigStore {
         value: Option<&str>,
         if_match: Option<u64>,
         position: Option<ListPosition>,
-    ) -> Result<u64, ConfigError> {
-        self.edit_path(name, path, value, if_match, position, |t, _| t.generation)
-            .await
+    ) -> Result<PathEdit, ConfigError> {
+        let set = value.is_some();
+        self.edit_path(name, path, value, if_match, position, |t, _| {
+            Ok(PathEdit {
+                generation: t.generation,
+                dirty: t.dirty,
+                value: set
+                    .then(|| path_edit::get(&t.config, path).map(|v| v.to_string()))
+                    .transpose()?,
+            })
+        })
+        .await?
     }
 
     /// O(edit) (#775): the edit is planned on the shared config under the
@@ -1991,7 +2011,8 @@ mod tests {
             .edit_transaction_path("u", &segs("hostname"), Some("\"y\""), Some(2), None)
             .await
             .unwrap();
-        assert_eq!(g, 3);
+        assert_eq!((g.generation, g.dirty), (3, true));
+        assert_eq!(g.value.as_deref(), Some("\"y\""));
         assert_eq!(
             store.get_transaction("u").await.unwrap().config.hostname,
             "y"

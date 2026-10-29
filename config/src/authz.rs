@@ -27,7 +27,8 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::CommitTransaction { .. }
         | Request::DiscardTransaction { .. }
         | Request::DiffTransaction { .. }
-        | Request::SetTransactionPath { .. } => matches!(role, Role::User | Role::Restd),
+        | Request::SetTransactionPath { .. }
+        | Request::EditTransactionPath { .. } => matches!(role, Role::User | Role::Restd),
     }
 }
 
@@ -56,6 +57,14 @@ mod tests {
             let may_edit = matches!(role, Role::User | Role::Restd);
             assert_eq!(allowed(role, &open()), may_edit, "{role:?} editing");
             assert_eq!(allowed(role, &Request::Save), may_edit, "{role:?} saving");
+            let edit = Request::EditTransactionPath {
+                name: "t".into(),
+                path: vec![],
+                value: None,
+                if_match: None,
+                position: None,
+            };
+            assert_eq!(allowed(role, &edit), may_edit, "{role:?} path edit");
             let upgrade = Request::UpgradePasswordHash {
                 user: "u".into(),
                 old: "a".into(),

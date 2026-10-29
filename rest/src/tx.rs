@@ -15,7 +15,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
 use nos_proto::config_path::{self, ListPosition};
-use nos_proto::{Config, ConfigDiff, Event, Request, TransactionBase, TransactionSnapshot};
+use nos_proto::{
+    redact_at, Config, ConfigDiff, Event, Request, TransactionBase, TransactionSnapshot,
+};
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -249,9 +251,9 @@ pub async fn put(
     let position = position(&uri)?;
     let value = String::from_utf8(body.to_vec())
         .map_err(|_| ApiError::BadRequest("body is not UTF-8".to_string()))?;
-    let snap = snapshot(
-        d.config(Request::SetTransactionPath {
-            name,
+    let (generation, dirty, value) = path_edit(
+        d.config(Request::EditTransactionPath {
+            name: name.clone(),
             path: path.clone(),
             value: Some(value),
             if_match,
@@ -259,12 +261,32 @@ pub async fn put(
         })
         .await?,
     )?;
-    let value = if path.is_empty() {
-        redacted_snapshot(&snap)
-    } else {
-        subsection(&snap, &path)?
-    };
-    Ok(([etag(snap.generation)], Json(value)).into_response())
+    let mut value: Value = serde_json::from_str(value.as_deref().unwrap_or("null"))
+        .map_err(|_| ApiError::BadGateway("nos-configd sent a malformed subsection".into()))?;
+    redact_at(&mut value, &path);
+    if path.is_empty() {
+        // The whole-config PUT keeps its `TransactionSnapshot` reply.
+        value = json!({
+            "name": name,
+            "config": value,
+            "dirty": dirty,
+            "resumed": true,
+            "generation": generation,
+        });
+    }
+    Ok(([etag(generation)], Json(value)).into_response())
+}
+
+/// `(generation, dirty, subsection JSON)` of an `EditTransactionPath` reply.
+fn path_edit(ev: Event) -> ApiResult<(u64, bool, Option<String>)> {
+    match ev {
+        Event::TransactionEdit {
+            generation,
+            dirty,
+            value,
+        } => Ok((generation, dirty, value)),
+        other => Err(unexpected("nos-configd", &other)),
+    }
 }
 
 /// `DELETE /v1/transactions/<tx>` discards the transaction;
@@ -283,8 +305,8 @@ pub async fn delete(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> A
             other => Err(unexpected("nos-configd", &other)),
         }
     } else {
-        let snap = snapshot(
-            d.config(Request::SetTransactionPath {
+        let (generation, ..) = path_edit(
+            d.config(Request::EditTransactionPath {
                 name,
                 path,
                 value: None,
@@ -293,7 +315,7 @@ pub async fn delete(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> A
             })
             .await?,
         )?;
-        Ok((StatusCode::NO_CONTENT, [etag(snap.generation)]).into_response())
+        Ok((StatusCode::NO_CONTENT, [etag(generation)]).into_response())
     }
 }
 

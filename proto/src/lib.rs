@@ -108,9 +108,9 @@ pub use rib::{
     VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
 };
 pub use schema::{
-    loopback_table_name, parse_fingerprint, AddressFamily, Admin, AdminKey, AsPathList, BfdAuth,
-    BfdAuthMethod, BfdProfile, BgpAddPath, BgpAggregate, BgpAoAlgorithm, BgpAoKey, BgpAuth,
-    BgpConfederation, BgpDamping, BgpFlowspecValidation, BgpGracefulRestart, BgpInstance,
+    loopback_table_name, parse_fingerprint, redact_at, AddressFamily, Admin, AdminKey, AsPathList,
+    BfdAuth, BfdAuthMethod, BfdProfile, BgpAddPath, BgpAggregate, BgpAoAlgorithm, BgpAoKey,
+    BgpAuth, BgpConfederation, BgpDamping, BgpFlowspecValidation, BgpGracefulRestart, BgpInstance,
     BgpLocalAs, BgpMaximumPrefix, BgpPeer, BgpPeerGroup, BgpPrefixLimit, BgpRole, BgpShutdown,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, DfAlgorithm, EsRedundancy, Interface,
     InterfaceAddress, LacpMode, LacpRate, LldpDestination, LldpSettings, LoggingSettings,

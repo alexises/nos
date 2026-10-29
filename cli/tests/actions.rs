@@ -42,8 +42,7 @@ fn fake_configd(path: &Path) {
                 Ok(()) => Event::Transaction(snapshot(&name, &cfg)),
                 Err(e) => Event::Error(e.to_string()),
             },
-            Request::SetTransactionPath {
-                name,
+            Request::EditTransactionPath {
                 path,
                 value,
                 position,
@@ -65,7 +64,11 @@ fn fake_configd(path: &Path) {
                 {
                     Ok(new) => {
                         *cfg = new;
-                        Event::Transaction(snapshot(&name, &cfg))
+                        Event::TransactionEdit {
+                            generation: 1,
+                            dirty: true,
+                            value: None,
+                        }
                     }
                     Err(e) => Event::Error(e),
                 }

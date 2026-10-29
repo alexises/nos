@@ -412,12 +412,11 @@ async fn whole_config_put_delete_path_and_discard() {
     let mut whole = send(app, Method::GET, "/v1/transactions/t2", None).await.1["config"].clone();
     whole["hostname"] = json!("bulk");
     whole["bgp_instances"] = json!([bgp_instance("a", 1), bgp_instance("b", 2)]);
-    assert_eq!(
-        send(app, Method::PUT, "/v1/transactions/t2", Some(whole))
-            .await
-            .0,
-        StatusCode::OK
-    );
+    let (s, put) = send(app, Method::PUT, "/v1/transactions/t2", Some(whole)).await;
+    assert_eq!(s, StatusCode::OK);
+    // The whole-config PUT still replies with the transaction, like a GET.
+    let (_, got) = send(app, Method::GET, "/v1/transactions/t2", None).await;
+    assert_eq!(put, got);
 
     assert_eq!(
         send(

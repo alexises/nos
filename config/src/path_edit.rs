@@ -322,6 +322,23 @@ macro_rules! sections {
                 _ => unreachable!("{field} is planned by `plan`"),
             }
         }
+
+        /// `{field: ...}` cut down to what `path` addresses: the section, or
+        /// the one list element `path[1]` names (an empty list if none).
+        fn section_doc(cfg: &Config, field: &str, path: &[String]) -> serde_json::Result<Value> {
+            let elem = |v: Value| -> serde_json::Result<Value> { Ok(wrap(field, v)) };
+            match field {
+                $(stringify!($l) => match path.get(1) {
+                    None => Ok(json_field(field, serde_json::to_value(&cfg.$l)?)),
+                    Some(k) => match cfg.$l.iter().find(|e| key_matches(&e.name, k)) {
+                        Some(e) => elem(serde_json::to_value(e)?),
+                        None => Ok(json_field(field, Value::Array(Vec::new()))),
+                    },
+                },)*
+                $(stringify!($f) => Ok(json_field(field, serde_json::to_value(&cfg.$f)?)),)*
+                _ => unreachable!("every section is listed"),
+            }
+        }
     };
 }
 
@@ -329,9 +346,53 @@ sections! {
     lists: bgp_instances, routing_tables, ospf_instances, ospfv3_instances,
         static_routing_instances, interfaces, policy_definitions, community_aliases,
         community_groups, prefix_lists, as_path_lists, broadcast_domains,
-        switching_profiles, port_aggregates, bfd_profiles, stp_port_profiles, acls;
-    fields: hostname, lldp, logging, sbfd_reflector, spanning_tree;
-    special: users, admin
+        switching_profiles, port_aggregates, bfd_profiles, stp_port_profiles, acls, users;
+    fields: hostname, lldp, logging, sbfd_reflector, spanning_tree, admin;
+    special:
+}
+
+fn json_field(field: &str, v: Value) -> Value {
+    let mut root = Map::new();
+    root.insert(field.to_string(), v);
+    Value::Object(root)
+}
+
+/// The subsection of `cfg` at `path` as `config_path::get` reads it from
+/// the whole config, serializing only its section, list element or static
+/// route: the reply of an edit costs the edit (#774).
+pub(crate) fn get(cfg: &Config, path: &[String]) -> Result<Value, ConfigError> {
+    let Some(seg) = path.first() else {
+        return Ok(serde_json::to_value(cfg)?);
+    };
+    let field = find_field(SECTIONS, seg).ok_or_else(|| PathError::NotFound(seg.clone()))?;
+    let route = (field == "static_routing_instances"
+        && path.len() >= 4
+        && field_matches("routes", &path[2]))
+    .then(|| {
+        let inst = cfg
+            .static_routing_instances
+            .iter()
+            .find(|s| key_matches(&s.name, &path[1]))?;
+        let r = inst
+            .routes
+            .iter()
+            .find(|r| key_matches(&r.subnet.to_string(), &path[3]))?;
+        Some((inst, r))
+    })
+    .flatten();
+    let doc = match route {
+        Some((inst, r)) => {
+            let mut i = Map::new();
+            i.insert("name".into(), Value::String(inst.name.clone()));
+            i.insert(
+                "routes".into(),
+                Value::Array(vec![serde_json::to_value(r)?]),
+            );
+            wrap(field, Value::Object(i))
+        }
+        None => section_doc(cfg, field, path)?,
+    };
+    Ok(config_path::get(&doc, path)?.clone())
 }
 
 #[cfg(test)]
@@ -506,6 +567,12 @@ mod tests {
                 match (want, got) {
                     (Ok(w), Ok(g)) => {
                         assert_eq!(w, g, "{ctx}");
+                        if value.is_some() {
+                            // The edit's reply reads what the whole config holds there.
+                            let whole = serde_json::to_value(&g).unwrap();
+                            let want = config_path::get(&whole, &path).unwrap();
+                            assert_eq!(&get(&g, &path).unwrap(), want, "{ctx}");
+                        }
                         cfg = g;
                         ok += 1;
                     }

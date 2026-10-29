@@ -112,7 +112,8 @@ pub enum Request {
     /// `path` — see `nos_proto::config_path` for the path grammar. An empty
     /// `path` addresses the whole config. Like `ApplyOp`, never validates;
     /// replies with `Event::Transaction`. `if_match` as on
-    /// `CommitTransaction`.
+    /// `CommitTransaction`. Unused in tree since #774 (a full snapshot per
+    /// edit): kept for wire compatibility, use `EditTransactionPath`.
     SetTransactionPath {
         /// Transaction name.
         name: String,
@@ -147,6 +148,21 @@ pub enum Request {
     GetRestApi {
         /// Routing table name.
         table: String,
+    },
+    /// `SetTransactionPath` replying with `Event::TransactionEdit` instead
+    /// of a full snapshot (#774): the reply costs the edited subsection,
+    /// not the config.
+    EditTransactionPath {
+        /// Transaction name.
+        name: String,
+        /// Config path of the node to edit.
+        path: Vec<String>,
+        /// Value to set; `None` clears the node.
+        value: Option<String>,
+        /// Only act if the transaction is at this revision.
+        if_match: Option<u64>,
+        /// As on `SetTransactionPath`.
+        position: Option<crate::config_path::ListPosition>,
     },
 }
 
@@ -186,6 +202,17 @@ pub enum Event {
     InstanceNames(Vec<String>),
     /// Reply to `GetRestApi`: `None` = table absent or not pinned.
     RestApi(Option<crate::RestApi>),
+    /// Reply to `EditTransactionPath` (#774).
+    TransactionEdit {
+        /// The transaction's generation after the edit.
+        generation: u64,
+        /// The transaction's `dirty` flag after the edit.
+        dirty: bool,
+        /// JSON text of the subsection at the edited path, unredacted
+        /// (postcard cannot carry a `serde_json::Value`); `None` after a
+        /// remove.
+        value: Option<String>,
+    },
 }
 
 /// What a newly opened transaction's in-progress config should start from.

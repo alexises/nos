@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
         send(
             &mut writer,
             &mut reader,
-            Request::SetTransactionPath {
+            Request::EditTransactionPath {
                 name: txn.clone(),
                 path,
                 value,
