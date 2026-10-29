@@ -33,7 +33,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 `server::start()` binds a `UnixListener` and spawns an accept loop, each connection sharing a cloned `ConfigStore`. Per-connection:
 - `Request::Get` → send `Event::Config(current_running)` once.
 - `Request::Subscribe` → `store.subscribe_config(role, sub_tx)`: the current config for the role, plus a forwarder task bridging the commit broadcast → `mpsc::Sender<Event>` (`Event::Config(config.for_role(role))` per commit). The select loop drains the `mpsc::Receiver` to the client.
-- `Request::SubscribeDiff { scopes }` → `store.subscribe_diff(role, scopes, sub_tx)`: the initial diff, then `CommitUpdate::diff_for(role)` per commit (one `Arc<ConfigDiff>` per visibility class, #751), scoped, skipped when empty. Forwarders live in `store.rs` (tests need no PKI).
+- `Request::SubscribeDiff { scopes }` → `store.subscribe_diff(role, scopes, sub_tx)`: the initial diff, then `CommitUpdate::diff_for(role)` per commit (one `Arc<ConfigDiff>` per visibility class, #751; `diff_configs_for_role`, no projection clone, #778), scoped, skipped when empty. Forwarders live in `store.rs` (tests need no PKI).
 - `Request::Unsubscribe` → abort the active forwarder task.
 - `UserExists`, `List*Instances`, `GetRestApi` → `Restd`-only, no clone (#755, #759).
 - `Request::Save` → serializes the running config as YAML and atomically writes it to the daemon's `--config-file` path; replies `Event::Saved` on success, `Event::Error` if no `--config-file` was configured or the write fails.

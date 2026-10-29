@@ -72,7 +72,12 @@ Editing the config happens inside a **named transaction**, held server-side in `
   - The store counts live diff subscribers per class (`ConfigStore::subscribe_diff`, released when the forwarder task ends). Registering and `broadcast::Sender::subscribe` happen under one lock, so a commit owes exactly the classes of the receivers that get it.
   - The class that sees everything (`User`, `Restd`) diffs the shared configs directly. Other classes build their `for_role` projections inside the diff task and drop them with it.
   - A commit with no diff subscriber keeps no previous config.
-- The diff itself is still O(config) per class (`diff_configs` walks both configs as JSON, ~75 `Config`s of transient at 66k routes). In the `config-mem` lab (#776) it is what grows `nos-configd`'s RSS: ~50 MB per 5500-route wave, all of it in the seconds after a commit, while the `PUT`s between commits stay flat. #778 tracks it.
+- The diff is typed (#778): `diff_configs` compares root fields and keyed-list elements with `==` and serializes only what differs, so its transient is the JSON of the change, not of both configs.
+  - Every keyed root list is paired by its typed key; a modified static routing instance pairs its `routes` by `subnet` the same way, so a one-route change in 22k routes serializes one route.
+  - The singleton root fields (`hostname`, `lldp`, `logging`, `admin`, ...) are always walked as JSON: they are small, and a duplicate key inside one is reported even between equal sides.
+  - The output is the full-JSON walk's (`diff_values`, kept as the test oracle): a differential test runs random edit sequences through both.
+  - Restricted classes use `diff_configs_for_role`: `for_role` only changes `users` and `admin` (`Config::role_secrets`), so only those two slots are re-diffed from projections, without two whole-config clones per class.
+- `config-mem` (#776) after #778: the ~50 MB step per wave is gone, but `nos-configd`'s `VmRSS` still creeps ~1.6 MB per 5500-route wave (34.9 MB after wave 2, 49.1 MB after wave 11), over the gate's ±25%. The config itself only grows ~0.35 MB per wave; the rest is an allocator follow-up, not the diff.
 
 ### Memory profiling (#766, #767)
 
@@ -87,10 +92,11 @@ Editing the config happens inside a **named transaction**, held server-side in `
   - per-`PUT` transient of `edit_transaction_path` (the edit without the snapshot reply), asserted at most 8 KiB;
   - the first `PUT` of each transaction, which unshares running (one copy), asserted at most 1.5 `Config`s;
   - store-level commit transient, asserted at most a quarter `Config`;
-  - the subscribers' diff transient, printed only (~75 `Config`s at 66k: `diff_configs` walks both configs as JSON for each class);
+  - the subscribers' diff transient for the three classes, asserted at most 2.6 `Config`s (#778);
   - live heap after the commits, broadcast ring included, asserted at most an eighth of a `Config`. Tokio drops a ring slot's value once every receiver has read it, so only a lagging receiver keeps a commit alive.
 - Measured at 66k in a debug build (#773): commit transient 0.14 `Config`, live after 4 commits ~0, per-`PUT` transient 11.6 `Config`s.
 - After #775: per-`PUT` transient 1.7 KB (was 11.6 `Config`s, ~49 MB), first `PUT` 1.38 `Config`s, live after 4 commits below the seed (running re-cloned with exact capacities).
+- After #778: diff transient 1.3 `Config`s for the three classes (was ~75, ~317 MB), asserted at most 2.6.
 
 ### Path edits (#775)
 

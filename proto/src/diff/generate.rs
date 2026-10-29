@@ -11,10 +11,15 @@
 //! inside one, is flattened to labels prefixed with its words
 //! (`logging syslog s1 address`). Hidden fields (derived state) are skipped.
 
+use std::collections::HashMap;
+use std::hash::Hash;
+
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::cli::render::{name, unwrap_option, words, HIDDEN};
 use crate::cli::{root, Field, Kind, Node};
+use crate::schema::StaticRoutingInstance;
 use crate::Config;
 
 use super::{ConfigDiff, DiffStatus, FieldDiff, SectionDiff};
@@ -22,12 +27,27 @@ use super::{ConfigDiff, DiffStatus, FieldDiff, SectionDiff};
 /// A secret that is still there but changed.
 const CHANGED: &str = "<changed>";
 
+/// The typed diff (#778): the same output as `diff_values` on both configs'
+/// JSON, but typed-equal root fields and list elements are skipped with
+/// `==` and never serialized, so a commit's transient is the JSON of what
+/// changed, not of two whole configs.
 pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
-    diff_values(&to_value(base), &to_value(candidate))
+    let mut out = ConfigDiff::default();
+    for f in root().fields.iter().filter(|f| !f.hidden) {
+        let (mut fields, mut subs) = (Vec::new(), Vec::new());
+        root_field(f, base, candidate, &mut fields, &mut subs);
+        assert!(
+            put(&mut out, f.name, fields, subs),
+            "Config.{} has no ConfigDiff slot",
+            f.name
+        );
+    }
+    out
 }
 
 /// `diff_configs` on the configs' JSON (the round-trip tests build configs
-/// that are only shaped like one).
+/// that are only shaped like one). Walks both whole trees: the oracle the
+/// typed diff is tested against.
 pub fn diff_values(b: &Value, c: &Value) -> ConfigDiff {
     let mut out = ConfigDiff::default();
     for f in root().fields.iter().filter(|f| !f.hidden) {
@@ -42,8 +62,200 @@ pub fn diff_values(b: &Value, c: &Value) -> ConfigDiff {
     out
 }
 
-fn to_value(c: &Config) -> Value {
+fn to_value<T: Serialize + ?Sized>(c: &T) -> Value {
     serde_json::to_value(c).expect("a config serializes")
+}
+
+/// One root field, typed. Every keyed root list is keyed by `name`.
+fn root_field(
+    f: &Field,
+    b: &Config,
+    c: &Config,
+    fields: &mut Vec<FieldDiff>,
+    subs: &mut Vec<SectionDiff>,
+) {
+    macro_rules! dispatch {
+        (lists: $($l:ident),*; values: $($v:ident),*) => {
+            $(if f.name == stringify!($l) {
+                return keyed(f, &b.$l, &c.$l, |e| &e.name, element, fields, subs);
+            })*
+            $(if f.name == stringify!($v) {
+                return one(f, &b.$v, &c.$v, fields, subs);
+            })*
+        };
+    }
+    if f.name == "static_routing_instances" {
+        let (b, c) = (&b.static_routing_instances, &c.static_routing_instances);
+        return keyed(f, b, c, |e| &e.name, static_instance, fields, subs);
+    }
+    dispatch!(
+        lists: bgp_instances, routing_tables, ospf_instances, ospfv3_instances, interfaces,
+            policy_definitions, community_aliases, community_groups, as_path_lists, prefix_lists,
+            broadcast_domains, switching_profiles, port_aggregates, users, bfd_profiles,
+            stp_port_profiles, acls;
+        values: hostname, lldp, logging, sbfd_reflector, spanning_tree, admin
+    );
+    panic!("Config.{} has no typed diff", f.name);
+}
+
+/// A field diffed through its JSON alone. Not skipped when typed-equal: a
+/// keyed list inside one (`admin keys`) with a duplicate key pairs every
+/// duplicate with the first, which `list` reports even between equal sides
+/// (an uncommitted transaction can hold one). The singletons are small.
+fn one<T: Serialize + ?Sized>(
+    f: &Field,
+    b: &T,
+    c: &T,
+    fields: &mut Vec<FieldDiff>,
+    subs: &mut Vec<SectionDiff>,
+) {
+    let obj = |v: &T| Value::Object([(f.name.to_string(), to_value(v))].into_iter().collect());
+    field(f, "", Some(&obj(b)), Some(&obj(c)), false, fields, subs);
+}
+
+/// One differing (or added/removed) element, through its JSON.
+fn element<T: Serialize>(
+    n: &Node,
+    b: Option<&T>,
+    c: Option<&T>,
+    fields: &mut Vec<FieldDiff>,
+    subs: &mut Vec<SectionDiff>,
+) {
+    let (b, c) = (b.map(to_value), c.map(to_value));
+    object(n, "", b.as_ref(), c.as_ref(), false, fields, subs);
+}
+
+/// A modified static instance holds thousands of routes: diff the instance
+/// without them, then its routes typed (only changed routes serialized).
+fn static_instance(
+    n: &Node,
+    b: Option<&StaticRoutingInstance>,
+    c: Option<&StaticRoutingInstance>,
+    fields: &mut Vec<FieldDiff>,
+    subs: &mut Vec<SectionDiff>,
+) {
+    let (Some(b), Some(c)) = (b, c) else {
+        return element(n, b, c, fields, subs);
+    };
+    // No `..`: a new field must be placed here, and `routes` stays the last
+    // field (its diff is appended after the rest's).
+    let bare = |e: &StaticRoutingInstance| StaticRoutingInstance {
+        name: e.name.clone(),
+        routes: Vec::new(),
+    };
+    element(n, Some(&bare(b)), Some(&bare(c)), fields, subs);
+    let routes = n
+        .fields
+        .iter()
+        .find(|f| f.name == "routes")
+        .expect("routes field");
+    keyed(
+        routes,
+        &b.routes,
+        &c.routes,
+        |r| &r.subnet,
+        element,
+        fields,
+        subs,
+    );
+}
+
+/// Diffs one element pair of a keyed list (`None`: added/removed).
+type ElemFn<T> = fn(&Node, Option<&T>, Option<&T>, &mut Vec<FieldDiff>, &mut Vec<SectionDiff>);
+
+/// Each element's index by key; the first wins on a duplicate, as in `list`.
+fn index<'l, T, K: Hash + Eq>(l: &'l [T], key: &impl Fn(&T) -> &K) -> HashMap<&'l K, usize> {
+    let mut m = HashMap::with_capacity(l.len());
+    for (i, e) in l.iter().enumerate() {
+        m.entry(key(e)).or_insert(i);
+    }
+    m
+}
+
+/// `list` on typed elements (`field` of a non-flat keyed list): elements
+/// paired by their typed key, typed-equal pairs skipped unserialized.
+fn keyed<T, K>(
+    f: &Field,
+    base: &[T],
+    cand: &[T],
+    key: impl Fn(&T) -> &K,
+    elem: ElemFn<T>,
+    fields: &mut Vec<FieldDiff>,
+    subs: &mut Vec<SectionDiff>,
+) where
+    T: Serialize + PartialEq,
+    K: Serialize + Hash + Eq,
+{
+    // No `b == c` shortcut, for the duplicate-key reason in `one`; equal
+    // sides cost two key indexes, nothing serialized.
+    let node = match unwrap_option((f.kind)()) {
+        Kind::List(e) if !f.secret && f.render.is_none() => match e() {
+            Kind::Struct(n) => key_of(n).map(|k| (n, k)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some((node, kf)) = node else {
+        return one(f, base, cand, fields, subs);
+    };
+    let (bi, ci) = (index(base, &key), index(cand, &key));
+    let label = name(f);
+    let common = |l: &[T], other: &HashMap<&K, usize>| -> Vec<usize> {
+        (0..l.len())
+            .filter(|&i| other.contains_key(key(&l[i])))
+            .collect()
+    };
+    let (old_order, new_order) = (common(base, &ci), common(cand, &bi));
+    let same_order = old_order.len() == new_order.len()
+        && old_order
+            .iter()
+            .zip(&new_order)
+            .all(|(&i, &j)| key(&base[i]) == key(&cand[j]));
+    let kw = |k: &K| words(&(kf.kind)(), &to_value(k)).join(" ");
+    if !same_order {
+        let text = |l: &[T], o: Vec<usize>| -> String {
+            o.into_iter()
+                .map(|i| kw(key(&l[i])))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        fields.push(FieldDiff {
+            label: format!("{label} order"),
+            old: Some(text(base, old_order)),
+            new: Some(text(cand, new_order)),
+        });
+    }
+    let pairs = base
+        .iter()
+        .map(|e| (Some(e), ci.get(key(e)).map(|&i| &cand[i])))
+        .chain(
+            cand.iter()
+                .filter(|e| !bi.contains_key(key(e)))
+                .map(|e| (None, Some(e))),
+        );
+    for (be, ce) in pairs {
+        if be.is_some() && be == ce {
+            continue;
+        }
+        let k = kw(key(be.or(ce).expect("one side")));
+        let status = match (be, ce) {
+            (None, _) => DiffStatus::Added,
+            (_, None) => DiffStatus::Removed,
+            _ => DiffStatus::Modified,
+        };
+        let (mut fs, mut ss) = (Vec::new(), Vec::new());
+        elem(node, be, ce, &mut fs, &mut ss);
+        if status == DiffStatus::Modified && fs.is_empty() && ss.is_empty() {
+            continue;
+        }
+        subs.push(SectionDiff {
+            header: format!("{label} {k}"),
+            name: k,
+            status,
+            fields: fs,
+            subsections: ss,
+        });
+    }
 }
 
 /// Stores one root field's diff in its `ConfigDiff` slot; `false` for a
@@ -560,6 +772,167 @@ mod tests {
             .map(|s| (s.name.as_str(), s.status))
             .collect();
         assert_eq!(st, [("b", DiffStatus::Removed), ("d", DiffStatus::Added)]);
+    }
+
+    /// The pre-#778 full-JSON walk: the typed diff must match it exactly.
+    fn diff_configs_full(b: &Config, c: &Config) -> ConfigDiff {
+        diff_values(&to_value(b), &to_value(c))
+    }
+
+    /// A deterministic xorshift, so a failure replays.
+    struct Rng(u64);
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            usize::try_from(self.0 % n.max(1) as u64).unwrap()
+        }
+    }
+
+    /// One random edit: add/remove/modify/reorder routes, instances, peer
+    /// groups, users, secrets, singletons; duplicate keys included.
+    #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one flat arm per edit
+    fn mutate(c: &mut Config, r: &mut Rng) {
+        use crate::schema::{StaticRoute, StaticRoutingInstance};
+        let route = |r: &mut Rng| StaticRoute {
+            subnet: format!("10.0.{}.0/24", r.below(40)).parse().unwrap(),
+            gateway: format!("192.0.2.{}", r.below(4)).parse().unwrap(),
+            bfd: (r.below(4) == 0).then(|| "b".to_string()),
+        };
+        let pick = |r: &mut Rng, len: usize| r.below(len);
+        match r.below(16) {
+            0 => c.static_routing_instances.push(StaticRoutingInstance {
+                name: format!("s{}", r.below(4)),
+                routes: (0..r.below(5)).map(|_| route(r)).collect(),
+            }),
+            1 if !c.static_routing_instances.is_empty() => {
+                let i = pick(r, c.static_routing_instances.len());
+                c.static_routing_instances.remove(i);
+            }
+            2..=4 if !c.static_routing_instances.is_empty() => {
+                let i = pick(r, c.static_routing_instances.len());
+                let rt = route(r);
+                c.static_routing_instances[i].routes.push(rt);
+            }
+            5 | 6 if !c.static_routing_instances.is_empty() => {
+                let i = pick(r, c.static_routing_instances.len());
+                let routes = &mut c.static_routing_instances[i].routes;
+                if !routes.is_empty() {
+                    let j = r.below(routes.len());
+                    match r.below(3) {
+                        0 => drop(routes.remove(j)),
+                        1 => {
+                            let k = r.below(routes.len());
+                            routes.swap(j, k);
+                        }
+                        _ => routes[j].gateway = format!("192.0.2.{}", r.below(9)).parse().unwrap(),
+                    }
+                }
+            }
+            7 if !c.static_routing_instances.is_empty() => {
+                let n = c.static_routing_instances.len();
+                c.static_routing_instances.swap(r.below(n), r.below(n));
+            }
+            8 => c.bgp_instances.push(BgpInstance {
+                name: format!("b{}", r.below(3)),
+                asn: u32::try_from(r.below(3)).unwrap(),
+                ..dflt()
+            }),
+            9 if !c.bgp_instances.is_empty() => {
+                let i = pick(r, c.bgp_instances.len());
+                let pg = &mut c.bgp_instances[i].peer_groups;
+                match r.below(3) {
+                    0 => pg.push(BgpPeerGroup {
+                        name: format!("g{}", r.below(4)),
+                        route_reflector_client: r.below(2) == 0,
+                        ..dflt()
+                    }),
+                    1 if !pg.is_empty() => drop(pg.remove(r.below(pg.len()))),
+                    _ => pg.reverse(),
+                }
+            }
+            10 => c.users.push(User {
+                name: format!("u{}", r.below(3)),
+                password: format!("p{}", r.below(3)),
+            }),
+            11 if !c.users.is_empty() => {
+                let i = pick(r, c.users.len());
+                c.users[i].password = format!("p{}", r.below(3));
+            }
+            12 => {
+                let keys = &mut c.admin.keys;
+                if keys.is_empty() || r.below(2) == 0 {
+                    keys.push(crate::schema::AdminKey {
+                        label: format!("k{}", r.below(3)),
+                        secret: format!("s{}", r.below(3)),
+                    });
+                } else {
+                    let i = r.below(keys.len());
+                    keys[i].secret = format!("s{}", r.below(3));
+                }
+            }
+            13 => c.hostname = format!("h{}", r.below(3)),
+            14 => {
+                let s = &mut c.logging.syslog;
+                if s.is_empty() || r.below(2) == 0 {
+                    s.push(crate::schema::SyslogServer {
+                        name: format!("l{}", r.below(3)),
+                        ..dflt()
+                    });
+                } else {
+                    let i = r.below(s.len());
+                    s[i].level = [None, Some(crate::log::LogLevel::Debug)][r.below(2)];
+                }
+            }
+            _ => {
+                c.ospf_instances = vec![OspfInstance {
+                    name: "o".into(),
+                    areas: vec![OspfArea {
+                        profiles: vec![OspfProfile {
+                            name: format!("p{}", r.below(2)),
+                            cost: Some(u16::try_from(r.below(3)).unwrap()),
+                            ..dflt()
+                        }],
+                        ..dflt()
+                    }],
+                    ..dflt()
+                }];
+            }
+        }
+    }
+
+    /// #778: random edit sequences diff the same typed as through JSON.
+    #[test]
+    fn the_typed_diff_matches_the_full_json_walk() {
+        let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..300 {
+            let mut base = Config::default();
+            for _ in 0..r.below(12) {
+                mutate(&mut base, &mut r);
+            }
+            let mut cand = base.clone();
+            for _ in 0..=r.below(4) {
+                mutate(&mut cand, &mut r);
+            }
+            for (b, c) in [(&base, &cand), (&cand, &base), (&base, &base)] {
+                assert_eq!(diff_configs(b, c), diff_configs_full(b, c), "{b:?}\n{c:?}");
+            }
+        }
+    }
+
+    /// A 22k-route instance with one route modified, added and removed.
+    #[test]
+    fn a_large_route_list_matches_the_full_walk() {
+        let n = 22_000;
+        let base = statics((0..n).map(|i| (i, 1)));
+        let cand = statics(
+            (0..n)
+                .filter(|&i| i != 9)
+                .map(|i| (i, if i == 3 { 2 } else { 1 }))
+                .chain([(n, 1)]),
+        );
+        assert_eq!(diff_configs(&base, &cand), diff_configs_full(&base, &cand));
     }
 
     #[test]

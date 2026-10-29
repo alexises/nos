@@ -67,7 +67,9 @@ pub use broker::{
 };
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
-pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
+pub use diff::{
+    diff_configs, diff_configs_for_role, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff,
+};
 pub use docs::{CommandDoc, Topic};
 pub use fdb::{
     EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbEvent, FdbRequest, FdbTable, MacEntry, MacSource,
