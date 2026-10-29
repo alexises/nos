@@ -2,18 +2,17 @@ use std::fmt;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, PeerId};
 use nos_proto::{Event, IpcCodec, Request, Role};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, warn};
 
 use crate::authz;
-use crate::store::{CommitUpdate, ConfigStore};
+use crate::store::ConfigStore;
 
 /// Where the IPC server binds: a Unix socket path (absolute or relative to
 /// the CWD), e.g. `/run/nos/config.sock`.
@@ -309,27 +308,18 @@ where
     }
     let reply = match req {
         Request::Subscribe => {
-            let role = caller.role;
-            let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| async move {
-                Some(Event::Config(u.config.for_role(role)))
-            });
+            let (initial, forwarder) = store.subscribe_config(caller.role, sub_tx.clone()).await;
             set_forwarder(sub_task, Some(forwarder));
             debug!("IPC client subscribed");
-            Event::Config(store.running_snapshot().await.for_role(role))
+            initial
         }
         Request::SubscribeDiff { scopes } => {
-            let task_scopes = scopes.clone();
-            let role = caller.role;
-            let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| {
-                let wanted = task_scopes.clone();
-                async move {
-                    let scoped = u.diff_for(role).await?.scoped(&wanted);
-                    (!scoped.is_empty()).then_some(Event::Diff(scoped))
-                }
-            });
-            set_forwarder(sub_task, Some(forwarder));
             debug!(?scopes, "IPC client subscribed to diff");
-            Event::Diff(store.initial_diff(role).await.scoped(&scopes))
+            let (initial, forwarder) = store
+                .subscribe_diff(caller.role, scopes, sub_tx.clone())
+                .await;
+            set_forwarder(sub_task, Some(forwarder));
+            initial
         }
         Request::Unsubscribe => {
             set_forwarder(sub_task, None);
@@ -353,38 +343,4 @@ fn set_forwarder(slot: &mut Option<JoinHandle<()>>, next: Option<JoinHandle<()>>
     if let Some(previous) = std::mem::replace(slot, next) {
         previous.abort();
     }
-}
-
-/// Bridges the store's commit broadcast to one connection's `mpsc`, so the
-/// connection loop never holds a `&mut` borrow across `select!` arms.
-/// `to_event` builds the event this subscriber wants from each commit, and
-/// returning `None` skips it — which is how a `SubscribeDiff` subscriber is
-/// never woken for a commit outside its scopes.
-fn spawn_forwarder<Fut>(
-    store: &ConfigStore,
-    tx: mpsc::Sender<Event>,
-    to_event: impl Fn(Arc<CommitUpdate>) -> Fut + Send + 'static,
-) -> JoinHandle<()>
-where
-    Fut: std::future::Future<Output = Option<Event>> + Send,
-{
-    let mut bcast_rx = store.subscribe();
-    tokio::spawn(async move {
-        loop {
-            match bcast_rx.recv().await {
-                Ok(update) => {
-                    let Some(event) = to_event(update).await else {
-                        continue;
-                    };
-                    if tx.send(event).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "IPC subscriber lagged, dropped messages");
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    })
 }

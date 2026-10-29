@@ -1,6 +1,7 @@
-//! Live-heap check for the config store (#766/#767): a counting global
+//! Live-heap check for the config store (#766/#767/#773): a counting global
 //! allocator reports what one route `PUT` and one commit cost at ~66k static
-//! routes, and bounds what stays live after the commit.
+//! routes with live diff subscribers, and bounds what stays live after
+//! several commits (the broadcast ring included).
 
 #![allow(clippy::cast_precision_loss, reason = "printed ratios only")]
 #![allow(
@@ -10,10 +11,11 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nos_config::ConfigStore;
-use nos_proto::{Config, TransactionBase};
+use nos_proto::{Config, DiffScope, Event, Role, TransactionBase};
+use tokio::sync::mpsc;
 
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -42,10 +44,14 @@ static A: Counting = Counting;
 
 const INSTANCES: u32 = 3;
 const PER_INSTANCE: u32 = 22_000;
-/// Extra single-route PUTs measured; the plan says 2000, lowered to 250 (~175 ms
-/// each in a debug build, so 500 already took ~90 s) to stay near 60 s with the
-/// base load (each PUT is O(config), itself a #766 finding).
-const PUTS: u32 = 250;
+/// Commits measured after the seed, each carrying `PUTS_PER_COMMIT` single
+/// route PUTs. ponytail: 4 x 60 PUTs (~175 ms each in a debug build, a PUT is
+/// still O(config) until #775), raised back toward 2000 once it is O(route).
+const COMMITS: u32 = 4;
+const PUTS_PER_COMMIT: u32 = 60;
+/// Diff subscribers, one per visibility class kind: everything (`User`, also
+/// `Restd`), users only (`Watchdog`), protocol keys (`Bgpd`).
+const SUBSCRIBERS: [Role; 3] = [Role::User, Role::Watchdog, Role::Bgpd];
 
 fn path(instance: u32) -> Vec<String> {
     vec!["static-routing-instance".into(), format!("sw{instance}")]
@@ -75,6 +81,17 @@ fn instance_json(instance: u32, routes: std::ops::Range<u32>) -> String {
     )
 }
 
+/// Waits (bounded) for every subscriber's event of the last commit.
+async fn drain(subs: &mut [mpsc::Receiver<Event>]) {
+    for rx in subs {
+        let ev = tokio::time::timeout(Duration::from_secs(120), rx.recv())
+            .await
+            .expect("diff subscriber timed out")
+            .expect("diff subscriber closed");
+        assert!(matches!(ev, Event::Diff(_)), "{ev:?}");
+    }
+}
+
 #[tokio::test]
 async fn commit_and_put_cost_at_66k_routes() {
     let store = ConfigStore::new(Config::default(), None);
@@ -95,52 +112,92 @@ async fn commit_and_put_cost_at_66k_routes() {
     // One Config's own live size and its JSON size.
     let running = store.running_snapshot().await;
     let before_clone = LIVE.load(Relaxed);
-    let copy = running.clone();
+    let copy = (*running).clone();
     let one_config = LIVE.load(Relaxed) - before_clone;
     drop(copy);
-    let json_len = serde_json::to_vec(&running).unwrap().len();
+    let json_len = serde_json::to_vec(&*running).unwrap().len();
     drop(running);
 
+    // Live diff subscribers, as nos-watchdogd/nos-bgpd/nos-restd hold them.
+    let mut subs = Vec::new();
+    let mut tasks = Vec::new();
+    for role in SUBSCRIBERS {
+        let (tx, rx) = mpsc::channel(16);
+        let (initial, task) = store
+            .subscribe_diff(role, vec![DiffScope::StaticRoutingInstances], tx)
+            .await;
+        drop(initial);
+        subs.push(rx);
+        tasks.push(task);
+    }
+
     let b0 = LIVE.load(Relaxed);
-    store
-        .open_transaction("m", TransactionBase::Current)
-        .await
-        .unwrap();
     let t = Instant::now();
-    let mut put_transient = 0;
-    for k in 0..PUTS {
-        let live = LIVE.load(Relaxed);
-        PEAK.store(live, Relaxed);
-        let n = INSTANCES * PER_INSTANCE + k;
-        let mut p = path(0);
-        p.extend(["route".to_string(), prefix(n)]);
+    let (mut put_transient, mut commit_transient, mut diff_transient) = (0, 0, 0);
+    for c in 0..COMMITS {
         store
-            .set_transaction_path("m", &p, Some(&route_json(n)), None, None)
+            .open_transaction("m", TransactionBase::Current)
             .await
             .unwrap();
-        put_transient = put_transient.max(PEAK.load(Relaxed) - live);
+        for k in 0..PUTS_PER_COMMIT {
+            let live = LIVE.load(Relaxed);
+            PEAK.store(live, Relaxed);
+            let n = INSTANCES * PER_INSTANCE + c * PUTS_PER_COMMIT + k;
+            let mut p = path(0);
+            p.extend(["route".to_string(), prefix(n)]);
+            store
+                .set_transaction_path("m", &p, Some(&route_json(n)), None, None)
+                .await
+                .unwrap();
+            put_transient = put_transient.max(PEAK.load(Relaxed) - live);
+        }
+        // The store-level commit (the forwarders only run once this task
+        // yields), then every subscriber's diff of it.
+        let live = LIVE.load(Relaxed);
+        PEAK.store(live, Relaxed);
+        store.commit_transaction("m", None).await.unwrap();
+        commit_transient = commit_transient.max(PEAK.load(Relaxed) - live);
+        let live = LIVE.load(Relaxed);
+        PEAK.store(live, Relaxed);
+        drain(&mut subs).await;
+        diff_transient = diff_transient.max(PEAK.load(Relaxed) - live);
     }
-    let puts_elapsed = t.elapsed();
-
-    let live = LIVE.load(Relaxed);
-    PEAK.store(live, Relaxed);
-    store.commit_transaction("m", None).await.unwrap();
-    let commit_peak = PEAK.load(Relaxed) - live;
+    let elapsed = t.elapsed();
     let after = LIVE.load(Relaxed) - b0;
 
     eprintln!(
-        "one_config_live={one_config} json_len={json_len} puts={PUTS} in {puts_elapsed:?} \
-         per_put_transient={put_transient} commit_transient={commit_peak} \
-         commit_copies~{:.1} live_after_commit_delta={after} ({:.1}x one config)",
-        commit_peak as f64 / one_config as f64,
+        "one_config_live={one_config} json_len={json_len} commits={COMMITS} \
+         puts={} in {elapsed:?} subscribers={} per_put_transient={put_transient} \
+         ({:.1}x) commit_transient={commit_transient} ({:.2}x) \
+         diff_transient={diff_transient} ({:.1}x) live_after_commits_delta={after} ({:.2}x one config)",
+        COMMITS * PUTS_PER_COMMIT,
+        SUBSCRIBERS.len(),
+        put_transient as f64 / one_config as f64,
+        commit_transient as f64 / one_config as f64,
+        diff_transient as f64 / one_config as f64,
         after as f64 / one_config as f64,
     );
-    // ponytail: generous 6x bound, retuned in the fix PR once the copies are gone.
-    // No subscriber here, so the broadcast ring's retained `CommitUpdate`s (and
-    // their `diff_for` diffs, the bulk of dhat's t-end) are not counted: the fix
-    // PR adds one.
+    // Measured (#773): ~0. Running is the one config the transaction now
+    // shares, `prev` and the `for_role` projections are gone, and tokio drops
+    // a ring slot's value once every receiver read it (a lagging receiver
+    // would keep `config` + diffs, without `prev` once the owed diffs exist).
+    // The diff transient (~75x at 66k: `diff_configs` walks both configs as
+    // JSON, per class) is printed, not bounded: the remaining commit cost.
+    // ponytail: bounds from this PR's measurement plus headroom; #775/#776
+    // tighten the per-PUT one.
     assert!(
-        after <= 6 * one_config,
-        "live after commit {after} > 6x one config ({one_config})"
+        after <= one_config / 2,
+        "live after {COMMITS} commits {after} > half a config ({one_config})"
     );
+    assert!(
+        commit_transient <= one_config,
+        "commit transient {commit_transient} > one config ({one_config})"
+    );
+    assert!(
+        put_transient <= 16 * one_config,
+        "per-PUT transient {put_transient} > 16x one config ({one_config})"
+    );
+    for task in tasks {
+        task.abort();
+    }
 }

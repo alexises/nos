@@ -6,9 +6,10 @@ How `nos-config` is built, moved from `config/CLAUDE.md` (#264) so the always-lo
 
 ```rust
 ConfigStore::new(initial, config_path)          // create with an initial running config + optional persistence path
-store.running_snapshot().await                  // Config — a clone of the current running config
-store.subscribe()                               // broadcast::Receiver<Arc<CommitUpdate>> — pub(crate), server.rs only
-store.initial_diff().await                      // ConfigDiff — running vs. Config::default(), for a fresh SubscribeDiff connection's first event
+store.running_snapshot().await                  // Arc<Config> — the running config, shared (no copy)
+store.subscribe_config(role, out).await         // (initial Event::Config, forwarder JoinHandle) — Request::Subscribe; abort the handle to unsubscribe
+store.subscribe_diff(role, scopes, out).await   // (initial Event::Diff, forwarder JoinHandle) — Request::SubscribeDiff; registers role's ViewClass while the task lives
+store.initial_diff(role).await                  // ConfigDiff — running vs. Config::default(), for a fresh SubscribeDiff connection's first event
 store.save_to_disk().await                      // persist running config to config_path
 
 store.open_transaction(name, base).await        // Result<TransactionSnapshot, ConfigError> — create from Blank/Current, or resume if `name` exists
@@ -29,6 +30,11 @@ Limits on the transaction surface (#388), all in `store.rs`:
 - A new name is 1-`MAX_TX_NAME` (64) characters of letters, digits, `.`, `_`, `-` (`InvalidTransactionName`, `400`).
 - A transaction untouched for 4 hours is dropped when the next `open_transaction` runs (no background task).
 - One edit may carry at most `MAX_CLEAR_PASSWORDS_PER_EDIT` (4) clear-text passwords (`TooManyClearPasswords`, `400`); a bulk user import needs several edits.
-- `apply_op`/`set_transaction_path` copy the transaction out, edit and hash (`spawn_blocking`) with no lock held, then store the result only if the generation is unchanged; otherwise `PreconditionFailed` and the caller retries.
+- `apply_op`/`set_transaction_path` take a shared `Arc` of the transaction's config, build the edited config and hash (`spawn_blocking`) with no lock held, then store the result only if the generation is unchanged; otherwise `PreconditionFailed` and the caller retries. A failed edit never touches the stored config.
+
+Config sharing (#773):
+- `running` and every `Transaction.config` are `Arc<Config>`. `open_transaction(Current)` shares running's Arc; an edit stores a new Arc, so running never changes under a transaction.
+- `commit_transaction` removes the transaction, runs `sync_routing_table_refs` through `Arc::make_mut` (no copy: the Arc is unshared by then), and hands the same Arc to `running` and to the broadcast `CommitUpdate`.
+- `apply_op` still copies the config once per op (an op may fail half-applied); only the shell sends ops.
 
 Every `Transaction` carries a `generation: u64` (0 when created, +1 per successful `apply_op`/`set_transaction_path`), reported in every `TransactionSnapshot`. `if_match: Option<u64>` on `set_transaction_path`/`commit_transaction`/`discard_transaction` (and the matching `Request` variants) is an RFC 9110 §13.1.1 precondition: `Some(g)` is compared against the current generation under the same `transactions` lock the mutation takes, so it is a real compare-and-set, and a mismatch is `ConfigError::PreconditionFailed` with nothing changed (the transaction stays); `None` is unconditional — `nos-cli`/`nos-provision` never send one, only `nos-restd` does (its `ETag`/`If-Match`).
