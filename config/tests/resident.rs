@@ -44,11 +44,18 @@ static A: Counting = Counting;
 
 const INSTANCES: u32 = 3;
 const PER_INSTANCE: u32 = 22_000;
-/// Commits measured after the seed, each carrying `PUTS_PER_COMMIT` single
-/// route PUTs. ponytail: 4 x 60 PUTs (~175 ms each in a debug build, a PUT is
-/// still O(config) until #775), raised back toward 2000 once it is O(route).
+/// Commits measured after the seed, sharing the single-route PUTs between
+/// them: 2000 by default (#772 Q6), `NOS_RESIDENT_PUTS` overrides.
 const COMMITS: u32 = 4;
-const PUTS_PER_COMMIT: u32 = 60;
+
+fn puts_per_commit() -> u32 {
+    std::env::var("NOS_RESIDENT_PUTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000)
+        .max(COMMITS)
+        / COMMITS
+}
 /// Diff subscribers, one per visibility class kind: everything (`User`, also
 /// `Restd`), users only (`Watchdog`), protocol keys (`Bgpd`).
 const SUBSCRIBERS: [Role; 3] = [Role::User, Role::Watchdog, Role::Bgpd];
@@ -133,23 +140,32 @@ async fn commit_and_put_cost_at_66k_routes() {
 
     let b0 = LIVE.load(Relaxed);
     let t = Instant::now();
-    let (mut put_transient, mut commit_transient, mut diff_transient) = (0, 0, 0);
+    let per_commit = puts_per_commit();
+    let (mut first_put, mut put_transient) = (0, 0);
+    let (mut commit_transient, mut diff_transient) = (0, 0);
     for c in 0..COMMITS {
         store
             .open_transaction("m", TransactionBase::Current)
             .await
             .unwrap();
-        for k in 0..PUTS_PER_COMMIT {
+        for k in 0..per_commit {
             let live = LIVE.load(Relaxed);
             PEAK.store(live, Relaxed);
-            let n = INSTANCES * PER_INSTANCE + c * PUTS_PER_COMMIT + k;
+            let n = INSTANCES * PER_INSTANCE + c * per_commit + k;
             let mut p = path(0);
             p.extend(["route".to_string(), prefix(n)]);
+            // The edit alone: the snapshot reply is #774's.
             store
-                .set_transaction_path("m", &p, Some(&route_json(n)), None, None)
+                .edit_transaction_path("m", &p, Some(&route_json(n)), None, None)
                 .await
                 .unwrap();
-            put_transient = put_transient.max(PEAK.load(Relaxed) - live);
+            let cost = PEAK.load(Relaxed) - live;
+            // The first edit after open(Current) unshares running: one copy.
+            if k == 0 {
+                first_put = first_put.max(cost);
+            } else {
+                put_transient = put_transient.max(cost);
+            }
         }
         // The store-level commit (the forwarders only run once this task
         // yields), then every subscriber's diff of it.
@@ -163,15 +179,18 @@ async fn commit_and_put_cost_at_66k_routes() {
         diff_transient = diff_transient.max(PEAK.load(Relaxed) - live);
     }
     let elapsed = t.elapsed();
-    let after = LIVE.load(Relaxed) - b0;
+    // Saturating: running cloned by `make_mut` has exact-capacity lists, so it
+    // can be smaller than the deserialized seed it replaces.
+    let after = LIVE.load(Relaxed).saturating_sub(b0);
 
     eprintln!(
         "one_config_live={one_config} json_len={json_len} commits={COMMITS} \
-         puts={} in {elapsed:?} subscribers={} per_put_transient={put_transient} \
-         ({:.1}x) commit_transient={commit_transient} ({:.2}x) \
+         puts={} in {elapsed:?} subscribers={} first_put_transient={first_put} ({:.2}x) \
+         per_put_transient={put_transient} ({:.4}x) commit_transient={commit_transient} ({:.2}x) \
          diff_transient={diff_transient} ({:.1}x) live_after_commits_delta={after} ({:.2}x one config)",
-        COMMITS * PUTS_PER_COMMIT,
+        COMMITS * per_commit,
         SUBSCRIBERS.len(),
+        first_put as f64 / one_config as f64,
         put_transient as f64 / one_config as f64,
         commit_transient as f64 / one_config as f64,
         diff_transient as f64 / one_config as f64,
@@ -183,8 +202,11 @@ async fn commit_and_put_cost_at_66k_routes() {
     // would keep `config` + diffs, without `prev` once the owed diffs exist).
     // The diff transient (~75x at 66k: `diff_configs` walks both configs as
     // JSON, per class) is printed, not bounded: the remaining commit cost.
-    // ponytail: bounds from this PR's measurement plus headroom; #775/#776
-    // tighten the per-PUT one.
+    // A PUT is O(route) (#775): measured 1.7 KB (a route, its JSON, the
+    // planned edit), so 16 KiB is headroom, not a config-sized bound. The
+    // first PUT of a transaction unshares running (1.38x measured: one copy
+    // plus the routes list growing past its exact clone capacity).
+    // ponytail: bounds from the #773/#775 measurements plus headroom.
     assert!(
         after <= one_config / 2,
         "live after {COMMITS} commits {after} > half a config ({one_config})"
@@ -194,8 +216,12 @@ async fn commit_and_put_cost_at_66k_routes() {
         "commit transient {commit_transient} > one config ({one_config})"
     );
     assert!(
-        put_transient <= 16 * one_config,
-        "per-PUT transient {put_transient} > 16x one config ({one_config})"
+        put_transient <= 16 * 1024,
+        "per-PUT transient {put_transient} > 16 KiB"
+    );
+    assert!(
+        first_put <= 2 * one_config,
+        "first PUT transient {first_put} > 2x one config ({one_config})"
     );
     for task in tasks {
         task.abort();

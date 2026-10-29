@@ -5,18 +5,16 @@ use std::time::{Duration, Instant};
 
 use garde::Validate as _;
 use nos_proto::{
-    config_path::{self, ListPosition},
-    diff_configs,
-    schema::redact::ViewClass,
-    sync_routing_table_refs, Config, ConfigDiff, ConfigOp, DiffScope, Event, Role, TransactionBase,
-    TransactionSnapshot,
+    config_path::ListPosition, diff_configs, schema::redact::ViewClass, sync_routing_table_refs,
+    Config, ConfigDiff, ConfigOp, DiffScope, Event, Role, TransactionBase, TransactionSnapshot,
 };
 use tokio::sync::{broadcast, mpsc, Mutex, OnceCell, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::ConfigError;
-use crate::secrets::{restore_masked, unmask_op};
+use crate::path_edit::{self, Planned};
+use crate::secrets::unmask_op;
 use crate::users::{hash_clear_passwords, is_clear, normalize_names};
 
 const BROADCAST_CAPACITY: usize = 16;
@@ -60,6 +58,12 @@ impl Transaction {
             _ => Ok(()),
         }
     }
+}
+
+/// An edit `finish_edit` hashes off-lock, then stores.
+enum Edit {
+    Whole(Box<Config>),
+    Users(Vec<nos_proto::User>),
 }
 
 /// One committed change, broadcast to every subscriber connection — the new
@@ -380,19 +384,27 @@ impl ConfigStore {
         debug!(transaction = %name, op = op.kind(), "applying op");
         let op = unmask_op(op, &[&base, &*self.running_snapshot().await])?;
         let users_before = base.users.clone();
-        // ponytail: one Config copy per op, since an op may fail half-applied;
-        // only the shell sends ops (the REST/provision PUT path is #775's).
+        // ponytail: one Config copy per op, since an op may fail half-applied
+        // and has no plan step; only the shell sends ops (REST/provision PUTs
+        // are O(edit), #775). Fix: a per-op section snapshot to roll back.
         let mut config = (*base).clone();
         drop(base);
         op.apply(&mut config)?;
-        self.finish_edit(name, config, users_before, generation)
-            .await
+        self.finish_edit(
+            name,
+            Edit::Whole(Box::new(config)),
+            users_before,
+            generation,
+            |t, n| t.snapshot(n, true),
+        )
+        .await
     }
 
     /// Sets or removes the subsection of a named transaction's in-progress
-    /// config addressed by `path` (see `nos_proto::config_path`). Atomic: the
-    /// edit lands on a copy that replaces the transaction's config only if
-    /// nothing else edited it meanwhile. Never runs `garde` validation.
+    /// config addressed by `path` (see `nos_proto::config_path`). Atomic: a
+    /// failed edit changes nothing. Costs the addressed section (one element
+    /// of a top-level list, one static route), not the config (#775). Never
+    /// runs `garde` validation.
     /// `if_match` refuses the edit once the generation has moved on.
     pub async fn set_transaction_path(
         &self,
@@ -402,34 +414,64 @@ impl ConfigStore {
         if_match: Option<u64>,
         position: Option<ListPosition>,
     ) -> Result<TransactionSnapshot, ConfigError> {
-        let (config, generation) = self.checkout(name, if_match).await?;
-        let users_before = config.users.clone();
-        let mut doc = serde_json::to_value(&*config)?;
-        match value {
-            Some(json) => config_path::set_at(
-                &mut doc,
-                path,
-                serde_json::from_str(json)?,
-                position.as_ref(),
-            )?,
-            None if position.is_some() => {
-                return Err(config_path::PathError::Invalid(
-                    "a position needs a value".to_string(),
-                )
-                .into());
-            }
-            None => config_path::remove(&mut doc, path)?,
-        }
-        let mut new: Config = serde_json::from_value(doc)?;
-        // A GET-then-PUT round trip carries the REST mask where secrets were.
-        restore_masked(&mut new, &[&config, &*self.running_snapshot().await])?;
-        drop(config);
-        let config = new;
-        let snap = self
-            .finish_edit(name, config, users_before, generation)
-            .await?;
+        self.edit_path(name, path, value, if_match, position, |t, n| {
+            t.snapshot(n, true)
+        })
+        .await
+    }
+
+    /// [`Self::set_transaction_path`] without the full-config snapshot
+    /// reply: returns the transaction's new generation.
+    pub async fn edit_transaction_path(
+        &self,
+        name: &str,
+        path: &[String],
+        value: Option<&str>,
+        if_match: Option<u64>,
+        position: Option<ListPosition>,
+    ) -> Result<u64, ConfigError> {
+        self.edit_path(name, path, value, if_match, position, |t, _| t.generation)
+            .await
+    }
+
+    /// O(edit) (#775): the edit is planned on the shared config under the
+    /// lock, then applied in place (`Arc::make_mut`: the first edit after
+    /// `open(Current)` copies once, later ones don't). A user-list edit
+    /// hashes off-lock through `finish_edit`.
+    async fn edit_path<R>(
+        &self,
+        name: &str,
+        path: &[String],
+        value: Option<&str>,
+        if_match: Option<u64>,
+        position: Option<ListPosition>,
+        reply: impl FnOnce(&Transaction, &str) -> R,
+    ) -> Result<R, ConfigError> {
+        let mut txs = self.0.transactions.lock().await;
+        let txn = txs
+            .get_mut(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        txn.check(if_match)?;
+        txn.last_used = Instant::now();
+        let json = value.map(serde_json::from_str).transpose()?;
+        let running = self.running_snapshot().await;
+        let planned = path_edit::plan(&txn.config, &running, path, json, position.as_ref())?;
+        drop(running);
         debug!(transaction = %name, path = %path.join("/"), remove = value.is_none(), "set transaction path");
-        Ok(snap)
+        let edit = match planned {
+            Planned::Apply(apply) => {
+                apply(Arc::make_mut(&mut txn.config));
+                txn.dirty = true;
+                txn.generation += 1;
+                return Ok(reply(txn, name));
+            }
+            Planned::Users(users) => Edit::Users(users),
+            Planned::Whole(config) => Edit::Whole(config),
+        };
+        let (users_before, generation) = (txn.config.users.clone(), txn.generation);
+        drop(txs);
+        self.finish_edit(name, edit, users_before, generation, reply)
+            .await
     }
 
     /// Shares a transaction's config out under the lock (checking `if_match`,
@@ -453,15 +495,20 @@ impl ConfigStore {
     /// previous users or the running config), then stores `config` unless the
     /// transaction moved past `generation` meanwhile (a retryable
     /// `PreconditionFailed`, like a stale `if_match`).
-    async fn finish_edit(
+    async fn finish_edit<R>(
         &self,
         name: &str,
-        mut config: Config,
+        mut edit: Edit,
         users_before: Vec<nos_proto::User>,
         generation: u64,
-    ) -> Result<TransactionSnapshot, ConfigError> {
-        normalize_names(&mut config.users);
-        let clear = config.users.iter().filter(|u| is_clear(u)).count();
+        reply: impl FnOnce(&Transaction, &str) -> R,
+    ) -> Result<R, ConfigError> {
+        let users = match &mut edit {
+            Edit::Whole(config) => &mut config.users,
+            Edit::Users(users) => users,
+        };
+        normalize_names(users);
+        let clear = users.iter().filter(|u| is_clear(u)).count();
         if clear > MAX_CLEAR_PASSWORDS_PER_EDIT {
             return Err(ConfigError::TooManyClearPasswords(
                 MAX_CLEAR_PASSWORDS_PER_EDIT,
@@ -469,10 +516,10 @@ impl ConfigStore {
         }
         if clear > 0 {
             let running = self.0.running.read().await.users.clone();
-            let mut users = std::mem::take(&mut config.users);
-            config.users = tokio::task::spawn_blocking(move || {
-                hash_clear_passwords(&mut users, &[&users_before, &running]);
-                users
+            let mut taken = std::mem::take(users);
+            *users = tokio::task::spawn_blocking(move || {
+                hash_clear_passwords(&mut taken, &[&users_before, &running]);
+                taken
             })
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -482,11 +529,14 @@ impl ConfigStore {
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         txn.check(Some(generation))?;
-        txn.config = Arc::new(config);
+        match edit {
+            Edit::Whole(config) => txn.config = Arc::new(*config),
+            Edit::Users(users) => Arc::make_mut(&mut txn.config).users = users,
+        }
         txn.dirty = true;
         txn.generation += 1;
         txn.last_used = Instant::now();
-        Ok(txn.snapshot(name, true))
+        Ok(reply(txn, name))
     }
 
     pub async fn get_transaction(&self, name: &str) -> Result<TransactionSnapshot, ConfigError> {
@@ -1922,6 +1972,12 @@ mod tests {
             .set_transaction_path("u", &segs("hostname"), Some("{"), None, None)
             .await
             .is_err());
+        // Planned on the unshared config, refused before it is touched.
+        let other = r#"{"name":"other"}"#;
+        assert!(store
+            .edit_transaction_path("u", &segs("bgp-instance/b"), Some(other), None, None)
+            .await
+            .is_err());
         let after = store.get_transaction("u").await.unwrap();
         assert_eq!(after.config, before.config);
         assert_eq!(after.generation, before.generation);
@@ -1931,6 +1987,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::PreconditionFailed { .. }));
+        let g = store
+            .edit_transaction_path("u", &segs("hostname"), Some("\"y\""), Some(2), None)
+            .await
+            .unwrap();
+        assert_eq!(g, 3);
+        assert_eq!(
+            store.get_transaction("u").await.unwrap().config.hostname,
+            "y"
+        );
     }
 
     #[tokio::test]
@@ -1943,7 +2008,13 @@ mod tests {
         let (config, generation) = store.checkout("t", None).await.unwrap();
         store.apply_op("t", ensure_op("x")).await.unwrap();
         let err = store
-            .finish_edit("t", (*config).clone(), Vec::new(), generation)
+            .finish_edit(
+                "t",
+                Edit::Whole(Box::new((*config).clone())),
+                Vec::new(),
+                generation,
+                |_, _| (),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::PreconditionFailed { .. }));

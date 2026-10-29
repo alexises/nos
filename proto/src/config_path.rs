@@ -80,6 +80,13 @@ fn norm(s: &str) -> String {
 }
 
 fn find_key(map: &Map<String, Value>, seg: &str) -> Option<String> {
+    let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    find_field(&keys, seg).map(str::to_string)
+}
+
+/// The field among `fields` that URL segment `seg` names, exactly as a path
+/// resolves it against an object with these fields (see the module docs).
+pub fn find_field<'a>(fields: &[&'a str], seg: &str) -> Option<&'a str> {
     let n = norm(seg);
     let mut candidates = vec![n.clone(), format!("{n}s"), format!("{n}es")];
     if let Some(stem) = n.strip_suffix('y') {
@@ -87,8 +94,20 @@ fn find_key(map: &Map<String, Value>, seg: &str) -> Option<String> {
     }
     candidates
         .iter()
-        .find_map(|c| map.keys().find(|k| &norm(k) == c))
-        .cloned()
+        .find_map(|c| fields.iter().find(|k| &norm(k) == c))
+        .copied()
+}
+
+/// Whether a list element whose key reads `text` is the one segment `sel`
+/// selects: equal, or equal once lowercased without `-`/`_`. Allocation-free,
+/// so a typed key scan over a long list stays cheap.
+pub fn key_matches(text: &str, sel: &str) -> bool {
+    fn n(s: &str) -> impl Iterator<Item = char> + '_ {
+        s.chars()
+            .filter(|c| *c != '-' && *c != '_')
+            .flat_map(char::to_lowercase)
+    }
+    text == sel || n(text).eq(n(sel))
 }
 
 /// The element-identifying field among `fields` (see [`ELEMENT_KEYS`]).
@@ -120,8 +139,8 @@ fn find_element(items: &[Value], sel: &str) -> Option<usize> {
     items.iter().position(|el| match el {
         Value::Object(o) => element_key_field(o)
             .and_then(|k| scalar_text(&o[k]))
-            .is_some_and(|t| t == sel || norm(&t) == norm(sel)),
-        Value::String(s) => s == sel || norm(s) == norm(sel),
+            .is_some_and(|t| key_matches(&t, sel)),
+        Value::String(s) => key_matches(s, sel),
         Value::Number(n) => n.to_string() == sel,
         _ => false,
     })
@@ -187,7 +206,10 @@ pub fn get<'a>(root: &'a Value, path: &[String]) -> Result<&'a Value, PathError>
 }
 
 /// A list element's body must agree with the key in the URL it was PUT to.
-fn check_element_key(value: &Value, key: &str) -> Result<(), PathError> {
+///
+/// # Errors
+/// [`PathError::Invalid`] when the body's key field names another element.
+pub fn check_element_key(value: &Value, key: &str) -> Result<(), PathError> {
     let Value::Object(o) = value else {
         return Ok(());
     };
@@ -195,7 +217,7 @@ fn check_element_key(value: &Value, key: &str) -> Result<(), PathError> {
         return Ok(());
     };
     match scalar_text(&o[field]) {
-        Some(t) if t != key && norm(&t) != norm(key) => Err(PathError::Invalid(format!(
+        Some(t) if !key_matches(&t, key) => Err(PathError::Invalid(format!(
             "body {field} '{t}' does not match path key '{key}'"
         ))),
         _ => Ok(()),
@@ -267,7 +289,7 @@ pub fn set_at(
     let own_key = &path[path.len() - 1];
     let anchor = match position {
         ListPosition::Before(a) | ListPosition::After(a) => {
-            if a == own_key || norm(a) == norm(own_key) {
+            if key_matches(a, own_key) {
                 return Err(PathError::Invalid(
                     "cannot position an element relative to itself".to_string(),
                 ));

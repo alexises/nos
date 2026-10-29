@@ -77,14 +77,27 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - Watchdog args: `--configd-arg=--profile-memory-out=/tmp/dhat-configd.json --restd-arg=--profile-memory-out=/tmp/dhat-restd-{name}.json`. The watchdog replaces a literal `{name}` in pass-through flags with the instance name, so each `nos-restd` (one per table) gets its own file. The lab takes extra watchdog args from `NOS_E2E_WATCHDOG_ARGS` (space-separated) on `nos-e2e up`.
 - Wave load: `LOGD_MEM_ROUTER=b [WAVE_COUNT=12] [WAVE_ROUTES=5500] [WAVE_IDLE=0] cargo run -p nos-e2e -- mem-wave`. Each wave opens a transaction on running, `PUT`s `WAVE_ROUTES` static routes one per request (spread over `ceil(total/25000)` instances), commits, and logs every `nos-*` daemon's `VmRSS`/`VmHWM` plus the cgroup after the commit and after `WAVE_IDLE` seconds. It fails if `nos-configd` or `nos-restd` changes pid.
 - At the end it prints the running config's JSON size, SIGINTs `nos-configd` and `nos-restd`, and prints their dhat `t-gmax`/`t-end` and the top 8 program points by max bytes, total bytes and bytes live at exit (2 frames below the allocator plus the first 3 `nos_*` frames). A non-dhat image just logs that there is no report. Not a phase (asserts nothing, not in `phases::ALL`).
-- On the dhat image use a smaller load, e.g. `WAVE_COUNT=4 WAVE_ROUTES=2500` (~25 min): every `PUT` is O(config) and dhat slows each allocation, so the default 12 x 5500 takes hours. Read RSS from the default image, attribution from dhat.
+- On the dhat image use a smaller load, e.g. `WAVE_COUNT=4 WAVE_ROUTES=2500`: dhat slows each allocation, and until #774 every `PUT` still replies with the whole transaction (O(config)), so the default 12 x 5500 takes hours. Read RSS from the default image, attribution from dhat.
 - For a deeper split than the log lines, copy the report out before `down` (`docker exec router-b cat /tmp/dhat-configd.json > configd.json`) and load it in https://nnethercote.github.io/dh_view/dh_view.html.
-- `cargo test -p nos-config --test resident -- --nocapture`: counting allocator over ~66k static routes with three `SubscribeDiff` subscribers (`User`, `Watchdog`, `Bgpd`, one per kind of visibility class) through `ConfigStore::subscribe_diff`. It runs several commits of single-route `PUT`s and prints one `Config`'s live size and these peaks:
-  - per-`PUT` transient (still O(config) until #775);
+- `cargo test -p nos-config --test resident -- --nocapture`: counting allocator over ~66k static routes with three `SubscribeDiff` subscribers (`User`, `Watchdog`, `Bgpd`, one per kind of visibility class) through `ConfigStore::subscribe_diff`. It runs 4 commits sharing 2000 single-route edits (`NOS_RESIDENT_PUTS` overrides) and prints one `Config`'s live size and these peaks:
+  - per-`PUT` transient of `edit_transaction_path` (the edit without the snapshot reply), asserted at most 16 KiB;
+  - the first `PUT` of each transaction, which unshares running (one copy), asserted at most two `Config`s;
   - store-level commit transient, asserted at most one `Config`;
   - the subscribers' diff transient, printed only (~75 `Config`s at 66k: `diff_configs` walks both configs as JSON for each class);
   - live heap after the commits, broadcast ring included, asserted at most half a `Config`. Tokio drops a ring slot's value once every receiver has read it, so only a lagging receiver keeps a commit alive.
 - Measured at 66k in a debug build (#773): commit transient 0.14 `Config`, live after 4 commits ~0, per-`PUT` transient 11.6 `Config`s.
+- After #775: per-`PUT` transient 1.7 KB (was 11.6 `Config`s, ~49 MB), first `PUT` 1.38 `Config`s, live after 4 commits below the seed (running re-cloned with exact capacities).
+
+### Path edits (#775)
+
+- `set_transaction_path` costs the addressed part, not the config (`config/src/path_edit.rs`):
+  - one element of a top-level list (`bgp-instance/r1/...`) or one top-level section goes through JSON and back;
+  - `static-routing-instance/<n>/route/<subnet>[/...]` touches one route of the typed list (key scan without allocation);
+  - an empty path takes the whole-config route (the config through JSON and back).
+- The edit is planned on the transaction's config under the lock; every check (path, key, anchor, JSON body, `<hidden>` masks) runs first, then the change applies in place with `Arc::make_mut`. A failed edit changes nothing. The first edit after `open(Current)` copies running once.
+- A `users` edit goes through the off-lock argon2 hashing, then stores only the user list if the generation did not move.
+- A differential unit test replays random edit sequences through both routes and requires the same configs and the same errors.
+- `edit_transaction_path` is the same edit returning only the new generation (the subsection reply of #774 builds on it).
 
 ### Config plane vs data plane
 
