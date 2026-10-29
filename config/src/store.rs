@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,10 +8,11 @@ use nos_proto::{
     config_path::{self, ListPosition},
     diff_configs,
     schema::redact::ViewClass,
-    sync_routing_table_refs, Config, ConfigDiff, ConfigOp, Role, TransactionBase,
+    sync_routing_table_refs, Config, ConfigDiff, ConfigOp, DiffScope, Event, Role, TransactionBase,
     TransactionSnapshot,
 };
-use tokio::sync::{broadcast, Mutex, OnceCell, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, OnceCell, RwLock};
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::ConfigError;
@@ -29,7 +30,8 @@ pub const MAX_CLEAR_PASSWORDS_PER_EDIT: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Transaction {
-    config: Config,
+    /// Shared with running after `open(Current)` until the first edit.
+    config: Arc<Config>,
     dirty: bool,
     /// See `TransactionSnapshot::generation`.
     generation: u64,
@@ -41,7 +43,7 @@ impl Transaction {
     fn snapshot(&self, name: &str, resumed: bool) -> TransactionSnapshot {
         TransactionSnapshot {
             name: name.to_string(),
-            config: self.config.clone(),
+            config: (*self.config).clone(),
             dirty: self.dirty,
             resumed,
             generation: self.generation,
@@ -61,51 +63,80 @@ impl Transaction {
 }
 
 /// One committed change, broadcast to every subscriber connection — the new
-/// and previous running config. `Subscribe` projects the new one for its role
-/// (`Config::for_role`); `SubscribeDiff` takes [`CommitUpdate::diff_for`].
-/// Internal only — never sent over the wire directly; `server.rs` unwraps
-/// this into `Event::Config`/`Event::Diff` per connection.
+/// running config, shared with `running` (no copy). `Subscribe` projects it
+/// for its role (`Config::for_role`); `SubscribeDiff` takes
+/// [`CommitUpdate::diff_for`]. Internal only — never sent over the wire.
+///
+/// A ring slot stays lean (#773): the previous config is held only until
+/// every visibility class with a live diff subscriber at send time has its
+/// diff, then released, so a slot keeps `config` plus delta-sized diffs.
 pub(crate) struct CommitUpdate {
-    pub config: Config,
-    /// The running config before this commit, for per-role diffs (#384).
-    pub prev: Config,
+    pub config: Arc<Config>,
+    state: std::sync::Mutex<DiffState>,
+}
+
+struct DiffState {
+    /// The running config before this commit (#384); `None` once released.
+    prev: Option<Arc<Config>>,
+    /// Classes whose diff is still owed to a subscriber; empty releases `prev`.
+    pending: HashSet<ViewClass>,
     /// One diff per visibility class, computed once for all subscribers (#751).
-    diffs: std::sync::Mutex<HashMap<ViewClass, Arc<OnceCell<Arc<ConfigDiff>>>>>,
+    diffs: HashMap<ViewClass, Arc<OnceCell<Arc<ConfigDiff>>>>,
 }
 
 impl CommitUpdate {
-    pub(crate) fn new(config: Config, prev: Config) -> Self {
+    /// `pending`: the visibility classes of the live diff subscribers.
+    pub(crate) fn new(config: Arc<Config>, prev: Arc<Config>, pending: HashSet<ViewClass>) -> Self {
         Self {
             config,
-            prev,
-            diffs: std::sync::Mutex::default(),
+            state: std::sync::Mutex::new(DiffState {
+                prev: (!pending.is_empty()).then_some(prev),
+                pending,
+                diffs: HashMap::new(),
+            }),
         }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, DiffState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The diff of `role`'s own view (a key it may not see never shows up as
     /// an Added/Modified field), shared by every role of its visibility
     /// class and computed off the runtime threads. `None` when the
-    /// computation panicked: that subscriber skips this commit.
+    /// computation panicked, or `prev` was already released (a class not
+    /// subscribed at send time): that subscriber skips this commit.
     pub(crate) async fn diff_for(self: &Arc<Self>, role: Role) -> Option<Arc<ConfigDiff>> {
-        let cell = Arc::clone(
-            self.diffs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(ViewClass::of(role))
-                .or_default(),
-        );
-        let this = Arc::clone(self);
+        let class = ViewClass::of(role);
+        let (cell, prev) = {
+            let mut s = self.state();
+            let cell = Arc::clone(s.diffs.entry(class).or_default());
+            (cell, s.prev.clone())
+        };
+        let config = Arc::clone(&self.config);
         let init = || async move {
+            let prev = prev.ok_or("previous config already released")?;
             tokio::task::spawn_blocking(move || {
-                Arc::new(diff_configs(
-                    &this.prev.for_role(role),
-                    &this.config.for_role(role),
-                ))
+                // User/Restd see everything: diff the shared configs, no projection.
+                Arc::new(if class == ViewClass::of(Role::User) {
+                    diff_configs(&prev, &config)
+                } else {
+                    diff_configs(&prev.for_role(role), &config.for_role(role))
+                })
             })
             .await
+            .map_err(|e| e.to_string())
         };
-        match cell.get_or_try_init(init).await {
-            Ok(d) => Some(Arc::clone(d)),
+        let res = cell.get_or_try_init(init).await.map(Arc::clone);
+        let mut s = self.state();
+        if s.pending.remove(&class) && s.pending.is_empty() {
+            s.prev = None;
+        }
+        drop(s);
+        match res {
+            Ok(d) => Some(d),
             Err(e) => {
                 warn!(error = %e, "commit diff failed, subscribers skip this commit");
                 None
@@ -114,10 +145,32 @@ impl CommitUpdate {
     }
 }
 
+/// Live diff subscriber count per visibility class; dropping it unregisters.
+struct DiffSubscriber {
+    store: ConfigStore,
+    class: ViewClass,
+}
+
+impl Drop for DiffSubscriber {
+    fn drop(&mut self) {
+        let mut subs = self.store.diff_subscribers();
+        if let Some(n) = subs.get_mut(&self.class) {
+            *n -= 1;
+            if *n == 0 {
+                subs.remove(&self.class);
+            }
+        }
+    }
+}
+
 struct Inner {
-    running: RwLock<Config>,
+    running: RwLock<Arc<Config>>,
     transactions: Mutex<HashMap<String, Transaction>>,
     tx: broadcast::Sender<Arc<CommitUpdate>>,
+    /// Held across registering and `tx.subscribe()`, and across reading it
+    /// and `tx.send()`, so a commit's `pending` classes are exactly those of
+    /// the receivers that get it.
+    diff_subscribers: std::sync::Mutex<HashMap<ViewClass, usize>>,
     config_path: Option<PathBuf>,
     idle_ttl: Duration,
 }
@@ -141,16 +194,18 @@ impl ConfigStore {
         hash_clear_passwords(&mut initial.users, &[]);
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self(Arc::new(Inner {
-            running: RwLock::new(initial),
+            running: RwLock::new(Arc::new(initial)),
             transactions: Mutex::new(HashMap::new()),
             tx,
+            diff_subscribers: std::sync::Mutex::default(),
             config_path,
             idle_ttl: TX_IDLE_TTL,
         }))
     }
 
-    pub async fn running_snapshot(&self) -> Config {
-        self.0.running.read().await.clone()
+    /// The running config, shared (no copy).
+    pub async fn running_snapshot(&self) -> Arc<Config> {
+        Arc::clone(&*self.0.running.read().await)
     }
 
     /// Whether the running config has a user `name`; scans under the read
@@ -192,8 +247,69 @@ impl ConfigStore {
             .and_then(|t| t.rest_api.clone())
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<CommitUpdate>> {
-        self.0.tx.subscribe()
+    fn diff_subscribers(&self) -> std::sync::MutexGuard<'_, HashMap<ViewClass, usize>> {
+        self.0
+            .diff_subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hands a commit to every subscriber, owing a diff to each live class.
+    fn broadcast(&self, config: Arc<Config>, prev: Arc<Config>) {
+        let subs = self.diff_subscribers();
+        let pending = subs.keys().copied().collect();
+        // Ignore send errors — no active receivers is not a failure.
+        let _ = self
+            .0
+            .tx
+            .send(Arc::new(CommitUpdate::new(config, prev, pending)));
+    }
+
+    /// `Request::Subscribe`: forwards every later commit to `out` as
+    /// `role`'s `Event::Config`, and returns the initial event (the current
+    /// config) with the forwarder task (abort it to unsubscribe).
+    pub async fn subscribe_config(
+        &self,
+        role: Role,
+        out: mpsc::Sender<Event>,
+    ) -> (Event, JoinHandle<()>) {
+        let rx = self.0.tx.subscribe();
+        let task = forward(rx, None, out, move |u| async move {
+            Some(Event::Config(u.config.for_role(role)))
+        });
+        let initial = Event::Config(self.running_snapshot().await.for_role(role));
+        (initial, task)
+    }
+
+    /// `Request::SubscribeDiff`: forwards every later commit's diff of
+    /// `role`'s view, scoped, skipping empty ones; returns the initial diff
+    /// (everything running, as `Added`) with the forwarder task.
+    pub async fn subscribe_diff(
+        &self,
+        role: Role,
+        scopes: Vec<DiffScope>,
+        out: mpsc::Sender<Event>,
+    ) -> (Event, JoinHandle<()>) {
+        let class = ViewClass::of(role);
+        let rx = {
+            let mut subs = self.diff_subscribers();
+            *subs.entry(class).or_default() += 1;
+            self.0.tx.subscribe()
+        };
+        let guard = DiffSubscriber {
+            store: self.clone(),
+            class,
+        };
+        let task_scopes = scopes.clone();
+        let task = forward(rx, Some(guard), out, move |u| {
+            let wanted = task_scopes.clone();
+            async move {
+                let diff = u.diff_for(role).await?.scoped(&wanted);
+                (!diff.is_empty()).then_some(Event::Diff(diff))
+            }
+        });
+        let initial = Event::Diff(self.initial_diff(role).await.scoped(&scopes));
+        (initial, task)
     }
 
     /// Serializes the running config to disk at the daemon's configured
@@ -237,8 +353,8 @@ impl ConfigStore {
             return Err(ConfigError::TooManyTransactions(MAX_TRANSACTIONS));
         }
         let config = match base {
-            TransactionBase::Blank => Config::default(),
-            TransactionBase::Current => self.0.running.read().await.clone(),
+            TransactionBase::Blank => Arc::new(Config::default()),
+            TransactionBase::Current => self.running_snapshot().await,
         };
         let txn = Transaction {
             config,
@@ -259,11 +375,15 @@ impl ConfigStore {
         name: &str,
         op: ConfigOp,
     ) -> Result<TransactionSnapshot, ConfigError> {
-        let (mut config, generation) = self.checkout(name, None).await?;
+        let (base, generation) = self.checkout(name, None).await?;
         // The kind only: an op may carry a secret (and `?op` goes to `nos-logd`).
         debug!(transaction = %name, op = op.kind(), "applying op");
-        let op = unmask_op(op, &[&config, &*self.0.running.read().await])?;
-        let users_before = config.users.clone();
+        let op = unmask_op(op, &[&base, &*self.running_snapshot().await])?;
+        let users_before = base.users.clone();
+        // ponytail: one Config copy per op, since an op may fail half-applied;
+        // only the shell sends ops (the REST/provision PUT path is #775's).
+        let mut config = (*base).clone();
+        drop(base);
         op.apply(&mut config)?;
         self.finish_edit(name, config, users_before, generation)
             .await
@@ -284,7 +404,7 @@ impl ConfigStore {
     ) -> Result<TransactionSnapshot, ConfigError> {
         let (config, generation) = self.checkout(name, if_match).await?;
         let users_before = config.users.clone();
-        let mut doc = serde_json::to_value(&config)?;
+        let mut doc = serde_json::to_value(&*config)?;
         match value {
             Some(json) => config_path::set_at(
                 &mut doc,
@@ -302,7 +422,8 @@ impl ConfigStore {
         }
         let mut new: Config = serde_json::from_value(doc)?;
         // A GET-then-PUT round trip carries the REST mask where secrets were.
-        restore_masked(&mut new, &[&config, &*self.0.running.read().await])?;
+        restore_masked(&mut new, &[&config, &*self.running_snapshot().await])?;
+        drop(config);
         let config = new;
         let snap = self
             .finish_edit(name, config, users_before, generation)
@@ -311,20 +432,20 @@ impl ConfigStore {
         Ok(snap)
     }
 
-    /// Copies a transaction's config out under the lock (checking `if_match`),
-    /// so the edit and the argon2 hashing run with no lock held.
+    /// Shares a transaction's config out under the lock (checking `if_match`,
+    /// no copy), so the edit and the argon2 hashing run with no lock held.
     async fn checkout(
         &self,
         name: &str,
         if_match: Option<u64>,
-    ) -> Result<(Config, u64), ConfigError> {
+    ) -> Result<(Arc<Config>, u64), ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         txn.check(if_match)?;
         txn.last_used = Instant::now();
-        Ok((txn.config.clone(), txn.generation))
+        Ok((Arc::clone(&txn.config), txn.generation))
     }
 
     /// PRECIS-normalizes every user name, hashes any clear-text password (on
@@ -361,7 +482,7 @@ impl ConfigStore {
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         txn.check(Some(generation))?;
-        txn.config = config;
+        txn.config = Arc::new(config);
         txn.dirty = true;
         txn.generation += 1;
         txn.last_used = Instant::now();
@@ -397,18 +518,21 @@ impl ConfigStore {
         if txn.config.users.is_empty() && !self.0.running.read().await.users.is_empty() {
             return Err(ConfigError::NoUsersLeft);
         }
-        let mut config = txn.config.clone();
-        sync_routing_table_refs(&mut config);
-        let warnings = crate::warnings::commit_warnings(&config);
-        txs.remove(name);
+        let mut config = txs
+            .remove(name)
+            .map(|t| t.config)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         drop(txs);
+        // Unshared once the transaction is gone (no copy), unless it was never
+        // edited since `open(Current)`; the same Arc then becomes running.
+        sync_routing_table_refs(Arc::make_mut(&mut config));
+        let warnings = crate::warnings::commit_warnings(&config);
 
         let mut running = self.0.running.write().await;
-        let prev = std::mem::replace(&mut *running, config.clone());
+        let prev = std::mem::replace(&mut *running, Arc::clone(&config));
         drop(running);
         info!(transaction = %name, "config committed");
-        // Ignore send errors — no active receivers is not a failure.
-        let _ = self.0.tx.send(Arc::new(CommitUpdate::new(config, prev)));
+        self.broadcast(config, prev);
         Ok(warnings)
     }
 
@@ -424,19 +548,20 @@ impl ConfigStore {
             return Err(ConfigError::HashUpgradeRefused);
         }
         let mut running = self.0.running.write().await;
-        let mut config = running.clone();
-        match config
+        let Some(i) = running
             .users
-            .iter_mut()
-            .find(|u| u.name == user && u.password == old)
-        {
-            Some(u) => u.password = new,
-            None => return Err(ConfigError::HashUpgradeRefused),
-        }
-        let prev = std::mem::replace(&mut *running, config.clone());
+            .iter()
+            .position(|u| u.name == user && u.password == old)
+        else {
+            return Err(ConfigError::HashUpgradeRefused);
+        };
+        // Copies once: `prev` must stay intact for the diff subscribers.
+        let mut config = Arc::clone(&running);
+        Arc::make_mut(&mut config).users[i].password = new;
+        let prev = std::mem::replace(&mut *running, Arc::clone(&config));
         drop(running);
         info!(user = ?user, "password hash upgraded");
-        let _ = self.0.tx.send(Arc::new(CommitUpdate::new(config, prev)));
+        self.broadcast(config, prev);
         Ok(())
     }
 
@@ -457,11 +582,11 @@ impl ConfigStore {
     /// still be diffed.
     pub async fn diff_transaction(&self, name: &str) -> Result<ConfigDiff, ConfigError> {
         let txs = self.0.transactions.lock().await;
-        let candidate = txs
-            .get(name)
-            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?
-            .config
-            .clone();
+        let candidate = Arc::clone(
+            &txs.get(name)
+                .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?
+                .config,
+        );
         drop(txs);
         let running = self.running_snapshot().await;
         Ok(diff_configs(&running, &candidate))
@@ -493,6 +618,40 @@ impl ConfigStore {
     ) -> std::io::Result<tokio::task::JoinHandle<()>> {
         crate::server::start(addr, self.clone(), identity)
     }
+}
+
+/// Bridges the store's commit broadcast to one subscriber's `mpsc`.
+/// `to_event` builds the event this subscriber wants from each commit;
+/// `None` skips it (how a `SubscribeDiff` subscriber is never woken for a
+/// commit outside its scopes). `guard` lives as long as the task.
+fn forward<Fut>(
+    mut rx: broadcast::Receiver<Arc<CommitUpdate>>,
+    guard: Option<DiffSubscriber>,
+    tx: mpsc::Sender<Event>,
+    to_event: impl Fn(Arc<CommitUpdate>) -> Fut + Send + 'static,
+) -> JoinHandle<()>
+where
+    Fut: std::future::Future<Output = Option<Event>> + Send,
+{
+    tokio::spawn(async move {
+        let _guard = guard;
+        loop {
+            match rx.recv().await {
+                Ok(update) => {
+                    let Some(event) = to_event(update).await else {
+                        continue;
+                    };
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "IPC subscriber lagged, dropped messages");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// A syslog server's `trust_anchor` must parse as PEM certificates. Done here,
@@ -574,12 +733,17 @@ mod tests {
             name: "u".into(),
             password: "hash".into(),
         };
+        let pending = [Role::User, Role::Bgpd, Role::Watchdog]
+            .into_iter()
+            .map(ViewClass::of)
+            .collect();
         Arc::new(CommitUpdate::new(
-            Config {
+            Arc::new(Config {
                 users: vec![user],
                 ..Config::default()
-            },
-            Config::default(),
+            }),
+            Arc::default(),
+            pending,
         ))
     }
 
@@ -609,7 +773,60 @@ mod tests {
             bgpd1.is_empty(),
             "bgpd must not see a user change: {bgpd1:?}"
         );
-        assert_eq!(u.diffs.lock().unwrap().len(), 3);
+        let s = u.state();
+        assert_eq!(s.diffs.len(), 3);
+        assert!(
+            s.prev.is_none(),
+            "prev released once every owed diff exists"
+        );
+    }
+
+    /// #773: `prev` stays until the last owed class has its diff; a commit
+    /// with no diff subscriber keeps no `prev` at all.
+    #[tokio::test]
+    async fn prev_is_released_after_the_owed_diffs() {
+        let u = update_adding_a_user();
+        u.diff_for(Role::User).await.unwrap();
+        u.diff_for(Role::Bgpd).await.unwrap();
+        assert!(u.state().prev.is_some(), "Watchdog's diff still owed");
+        u.diff_for(Role::Watchdog).await.unwrap();
+        assert!(u.state().prev.is_none());
+        // A class nobody owed after the release: skipped, not a stale diff.
+        assert!(u.diff_for(Role::Ospfd).await.is_none());
+        let lone = CommitUpdate::new(Arc::default(), Arc::default(), HashSet::new());
+        assert!(lone.state().prev.is_none());
+    }
+
+    /// #773: the store registers each live diff subscriber's class, so a
+    /// commit owes exactly those diffs, and unregisters on unsubscribe.
+    #[tokio::test]
+    async fn subscribe_diff_registers_its_class_until_dropped() {
+        let store = ConfigStore::new(Config::default(), None);
+        let (out, mut rx) = mpsc::channel(4);
+        let (initial, task) = store
+            .subscribe_diff(Role::User, vec![DiffScope::Hostname], out)
+            .await;
+        assert!(matches!(initial, Event::Diff(_)));
+        store
+            .open_transaction("t", TransactionBase::Current)
+            .await
+            .unwrap();
+        store
+            .set_transaction_path("t", &segs("hostname"), Some("\"h\""), None, None)
+            .await
+            .unwrap();
+        store.commit_transaction("t", None).await.unwrap();
+        let Some(Event::Diff(d)) = rx.recv().await else {
+            panic!("no diff")
+        };
+        assert!(!d.is_empty());
+        assert_eq!(
+            store.diff_subscribers().get(&ViewClass::of(Role::User)),
+            Some(&1)
+        );
+        task.abort();
+        let _ = task.await;
+        assert!(store.diff_subscribers().is_empty());
     }
 
     fn instance(name: &str, asn: u32) -> BgpInstance {
@@ -1133,7 +1350,7 @@ mod tests {
         store.0.transactions.lock().await.insert(
             "t1".to_string(),
             Transaction {
-                config: bad_config,
+                config: Arc::new(bad_config),
                 dirty: true,
                 generation: 0,
                 last_used: Instant::now(),
@@ -1386,7 +1603,7 @@ mod tests {
         commit_password(&store, "t1", "alice", "one").await;
         let old = store.running_snapshot().await.users[0].password.clone();
         let new = nos_password::hash("one");
-        let mut rx = store.subscribe();
+        let mut rx = store.0.tx.subscribe();
 
         assert!(store
             .upgrade_password_hash("alice", "stale", new.clone())
@@ -1452,7 +1669,7 @@ mod tests {
         let mut cfg = Config::default();
         crate::users::seed_default_user(&mut cfg);
         let store = ConfigStore::new(cfg, None);
-        let users = store.running_snapshot().await.users;
+        let users = store.running_snapshot().await.users.clone();
         assert!(nos_password::verify("admin", &users[0].password));
     }
 
@@ -1667,6 +1884,55 @@ mod tests {
         assert!(quick < Duration::from_millis(50), "{quick:?}");
     }
 
+    /// #773: a transaction opened from running shares its Arc until the first
+    /// edit, which never reaches running; a committed config stays put while
+    /// a later transaction edits; a failed edit changes nothing.
+    #[tokio::test]
+    async fn shared_configs_are_never_edited_in_place() {
+        let store = ConfigStore::new(Config::default(), None);
+        store
+            .open_transaction("t", TransactionBase::Current)
+            .await
+            .unwrap();
+        let running = store.running_snapshot().await;
+        let txn = store.checkout("t", None).await.unwrap().0;
+        assert!(Arc::ptr_eq(&running, &txn), "open(Current) shares running");
+        drop(txn);
+        store.apply_op("t", ensure_op("a")).await.unwrap();
+        store.apply_op("t", set_asn_op("a", 65000)).await.unwrap();
+        assert_eq!(store.running_snapshot().await.bgp_instances.len(), 0);
+        store.commit_transaction("t", None).await.unwrap();
+        let committed = store.running_snapshot().await;
+
+        store
+            .open_transaction("u", TransactionBase::Current)
+            .await
+            .unwrap();
+        store.apply_op("u", ensure_op("b")).await.unwrap();
+        store
+            .set_transaction_path("u", &segs("hostname"), Some("\"x\""), None, None)
+            .await
+            .unwrap();
+        assert_eq!(committed.bgp_instances.len(), 1);
+        assert_eq!(store.running_snapshot().await.hostname, committed.hostname);
+
+        let before = store.get_transaction("u").await.unwrap();
+        assert!(store.apply_op("u", set_asn_op("zz", 1)).await.is_err());
+        assert!(store
+            .set_transaction_path("u", &segs("hostname"), Some("{"), None, None)
+            .await
+            .is_err());
+        let after = store.get_transaction("u").await.unwrap();
+        assert_eq!(after.config, before.config);
+        assert_eq!(after.generation, before.generation);
+        // A stale generation is still refused.
+        let err = store
+            .set_transaction_path("u", &segs("hostname"), Some("\"y\""), Some(0), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::PreconditionFailed { .. }));
+    }
+
     #[tokio::test]
     async fn an_edit_that_lost_the_race_is_refused() {
         let store = ConfigStore::new(Config::default(), None);
@@ -1677,7 +1943,7 @@ mod tests {
         let (config, generation) = store.checkout("t", None).await.unwrap();
         store.apply_op("t", ensure_op("x")).await.unwrap();
         let err = store
-            .finish_edit("t", config, Vec::new(), generation)
+            .finish_edit("t", (*config).clone(), Vec::new(), generation)
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::PreconditionFailed { .. }));

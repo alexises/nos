@@ -66,6 +66,10 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - The diff runs in `spawn_blocking`, off the runtime workers. If it panics, those subscribers skip that commit (warning logged).
 - `diff_configs` indexes each keyed list by key and skips equal elements: O(n) in the list length, no `Value` cloned. Duplicate keys still pair with the first match.
 - `Subscribe` (full config) keeps its per-subscriber `for_role` clone.
+- Lean ring slots (#773): a `CommitUpdate` shares its `config` with running, and holds the previous config only until every visibility class with a live `SubscribeDiff` subscriber at send time has its diff, then drops it. A slot then keeps `config` plus the diffs.
+  - The store counts live diff subscribers per class (`ConfigStore::subscribe_diff`, released when the forwarder task ends). Registering and `broadcast::Sender::subscribe` happen under one lock, so a commit owes exactly the classes of the receivers that get it.
+  - The class that sees everything (`User`, `Restd`) diffs the shared configs directly. Other classes build their `for_role` projections inside the diff task and drop them with it.
+  - A commit with no diff subscriber keeps no previous config.
 
 ### Memory profiling (#766, #767)
 
@@ -75,7 +79,12 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - At the end it prints the running config's JSON size, SIGINTs `nos-configd` and `nos-restd`, and prints their dhat `t-gmax`/`t-end` and the top 8 program points by max bytes, total bytes and bytes live at exit (2 frames below the allocator plus the first 3 `nos_*` frames). A non-dhat image just logs that there is no report. Not a phase (asserts nothing, not in `phases::ALL`).
 - On the dhat image use a smaller load, e.g. `WAVE_COUNT=4 WAVE_ROUTES=2500` (~25 min): every `PUT` is O(config) and dhat slows each allocation, so the default 12 x 5500 takes hours. Read RSS from the default image, attribution from dhat.
 - For a deeper split than the log lines, copy the report out before `down` (`docker exec router-b cat /tmp/dhat-configd.json > configd.json`) and load it in https://nnethercote.github.io/dh_view/dh_view.html.
-- `cargo test -p nos-config --test resident -- --nocapture`: counting allocator over ~66k static routes, prints one `Config`'s live size, the per-`PUT` and per-commit transient peaks, and bounds live heap after a commit to 6x one `Config`. It has no subscriber, so the broadcast ring's retained commits are not counted.
+- `cargo test -p nos-config --test resident -- --nocapture`: counting allocator over ~66k static routes with three `SubscribeDiff` subscribers (`User`, `Watchdog`, `Bgpd`, one per kind of visibility class) through `ConfigStore::subscribe_diff`. It runs several commits of single-route `PUT`s and prints one `Config`'s live size and these peaks:
+  - per-`PUT` transient (still O(config) until #775);
+  - store-level commit transient, asserted at most one `Config`;
+  - the subscribers' diff transient, printed only (~75 `Config`s at 66k: `diff_configs` walks both configs as JSON for each class);
+  - live heap after the commits, broadcast ring included, asserted at most half a `Config`. Tokio drops a ring slot's value once every receiver has read it, so only a lagging receiver keeps a commit alive.
+- Measured at 66k in a debug build (#773): commit transient 0.14 `Config`, live after 4 commits ~0, per-`PUT` transient 11.6 `Config`s.
 
 ### Config plane vs data plane
 

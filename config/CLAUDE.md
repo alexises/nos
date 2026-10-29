@@ -18,8 +18,8 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 
 | Type | File | Role |
 |------|------|------|
-| `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Config>` + `transactions: Mutex<HashMap<String, Transaction>>` + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
-| `CommitUpdate` | `store.rs` | Internal — one commit's `{ config, prev }`; each connection projects both per role (and diffs them for `SubscribeDiff`) |
+| `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Arc<Config>>` + `transactions: Mutex<HashMap<String, Transaction>>` (`Arc<Config>` each, #773) + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
+| `CommitUpdate` | `store.rs` | Internal — one commit: `config` (running's `Arc`) + `prev` until each live diff class has its diff (#773) |
 | `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft` (a commit may not remove every user), `TransactionNotFound`, `PreconditionFailed` (an `if_match` named a stale generation — message prefixed `precondition failed`, which `nos-restd` maps to 412), `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
 | `server::start()` | `server.rs` | Binds a TLS `nos_pki::Listener` on a Unix socket (`ListenAddr::Unix` only — the TCP listener was removed, since it would bypass mTLS), spawns per-connection tasks (handshake inside the task) each holding a cloned `ConfigStore` and the peer's role/name from its certificate |
 | `authz::allowed()` | `authz.rs` | Pure per-request allow-list: config reads (`Get`/`Subscribe*`/`Describe`) for every authenticated daemon and `User`; edits/`Save` for `User`/`Restd` only. No wildcard arm — a new `Request` variant won't compile until classified. A refused request gets `Event::Error("permission denied")` and the connection is closed |
@@ -32,8 +32,8 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 
 `server::start()` binds a `UnixListener` and spawns an accept loop, each connection sharing a cloned `ConfigStore`. Per-connection:
 - `Request::Get` → send `Event::Config(current_running)` once.
-- `Request::Subscribe` → send the current full snapshot, then spawn a forwarder task that bridges `broadcast::Receiver<Arc<CommitUpdate>>` → `mpsc::Sender<Event>`, building `Event::Config(update.config.clone())` per commit. The select loop drains the `mpsc::Receiver` and forwards whatever `Event` it built to the client.
-- `Request::SubscribeDiff { scopes }` → send `store.initial_diff(role).await.scoped(&scopes)` first, then a forwarder sending `CommitUpdate::diff_for(role)` (one `Arc<ConfigDiff>` per visibility class per commit, #751), scoped, skipped when empty.
+- `Request::Subscribe` → `store.subscribe_config(role, sub_tx)`: the current config for the role, plus a forwarder task bridging the commit broadcast → `mpsc::Sender<Event>` (`Event::Config(config.for_role(role))` per commit). The select loop drains the `mpsc::Receiver` to the client.
+- `Request::SubscribeDiff { scopes }` → `store.subscribe_diff(role, scopes, sub_tx)`: the initial diff, then `CommitUpdate::diff_for(role)` per commit (one `Arc<ConfigDiff>` per visibility class, #751), scoped, skipped when empty. Forwarders live in `store.rs` (tests need no PKI).
 - `Request::Unsubscribe` → abort the active forwarder task.
 - `UserExists`, `List*Instances`, `GetRestApi` → `Restd`-only, no clone (#755, #759).
 - `Request::Save` → serializes the running config as YAML and atomically writes it to the daemon's `--config-file` path; replies `Event::Saved` on success, `Event::Error` if no `--config-file` was configured or the write fails.
