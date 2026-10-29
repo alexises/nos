@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use garde::Validate as _;
 use nos_proto::{
-    config_path::ListPosition, diff_configs, schema::redact::ViewClass, sync_routing_table_refs,
-    Config, ConfigDiff, ConfigOp, DiffScope, Event, Role, TransactionBase, TransactionSnapshot,
+    config_path::ListPosition, diff_configs, diff_configs_for_role, schema::redact::ViewClass,
+    sync_routing_table_refs, Config, ConfigDiff, ConfigOp, DiffScope, Event, Role, TransactionBase,
+    TransactionSnapshot,
 };
 use tokio::sync::{broadcast, mpsc, Mutex, OnceCell, RwLock};
 use tokio::task::JoinHandle;
@@ -133,12 +134,8 @@ impl CommitUpdate {
         let init = || async move {
             let prev = prev.ok_or("previous config already released")?;
             tokio::task::spawn_blocking(move || {
-                // User/Restd see everything: diff the shared configs, no projection.
-                Arc::new(if class == ViewClass::of(Role::User) {
-                    diff_configs(&prev, &config)
-                } else {
-                    diff_configs(&prev.for_role(role), &config.for_role(role))
-                })
+                // No whole-config projection per class (#778).
+                Arc::new(diff_configs_for_role(&prev, &config, role))
             })
             .await
             .map_err(|e| e.to_string())
@@ -640,10 +637,7 @@ impl ConfigStore {
     /// `Added` (diffing against an empty config can never produce
     /// `Removed`/`Modified`).
     pub(crate) async fn initial_diff(&self, role: nos_proto::Role) -> ConfigDiff {
-        diff_configs(
-            &Config::default(),
-            &self.running_snapshot().await.for_role(role),
-        )
+        diff_configs_for_role(&Config::default(), &*self.running_snapshot().await, role)
     }
 
     /// Computes the structural difference between the running config and a

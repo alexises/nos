@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use crate::broker::Role;
 
-use super::{BgpAuth, Config, OspfAuth};
+use super::{Admin, BgpAuth, Config, OspfAuth, User};
 
 /// Which key families a role may read. Exhaustive `match` on [`Role`]: a
 /// new role must be classified here before it compiles.
@@ -111,13 +111,28 @@ impl Config {
     /// auth structures keep their labels, so the config still parses.
     #[must_use]
     pub fn for_role(&self, role: Role) -> Config {
-        let v = visible(role);
-        let mut out = self.clone();
-        if !v.users {
-            out.users.clear();
+        let (users, admin) = self.role_secrets(role);
+        Config {
+            users,
+            admin,
+            ..self.clone()
         }
+    }
+
+    /// The only two fields [`Config::for_role`] changes, as `role` sees them:
+    /// `users` and `admin`. Everything else is `self`'s, so a per-role diff
+    /// only re-diffs these (`diff_configs_for_role`, #778).
+    #[must_use]
+    pub fn role_secrets(&self, role: Role) -> (Vec<User>, Admin) {
+        let v = visible(role);
+        let users = if v.users {
+            self.users.clone()
+        } else {
+            Vec::new()
+        };
+        let mut admin = self.admin.clone();
         if v.all_keys {
-            return out;
+            return (users, admin);
         }
         let mut keep = BTreeSet::new();
         if v.bgp {
@@ -157,8 +172,8 @@ impl Config {
                     .filter_map(|p| p.auth.as_ref().map(|a| a.key.clone())),
             );
         }
-        out.admin.keys.retain(|k| keep.contains(&k.label));
-        out
+        admin.keys.retain(|k| keep.contains(&k.label));
+        (users, admin)
     }
 }
 
@@ -287,6 +302,35 @@ mod tests {
             assert_eq!(got.hostname, "visible-host");
             assert_eq!(got.bgp_instances, cfg.bgp_instances, "{role:?}");
             assert_eq!(got.bfd_profiles, cfg.bfd_profiles, "{role:?}");
+        }
+    }
+
+    /// #778: the per-role diff without projections equals the diff of the
+    /// projections, for every role and secret edit.
+    #[test]
+    fn the_per_role_diff_matches_the_diff_of_the_projections() {
+        let base = fixture();
+        let mut cands = vec![Config::default(), base.clone()];
+        let mut c = base.clone();
+        c.admin.keys[0].secret = "SECRET-changed".into();
+        c.users[0].password = "SECRET-other".into();
+        c.hostname = "h2".into();
+        cands.push(c);
+        let mut c = base.clone();
+        c.admin.keys.remove(4);
+        c.users.clear();
+        c.bgp_instances.clear();
+        cands.push(c);
+        for cand in &cands {
+            for role in Role::ALL {
+                for (b, c) in [(&base, cand), (cand, &base)] {
+                    assert_eq!(
+                        crate::diff_configs_for_role(b, c, role),
+                        crate::diff_configs(&b.for_role(role), &c.for_role(role)),
+                        "{role:?}"
+                    );
+                }
+            }
         }
     }
 }

@@ -4,6 +4,7 @@ pub use generate::diff_values;
 
 use serde::{Deserialize, Serialize};
 
+use crate::broker::Role;
 use crate::schema::Config;
 
 /// Whether a diffed section is wholly new, wholly gone, or has some fields
@@ -346,6 +347,27 @@ pub const VNI_LABEL: &str = "vni";
 /// diffed, and labels/headers are the CLI's own words.
 pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
     generate::diff_configs(base, candidate)
+}
+
+/// `diff_configs(&base.for_role(role), &candidate.for_role(role))` without
+/// the two whole-config projections (#778): `for_role` only changes `users`
+/// and `admin`, so those two slots are diffed from configs holding only
+/// `Config::role_secrets`, the rest from the configs themselves.
+pub fn diff_configs_for_role(base: &Config, candidate: &Config, role: Role) -> ConfigDiff {
+    let secrets = |c: &Config| {
+        let (users, admin) = c.role_secrets(role);
+        Config {
+            users,
+            admin,
+            ..Config::default()
+        }
+    };
+    let masked = diff_configs(&secrets(base), &secrets(candidate));
+    ConfigDiff {
+        users: masked.users,
+        admin: masked.admin,
+        ..diff_configs(base, candidate)
+    }
 }
 
 #[cfg(test)]
