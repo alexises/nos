@@ -136,6 +136,9 @@ async fn commit_and_put_cost_at_66k_routes() {
         after as f64 / one_config as f64,
     );
     // ponytail: generous 6x bound, retuned in the fix PR once the copies are gone.
+    // No subscriber here, so the broadcast ring's retained `CommitUpdate`s (and
+    // their `diff_for` diffs, the bulk of dhat's t-end) are not counted: the fix
+    // PR adds one.
     assert!(
         after <= 6 * one_config,
         "live after commit {after} > 6x one config ({one_config})"

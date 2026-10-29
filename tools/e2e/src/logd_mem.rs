@@ -367,30 +367,33 @@ fn dhat_sum(v: &serde_json::Value, key: &str) -> u64 {
         .map_or(0, |p| p.iter().filter_map(|e| e[key].as_u64()).sum())
 }
 
-/// The top `n` dhat program points by max bytes (`mb`) and by total bytes
-/// (`tb`), one line each with the first 3 frames resolved from `ftbl`.
+/// The top `n` dhat program points by max bytes (`mb`), total bytes (`tb`)
+/// and bytes still live at exit (`eb`), one line each: the first 2 frames
+/// below the allocator plus the first 3 NOS frames (`nos_*`), resolved from
+/// `ftbl` with the address prefix and `(???:0:0)` suffix stripped.
 fn dhat_top(v: &serde_json::Value, n: usize) -> Vec<String> {
     let empty = Vec::new();
     let pps = v["pps"].as_array().unwrap_or(&empty);
     let ftbl = v["ftbl"].as_array().unwrap_or(&empty);
     let mut out = Vec::new();
-    for (key, name) in [("mb", "max"), ("tb", "total")] {
+    for (key, name) in [("mb", "max"), ("tb", "total"), ("eb", "end")] {
         let mut order: Vec<&serde_json::Value> = pps.iter().collect();
         order.sort_by_key(|e| std::cmp::Reverse(e[key].as_u64().unwrap_or(0)));
         for e in order.into_iter().take(n) {
-            let frames: Vec<String> = e["fs"]
+            let all: Vec<&str> = e["fs"]
                 .as_array()
                 .unwrap_or(&empty)
                 .iter()
-                .take(3)
                 .map(|i| {
                     i.as_u64()
                         .and_then(|i| ftbl.get(usize::try_from(i).ok()?))
                         .and_then(|f| f.as_str())
-                        .unwrap_or("?")
-                        .to_string()
+                        .map_or("?", frame_name)
                 })
+                .filter(|f| !f.contains("dhat::Alloc"))
                 .collect();
+            let nos = all.iter().skip(2).filter(|f| f.contains("nos_")).take(3);
+            let frames: Vec<&str> = all.iter().take(2).chain(nos).copied().collect();
             out.push(format!(
                 "top-{name} {key}={} gb={} eb={} :: {}",
                 e[key],
@@ -401,6 +404,12 @@ fn dhat_top(v: &serde_json::Value, n: usize) -> Vec<String> {
         }
     }
     out
+}
+
+/// `0x55..: <a as b>::f (???:0:0)` -> `<a as b>::f`.
+fn frame_name(f: &str) -> &str {
+    let f = f.split_once(": ").map_or(f, |(_, rest)| rest);
+    f.strip_suffix(" (???:0:0)").unwrap_or(f)
 }
 
 #[cfg(test)]
@@ -419,14 +428,16 @@ mod tests {
     #[test]
     fn dhat_top_resolves_frames_and_orders() {
         let v: serde_json::Value = serde_json::from_str(
-            r#"{"pps":[{"tb":10,"mb":1,"gb":1,"eb":0,"fs":[0,1]},{"tb":5,"mb":9,"gb":9,"eb":2,"fs":[2,0,1,0]}],
-                "ftbl":["a","b","c"]}"#,
+            r#"{"pps":[{"tb":10,"mb":1,"gb":1,"eb":0,"fs":[0,1]},{"tb":5,"mb":9,"gb":9,"eb":2,"fs":[3,2,0,4,1,4]}],
+                "ftbl":["a","nos_x","c","0x1: dhat::Alloc (???:0:0)","std"]}"#,
         )
         .unwrap();
         let top = dhat_top(&v, 1);
-        assert_eq!(top.len(), 2);
-        assert!(top[0].starts_with("top-max mb=9") && top[0].ends_with("c <- a <- b"));
-        assert!(top[1].starts_with("top-total tb=10") && top[1].ends_with("a <- b"));
+        assert_eq!(top.len(), 3);
+        assert!(top[0].starts_with("top-max mb=9") && top[0].ends_with("c <- a <- nos_x"));
+        assert!(top[1].starts_with("top-total tb=10") && top[1].ends_with("a <- nos_x"));
+        assert!(top[2].starts_with("top-end eb=2"));
+        assert_eq!(frame_name("0x5: <a as b>::f (???:0:0)"), "<a as b>::f");
         assert_eq!(dhat_sum(&v, "gb"), 10);
     }
 }
