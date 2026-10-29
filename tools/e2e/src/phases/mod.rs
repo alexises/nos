@@ -137,6 +137,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "pki" => pki::pki(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
         "logd-memory" => crate::logd_mem::phase(w).await,
+        "config-mem" => crate::logd_mem::config_phase(w).await,
         other => bail!("unknown phase '{other}'"),
     }
 }
@@ -280,6 +281,8 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         // Not run by CI (minutes of runtime, memory thresholds are the flakiest
         // class): `cargo run -p nos-e2e -- logd-memory-lab` by hand (#756).
         "logd-memory-lab" => &["up", "established", "logd-memory"],
+        // Same: `cargo run -p nos-e2e -- config-memory-lab` by hand (#776).
+        "config-memory-lab" => &["up", "established", "config-mem"],
         _ => return None,
     })
 }
@@ -400,6 +403,7 @@ pub const ALL: &[&str] = &[
     "pki",
     "pki-rotation",
     "logd-memory",
+    "config-mem",
 ];
 
 #[cfg(test)]
@@ -410,7 +414,7 @@ mod tests {
 
     /// Add new groups here. (`run`'s match is not introspectable, so a name in
     /// `ALL` that `run` does not dispatch only fails when run: "unknown phase".)
-    const GROUPS: [&str; 7] = [
+    const GROUPS: [&str; 8] = [
         "base",
         "drivers",
         "rpl",
@@ -418,6 +422,7 @@ mod tests {
         "multi",
         "pki-suite",
         "logd-memory-lab",
+        "config-memory-lab",
     ];
 
     struct Row {

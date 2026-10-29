@@ -4,15 +4,15 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 
 - Run one phase, a group or everything: `cargo run -p nos-e2e -- <phase|group|all>`. Also `logs [n]` (last n log lines of every running router, via REST) and `down` (tear down containers, volumes and the network).
 - `all` runs every row below in table order and leaves the containers up for inspection (`logs`).
-- A group (`base`, `drivers`, `rpl`, `ospf-suite`, `multi`, `pki-suite`, `logd-memory-lab`) is self-contained: it starts its own routers, runs its members in table order and tears down on exit (pass or fail) unless `VERIFY_E2E_KEEP=1`. `.github/workflows/verify-e2e.yml` runs the first six as parallel CI jobs; `logd-memory-lab` is manual only (minutes of runtime, memory thresholds are the flakiest class). The `Groups` column lists membership; groups are not restated elsewhere.
+- A group (`base`, `drivers`, `rpl`, `ospf-suite`, `multi`, `pki-suite`, `logd-memory-lab`, `config-memory-lab`) is self-contained: it starts its own routers, runs its members in table order and tears down on exit (pass or fail) unless `VERIFY_E2E_KEEP=1`. `.github/workflows/verify-e2e.yml` runs the first six as parallel CI jobs; `logd-memory-lab` and `config-memory-lab` are manual only (minutes of runtime, memory thresholds are the flakiest class). The `Groups` column lists membership; groups are not restated elsewhere.
 - `Requires`: `self-contained` phases start their own routers; a list of phases must already have run in the same lab (earlier in table order); `-` needs only the lab that `up` and `established` leave behind.
 - How the harness provisions and asserts: root `CLAUDE.md`, "Two-router end-to-end verification".
 - Adding a phase: root `CLAUDE.md`, "New features require an end-to-end Docker verification phase". Add its row here, in `phases::ALL` order.
 
 | Phase | Family | Groups | Requires | Proves |
 |---|---|---|---|---|
-| `up` | BGP | base, drivers, rpl, ospf-suite, pki-suite, logd-memory-lab | - | Starts both routers (config seeded, REST pinned) configured as BGP peers. |
-| `established` | BGP | base, drivers, rpl, ospf-suite, pki-suite, logd-memory-lab | - | Both sides log `bgp session established` (graceful-restart capability checked too); `GET /v1/version` on both routers reports the same revision, not `unknown`. |
+| `up` | BGP | base, drivers, rpl, ospf-suite, pki-suite, logd-memory-lab, config-memory-lab | - | Starts both routers (config seeded, REST pinned) configured as BGP peers. |
+| `established` | BGP | base, drivers, rpl, ospf-suite, pki-suite, logd-memory-lab, config-memory-lab | - | Both sides log `bgp session established` (graceful-restart capability checked too); `GET /v1/version` on both routers reports the same revision, not `unknown`. |
 | `reconnect` | BGP | base | - | Killing one side's `nos-bgpd` is detected by the other and both re-establish. |
 | `collision` | BGP | base | - | Restarting both `nos-bgpd` at once yields an RFC 4271 §6.8 collision event (best-effort, timing-dependent). |
 | `shutdown` | BGP | base | - | RFC 9003 shutdown message reaches router-b as Cease/Administrative Shutdown (inside an RFC 8538 Hard Reset); the session stays down until cleared; removing the peer sends Cease/Peer De-configured. |
@@ -125,6 +125,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `pki` | PKI | pki-suite | - | Every daemon holds its watchdog-minted identity and runs as its own uid, with 0660 sockets another uid cannot unlink; every IPC handshake is X25519MLKEM768 + ML-DSA-65; login refusal, certificate revocation on password change, deletion and process exit; a REST certificate stops working (401) when its user's password changes; a burst of 200 concurrent bad logins on distinct usernames (#381) gets only 401/429, is rate limited per source address (429), leaves the watchdog running and a good login works again once the 60s window ends. |
 | `pki-rotation` | PKI | pki-suite | self-contained | 20s certificates rotated every 6s: after every original expired, a restarted `nos-ribd` is still reached by the long-lived `nos-bgpd`. |
 | `logd-memory` | Logging | logd-memory-lab | - | 20 000 sequential per-route `PUT`s into an uncommitted transaction (one `rest request` log line each): `nos-logd`'s RSS at 20 000 is at most +50% or +50 MB (larger) over 10 000, its idle RSS (30 s later) does not exceed the end-of-load RSS, and the watchdog logged `starting process=nos-logd ... env=MALLOC_ARENA_MAX=1` (its per-process env, #756; `/proc/<pid>/environ` is unreadable across uids). Minutes long. |
+| `config-mem` | Config | config-memory-lab | - | The `mem-wave` load on router-b (default 12 waves x 5500 per-route `PUT`s, one commit each, 66k static routes; `WAVE_COUNT`/`WAVE_ROUTES`/`WAVE_IDLE` override): `nos-configd`'s `VmRSS` after each commit from wave 2 on stays within ±25% of wave 2's, the cgroup's sampled `memory.current` stays under 1.5 GiB, neither `nos-configd` nor `nos-restd` changes pid, and the watchdog logged `starting process=nos-configd ... env=MALLOC_ARENA_MAX=1` (#776). Tens of minutes long. |
 
 ## BGP
 
@@ -260,3 +261,4 @@ Same lab as OSPFv2, with `ospfv3 <profile>` on the same attach points (no confli
 ## Logging
 
 - `logd-memory` (group `logd-memory-lab`, manual): on the standard lab it samples `nos-logd`'s `VmRSS` every 2000 of 20 000 sequential `PUT`s and 30 s after the load, and checks the watchdog's `starting ... env=` line for nos-logd. Per-daemon RSS and the container cgroup (`memory.current` vs `memory.max`) are logged at each sample; `LOGD_MEM_ROUTER=b cargo run -p nos-e2e -- logd-mem` prints the same on router-b.
+- `config-mem` (group `config-memory-lab`, manual): the `mem-wave` load and samples (`docs/architecture/config-protocol.md`, "Memory profiling"), asserted instead of only printed. Run it on a default (non-dhat) image under the lab's 2 GiB cgroup cap.
