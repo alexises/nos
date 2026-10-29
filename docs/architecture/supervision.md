@@ -39,4 +39,4 @@ In every family's pass-through flags (`--bgpd-arg`, `--restd-arg`, ...) a litera
 
 **User ids** (#512, #513): `nos-watchdogd` runs as `nos-wd`; `supervise_one` starts each child with `ProcessSpec.uid`, the role's own uid (`ProcessSpec::with_role_uid`, from `--child-gid` in the image) after creating `/var/lib/nos/<role>` and logs `uid=`/`gid=` in its `starting` line. The ids switch before exec, so the children's file capabilities are unaffected. See "uid model" in [IPC security](ipc-security.md).
 
-- Per-process env (#756): `ProcessSpec.env`/`with_env` is applied after the scrubbed `CHILD_ENV` allowlist, so a child gets extra variables only when its spec asks; only `nos-logd` uses it (`MALLOC_ARENA_MAX=1`).
+- Per-process env (#756): `ProcessSpec.env`/`with_env` is applied after the scrubbed `CHILD_ENV` allowlist, so a child gets extra variables only when its spec asks; only `nos-logd` (#756) and `nos-configd` (#776) use it, both for `MALLOC_ARENA_MAX=1`. `nos-restd` does not: the #766 measurements showed its RSS unchanged by it.

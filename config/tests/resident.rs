@@ -202,26 +202,28 @@ async fn commit_and_put_cost_at_66k_routes() {
     // would keep `config` + diffs, without `prev` once the owed diffs exist).
     // The diff transient (~75x at 66k: `diff_configs` walks both configs as
     // JSON, per class) is printed, not bounded: the remaining commit cost.
-    // A PUT is O(route) (#775): measured 1.7 KB (a route, its JSON, the
-    // planned edit), so 16 KiB is headroom, not a config-sized bound. The
+    // A PUT is O(route) (#775): measured 1.7-2.9 KB (a route, its JSON, the
+    // planned edit), so 8 KiB is headroom, not a config-sized bound. The
     // first PUT of a transaction unshares running (1.38x measured: one copy
     // plus the routes list growing past its exact clone capacity).
-    // ponytail: bounds from the #773/#775 measurements plus headroom.
+    // ponytail: bounds are the #776 debug-build measurements (live 0, commit
+    // 0.14x, PUT 2986 B, first PUT 1.38x) plus ~2x headroom; the diff
+    // transient gets its bound with #778.
     assert!(
-        after <= one_config / 2,
-        "live after {COMMITS} commits {after} > half a config ({one_config})"
+        after <= one_config / 8,
+        "live after {COMMITS} commits {after} > 1/8 config ({one_config})"
     );
     assert!(
-        commit_transient <= one_config,
-        "commit transient {commit_transient} > one config ({one_config})"
+        commit_transient <= one_config / 4,
+        "commit transient {commit_transient} > 1/4 config ({one_config})"
     );
     assert!(
-        put_transient <= 16 * 1024,
-        "per-PUT transient {put_transient} > 16 KiB"
+        put_transient <= 8 * 1024,
+        "per-PUT transient {put_transient} > 8 KiB"
     );
     assert!(
-        first_put <= 2 * one_config,
-        "first PUT transient {first_put} > 2x one config ({one_config})"
+        first_put <= one_config * 3 / 2,
+        "first PUT transient {first_put} > 1.5x one config ({one_config})"
     );
     for task in tasks {
         task.abort();

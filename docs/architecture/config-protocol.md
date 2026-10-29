@@ -72,21 +72,23 @@ Editing the config happens inside a **named transaction**, held server-side in `
   - The store counts live diff subscribers per class (`ConfigStore::subscribe_diff`, released when the forwarder task ends). Registering and `broadcast::Sender::subscribe` happen under one lock, so a commit owes exactly the classes of the receivers that get it.
   - The class that sees everything (`User`, `Restd`) diffs the shared configs directly. Other classes build their `for_role` projections inside the diff task and drop them with it.
   - A commit with no diff subscriber keeps no previous config.
+- The diff itself is still O(config) per class (`diff_configs` walks both configs as JSON, ~75 `Config`s of transient at 66k routes). In the `config-mem` lab (#776) it is what grows `nos-configd`'s RSS: ~50 MB per 5500-route wave, all of it in the seconds after a commit, while the `PUT`s between commits stay flat. #778 tracks it.
 
 ### Memory profiling (#766, #767)
 
 - Image: `CARGO_FEATURES="nos-config/dhat-heap nos-rest/dhat-heap" make docker-build` (the Dockerfile passes one `--features` to the multi-`--bin` build; cargo resolves both `pkg/feature` entries). Default and release builds are unchanged. The dhat image inflates RSS: read RSS only from a default image.
 - Watchdog args: `--configd-arg=--profile-memory-out=/tmp/dhat-configd.json --restd-arg=--profile-memory-out=/tmp/dhat-restd-{name}.json`. The watchdog replaces a literal `{name}` in pass-through flags with the instance name, so each `nos-restd` (one per table) gets its own file. The lab takes extra watchdog args from `NOS_E2E_WATCHDOG_ARGS` (space-separated) on `nos-e2e up`.
 - Wave load: `LOGD_MEM_ROUTER=b [WAVE_COUNT=12] [WAVE_ROUTES=5500] [WAVE_IDLE=0] cargo run -p nos-e2e -- mem-wave`. Each wave opens a transaction on running, `PUT`s `WAVE_ROUTES` static routes one per request (spread over `ceil(total/25000)` instances), commits, and logs every `nos-*` daemon's `VmRSS`/`VmHWM` plus the cgroup after the commit and after `WAVE_IDLE` seconds. It fails if `nos-configd` or `nos-restd` changes pid.
+- Gate (#776): `cargo run -p nos-e2e -- config-memory-lab` (`up`, `established`, phase `config-mem`; manual, not in CI) runs the same load on router-b with the same `WAVE_*` knobs and asserts `nos-configd`'s `VmRSS` after each commit from wave 2 on within ±25% of wave 2's, the sampled cgroup `memory.current` under 1.5 GiB, and the watchdog's `starting process=nos-configd ... env=MALLOC_ARENA_MAX=1` line. `VmHWM` and the idle samples are logged only. The watchdog starts `nos-configd` with `MALLOC_ARENA_MAX=1` (glibc per-thread arenas held about half its `VmHWM` in #766).
 - At the end it prints the running config's JSON size, SIGINTs `nos-configd` and `nos-restd`, and prints their dhat `t-gmax`/`t-end` and the top 8 program points by max bytes, total bytes and bytes live at exit (2 frames below the allocator plus the first 3 `nos_*` frames). A non-dhat image just logs that there is no report. Not a phase (asserts nothing, not in `phases::ALL`).
 - On the dhat image use a smaller load, e.g. `WAVE_COUNT=4 WAVE_ROUTES=2500`: dhat slows each allocation, so the default 12 x 5500 takes long. Read RSS from the default image, attribution from dhat.
 - For a deeper split than the log lines, copy the report out before `down` (`docker exec router-b cat /tmp/dhat-configd.json > configd.json`) and load it in https://nnethercote.github.io/dh_view/dh_view.html.
 - `cargo test -p nos-config --test resident -- --nocapture`: counting allocator over ~66k static routes with three `SubscribeDiff` subscribers (`User`, `Watchdog`, `Bgpd`, one per kind of visibility class) through `ConfigStore::subscribe_diff`. It runs 4 commits sharing 2000 single-route edits (`NOS_RESIDENT_PUTS` overrides) and prints one `Config`'s live size and these peaks:
-  - per-`PUT` transient of `edit_transaction_path` (the edit without the snapshot reply), asserted at most 16 KiB;
-  - the first `PUT` of each transaction, which unshares running (one copy), asserted at most two `Config`s;
-  - store-level commit transient, asserted at most one `Config`;
+  - per-`PUT` transient of `edit_transaction_path` (the edit without the snapshot reply), asserted at most 8 KiB;
+  - the first `PUT` of each transaction, which unshares running (one copy), asserted at most 1.5 `Config`s;
+  - store-level commit transient, asserted at most a quarter `Config`;
   - the subscribers' diff transient, printed only (~75 `Config`s at 66k: `diff_configs` walks both configs as JSON for each class);
-  - live heap after the commits, broadcast ring included, asserted at most half a `Config`. Tokio drops a ring slot's value once every receiver has read it, so only a lagging receiver keeps a commit alive.
+  - live heap after the commits, broadcast ring included, asserted at most an eighth of a `Config`. Tokio drops a ring slot's value once every receiver has read it, so only a lagging receiver keeps a commit alive.
 - Measured at 66k in a debug build (#773): commit transient 0.14 `Config`, live after 4 commits ~0, per-`PUT` transient 11.6 `Config`s.
 - After #775: per-`PUT` transient 1.7 KB (was 11.6 `Config`s, ~49 MB), first `PUT` 1.38 `Config`s, live after 4 commits below the seed (running re-cloned with exact capacities).
 

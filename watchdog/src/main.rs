@@ -345,15 +345,8 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
-    let configd_args = std::iter::once("--log-socket".to_string())
-        .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.configd_flags.iter().cloned())
-        .collect();
-    let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin.clone(), configd_args)
-        .with_identity(pki.clone(), Role::Configd, "")
-        .with_role_uid(child_gid);
     tasks.push(tokio::spawn(supervise_one(
-        configd_spec,
+        configd_spec(&args, &pki),
         policy,
         shutdown_rx.clone(),
     )));
@@ -655,6 +648,20 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `nos-configd`'s spec. `MALLOC_ARENA_MAX=1` (#776): glibc per-thread arenas
+/// doubled its `VmHWM` under route-PUT churn (1232 -> 616 MB at 66k routes
+/// with one arena, #766; same net as nos-logd's #756).
+fn configd_spec(args: &Args, pki: &Arc<Pki>) -> ProcessSpec {
+    let configd_args = std::iter::once("--log-socket".to_string())
+        .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(args.configd_flags.iter().cloned())
+        .collect();
+    ProcessSpec::new("nos-configd", args.configd_bin.clone(), configd_args)
+        .with_identity(pki.clone(), Role::Configd, "")
+        .with_role_uid(args.child_gid)
+        .with_env("MALLOC_ARENA_MAX", "1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +722,26 @@ mod tests {
         );
         // A daemon without a socket gets none.
         assert_eq!(fixed_args(None, w, g, vec![]), base[2..]);
+    }
+
+    #[test]
+    fn configd_runs_with_one_malloc_arena() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            dir.path(),
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let args = Args::try_parse_from(["x", "--configd-arg", "--listen"]).unwrap();
+        let spec = configd_spec(&args, &pki);
+        assert_eq!(spec.name, "nos-configd");
+        assert_eq!(spec.args.last().map(String::as_str), Some("--listen"));
+        assert_eq!(
+            spec.env,
+            [("MALLOC_ARENA_MAX".to_string(), "1".to_string())]
+        );
     }
 
     #[test]

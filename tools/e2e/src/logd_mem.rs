@@ -1,5 +1,6 @@
 //! `nos-e2e logd-mem`: the `nos-logd` memory-profiling load (#757), and the
-//! `logd-memory` phase (#756) that asserts on the same load. `logd-mem` is not
+//! `logd-memory` phase (#756) that asserts on the same load; likewise
+//! `mem-wave` (#767) and its `config-mem` phase (#776). `logd-mem` is not
 //! a phase (it asserts nothing, not in `phases::ALL`): it drives sequential
 //! per-route `PUT`s into one uncommitted transaction on router-a, or on
 //! router-b with `LOGD_MEM_ROUTER=b` (every request is one `rest request` log
@@ -32,7 +33,7 @@ fn env(name: &str, default: u64) -> u64 {
 }
 
 /// Every `nos-*` process (`comm pid VmRSS VmHWM`) plus the container cgroup.
-const SAMPLE_SCRIPT: &str = "for p in /proc/[0-9]*; do c=$(cat $p/comm 2>/dev/null); case $c in nos-*) echo \"$c ${p#/proc/} $(grep -E '^(VmRSS|VmHWM)' $p/status | tr -s ' \\n' ' ')\";; esac; done; echo \"cgroup current=$(cat /sys/fs/cgroup/memory.current) max=$(cat /sys/fs/cgroup/memory.max)\"";
+const SAMPLE_SCRIPT: &str = "for p in /proc/[0-9]*; do c=$(cat $p/comm 2>/dev/null); case $c in nos-*) echo \"$c ${p#/proc/} $(grep -E '^(VmRSS|VmHWM)' $p/status | tr -s ' \\n' ' ')\";; esac; done; echo \"cgroup current=$(cat /sys/fs/cgroup/memory.current) max=$(cat /sys/fs/cgroup/memory.max) peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null)\"";
 
 /// Picks the pid by `comm` prefix.
 fn find_pid(comm: &str) -> String {
@@ -60,8 +61,17 @@ pub(crate) async fn sample_all(
     Ok(map)
 }
 
-/// `nos-x 123 VmHWM: 20 kB VmRSS: 10 kB` (either order) -> `("nos-x", (123, 10, 20))`.
+/// `nos-x 123 VmHWM: 20 kB VmRSS: 10 kB` (either order) -> `("nos-x", (123, 10, 20))`;
+/// `cgroup current=2048 max=max` -> `("cgroup", (0, 2, 0))` (bytes -> kB, `max` = 0).
 fn parse_sample_line(line: &str) -> Option<(String, (u64, u64, u64))> {
+    if let Some(rest) = line.strip_prefix("cgroup ") {
+        let kb = |key: &str| -> u64 {
+            rest.split_whitespace()
+                .find_map(|kv| kv.strip_prefix(key)?.parse::<u64>().ok())
+                .map_or(0, |b| b / 1024)
+        };
+        return Some(("cgroup".to_string(), (0, kb("current="), kb("max="))));
+    }
     let t: Vec<&str> = line.split_whitespace().collect();
     if !t.first()?.starts_with("nos-") {
         return None;
@@ -233,6 +243,8 @@ pub async fn phase(w: &World) -> anyhow::Result<()> {
 /// `PUT /v1/transactions/{tx}` docs).
 const MAX_ROUTES_PER_INSTANCE: u64 = 25_000;
 const WAVE_TX: &str = "wavemem";
+/// One `sample_all` result under its label.
+type Labelled = (String, HashMap<String, (u64, u64, u64)>);
 
 /// `nos-e2e mem-wave` (#767): `WAVE_COUNT` cumulative commits of `WAVE_ROUTES`
 /// static routes each (per-route `PUT`s, as REST clients do), sampling every
@@ -249,56 +261,7 @@ pub async fn wave(w: &World) -> anyhow::Result<()> {
         Ok("b") => w.b()?,
         _ => w.a()?,
     };
-    let (waves, per_wave, idle) = (
-        env("WAVE_COUNT", 12),
-        env("WAVE_ROUTES", 5500),
-        env("WAVE_IDLE", 0),
-    );
-    let instances = (waves * per_wave).div_ceil(MAX_ROUTES_PER_INSTANCE).max(1);
-    let mut pids: Option<(u64, u64)> = None;
-    check_pids(&sample_all(w, r, "baseline").await?, &mut pids)?;
-
-    let tx = format!("/v1/transactions/{WAVE_TX}");
-    let _ = r.rest(Method::DELETE, &tx, None).await?;
-    for wave in 0..waves {
-        r.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
-            .await?;
-        if wave == 0 {
-            for k in 0..instances {
-                let body = format!(r#"{{"name":"sw{k}","routes":[]}}"#);
-                put(r, &format!("{tx}/static-routing-instance/sw{k}"), &body).await?;
-            }
-        }
-        for i in 0..per_wave {
-            let n = wave * per_wave + i;
-            let a = 0x6440_0000_u64 + n; // 100.64.0.0 + n
-            let prefix = format!(
-                "{}.{}.{}.{}/32",
-                a >> 24,
-                (a >> 16) & 255,
-                (a >> 8) & 255,
-                a & 255
-            );
-            let body = format!(r#"{{"subnet":"{prefix}","gateway":"192.0.2.1"}}"#);
-            let path = format!(
-                "{tx}/static-routing-instance/sw{}/route/{}",
-                n % instances,
-                prefix.replace('/', "%2F")
-            );
-            put(r, &path, &body).await?;
-            if (i + 1) % 2000 == 0 {
-                let s = sample_all(w, r, &format!("wave{wave}-puts={}", i + 1)).await?;
-                check_pids(&s, &mut pids)?;
-            }
-        }
-        r.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
-            .await?;
-        let s = sample_all(w, r, &format!("wave{wave}-committed")).await?;
-        check_pids(&s, &mut pids)?;
-        tokio::time::sleep(Duration::from_secs(idle)).await;
-        let s = sample_all(w, r, &format!("wave{wave}-idle")).await?;
-        check_pids(&s, &mut pids)?;
-    }
+    wave_load(w, r).await?;
 
     let (st, cfg) = r.rest(Method::GET, "/v1/config", None).await?;
     log(format!(
@@ -331,6 +294,132 @@ pub async fn wave(w: &World) -> anyhow::Result<()> {
             log(format!("DHAT {daemon} {line}"));
         }
     }
+    Ok(())
+}
+
+/// The `config-mem` phase (#776): the `mem-wave` load on router-b, asserting
+/// nos-configd's `VmRSS` after each commit from wave 2 on stays within ±25% of
+/// the wave-2 value, the cgroup's sampled `memory.current` stays under 1.5 GiB,
+/// and the watchdog started nos-configd with `MALLOC_ARENA_MAX=1`. `VmHWM` and
+/// the idle samples are logged, not asserted (plan Q5).
+pub async fn config_phase(w: &World) -> anyhow::Result<()> {
+    let b = w.b()?;
+    b.wait("starting process=nos-configd program=.* env=MALLOC_ARENA_MAX=1")
+        .await?;
+    let samples = wave_load(w, b).await?;
+
+    let cgroup_peak = samples
+        .iter()
+        .filter_map(|(_, s)| s.get("cgroup"))
+        .map(|c| c.1)
+        .max()
+        .unwrap_or(0);
+    let committed: Vec<u64> = samples
+        .iter()
+        .filter(|(l, _)| l.ends_with("-committed"))
+        .map(|(_, s)| s.get("nos-configd").map_or(0, |v| v.1))
+        .collect();
+    let (base, verdict) = rss_flat(&committed)?;
+    log(format!(
+        "config-mem: configd VmRSS after commit (kB) {committed:?} wave2={base} cgroup peak={cgroup_peak} kB"
+    ));
+    verdict?;
+    ensure!(
+        cgroup_peak < 1536 * 1024,
+        "cgroup memory.current peaked at {cgroup_peak} kB (limit 1.5 GiB)"
+    );
+    Ok(())
+}
+
+/// Checks every after-commit `VmRSS` from wave 2 on is within ±25% of wave 2's;
+/// returns that baseline and the verdict.
+fn rss_flat(committed: &[u64]) -> anyhow::Result<(u64, anyhow::Result<()>)> {
+    let Some(&base) = committed.get(2) else {
+        bail!("config-mem needs at least 3 waves, got {committed:?}");
+    };
+    let (lo, hi) = (base - base / 4, base + base / 4);
+    let verdict = match committed[2..]
+        .iter()
+        .enumerate()
+        .find(|(_, r)| !(lo..=hi).contains(*r))
+    {
+        Some((i, r)) => Err(anyhow::anyhow!(
+            "nos-configd VmRSS {r} kB after wave {} is outside ±25% of wave 2's {base} kB",
+            i + 2
+        )),
+        None => Ok(()),
+    };
+    Ok((base, verdict))
+}
+
+/// The `mem-wave` load: `WAVE_COUNT` (12) cumulative commits of `WAVE_ROUTES`
+/// (5500) per-route `PUT`s on `r`, sampling every 2000 `PUT`s, after each
+/// commit (`wave<n>-committed`) and `WAVE_IDLE` (0) seconds later
+/// (`wave<n>-idle`). Fails if nos-configd or nos-restd changed pid.
+async fn wave_load(w: &World, r: &Router) -> anyhow::Result<Vec<Labelled>> {
+    let (waves, per_wave, idle) = (
+        env("WAVE_COUNT", 12),
+        env("WAVE_ROUTES", 5500),
+        env("WAVE_IDLE", 0),
+    );
+    let instances = (waves * per_wave).div_ceil(MAX_ROUTES_PER_INSTANCE).max(1);
+    let mut pids: Option<(u64, u64)> = None;
+    let mut out = Vec::new();
+    take(w, r, "baseline".into(), &mut pids, &mut out).await?;
+
+    let tx = format!("/v1/transactions/{WAVE_TX}");
+    let _ = r.rest(Method::DELETE, &tx, None).await?;
+    for wave in 0..waves {
+        r.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+            .await?;
+        if wave == 0 {
+            for k in 0..instances {
+                let body = format!(r#"{{"name":"sw{k}","routes":[]}}"#);
+                put(r, &format!("{tx}/static-routing-instance/sw{k}"), &body).await?;
+            }
+        }
+        for i in 0..per_wave {
+            let n = wave * per_wave + i;
+            let a = 0x6440_0000_u64 + n; // 100.64.0.0 + n
+            let prefix = format!(
+                "{}.{}.{}.{}/32",
+                a >> 24,
+                (a >> 16) & 255,
+                (a >> 8) & 255,
+                a & 255
+            );
+            let body = format!(r#"{{"subnet":"{prefix}","gateway":"192.0.2.1"}}"#);
+            let path = format!(
+                "{tx}/static-routing-instance/sw{}/route/{}",
+                n % instances,
+                prefix.replace('/', "%2F")
+            );
+            put(r, &path, &body).await?;
+            if (i + 1) % 2000 == 0 {
+                let label = format!("wave{wave}-puts={}", i + 1);
+                take(w, r, label, &mut pids, &mut out).await?;
+            }
+        }
+        r.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+            .await?;
+        take(w, r, format!("wave{wave}-committed"), &mut pids, &mut out).await?;
+        tokio::time::sleep(Duration::from_secs(idle)).await;
+        take(w, r, format!("wave{wave}-idle"), &mut pids, &mut out).await?;
+    }
+    Ok(out)
+}
+
+/// One `sample_all` under `label`, pid-checked, appended to `out`.
+async fn take(
+    w: &World,
+    r: &Router,
+    label: String,
+    pids: &mut Option<(u64, u64)>,
+    out: &mut Vec<Labelled>,
+) -> anyhow::Result<()> {
+    let s = sample_all(w, r, &label).await?;
+    check_pids(&s, pids)?;
+    out.push((label, s));
     Ok(())
 }
 
@@ -422,7 +511,21 @@ mod tests {
             parse_sample_line("nos-configd 42 VmHWM:\t 2000 kB VmRSS:\t 1000 kB "),
             Some(("nos-configd".to_string(), (42, 1000, 2000)))
         );
-        assert_eq!(parse_sample_line("cgroup current=1 max=2"), None);
+        assert_eq!(
+            parse_sample_line("cgroup current=4096 max=max peak=8192"),
+            Some(("cgroup".to_string(), (0, 4, 0)))
+        );
+        assert_eq!(parse_sample_line("other 1 2"), None);
+    }
+
+    #[test]
+    fn rss_flat_is_twenty_five_percent_of_wave_two() {
+        let ok = |c: &[u64]| rss_flat(c).map(|(_, v)| v.is_ok());
+        assert!(ok(&[1, 2]).is_err(), "fewer than 3 waves");
+        assert_eq!(rss_flat(&[9, 9, 400, 300, 500]).unwrap().0, 400);
+        assert!(ok(&[9, 9, 400, 300, 500]).unwrap());
+        assert!(!ok(&[9, 9, 400, 501]).unwrap());
+        assert!(!ok(&[9, 9, 400, 299]).unwrap());
     }
 
     #[test]
