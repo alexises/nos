@@ -10,6 +10,10 @@ use tokio::sync::watch;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[derive(Parser)]
 #[command(name = "nos-configd", about = "NOS configuration daemon")]
 struct Args {
@@ -28,11 +32,21 @@ struct Args {
     /// by nos-watchdog to every process it spawns (see `docs/architecture/supervision.md`).
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
+
+    /// Only present when built with `--features dhat-heap`. Path to write
+    /// the dhat heap-profile report to on exit (SIGINT).
+    #[cfg(feature = "dhat-heap")]
+    #[arg(long, default_value = "dhat-heap.json")]
+    profile_memory_out: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::builder()
+        .file_name(args.profile_memory_out.clone())
+        .build();
     // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
     let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
     // No graceful-shutdown signal of its own (see the bare `ctrl_c()` wait
@@ -95,5 +109,13 @@ mod tests {
             args.config_file,
             std::path::PathBuf::from("/var/lib/nos/configd/config.yaml")
         );
+    }
+
+    #[cfg(feature = "dhat-heap")]
+    #[test]
+    fn profile_memory_out_parses() {
+        let args =
+            Args::try_parse_from(["nos-configd", "--profile-memory-out", "/tmp/x.json"]).unwrap();
+        assert_eq!(args.profile_memory_out, PathBuf::from("/tmp/x.json"));
     }
 }

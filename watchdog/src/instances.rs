@@ -44,6 +44,8 @@ pub struct Managed {
     pub section: fn(&ConfigDiff) -> &[SectionDiff],
     pub bin: PathBuf,
     /// Opaque pass-through flags for this family (`--bgpd-arg` and friends).
+    /// A literal `{name}` in a flag is replaced by the instance name, so a
+    /// per-instance output path is expressible.
     pub flags: Vec<String>,
     /// How the binary names its own object: `--instance` or `--table`.
     pub name_flag: &'static str,
@@ -237,6 +239,11 @@ async fn apply_diff(
     }
 }
 
+/// `flags` with every literal `{name}` replaced by the instance name.
+fn pass_through(flags: &[String], name: &str) -> Vec<String> {
+    flags.iter().map(|f| f.replace("{name}", name)).collect()
+}
+
 async fn spawn_instance(instances: &mut HashMap<String, InstanceHandle>, name: &str, m: &Managed) {
     let mut args = vec![
         m.name_flag.to_string(),
@@ -254,7 +261,7 @@ async fn spawn_instance(instances: &mut HashMap<String, InstanceHandle>, name: &
         args.push(socket.display().to_string());
         m.registry.set(endpoint.kind, name, socket).await;
     }
-    args.extend(m.flags.iter().cloned());
+    args.extend(pass_through(&m.flags, name));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let spec = ProcessSpec::new(format!("{}[{name}]", m.daemon), m.bin.clone(), args)
@@ -365,6 +372,18 @@ mod tests {
         let mut n: Vec<&str> = instances.keys().map(String::as_str).collect();
         n.sort_unstable();
         n
+    }
+
+    #[test]
+    fn pass_through_flags_get_the_instance_name() {
+        let flags = vec![
+            "--profile-memory-out=/tmp/dhat-{name}.json".to_string(),
+            "--plain".to_string(),
+        ];
+        assert_eq!(
+            pass_through(&flags, "rt7"),
+            ["--profile-memory-out=/tmp/dhat-rt7.json", "--plain"]
+        );
     }
 
     #[tokio::test]

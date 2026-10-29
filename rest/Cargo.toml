@@ -32,6 +32,11 @@ hyper              = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util         = { version = "0.1", features = ["server-auto", "server-graceful", "tokio", "http1", "http2", "service"] }
 tower              = { version = "0.5", features = ["util"] }
 
+dhat = { version = "0.3", optional = true }
+
+[features]
+dhat-heap = ["dep:dhat"]
+
 [[bin]]
 name = "nos-restd"
 path = "src/main.rs"

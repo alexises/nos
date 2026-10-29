@@ -84,7 +84,8 @@ struct Args {
     #[arg(long, default_value = "/usr/local/bin/nos-restd")]
     restd_bin: PathBuf,
 
-    /// Extra arguments forwarded to every nos-restd instance.
+    /// Extra arguments forwarded to every nos-restd instance; a literal
+    /// `{name}` is replaced by the table name.
     #[arg(long = "restd-arg", allow_hyphen_values = true)]
     restd_flags: Vec<String>,
 

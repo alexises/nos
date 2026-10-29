@@ -18,7 +18,12 @@ use crate::world::World;
 pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
     log(format!("=== {name} ==="));
     match name {
-        "up" => w.up(&[]).await,
+        "up" => {
+            // NOS_E2E_WATCHDOG_ARGS: space-separated extra nos-watchdogd args
+            // (dhat output paths for `mem-wave`, #767).
+            let extra = std::env::var("NOS_E2E_WATCHDOG_ARGS").unwrap_or_default();
+            w.up(&extra.split_whitespace().collect::<Vec<_>>()).await
+        }
         "established" => bgp::established(w).await,
         "reconnect" => bgp::reconnect(w).await,
         "collision" => bgp::collision(w).await,
