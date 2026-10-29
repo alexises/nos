@@ -132,6 +132,68 @@ pub fn redact_value(v: &mut serde_json::Value, kind: &crate::cli::Kind) {
     }
 }
 
+/// Masks the secret fields of `v`, the subsection of a config at `path`
+/// (`config_path` grammar), exactly as [`Config::redacted`] masks them in
+/// the whole config — without serializing the rest of it (#774).
+pub fn redact_at(v: &mut serde_json::Value, path: &[String]) {
+    redact_path(
+        v,
+        &crate::cli::Kind::Struct(crate::cli::root()),
+        path,
+        false,
+    );
+}
+
+/// `keyed`: `kind` is a list element reached by a path whose next segment
+/// is still the element key.
+fn redact_path(v: &mut serde_json::Value, kind: &crate::cli::Kind, path: &[String], keyed: bool) {
+    use crate::cli::{Kind, Payload};
+    use crate::config_path::field_matches;
+    let Some((seg, rest)) = path.split_first() else {
+        return redact_value(v, kind);
+    };
+    match kind {
+        Kind::Option(inner) => redact_path(v, &inner(), path, keyed),
+        Kind::List(inner) if !keyed => redact_path(v, &inner(), rest, true),
+        Kind::Struct(node) => redact_field_path(v, node.fields, seg, rest),
+        Kind::Enum(variants) => {
+            let Some(var) = variants.iter().find(|var| field_matches(var.name, seg)) else {
+                return;
+            };
+            match &var.payload {
+                Payload::Unit => {}
+                Payload::Newtype(k) => redact_path(v, &k(), rest, false),
+                Payload::Struct(fields) => match rest.split_first() {
+                    None => redact_fields(v, fields),
+                    Some((seg, rest)) => redact_field_path(v, fields, seg, rest),
+                },
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_field_path(
+    v: &mut serde_json::Value,
+    fields: &[crate::cli::Field],
+    seg: &str,
+    rest: &[String],
+) {
+    let Some(f) = fields
+        .iter()
+        .find(|f| crate::config_path::field_matches(f.name, seg))
+    else {
+        return;
+    };
+    if f.secret {
+        if rest.is_empty() && !v.is_null() {
+            *v = HIDDEN.into();
+        }
+        return;
+    }
+    redact_path(v, &(f.kind)(), rest, false);
+}
+
 fn redact_fields(v: &mut serde_json::Value, fields: &[crate::cli::Field]) {
     for f in fields {
         let Some(child) = v.get_mut(f.name) else {
@@ -209,6 +271,91 @@ mod tests {
         v.as_object_mut().unwrap().remove("admin");
         let c: Config = serde_json::from_value(v).unwrap();
         assert_eq!(c.admin, Admin::default());
+    }
+
+    /// Every path into `v` (`config_path` segments), the whole one first.
+    fn paths(v: &serde_json::Value, at: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
+        use serde_json::Value;
+        out.push(at.clone());
+        match v {
+            Value::Object(o) => {
+                for (k, c) in o {
+                    at.push(k.clone());
+                    paths(c, at, out);
+                    at.pop();
+                }
+            }
+            Value::Array(items) => {
+                let Some(field) = at.pop() else { return };
+                for e in items {
+                    let key = match e {
+                        Value::Object(o) => {
+                            crate::config_path::key_field(o.keys().map(String::as_str))
+                                .map(|k| o[k].to_string().trim_matches('"').to_string())
+                        }
+                        Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    };
+                    if let Some(key) = key {
+                        at.extend([field.clone(), key]);
+                        paths(e, at, out);
+                        at.truncate(at.len() - 2);
+                    }
+                }
+                at.push(field);
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn redact_at_masks_what_redacted_masks_at_every_path() {
+        use serde_json::json;
+        let mut c = cfg(vec![key("k", "hunter2"), key("o", "ospfpw")]);
+        c.users.push(crate::schema::User {
+            name: "u".into(),
+            password: "$argon2id$x".into(),
+        });
+        let mut v = serde_json::to_value(&c).unwrap();
+        let mut pg = serde_json::to_value(crate::schema::BgpPeerGroup::default()).unwrap();
+        pg["name"] = json!("pg1");
+        pg["auth"] = json!({"Md5": {"key_ref": "k"}});
+        let mut bgp = serde_json::to_value(crate::schema::BgpInstance::default()).unwrap();
+        bgp["name"] = json!("r1");
+        bgp["peer_groups"] = json!([pg]);
+        let mut prof = serde_json::to_value(crate::schema::OspfProfile::default()).unwrap();
+        prof["name"] = json!("p1");
+        prof["auth"] = json!({"Simple": {"key": "o"}});
+        let mut area = serde_json::to_value(crate::schema::OspfArea::default()).unwrap();
+        area["profiles"] = json!([prof]);
+        let mut ospf = serde_json::to_value(crate::schema::OspfInstance::default()).unwrap();
+        ospf["name"] = json!("o1");
+        ospf["areas"] = json!([area]);
+        v["bgp_instances"] = json!([bgp]);
+        v["ospf_instances"] = json!([ospf]);
+        let c: Config = serde_json::from_value(v).unwrap();
+
+        let plain = serde_json::to_value(&c).unwrap();
+        let redacted = c.redacted();
+        let mut all = Vec::new();
+        paths(&plain, &mut Vec::new(), &mut all);
+        assert!(all.len() > 50, "{}", all.len());
+        for p in &all {
+            let mut got = crate::config_path::get(&plain, p).unwrap().clone();
+            redact_at(&mut got, p);
+            let want = crate::config_path::get(&redacted, p).unwrap();
+            assert_eq!(&got, want, "{p:?}");
+        }
+        for p in [
+            &["admin", "key", "k"][..],
+            &["user", "u", "password"],
+            &["users"],
+        ] {
+            let p: Vec<String> = p.iter().map(|s| (*s).to_string()).collect();
+            let mut got = crate::config_path::get(&plain, &p).unwrap().clone();
+            redact_at(&mut got, &p);
+            assert!(!got.to_string().contains("hunter2") && !got.to_string().contains("argon2"));
+        }
     }
 
     #[test]

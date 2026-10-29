@@ -16,6 +16,7 @@ Client → Server:
   Request::DiscardTransaction  delete a named transaction without touching running config (if_match as above)
   Request::Describe            one-shot fetch of one operation's documentation, by Topic
   Request::SetTransactionPath  set/remove one subsection of a named transaction by URL-style path (whole config for an empty path) — see nos_proto::config_path (if_match as above); an optional `position` (`ListPosition`: First/Last/Before(k)/After(k)) inserts or moves the list element the path names (#539)
+  Request::EditTransactionPath the same edit, replying Event::TransactionEdit (#774); what nos-restd, nos and nos-provision send. SetTransactionPath is unused in tree, kept for wire compatibility
   Request::UserExists          cheap auth probe (#755): is this name in `Config.users`? `Restd` only; replies with no config data
   Request::ListBgpInstances / ListOspfInstances / ListOspfv3Instances   instance names only (#759): what `nos-restd`'s show routes iterate, without shipping the config. `Restd` only
   Request::GetRestApi { table }  that routing table's pinned `rest_api` (#759, #758): the listener's per-tick "what is wanted" probe. `Restd` only
@@ -31,6 +32,7 @@ Server → Client:
   Event::UserExists(bool)           reply to UserExists
   Event::InstanceNames(Vec<String>) reply to the three List*Instances requests
   Event::RestApi(Option<RestApi>)   reply to GetRestApi (`None` = table absent or not pinned)
+  Event::TransactionEdit { generation, dirty, value }  reply to EditTransactionPath: `value` is the JSON text of the edited subsection, unredacted (`None` after a remove)
 ```
 
 `Describe`/`Description` exist so that the shell's help text (what a command does, in human terms, for the CLI's user) is authored once in `nos-config` and shared by every client, rather than duplicated per-client. A `Topic` is one config-tree node or field — named by the mandatory `#[cli(topic = …)]` on every schema field (`nos-proto-derive`, see [Schema reference](../schema-reference.md)), so a field can't exist without its CLI help — or one show/shell command (`nos-cli`'s `spec.rs` rows). `nos-cli`'s config commands (`edit`/`set`/`delete`), their help, `?`, Tab and usage are all generated from that schema tree (`cli/src/config_grammar.rs`, #109) and sent as `SetTransactionPath`, the same generic write REST uses. The schema's `///` comments are the REST API's (Swagger) text, deliberately separate. It's scoped to a single `Topic` per request (not a bulk catalog fetch) so a client only ever fetches the docs it actually displays.
@@ -77,7 +79,7 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - Watchdog args: `--configd-arg=--profile-memory-out=/tmp/dhat-configd.json --restd-arg=--profile-memory-out=/tmp/dhat-restd-{name}.json`. The watchdog replaces a literal `{name}` in pass-through flags with the instance name, so each `nos-restd` (one per table) gets its own file. The lab takes extra watchdog args from `NOS_E2E_WATCHDOG_ARGS` (space-separated) on `nos-e2e up`.
 - Wave load: `LOGD_MEM_ROUTER=b [WAVE_COUNT=12] [WAVE_ROUTES=5500] [WAVE_IDLE=0] cargo run -p nos-e2e -- mem-wave`. Each wave opens a transaction on running, `PUT`s `WAVE_ROUTES` static routes one per request (spread over `ceil(total/25000)` instances), commits, and logs every `nos-*` daemon's `VmRSS`/`VmHWM` plus the cgroup after the commit and after `WAVE_IDLE` seconds. It fails if `nos-configd` or `nos-restd` changes pid.
 - At the end it prints the running config's JSON size, SIGINTs `nos-configd` and `nos-restd`, and prints their dhat `t-gmax`/`t-end` and the top 8 program points by max bytes, total bytes and bytes live at exit (2 frames below the allocator plus the first 3 `nos_*` frames). A non-dhat image just logs that there is no report. Not a phase (asserts nothing, not in `phases::ALL`).
-- On the dhat image use a smaller load, e.g. `WAVE_COUNT=4 WAVE_ROUTES=2500`: dhat slows each allocation, and until #774 every `PUT` still replies with the whole transaction (O(config)), so the default 12 x 5500 takes hours. Read RSS from the default image, attribution from dhat.
+- On the dhat image use a smaller load, e.g. `WAVE_COUNT=4 WAVE_ROUTES=2500`: dhat slows each allocation, so the default 12 x 5500 takes long. Read RSS from the default image, attribution from dhat.
 - For a deeper split than the log lines, copy the report out before `down` (`docker exec router-b cat /tmp/dhat-configd.json > configd.json`) and load it in https://nnethercote.github.io/dh_view/dh_view.html.
 - `cargo test -p nos-config --test resident -- --nocapture`: counting allocator over ~66k static routes with three `SubscribeDiff` subscribers (`User`, `Watchdog`, `Bgpd`, one per kind of visibility class) through `ConfigStore::subscribe_diff`. It runs 4 commits sharing 2000 single-route edits (`NOS_RESIDENT_PUTS` overrides) and prints one `Config`'s live size and these peaks:
   - per-`PUT` transient of `edit_transaction_path` (the edit without the snapshot reply), asserted at most 16 KiB;
@@ -97,7 +99,15 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - The edit is planned on the transaction's config under the lock; every check (path, key, anchor, JSON body, `<hidden>` masks) runs first, then the change applies in place with `Arc::make_mut`. A failed edit changes nothing. The first edit after `open(Current)` copies running once.
 - A `users` edit goes through the off-lock argon2 hashing, then stores only the user list if the generation did not move.
 - A differential unit test replays random edit sequences through both routes and requires the same configs and the same errors.
-- `edit_transaction_path` is the same edit returning only the new generation (the subsection reply of #774 builds on it).
+- `edit_transaction_path` is the same edit returning only the new generation, `dirty` and the edited subsection.
+
+### Edit replies (#774)
+
+- `EditTransactionPath` replies `Event::TransactionEdit { generation, dirty, value }`, not a full `TransactionSnapshot`: no copy or postcard of the config per `PUT`.
+- `value` is read back from the edited section only (`path_edit::get`: one list element, one static route, or one top-level section); an empty path is the whole config.
+- `nos-restd` masks secrets on that subsection with `nos_proto::redact_at(value, path)`, which walks `cli::root()` along the path; a unit test holds it to `Config::redacted()` at every path of a config with keys, users and BGP/OSPF auth. The REST contract is unchanged (`PUT` still replies with the stored, redacted subsection and the `ETag`).
+- `nos` sends its writes, then reads the transaction once to check that its position still exists.
+- `SetTransactionPath` (full-snapshot reply) stays in the enum for wire compatibility; no in-tree client sends it.
 
 ### Config plane vs data plane
 

@@ -12,7 +12,7 @@ use super::OpError;
 /// `OspfInstance`, within a transaction's in-progress config. Applied
 /// without validation, matching every other `Op`. Its `profiles` list is
 /// `OspfProfileOp`'s. The CLI/REST reach the stub/range fields through
-/// `SetTransactionPath`; these ops exist for `nos-provision`.
+/// `EditTransactionPath`; these ops exist for `nos-provision`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfAreaOp {
     /// Creates the area if it doesn't already exist (creating its parent

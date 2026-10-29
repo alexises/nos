@@ -1,6 +1,6 @@
 //! The config grammar's regression suite (#109): every `edit`/`set`/`delete`
 //! line the legacy hand-written parser was tested with, and a filled-in line
-//! for every one of its help rows, with the `SetTransactionPath` writes (and
+//! for every one of its help rows, with the `EditTransactionPath` writes (and
 //! navigation) the tree grammar must produce for it — recorded, in
 //! `config_corpus.jsonl`, while the legacy parser still existed and agreed
 //! on the resulting `Config`. Lines the legacy parser couldn't parse must

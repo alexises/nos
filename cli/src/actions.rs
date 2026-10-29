@@ -1439,7 +1439,7 @@ async fn apply_op(mode: Mode, socket: &Path, op: ConfigOp) -> Mode {
 
 /// An `edit`/`set`/`delete` line: resolved by `config_grammar` against the
 /// transaction's config at the current position, then sent as
-/// `SetTransactionPath` writes. Lands where the grammar navigates (`edit`,
+/// `EditTransactionPath` writes. Lands where the grammar navigates (`edit`,
 /// bare `delete`), else stays — moving up if the position was just deleted.
 async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
     let transaction = current_transaction(&mode);
@@ -1456,9 +1456,9 @@ async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
         eprintln!("error: '{line}' is not a valid edit here (press ? to see what fits)");
         return mode;
     };
-    let mut snap = snap;
+    let mut dirty = snap.dirty;
     for (write_path, value) in edit.writes {
-        match client::set_transaction_path(
+        match client::edit_transaction_path(
             socket,
             &transaction,
             write_path,
@@ -1467,7 +1467,7 @@ async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
         )
         .await
         {
-            Ok(s) => snap = s,
+            Ok(d) => dirty = d,
             Err(e) => {
                 eprintln!("error: {e}");
                 return mode;
@@ -1475,6 +1475,18 @@ async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
         }
     }
     let mut path = edit.navigate.map_or(path, session::Path::from);
+    // One read after the writes (#774): does the position still exist?
+    let snap = match client::get_transaction(socket, &transaction).await {
+        Ok(snap) => snap,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Mode::Configuration {
+                transaction,
+                path,
+                dirty,
+            };
+        }
+    };
     let doc = serde_json::to_value(&snap.config).expect("a config serializes");
     while nos_proto::config_path::get(&doc, path.segments()).is_err() {
         path = path.up();

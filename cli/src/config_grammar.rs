@@ -3,7 +3,7 @@
 //! Nothing here names a config object or field — the verbs are the only
 //! words this file knows. A line is resolved against the current `edit`
 //! position first, then against the root, and becomes the
-//! `Request::SetTransactionPath` writes that make the edit.
+//! `Request::EditTransactionPath` writes that make the edit.
 //!
 //! Generic rules, by field kind:
 //! - a keyed list (`peer-group <name>`) is walked into, creating a missing
@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 /// What one config line does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigEdit {
-    /// `SetTransactionPath` writes (path, JSON value), applied in order.
+    /// `EditTransactionPath` writes (path, JSON value), applied in order.
     pub writes: Vec<(Vec<String>, Value)>,
     /// `edit`: the position to navigate to, as REST segments.
     pub navigate: Option<Vec<String>>,

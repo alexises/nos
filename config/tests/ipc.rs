@@ -829,6 +829,67 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
 }
 
 #[tokio::test]
+async fn edit_transaction_path_over_ipc_replies_with_the_subsection_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(sock_path.clone()), &server_identity())
+        .unwrap();
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    writer
+        .send(Request::OpenTransaction {
+            actor: None,
+            name: "t1".to_string(),
+            base: TransactionBase::Blank,
+        })
+        .await
+        .unwrap();
+    next_event(&mut reader).await;
+    let path = vec!["bgp-instance".to_string(), "r1".to_string()];
+    let edit = |value: Option<String>, if_match| Request::EditTransactionPath {
+        name: "t1".to_string(),
+        path: path.clone(),
+        value,
+        if_match,
+        position: None,
+    };
+    let body = serde_json::to_value(instance("r1", 65000)).unwrap();
+
+    writer
+        .send(edit(Some(body.to_string()), Some(0)))
+        .await
+        .unwrap();
+    match next_event(&mut reader).await {
+        Event::TransactionEdit {
+            generation: 1,
+            dirty: true,
+            value: Some(v),
+        } => assert_eq!(serde_json::from_str::<serde_json::Value>(&v).unwrap(), body),
+        other => panic!("expected TransactionEdit, got {other:?}"),
+    }
+    // A stale generation: 412-style error, nothing changed.
+    writer.send(edit(None, Some(0))).await.unwrap();
+    match next_event(&mut reader).await {
+        Event::Error(msg) => assert!(msg.starts_with("precondition failed"), "{msg}"),
+        other => panic!("expected Error event, got {other:?}"),
+    }
+    // A remove carries no subsection.
+    writer.send(edit(None, Some(1))).await.unwrap();
+    match next_event(&mut reader).await {
+        Event::TransactionEdit {
+            generation: 2,
+            dirty: true,
+            value: None,
+        } => {}
+        other => panic!("expected TransactionEdit, got {other:?}"),
+    }
+    // Removing it again: not found.
+    writer.send(edit(None, None)).await.unwrap();
+    assert!(matches!(next_event(&mut reader).await, Event::Error(_)));
+}
+
+#[tokio::test]
 async fn positioned_set_over_ipc_reorders_and_shows_in_the_diff() {
     let tmp = tempfile::tempdir().unwrap();
     let sock_path = tmp.path().join("config.sock");

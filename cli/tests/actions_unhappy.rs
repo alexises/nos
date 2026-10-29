@@ -179,12 +179,10 @@ fn fake_configd(path: &Path, kind: Configd) {
                 Ok(()) => Event::Transaction(snapshot(&name, &cfg)),
                 Err(e) => Event::Error(e.to_string()),
             },
-            Request::SetTransactionPath { name, .. } if named(&name) => {
+            Request::EditTransactionPath { name, .. } if named(&name) => {
                 Event::Error("no".to_string())
             }
-            Request::SetTransactionPath {
-                name, path, value, ..
-            } => {
+            Request::EditTransactionPath { path, value, .. } => {
                 if value.as_deref().is_some_and(|v| v.contains("FAIL")) {
                     Event::Error("refused by the fake".to_string())
                 } else {
@@ -203,7 +201,11 @@ fn fake_configd(path: &Path, kind: Configd) {
                     {
                         Ok(new) => {
                             *cfg = new;
-                            Event::Transaction(snapshot(&name, &cfg))
+                            Event::TransactionEdit {
+                                generation: 1,
+                                dirty: true,
+                                value: None,
+                            }
                         }
                         Err(e) => Event::Error(e),
                     }
@@ -699,6 +701,13 @@ async fn config_edit_lands_where_the_grammar_says() {
     // A write the daemon refuses part-way leaves the position.
     let (mode, _) = run(&lab, inside.clone(), &["set hostname FAIL"], leave_open).await;
     assert_eq!(mode, inside);
+
+    // The re-read after the writes fails (every 2nd `flaky` read): the
+    // write landed, so the shell stays put and is dirty.
+    let flaky = world(Wd::Resolves, Daemons::Populated, Configd::Healthy);
+    let at = configuration("flaky", &["bgp-instance", "b1"], false);
+    let (mode, _) = run(&flaky, at, &["set hostname h2"], leave_open).await;
+    assert_eq!(mode, configuration("flaky", &["bgp-instance", "b1"], true));
 
     // Deleting the object we stand in moves us up out of it.
     let (mode, _) = run(&lab, inside, &["delete"], leave_open).await;

@@ -15,7 +15,7 @@ store.save_to_disk().await                      // persist running config to con
 store.open_transaction(name, base).await        // Result<TransactionSnapshot, ConfigError> — create from Blank/Current, or resume if `name` exists
 store.apply_op(name, op).await                  // Result<TransactionSnapshot, ConfigError> — mutate a transaction, no validation
 store.set_transaction_path(name, path, value, if_match, position).await  // set/remove one JSON subsection, optionally at a list `position` (needs a value), no validation; O(edit) (#775)
-store.edit_transaction_path(name, path, value, if_match, position).await // the same edit, returns the new generation instead of a snapshot
+store.edit_transaction_path(name, path, value, if_match, position).await // PathEdit { generation, dirty, value }: the same edit, replying the edited subsection instead of a snapshot (#774)
 store.get_transaction(name).await               // Result<TransactionSnapshot, ConfigError>
 store.commit_transaction(name, if_match).await  // validate → promote to running → broadcast → remove transaction
 store.discard_transaction(name, if_match).await // remove transaction without touching running

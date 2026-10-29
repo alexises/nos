@@ -1949,7 +1949,7 @@ fn sbfd_static_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     v
 }
 
-/// `SetTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
+/// `EditTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
 /// for a profile's intervals or a route's `bfd` reference, so these go in
 /// through the generic path edit after the ops.
 pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
