@@ -1,6 +1,7 @@
 pub mod authz;
 pub mod docs;
 pub mod error;
+mod path_edit;
 pub mod persistence;
 mod secrets;
 pub mod server;

@@ -3,7 +3,7 @@
 //! was. The mask must keep the stored value, never become the value.
 
 use nos_proto::cli::render::HIDDEN;
-use nos_proto::{AdminOp, Config, ConfigOp, UserOp};
+use nos_proto::{Admin, AdminOp, Config, ConfigOp, User, UserOp};
 
 use crate::error::ConfigError;
 
@@ -15,13 +15,24 @@ fn refused(what: String) -> ConfigError {
 /// hashes) with the value the same label/name has in the first of `earlier`
 /// that holds one. A mask with nothing earlier to keep is refused.
 pub(crate) fn restore_masked(config: &mut Config, earlier: &[&Config]) -> Result<(), ConfigError> {
-    for k in config.admin.keys.iter_mut().filter(|k| k.secret == HIDDEN) {
+    restore_admin(&mut config.admin, earlier)?;
+    restore_users(&mut config.users, earlier)
+}
+
+/// [`restore_masked`] for the admin keystore alone.
+pub(crate) fn restore_admin(admin: &mut Admin, earlier: &[&Config]) -> Result<(), ConfigError> {
+    for k in admin.keys.iter_mut().filter(|k| k.secret == HIDDEN) {
         let old = earlier.iter().find_map(|c| c.key(&k.label));
         k.secret = old
             .ok_or_else(|| refused(format!("admin key '{}'", k.label)))?
             .to_string();
     }
-    for u in config.users.iter_mut().filter(|u| u.password == HIDDEN) {
+    Ok(())
+}
+
+/// [`restore_masked`] for the user list alone.
+pub(crate) fn restore_users(users: &mut [User], earlier: &[&Config]) -> Result<(), ConfigError> {
+    for u in users.iter_mut().filter(|u| u.password == HIDDEN) {
         let old = earlier
             .iter()
             .find_map(|c| c.users.iter().find(|o| o.name == u.name));
