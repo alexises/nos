@@ -56,6 +56,10 @@ async fn revision(r: &Router) -> anyhow::Result<String> {
     Ok(v["revision"].as_str().unwrap_or_default().to_string())
 }
 
+/// State-based for the session (`Router::established`), log-based for the
+/// capabilities below (only visible in logs): re-runnable after a
+/// log-flooding phase for the session part only. Callers following such a
+/// phase use `Router::established()`, not this phase.
 pub async fn established(w: &mut World) -> anyhow::Result<()> {
     let waited = async {
         w.a()?.established().await?;
