@@ -660,6 +660,11 @@ fn configd_spec(args: &Args, pki: &Arc<Pki>) -> ProcessSpec {
         .with_identity(pki.clone(), Role::Configd, "")
         .with_role_uid(args.child_gid)
         .with_env("MALLOC_ARENA_MAX", "1")
+        // #796: a fixed trim threshold also pins the mmap threshold at 128 KiB
+        // (glibc turns off its dynamic raise), so big freed buffers go back to
+        // the kernel: 66k-route RSS 57.0 -> 42.4 MB in config-mem.
+        .with_env("MALLOC_TRIM_THRESHOLD_", "131072")
+        .with_env("MALLOC_TOP_PAD_", "0")
 }
 
 #[cfg(test)]
@@ -725,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn configd_runs_with_one_malloc_arena() {
+    fn configd_runs_with_one_trimmed_malloc_arena() {
         let dir = tempfile::tempdir().unwrap();
         let pki = Pki::start(
             dir.path(),
@@ -738,9 +743,18 @@ mod tests {
         let spec = configd_spec(&args, &pki);
         assert_eq!(spec.name, "nos-configd");
         assert_eq!(spec.args.last().map(String::as_str), Some("--listen"));
+        let env: Vec<(&str, &str)> = spec
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         assert_eq!(
-            spec.env,
-            [("MALLOC_ARENA_MAX".to_string(), "1".to_string())]
+            env,
+            [
+                ("MALLOC_ARENA_MAX", "1"),
+                ("MALLOC_TRIM_THRESHOLD_", "131072"),
+                ("MALLOC_TOP_PAD_", "0"),
+            ]
         );
     }
 

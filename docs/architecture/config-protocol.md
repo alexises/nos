@@ -101,6 +101,19 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - Measured at 66k in a debug build (#773): commit transient 0.14 `Config`, live after 4 commits ~0, per-`PUT` transient 11.6 `Config`s.
 - After #775: per-`PUT` transient 1.7 KB (was 11.6 `Config`s, ~49 MB), first `PUT` 1.38 `Config`s, live after 4 commits below the seed (running re-cloned with exact capacities).
 - After #778: diff transient 1.3 `Config`s for the three classes (was ~75, ~317 MB), asserted at most 2.6.
+- Per-commit live heap (#796, dhat image only): `nos-configd` logs `heap after commit curr_bytes=… max_bytes=…` (`dhat::HeapStats`) after each commit, and `mem-wave` prints it per wave as `HEAP wave<n> configd VmRSS=… kB …`, next to that wave's RSS.
+- #796 measurements, router-b, `nos-configd` after each commit:
+
+  | Wave | dhat `curr_bytes`, 2500 routes/wave | `VmRSS` kB, default image, 5500/wave, before | `VmRSS` kB, after `MALLOC_TRIM_THRESHOLD_` |
+  |---|---|---|---|
+  | 2 | 2 578 365 | 33 716 | 29 240 |
+  | 5 | 4 693 192 | 37 280 | 34 316 |
+  | 8 | 6 863 090 | 44 432 | 39 280 |
+  | 11 | 9 651 014 | 57 024 | 42 424 |
+
+- Reading: live heap grows ~0.31 MB per 1000 routes (running config, the previous config still held for the subscribers' diffs, and per-connection write buffers sized to the largest frame), so ~15 MB from wave 2 (16.5k routes) to wave 11 (66k) at the default load. With the trim env, RSS grows by less than that (+13 MB): the remaining creep is live heap, not fragmentation.
+- The watchdog starts `nos-configd` with `MALLOC_TRIM_THRESHOLD_=131072` and `MALLOC_TOP_PAD_=0` next to `MALLOC_ARENA_MAX=1` (#796). Setting the trim threshold also turns off glibc's dynamic mmap threshold, so large freed buffers go back to the kernel; wave 11 RSS went from 57.0 to 42.4 MB.
+- The broadcast ring retains nothing (no `CommitUpdate` in dhat's live-at-exit points), so `BROADCAST_CAPACITY` stays 16.
 
 ### Path edits (#775)
 
