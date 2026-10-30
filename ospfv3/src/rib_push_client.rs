@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use ipnet::IpNet;
 use nos_proto::{IpcCodec, OspfRoute, OspfRouteUpdate, RibRequest, Role, ServiceRef};
+use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
@@ -92,10 +93,12 @@ async fn run(
             }
         };
 
-        // ponytail: write-only, so a restarted nos-ribd only gets its routes
-        // back at the next route change (the write fails, then a fresh `Full`);
-        // read for EOF like `bgp::rib_push_client` if that gap matters.
-        let mut writer = FramedWrite::new(stream, IpcCodec::<RibRequest>::default());
+        // nos-ribd never replies on this connection, so a read returning means
+        // it went away (a restart): reconnect and send a fresh `Full` at once,
+        // like `bgp::rib_push_client`, not at the next route change (#729).
+        let (mut reader, write_half) = tokio::io::split(stream);
+        let mut writer = FramedWrite::new(write_half, IpcCodec::<RibRequest>::default());
+        let mut eof_buf = [0u8; 1];
         let routes = compute_routes(&links).await;
         if !push(
             &mut writer,
@@ -115,8 +118,12 @@ async fn run(
 
         let changed = links.route_changed();
         loop {
-            if wait_for_change(&changed, &mut shutdown).await {
-                return;
+            tokio::select! {
+                stop = wait_for_change(&changed, &mut shutdown) => if stop { return },
+                _ = reader.read(&mut eof_buf) => {
+                    warn!(table = %table, "nos-ribd closed the ospfv3 push connection, reconnecting");
+                    break;
+                }
             }
             let new_table = routing_table_rx.borrow().clone();
             if new_table.as_deref() != Some(table.as_str()) {
@@ -410,5 +417,47 @@ mod tests {
                 vec![OspfRouteUpdate::Full(expect(4))],
             ]
         );
+    }
+
+    fn frames_of(r: RibRequest) -> Vec<OspfRouteUpdate> {
+        match r {
+            RibRequest::PushOspfRoutes(f) => f,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// A restarted `nos-ribd` (its connection closed) gets a fresh `Full` at
+    /// once, with no route change to make the next write fail (#729).
+    #[tokio::test]
+    async fn closed_connection_resends_a_full_at_once() {
+        use nos_test_support::{Fake, Fakes};
+
+        let f = Fakes::start(&[Fake::Watchdog, Fake::Ribd("rt1".into())]);
+        let wire = Arc::new(crate::link::tests::wire::Wire::default());
+        let links = LinkManager::with_opener(1, None, wire.opener());
+        let (_rt_tx, rt) = watch::channel(Some("rt1".to_string()));
+        let (_stop, shutdown) = watch::channel(false);
+        let task = spawn(f.watchdog_socket(), links, rt, shutdown, 4);
+        let ribd = &f.ribd["rt1"];
+        let full = vec![vec![OspfRouteUpdate::Full(Vec::new())]];
+        let pushed_on = |conns: usize| async move {
+            for _ in 0..500 {
+                let p = if ribd.connections() >= conns {
+                    ribd.take_pushed()
+                } else {
+                    Vec::new()
+                };
+                if !p.is_empty() {
+                    return p.into_iter().map(frames_of).collect::<Vec<_>>();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("no push on connection {conns}");
+        };
+
+        assert_eq!(pushed_on(1).await, full);
+        ribd.close_connections();
+        assert_eq!(pushed_on(2).await, full);
+        task.abort();
     }
 }

@@ -78,6 +78,15 @@ struct Args {
     /// by nos-watchdog to every process it spawns (see `docs/architecture/supervision.md`), the same way `--config-socket` is.
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
+
+    /// Routes per `RedistributeRoutes` frame of the `Full` sent to
+    /// `nos-bgpd`/`nos-ospfd`/`nos-ospfv3d` (`RedistributeUpdate::split_with`).
+    /// Unset: `nos_proto::bgp::redistribute_chunk()`. Test-only, via
+    /// `--ribd-arg` (the watchdog clears its children's environment, so
+    /// `NOS_REDISTRIBUTE_CHUNK` cannot reach a supervised daemon); never a
+    /// config field.
+    #[arg(long, hide = true)]
+    redistribute_chunk: Option<usize>,
 }
 
 #[tokio::main]
@@ -120,7 +129,12 @@ async fn main() -> anyhow::Result<()> {
         ),
     };
 
-    let redistribute_tx = bgp_client::spawn(args.watchdog_socket.clone(), shutdown_rx.clone());
+    let chunk = args
+        .redistribute_chunk
+        .filter(|&n| n > 0)
+        .unwrap_or_else(nos_proto::bgp::redistribute_chunk);
+    let redistribute_tx =
+        bgp_client::spawn(args.watchdog_socket.clone(), shutdown_rx.clone(), chunk);
     let ospf_redistribute_tx = vec![
         (
             nos_proto::RedistributeTarget::Ospf,
@@ -128,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
                 args.watchdog_socket.clone(),
                 shutdown_rx.clone(),
                 ospf_client::OSPFV2,
+                chunk,
             ),
         ),
         (
@@ -136,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 args.watchdog_socket.clone(),
                 shutdown_rx.clone(),
                 ospf_client::OSPFV3,
+                chunk,
             ),
         ),
     ];

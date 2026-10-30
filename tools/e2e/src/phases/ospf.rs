@@ -1299,47 +1299,51 @@ async fn wait_ospf_count(r: &Router, secs: u64, ok: impl Fn(usize) -> bool) -> a
     bail!("{}: rt1 stuck at {n:?} ospf routes", r.name())
 }
 
-/// #727: a `PushOspfRoutes` `Full` heavier than one frame crosses as
-/// `FullPart`s closed by a `Full`, which `nos-ribd` assembles before applying
-/// anything. Self-contained: `nos-ospfd --push-chunk` (test-only) makes ~83
-/// routes 3 frames. router-a redistributes `OSPF_CHUNKED_ROUTES` statics,
-/// router-b learns them. Killing router-b's `nos-ribd` empties its RIB (the
-/// respawned one removes the stale kernel routes); router-b's `nos-ospfd`
-/// only notices on its next write, so one more static on router-a is the
-/// trigger: the write fails, it reconnects and pushes one chunked `Full`, and
-/// no route is removed meanwhile.
+/// #727/#729: a `Full` heavier than one frame crosses as `FullPart`s closed
+/// by a `Full`, assembled by the receiver before anything is applied, in both
+/// directions between `nos-ospfd` and `nos-ribd`. Self-contained:
+/// `nos-ospfd --push-chunk` and `nos-ribd --redistribute-chunk` (test-only)
+/// make ~80 routes 3 frames. router-a redistributes `OSPF_CHUNKED_ROUTES`
+/// statics, router-b learns them.
+/// - `PushOspfRoutes`: killing router-b's `nos-ribd` closes router-b's
+///   `nos-ospfd` push connection, which reconnects at once (it reads for EOF)
+///   with one chunked `Full`.
+/// - `RedistributeRoutes`: killing router-a's `nos-ospfd` closes router-a's
+///   `nos-ribd` redistribution connection, which reconnects to the successor
+///   with one chunked `Full`; the externals still reach router-b.
 pub async fn ospf_push_chunked(w: &mut World) -> anyhow::Result<()> {
-    w.up(&[&format!("--ospfd-arg=--push-chunk={OSPF_PUSH_CHUNK_TEST}")])
-        .await?;
+    w.up(&[
+        &format!("--ospfd-arg=--push-chunk={OSPF_PUSH_CHUNK_TEST}"),
+        &format!("--ribd-arg=--redistribute-chunk={REDISTRIBUTE_CHUNK_TEST}"),
+    ])
+    .await?;
     let (a, b) = (w.a()?, w.b()?);
-    let a_flags = |n| {
-        with_base(
-            A,
-            [asbr(ospf(OSPF_ROUTER_ID)), ospf_chunked_routes(n)].concat(),
-        )
-    };
-    a.provision_flags(&a_flags(OSPF_CHUNKED_ROUTES)).await?;
+    let mut a_flags = asbr(ospf(OSPF_ROUTER_ID));
+    a_flags.extend(ospf_chunked_routes(OSPF_CHUNKED_ROUTES));
+    a.provision_flags(&with_base(A, a_flags)).await?;
     b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
         .await?;
     both_full_p2p(a, b).await?;
     wait_ospf_count(b, 120, |n| n > OSPF_CHUNKED_ROUTES).await?;
 
-    let removed = b.count("removed route");
-    log("killing router-b's nos-ribd; its successor starts with no ospf route");
-    w.dock.kill_process("router-b", "nos-ribd").await?;
-    wait_ospf_count(b, 60, |n| n == 0).await?;
-    // The successor's first apply deletes the stale kernel routes: let it
-    // finish before the quiet window below.
-    b.wait_new("removed route", removed, 60).await?;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     let assembled = "assembled chunked ospf route snapshot table=rt1 routes=8[0-9] parts=3";
-    let (asm_b, removed_b) = (b.count(assembled), b.count("removed route"));
-    log("router-a redistributes one more static: router-b's next push reconnects");
-    a.provision_flags(&a_flags(OSPF_CHUNKED_ROUTES + 1)).await?;
+    let asm_b = b.count(assembled);
+    log("killing router-b's nos-ribd: router-b's nos-ospfd reconnects with a chunked Full");
+    w.dock.kill_process("router-b", "nos-ribd").await?;
     b.wait_new(assembled, asm_b, 60).await?;
-    b.assert_quiet("removed route", removed_b, 3).await?;
-    wait_ospf_count(b, 30, |n| n > OSPF_CHUNKED_ROUTES).await
+    // Only the assembled Full is applied: no half table, so no route removed.
+    b.assert_quiet("removed route", b.count("removed route"), 3)
+        .await?;
+    wait_ospf_count(b, 30, |n| n > OSPF_CHUNKED_ROUTES).await?;
+
+    let redistributed = "assembled chunked redistribute snapshot instance=.* routes=8[0-9] parts=3";
+    let full_a = full_p2p(OSPF_ROUTER_ID_B);
+    let (asm_a, full_before) = (a.count(redistributed), a.count(&full_a));
+    log("killing router-a's nos-ospfd: router-a's nos-ribd reconnects with a chunked Full");
+    w.dock.kill_process("router-a", "nos-ospfd").await?;
+    a.wait_new(redistributed, asm_a, 60).await?;
+    a.wait_new(&full_a, full_before, 120).await?;
+    wait_ospf_count(b, 120, |n| n > OSPF_CHUNKED_ROUTES).await
 }
 
 /// RFC 2328 §3.5/§3.6 stub areas and area ranges, self-contained. eth0.0 is
