@@ -114,6 +114,21 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - Reading: live heap grows ~0.31 MB per 1000 routes (running config, the previous config still held for the subscribers' diffs, and per-connection write buffers sized to the largest frame), so ~15 MB from wave 2 (16.5k routes) to wave 11 (66k) at the default load. With the trim env, RSS grows by less than that (+13 MB): the remaining creep is live heap, not fragmentation.
 - The watchdog starts `nos-configd` with `MALLOC_TRIM_THRESHOLD_=131072` and `MALLOC_TOP_PAD_=0` next to `MALLOC_ARENA_MAX=1` (#796). Setting the trim threshold also turns off glibc's dynamic mmap threshold, so large freed buffers go back to the kernel; wave 11 RSS went from 57.0 to 42.4 MB.
 - The broadcast ring retains nothing (no `CommitUpdate` in dhat's live-at-exit points), so `BROADCAST_CAPACITY` stays 16.
+- `nos-restd` live heap (#798, dhat image only): `kill -USR1 <pid>` makes it log `restd heap stats curr_bytes=… max_bytes=… total_bytes=…` (`dhat::HeapStats`). A default build has no handler, and SIGUSR1 kills it.
+- `mem-wave` sends that SIGUSR1 at every sample when `nos-restd` runs with `--profile-memory-out` (only a dhat build accepts it), and prints `HEAP <label> restd VmRSS=… kB …`. It also prints each wave's `OPEN wave<n> <ms> ms <bytes> bytes` (`POST ?base=current`, the whole-config reply) and `COMMIT wave<n> …`.
+- #798 measurements, router-b, `nos-restd` `VmRSS` MiB after each commit (default image, 12 x 5500 routes; experiments set through a local, uncommitted env hook):
+
+  | Variant | Wave 2 | Wave 5 | Wave 8 | Wave 11 |
+  |---|---|---|---|---|
+  | baseline (run 1) | 93 | 177 | 294 | 314 |
+  | baseline (run 2) | 96 | 207 | 263 | 271 |
+  | `MALLOC_ARENA_MAX=1` | 106 | 190 | 277 | 397 |
+  | `MALLOC_TRIM_THRESHOLD_=131072 MALLOC_TOP_PAD_=0` | 99 | 249 | 298 | 317 |
+  | `POST ?base=current` replies `{}` | 76 | 143 | 266 | 294 |
+  | `malloc_trim(0)` every second | 42 | 60 | 61 | 54 |
+
+- Reading: the growth is free memory glibc keeps inside its heaps, not live data. On the dhat image (4 x 2500) the live heap after each commit stays at 13.8 MB while `VmRSS` goes 67 -> 156 MB. The once-per-wave whole-config reply (3.8 MB, 74 ms at 66k routes) is not the cause, and neither one arena nor a fixed trim threshold helps, because those only trim the top of a heap. An explicit `malloc_trim(0)`, which also releases free pages in the middle of a heap, keeps `VmRSS` flat.
+- The allocation churn comes mostly from the harness's own `GET /v1/logs?follow` stream: `show::logs_follow` builds a `Vec<sse::Event>` per log batch (largest allocator by total and peak, 10.5 MB), next to a 4.7 MB live read buffer. Each `PUT` also allocates three fresh 8 KiB `FramedRead` buffers (`ipc::exchange`: two from `client_auth`, one to the broker and one to `nos-configd`, plus the `PUT`'s own call).
 
 ### Path edits (#775)
 

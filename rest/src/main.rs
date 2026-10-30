@@ -53,6 +53,23 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
     info!(table = %args.table, "nos-restd starting");
+    // Dhat build only (#798): SIGUSR1 logs the live heap, so `mem-wave` can
+    // put it next to `VmRSS`. A default build keeps SIGUSR1's default action.
+    #[cfg(feature = "dhat-heap")]
+    {
+        let mut usr1 = signal(SignalKind::user_defined1()).context("installing SIGUSR1 handler")?;
+        tokio::spawn(async move {
+            while usr1.recv().await.is_some() {
+                let s = dhat::HeapStats::get();
+                info!(
+                    curr_bytes = s.curr_bytes,
+                    max_bytes = s.max_bytes,
+                    total_bytes = s.total_bytes,
+                    "restd heap stats"
+                );
+            }
+        });
+    }
 
     let Some(config_socket) = watchdog::resolve_with_retry(
         &args.watchdog_socket,

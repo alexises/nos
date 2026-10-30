@@ -14,7 +14,7 @@
 //! `docs/architecture/logging.md`).
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure};
 use reqwest::Method;
@@ -245,6 +245,8 @@ const MAX_ROUTES_PER_INSTANCE: u64 = 25_000;
 const WAVE_TX: &str = "wavemem";
 /// `nos-configd`'s per-commit dhat `HeapStats` line (dhat image only, #796).
 const HEAP_LINE: &str = "heap after commit";
+/// `nos-restd`'s SIGUSR1 dhat `HeapStats` line (dhat image only, #798).
+const RESTD_HEAP_LINE: &str = "restd heap stats";
 /// One `sample_all` result under its label.
 type Labelled = (String, HashMap<String, (u64, u64, u64)>);
 
@@ -365,15 +367,34 @@ async fn wave_load(w: &World, r: &Router) -> anyhow::Result<Vec<Labelled>> {
         env("WAVE_IDLE", 0),
     );
     let instances = (waves * per_wave).div_ceil(MAX_ROUTES_PER_INSTANCE).max(1);
-    let mut pids: Option<(u64, u64)> = None;
-    let mut out = Vec::new();
-    take(w, r, "baseline".into(), &mut pids, &mut out).await?;
+    // Only a dhat `nos-restd` takes `--profile-memory-out` and handles
+    // SIGUSR1; a default build would die of it (#798).
+    let script = format!(
+        "cat /proc/$({})/cmdline | tr '\\0' ' '",
+        find_pid("nos-restd")
+    );
+    let (_, cmd) = w.dock.exec_root(r.name(), &["sh", "-c", &script]).await?;
+    let mut smp = Sampler {
+        w,
+        r,
+        dhat: cmd.contains("--profile-memory-out"),
+        pids: None,
+        out: Vec::new(),
+    };
+    smp.take("baseline".into()).await?;
 
     let tx = format!("/v1/transactions/{WAVE_TX}");
     let _ = r.rest(Method::DELETE, &tx, None).await?;
     for wave in 0..waves {
-        r.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        let started = Instant::now();
+        let body = r
+            .rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
             .await?;
+        log(format!(
+            "OPEN wave{wave} {} ms {} bytes",
+            started.elapsed().as_millis(),
+            body.len()
+        ));
         if wave == 0 {
             for k in 0..instances {
                 let body = format!(r#"{{"name":"sw{k}","routes":[]}}"#);
@@ -399,13 +420,20 @@ async fn wave_load(w: &World, r: &Router) -> anyhow::Result<Vec<Labelled>> {
             put(r, &path, &body).await?;
             if (i + 1) % 2000 == 0 {
                 let label = format!("wave{wave}-puts={}", i + 1);
-                take(w, r, label, &mut pids, &mut out).await?;
+                smp.take(label).await?;
             }
         }
         let heaps = r.count(HEAP_LINE);
-        r.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        let started = Instant::now();
+        let body = r
+            .rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
             .await?;
-        take(w, r, format!("wave{wave}-committed"), &mut pids, &mut out).await?;
+        log(format!(
+            "COMMIT wave{wave} {} ms {} bytes",
+            started.elapsed().as_millis(),
+            body.len()
+        ));
+        smp.take(format!("wave{wave}-committed")).await?;
         // Dhat image only (#796): configd's live heap at this commit, next to
         // the RSS sample above. Wave 0 waits once to learn whether it logs one.
         if (wave == 0 || heaps > 0)
@@ -414,30 +442,56 @@ async fn wave_load(w: &World, r: &Router) -> anyhow::Result<Vec<Labelled>> {
                 .await
         {
             let line = r.logs.last(HEAP_LINE).unwrap_or_default();
-            let rss = out
+            let rss = smp
+                .out
                 .last()
                 .and_then(|(_, s)| s.get("nos-configd"))
                 .map_or(0, |v| v.1);
             log(format!("HEAP wave{wave} configd VmRSS={rss} kB {line}"));
         }
         tokio::time::sleep(Duration::from_secs(idle)).await;
-        take(w, r, format!("wave{wave}-idle"), &mut pids, &mut out).await?;
+        smp.take(format!("wave{wave}-idle")).await?;
     }
-    Ok(out)
+    Ok(smp.out)
 }
 
-/// One `sample_all` under `label`, pid-checked, appended to `out`.
-async fn take(
-    w: &World,
-    r: &Router,
-    label: String,
-    pids: &mut Option<(u64, u64)>,
-    out: &mut Vec<Labelled>,
-) -> anyhow::Result<()> {
-    let s = sample_all(w, r, &label).await?;
-    check_pids(&s, pids)?;
-    out.push((label, s));
-    Ok(())
+/// `wave_load`'s sampling state.
+struct Sampler<'a> {
+    w: &'a World,
+    r: &'a Router,
+    /// `nos-restd` is a dhat build: SIGUSR1 it at every sample.
+    dhat: bool,
+    pids: Option<(u64, u64)>,
+    out: Vec<Labelled>,
+}
+
+impl Sampler<'_> {
+    /// One `sample_all` under `label`, pid-checked, appended to `out`; on a
+    /// dhat image also `nos-restd`'s live heap next to its `VmRSS` (#798).
+    async fn take(&mut self, label: String) -> anyhow::Result<()> {
+        let s = sample_all(self.w, self.r, &label).await?;
+        check_pids(&s, &mut self.pids)?;
+        if self.dhat {
+            let (pid, rss, _) = s.get("nos-restd").copied().unwrap_or_default();
+            let before = self.r.count(RESTD_HEAP_LINE);
+            let kill = format!("kill -USR1 {pid}");
+            self.w
+                .dock
+                .exec_root(self.r.name(), &["sh", "-c", &kill])
+                .await?;
+            if self
+                .r
+                .logs
+                .wait_over(RESTD_HEAP_LINE, before, Duration::from_secs(5))
+                .await
+            {
+                let line = self.r.logs.last(RESTD_HEAP_LINE).unwrap_or_default();
+                log(format!("HEAP {label} restd VmRSS={rss} kB {line}"));
+            }
+        }
+        self.out.push((label, s));
+        Ok(())
+    }
 }
 
 async fn put(r: &Router, path: &str, body: &str) -> anyhow::Result<()> {
