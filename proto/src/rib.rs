@@ -312,15 +312,71 @@ pub struct VpnRoute {
 }
 
 /// `PushVpnRoutes`' payload: `Full` on connect, then `Add`/`Remove`, like
-/// `BgpRouteUpdate`.
+/// `BgpRouteUpdate`; cut into frames by [`VpnRouteUpdate::frames`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VpnRouteUpdate {
-    /// The complete imported set, replacing any previous one.
+    /// The complete imported set, replacing any previous one — together with
+    /// every `FullPart` received since the last `Full` on this connection.
     Full(Vec<VpnRoute>),
     /// One route added or changed.
     Add(VpnRoute),
     /// One route no longer imported.
     Remove(IpNet),
+    /// The leading part of a `Full` snapshot too large for one frame: the
+    /// receiver stages it and publishes nothing until the closing `Full`.
+    /// Appended (postcard indexes variants by position).
+    FullPart(Vec<VpnRoute>),
+}
+
+/// Most weight one `PushVpnRoutes` frame carries, a route weighing its path
+/// count plus one. A worst-case path (IPv6 PE and gateway, the longest RD
+/// text, 28 labels) encodes to ~200 B, so a frame stays near 7 MiB, under
+/// the 16 MiB `MAX_FRAME` (pinned by a test).
+pub const VPN_PUSH_CHUNK: usize = 32768;
+
+impl VpnRoute {
+    /// Frame budget weight: one per path, plus one for the route itself.
+    fn weight(&self) -> usize {
+        self.paths.len() + 1
+    }
+}
+
+impl VpnRouteUpdate {
+    fn weight(&self) -> usize {
+        match self {
+            Self::Full(r) | Self::FullPart(r) => {
+                r.iter().map(VpnRoute::weight).sum::<usize>().max(1)
+            }
+            Self::Add(r) => r.weight(),
+            Self::Remove(_) => 1,
+        }
+    }
+
+    /// Cuts one push into `PushVpnRoutes` frames of at most
+    /// [`VPN_PUSH_CHUNK`] weight each, in order: a heavier `Full` becomes
+    /// `FullPart`s closed by a `Full` holding the last chunk, so the receiver
+    /// still swaps the whole set at once (see [`BgpRouteUpdate::frames`]).
+    #[must_use]
+    pub fn frames(updates: Vec<Self>) -> Vec<Vec<Self>> {
+        let mut split = Vec::with_capacity(updates.len());
+        for u in updates {
+            match u {
+                Self::Full(routes) => {
+                    let (parts, last) =
+                        crate::chunk::split_full(routes, VPN_PUSH_CHUNK, VpnRoute::weight);
+                    split.extend(parts.into_iter().map(Self::FullPart));
+                    split.push(Self::Full(last));
+                }
+                u => split.push(u),
+            }
+        }
+        // Greedy packing of whole updates is `split_full` again.
+        let (mut frames, last) = crate::chunk::split_full(split, VPN_PUSH_CHUNK, Self::weight);
+        if !last.is_empty() {
+            frames.push(last);
+        }
+        frames
+    }
 }
 
 /// One answer of `RibRequest::ResolveNextHop`: how the table reaches an
@@ -582,6 +638,100 @@ mod tests {
         };
         let frame =
             RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(vec![worst; BGP_PUSH_CHUNK])]);
+        let len = postcard::to_allocvec(&frame).unwrap().len();
+        assert!(len < MAX_FRAME, "{len} bytes");
+        let mut buf = bytes::BytesMut::new();
+        IpcCodec::<RibRequest>::default()
+            .encode(frame, &mut buf)
+            .unwrap();
+    }
+
+    fn vpn_route(i: u32, paths: usize) -> VpnRoute {
+        let path = VpnPath {
+            pe_next_hop: IpAddr::from([192, 0, 2, 1]),
+            rd: "65001:1".into(),
+            gateway: IpAddr::from([10, 0, 0, 1]),
+            interface_id: Some(3),
+            labels: vec![100],
+        };
+        VpnRoute {
+            prefix: IpNet::new(IpAddr::from(i.to_be_bytes()), 32).unwrap(),
+            paths: vec![path; paths],
+        }
+    }
+
+    fn vpn_shape(frames: &[Vec<VpnRouteUpdate>]) -> Vec<Vec<(char, usize)>> {
+        frames
+            .iter()
+            .map(|f| {
+                f.iter()
+                    .map(|u| match u {
+                        VpnRouteUpdate::Full(r) => ('F', r.len()),
+                        VpnRouteUpdate::FullPart(r) => ('P', r.len()),
+                        VpnRouteUpdate::Add(_) => ('A', 1),
+                        VpnRouteUpdate::Remove(_) => ('R', 1),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vpn_frames_weigh_paths_plus_one_per_route() {
+        // Small pushes stay one frame; nothing is no frame.
+        assert_eq!(VpnRouteUpdate::frames(vec![]).len(), 0);
+        let f = VpnRouteUpdate::frames(vec![VpnRouteUpdate::Full(vec![])]);
+        assert_eq!(vpn_shape(&f), [vec![('F', 0)]]);
+        // 16384 single-path routes weigh exactly VPN_PUSH_CHUNK.
+        let fits: Vec<_> = (0..16384).map(|i| vpn_route(i, 1)).collect();
+        let f = VpnRouteUpdate::frames(vec![VpnRouteUpdate::Full(fits)]);
+        assert_eq!(vpn_shape(&f), [vec![('F', 16384)]]);
+
+        // A heavier Full: parts closed by a Full, in order, rejoined whole.
+        let all: Vec<_> = (0..20000).map(|i| vpn_route(i, 3)).collect();
+        let f = VpnRouteUpdate::frames(vec![VpnRouteUpdate::Full(all.clone())]);
+        assert_eq!(
+            vpn_shape(&f),
+            [vec![('P', 8192)], vec![('P', 8192)], vec![('F', 3616)]]
+        );
+        let rejoined: Vec<VpnRoute> = f
+            .into_iter()
+            .flatten()
+            .flat_map(|u| match u {
+                VpnRouteUpdate::Full(r) | VpnRouteUpdate::FullPart(r) => r,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(rejoined, all);
+
+        // Add (paths + 1) and Remove (1) are packed by weight.
+        let mut u: Vec<_> = (0..11000)
+            .map(|i| VpnRouteUpdate::Add(vpn_route(i, 2)))
+            .collect();
+        u.push(VpnRouteUpdate::Remove(vpn_route(1, 1).prefix));
+        let f = VpnRouteUpdate::frames(u);
+        assert_eq!(f.iter().map(Vec::len).collect::<Vec<_>>(), [10922, 79]);
+    }
+
+    /// The worst case `VPN_PUSH_CHUNK` is sized for still fits one frame.
+    #[test]
+    fn a_chunk_of_worst_case_vpn_routes_fits_max_frame() {
+        let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
+        let path = VpnPath {
+            pe_next_hop: v6(1),
+            rd: "4294967295:65535".into(),
+            gateway: v6(2),
+            interface_id: Some(u32::MAX),
+            labels: vec![0x000F_FFFF; 28],
+        };
+        // One route of VPN_PUSH_CHUNK - 1 paths weighs exactly the budget.
+        let worst = VpnRoute {
+            prefix: IpNet::new(v6(3), 128).unwrap(),
+            paths: vec![path; VPN_PUSH_CHUNK - 1],
+        };
+        let f = VpnRouteUpdate::frames(vec![VpnRouteUpdate::Full(vec![worst])]);
+        assert_eq!(f.len(), 1);
+        let frame = RibRequest::PushVpnRoutes(f.into_iter().next().unwrap());
         let len = postcard::to_allocvec(&frame).unwrap().len();
         assert!(len < MAX_FRAME, "{len} bytes");
         let mut buf = bytes::BytesMut::new();

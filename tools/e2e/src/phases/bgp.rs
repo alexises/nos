@@ -3553,7 +3553,86 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
             bail!("VPN routes outlived their session: {body}");
         }
     }
-    Ok(())
+    vpn_chunked(w).await
+}
+
+/// `VPN_TABLE`'s routes from the `10.100.0.0/16` burst, over REST (20 000
+/// `added route` lines overrun the harness's log follower).
+async fn vpn_burst_in_table(a: &Router) -> anyhow::Result<usize> {
+    Ok(a.routes_walk(VPN_TABLE, None)
+        .await?
+        .iter()
+        .filter(|p| {
+            p["prefix"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("10.100."))
+                && p["candidates"][0]["source"] == "Vpn"
+        })
+        .count())
+}
+
+/// Polls until `vpn_burst_in_table` is `want`, for at most `secs`.
+async fn wait_vpn_burst(a: &Router, want: usize, secs: u64) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    loop {
+        let n = vpn_burst_in_table(a).await?;
+        if n == want {
+            log(format!(
+                "{VPN_TABLE} holds {n} burst routes after {}s",
+                started.elapsed().as_secs()
+            ));
+            return Ok(());
+        }
+        if started.elapsed() > Duration::from_secs(secs) {
+            bail!("{VPN_TABLE} holds {n} of {want} burst routes after {secs}s");
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// `vpn`'s chunked stage (#715): GoBGP (restarted) announces
+/// `VPN_CHUNKED_ROUTES` VPNv4 /32s, heavier than one `PushVpnRoutes` frame
+/// (`VPN_PUSH_CHUNK`). Killing `VPN_TABLE`'s `nos-ribd` (only that one) makes
+/// `nos-bgpd` resend the whole set as one `Full` on reconnect: two frames,
+/// which the new `nos-ribd` must assemble and apply once. Killing `nos-bgpd`
+/// instead would not do: without a graceful-restart deferral (the underlay
+/// holds no BGP route here) a fresh `nos-bgpd` pushes an empty `Full` at once
+/// and the routes come back as `Add`s. Removing the speaker then withdraws
+/// them all.
+async fn vpn_chunked(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    start_gobgp(w, &["l3vpn-ipv4-unicast"]).await?;
+    let n = VPN_CHUNKED_ROUTES;
+    log(format!("GoBGP announces {n} VPNv4 routes into {VPN_TABLE}"));
+    let announce = format!(
+        "seq 0 {} | xargs -P 16 -I{{}} sh -c 'i={{}}; gobgp global rib add -a vpnv4 \
+         10.100.$((i/250)).$((i%250+1))/32 label 1000 rd 65001:9 rt 65000:1'",
+        n - 1
+    );
+    let (code, out) = w.dock.exec("router-g", &["sh", "-c", &announce]).await?;
+    if code != 0 {
+        bail!("announcing the burst: exit {code}: {}", out.trim());
+    }
+    wait_vpn_burst(a, n, 600).await?;
+    let _ = crate::logd_mem::sample(w, a, "vpn-burst").await;
+
+    log(format!(
+        "killing {VPN_TABLE}'s nos-ribd: the reconnect Full is chunked"
+    ));
+    let assembled = format!(
+        "assembled chunked vpn route snapshot table={VPN_TABLE} routes=20[0-9][0-9][0-9] parts=2"
+    );
+    let base = a.count(&assembled);
+    w.dock
+        .kill_process_matching("router-a", "nos-ribd", &format!("--table {VPN_TABLE} "))
+        .await?;
+    a.wait_new(&assembled, base, 120).await?;
+    wait_vpn_burst(a, n, 120).await?;
+    let _ = crate::logd_mem::sample(w, a, "vpn-chunked").await;
+
+    log("removing the speaker withdraws the whole burst");
+    w.dock.container_remove("router-g").await;
+    wait_vpn_burst(a, 0, 300).await
 }
 
 /// router-a's flags for the VPN phases: `evpn_flags` with VPNv4/VPNv6

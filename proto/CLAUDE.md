@@ -25,6 +25,7 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 | `paths` | The two bootstrap socket defaults that stay fixed (config, watchdog) plus the PKI ones. |
 | `page` | Opaque keyset cursors (#714): `encode`/`decode`, `wire_len`. |
 | `codec` | `IpcCodec<T>`: 4-byte LE length prefix + postcard payload, generic over any `Serialize + DeserializeOwned`. |
+| `chunk` | `split_full`/`FullStaging`: a `Full` past the 16 MiB frame cap goes as `FullPart`s (`BgpRouteUpdate`, `EvpnUpdate`, `VpnRouteUpdate`, each with its own budget). |
 
 ## Schema pitfalls
 

@@ -468,6 +468,86 @@ async fn push_bgp_full_past_max_frame_is_chunked_and_applied_atomically() {
     assert_eq!(applied[0].len(), N as usize);
 }
 
+/// The VPN twin (#715): an imported `Full` past `MAX_FRAME` (an internet
+/// VRF) cut by `VpnRouteUpdate::frames` is staged until its closing `Full`
+/// and lands as one kernel apply, `vpn_info` included.
+#[tokio::test]
+async fn push_vpn_full_past_max_frame_is_chunked_and_applied_atomically() {
+    use nos_proto::{VpnPath, VpnRoute, VpnRouteUpdate};
+    use tokio_util::codec::Encoder;
+    // ~160 encoded bytes per IPv6 route with a 28-label path: 120k is ~19 MiB.
+    const N: u32 = 120_000;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let driver = Arc::new(RecordingDriver::default());
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib.clone(),
+        driver.clone(),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
+
+    let v6 = |i: u32| {
+        IpAddr::from(std::net::Ipv6Addr::from(
+            (0x2001_0db8_u128 << 96) | (u128::from(i) << 16),
+        ))
+    };
+    let routes: Vec<VpnRoute> = (0..N)
+        .map(|i| VpnRoute {
+            prefix: nos_proto::IpNet::new(v6(i), 112).unwrap(),
+            paths: vec![VpnPath {
+                pe_next_hop: v6(N + 1),
+                rd: "4294967295:65535".into(),
+                gateway: v6(N + 2),
+                interface_id: Some(7),
+                labels: vec![0x000F_FFFF; 28],
+            }],
+        })
+        .collect();
+    let whole = RibRequest::PushVpnRoutes(vec![VpnRouteUpdate::Full(routes.clone())]);
+    assert!(
+        IpcCodec::<RibRequest>::default()
+            .encode(whole, &mut bytes::BytesMut::new())
+            .is_err(),
+        "the unchunked snapshot must exceed MAX_FRAME"
+    );
+
+    let mut frames = VpnRouteUpdate::frames(vec![VpnRouteUpdate::Full(routes)]);
+    let last = frames.pop().unwrap();
+    assert!(frames.len() > 1);
+    let (mut reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
+    // `ResolveNextHop`'s reply is the barrier: every earlier frame was handled.
+    let barrier = || RibRequest::ResolveNextHop { addrs: vec![] };
+    for frame in frames {
+        writer.feed(RibRequest::PushVpnRoutes(frame)).await.unwrap();
+    }
+    writer.send(barrier()).await.unwrap();
+    reader.next().await.unwrap().unwrap();
+    {
+        let guard = rib.read().await;
+        assert_eq!(guard.count_source(RouteSource::Vpn), 0, "half a table");
+        assert!(guard.vpn_info.is_empty());
+    }
+    assert!(
+        driver.applied.lock().await.is_empty(),
+        "half a table published"
+    );
+
+    writer.send(RibRequest::PushVpnRoutes(last)).await.unwrap();
+    writer.send(barrier()).await.unwrap();
+    reader.next().await.unwrap().unwrap();
+    let guard = rib.read().await;
+    assert_eq!(guard.count_source(RouteSource::Vpn), N);
+    assert_eq!(guard.vpn_info.len(), N as usize);
+    let applied = driver.applied.lock().await;
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].len(), N as usize);
+}
+
 #[tokio::test]
 async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     let tmp = tempfile::tempdir().unwrap();

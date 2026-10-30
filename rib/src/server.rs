@@ -143,7 +143,7 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
     }
 }
 
-/// One connection's chunked BGP `Full` snapshot in progress
+/// One connection's chunked BGP/EVPN/VPN `Full` snapshot in progress
 /// (`BgpRouteUpdate::FullPart`s, see `BgpRouteUpdate::frames`): nothing
 /// reaches the `Rib` until the closing `Full`, so the table never shows half
 /// a snapshot, and a connection lost mid-snapshot simply drops it.
@@ -151,10 +151,12 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
 struct FullStaging {
     bgp: nos_proto::chunk::FullStaging<BgpRoute>,
     evpn: nos_proto::chunk::FullStaging<nos_proto::EvpnRoute>,
+    vpn: nos_proto::chunk::FullStaging<VpnRoute>,
 }
 
 impl FullStaging {
-    /// Stages every `FullPart` of a `PushBgpRoutes`/`PushEvpnRoutes` and folds
+    /// Stages every `FullPart` of a `PushBgpRoutes`/`PushEvpnRoutes`/
+    /// `PushVpnRoutes` and folds
     /// the staged routes into the closing `Full` (`None`: a part, nothing to
     /// dispatch yet); any other request passes through.
     fn absorb(&mut self, table: &str, req: RibRequest) -> Option<RibRequest> {
@@ -173,6 +175,26 @@ impl FullStaging {
                     );
                 }
                 return Some(RibRequest::PushEvpnRoutes(u));
+            }
+            RibRequest::PushVpnRoutes(updates) => {
+                let mut out = Vec::with_capacity(updates.len());
+                for update in updates {
+                    match update {
+                        VpnRouteUpdate::FullPart(routes) => self.vpn.part(routes),
+                        VpnRouteUpdate::Full(routes) if self.vpn.is_staging() => {
+                            let (all, parts) = self.vpn.close(routes);
+                            info!(
+                                table = %table,
+                                routes = all.len(),
+                                parts,
+                                "assembled chunked vpn route snapshot"
+                            );
+                            out.push(VpnRouteUpdate::Full(all));
+                        }
+                        update => out.push(update),
+                    }
+                }
+                return Some(RibRequest::PushVpnRoutes(out));
             }
             req => return Some(req),
         };
@@ -333,6 +355,8 @@ async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
                 guard.vpn_info.remove(&prefix);
                 (prefix, guard.remove_and_diff(&prefix, RouteSource::Vpn))
             }
+            // Staged by `FullStaging::absorb` before dispatch.
+            VpnRouteUpdate::FullPart(_) => continue,
         };
         match change {
             BestPathChange::Unchanged => {}
