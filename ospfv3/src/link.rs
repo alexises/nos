@@ -2198,6 +2198,11 @@ impl LinkManager {
         }
     }
 
+    /// How many prefixes `nos-ribd` redistributes (before policy).
+    pub async fn redistribute_raw_len(&self) -> usize {
+        self.redistribute_raw.lock().await.len()
+    }
+
     /// Applies one `Ospfv3Request::RedistributeRoutes` update (pushed by the
     /// owning `nos-ribd`) to the raw set and re-filters it. `OSPFv3` routes
     /// IPv6 only: `nos-ribd` sends no IPv4 prefix, and one is ignored.
@@ -2218,6 +2223,9 @@ impl LinkManager {
                         raw.remove(&p);
                     }
                 }
+                // Staged by `server.rs` (`RedistributeUpdate::absorb`); only
+                // the closing `Full` gets here.
+                RedistributeUpdate::FullPart(_) => return,
             }
         }
         self.refilter_redistributed().await;

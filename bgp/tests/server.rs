@@ -370,3 +370,70 @@ async fn evpn_redistribution_past_max_frame_is_staged_until_the_closing_full() {
         assert_eq!(sessions.evpn_local_len().await, held, "{role:?} snapshot");
     }
 }
+
+/// #728: a `RedistributeRoutes` `Full` past the codec's 16 MiB `MAX_FRAME`
+/// (a full table redistributed into BGP), cut by `RedistributeUpdate::split`,
+/// crosses the real codec as `ribd` and is staged until its closing `Full`:
+/// nothing is held from the `FullPart`s alone, then the whole set lands at
+/// once (`BgpRib` diffs each `Full` against the raw set, so parts applied one
+/// by one would leave only the last chunk).
+#[tokio::test]
+async fn redistribution_past_max_frame_is_staged_until_the_closing_full() {
+    use nos_proto::RedistributedRoute;
+    use tokio_util::codec::Encoder;
+    // ~35 encoded bytes per IPv6 route: 500k is ~17 MiB.
+    const N: u32 = 500_000;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("bgp.sock");
+    let sessions = SessionManager::new("r1".to_string());
+    let _server = nos_bgp::server::start(
+        &path,
+        "r1".to_string(),
+        sessions.clone(),
+        &shared().identity("bgpd", "r1"),
+        tmp.path().join("no-watchdog.sock"),
+    )
+    .unwrap();
+
+    let v6 = |i: u32| std::net::Ipv6Addr::from((0x2001_0db8_u128 << 96) | (u128::from(i) << 16));
+    let all: Vec<RedistributedRoute> = (0..N)
+        .map(|i| RedistributedRoute {
+            prefix: nos_proto::IpNet::new(v6(i).into(), 112).unwrap(),
+            gateway: v6(N + 1).into(),
+        })
+        .collect();
+    assert!(
+        IpcCodec::<BgpRequest>::default()
+            .encode(
+                BgpRequest::RedistributeRoutes(RedistributeUpdate::Full(all.clone())),
+                &mut bytes::BytesMut::new()
+            )
+            .is_err(),
+        "the unchunked snapshot must exceed MAX_FRAME"
+    );
+    let mut frames = RedistributeUpdate::Full(all).split();
+    let last = frames.pop().unwrap();
+    assert!(frames.len() > 1);
+    let (mut r, mut w) = connect_as(&path, Role::Ribd).await;
+    for frame in frames {
+        w.feed(BgpRequest::RedistributeRoutes(frame)).await.unwrap();
+    }
+    w.flush().await.unwrap();
+    // Fire-and-forget: no reply to wait on, so give the server time.
+    assert!(stays_open(&mut r).await, "ribd disconnected mid-snapshot");
+    assert_eq!(
+        sessions.redistribute_raw_len().await,
+        0,
+        "half a snapshot held"
+    );
+
+    w.send(BgpRequest::RedistributeRoutes(last)).await.unwrap();
+    for _ in 0..600 {
+        if sessions.redistribute_raw_len().await == N as usize {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(sessions.redistribute_raw_len().await, N as usize);
+}

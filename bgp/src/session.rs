@@ -645,6 +645,12 @@ impl SessionManager {
         self.bgp_rib.lock().await.apply_redistribute_update(update);
     }
 
+    /// How many prefixes `nos-ribd` redistributes into this instance (before
+    /// policy).
+    pub async fn redistribute_raw_len(&self) -> usize {
+        self.bgp_rib.lock().await.redistribute_raw_len()
+    }
+
     /// One `nos-fdbd`'s local MACs (`BgpRequest::RedistributeMacs`).
     pub async fn apply_evpn_local(&self, domain: &str, update: nos_proto::EvpnUpdate) {
         self.bgp_rib.lock().await.apply_evpn_local(domain, update);

@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, Stream};
-use nos_proto::{IpcCodec, Ospfv3Event, Ospfv3Request, Role};
+use nos_proto::chunk::FullStaging;
+use nos_proto::{IpcCodec, Ospfv3Event, Ospfv3Request, RedistributeUpdate, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
@@ -68,6 +69,7 @@ async fn handle_connection(
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<Ospfv3Request>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<Ospfv3Event>::default());
+    let mut redistribute = FullStaging::default();
 
     while let Some(msg) = reader.next().await {
         let req = match msg {
@@ -99,7 +101,19 @@ async fn handle_connection(
                 }
             }
             Ospfv3Request::RedistributeRoutes(update) => {
-                links.apply_redistribute_update(update).await;
+                // Only the closing `Full` is applied: it replaces the raw
+                // set, so half a snapshot would withdraw the rest.
+                if let Some((update, parts)) = update.absorb(&mut redistribute) {
+                    if parts > 1
+                        && let RedistributeUpdate::Full(r) = &update
+                    {
+                        info!(
+                            instance = %instance, routes = r.len(), parts,
+                            "assembled chunked redistribute snapshot"
+                        );
+                    }
+                    links.apply_redistribute_update(update).await;
+                }
             }
         }
     }

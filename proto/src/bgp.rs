@@ -285,6 +285,73 @@ pub enum RedistributeUpdate {
     Add(RedistributedRoute),
     /// One route withdrawn.
     Remove(IpNet),
+    /// A leading part of a `Full` too large for one frame: the receiver
+    /// stages it and applies nothing until the closing `Full`. Appended
+    /// (postcard indexes variants by position).
+    FullPart(Vec<RedistributedRoute>),
+}
+
+/// Routes per `RedistributeUpdate` frame. A route encodes to at most ~40 B
+/// (IPv6 prefix and gateway), so a chunk stays near 2.6 MiB, well under the
+/// 16 MiB `MAX_FRAME` (pinned by a test).
+pub const REDISTRIBUTE_CHUNK: usize = 65536;
+
+/// The budget [`RedistributeUpdate::split`] uses: [`REDISTRIBUTE_CHUNK`], or
+/// `NOS_REDISTRIBUTE_CHUNK` when set (a test hook, so tests and dev runs need
+/// few routes). Not usable under the watchdog, which clears its children's
+/// environment.
+#[must_use]
+pub fn redistribute_chunk() -> usize {
+    parse_chunk(std::env::var("NOS_REDISTRIBUTE_CHUNK").ok().as_deref())
+}
+
+fn parse_chunk(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.trim().parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(REDISTRIBUTE_CHUNK)
+}
+
+impl RedistributeUpdate {
+    /// [`Self::split_with`] at [`redistribute_chunk`].
+    #[must_use]
+    pub fn split(self) -> Vec<Self> {
+        self.split_with(redistribute_chunk())
+    }
+
+    /// The requests to send for this update: anything but a `Full` over
+    /// `chunk` routes is itself; that one becomes `FullPart`s closed by a
+    /// `Full` holding the last chunk (see [`crate::chunk::split_full`]).
+    #[must_use]
+    pub fn split_with(self, chunk: usize) -> Vec<Self> {
+        let Self::Full(routes) = self else {
+            return vec![self];
+        };
+        let (parts, last) = crate::chunk::split_full(routes, chunk, |_| 1);
+        let mut out: Vec<_> = parts.into_iter().map(Self::FullPart).collect();
+        out.push(Self::Full(last));
+        out
+    }
+
+    /// Receiver side of [`Self::split_with`]: stages a `FullPart` (returns
+    /// `None`), folds the staged parts into the closing `Full`, passes
+    /// `Add`/`Remove` through. The `usize` is the frames the update took (1
+    /// when unchunked), for the receiver's log.
+    pub fn absorb(
+        self,
+        staging: &mut crate::chunk::FullStaging<RedistributedRoute>,
+    ) -> Option<(Self, usize)> {
+        match self {
+            Self::FullPart(r) => {
+                staging.part(r);
+                None
+            }
+            Self::Full(r) => {
+                let (all, parts) = staging.close(r);
+                Some((Self::Full(all), parts))
+            }
+            other => Some((other, 1)),
+        }
+    }
 }
 
 /// One VRF route `nos-ribd` exports as a VPN-IPv4/IPv6 route (RFC 4364
@@ -577,4 +644,102 @@ pub enum BgpEvent {
         /// Pass back as `after`; `None` when this was the last page.
         next: Option<VpnRouteCursor>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::FullStaging;
+    use std::net::Ipv6Addr;
+
+    fn route(i: u32) -> RedistributedRoute {
+        let (prefix, gateway) = if i.is_multiple_of(2) {
+            (
+                IpNet::new(IpAddr::from(Ipv4Addr::from(i << 8)), 24).unwrap(),
+                IpAddr::from([10, 0, 0, 1]),
+            )
+        } else {
+            (
+                IpNet::new(IpAddr::from(Ipv6Addr::from(u128::from(i) << 64)), 64).unwrap(),
+                IpAddr::from(Ipv6Addr::LOCALHOST),
+            )
+        };
+        RedistributedRoute { prefix, gateway }
+    }
+
+    fn routes(n: u32) -> Vec<RedistributedRoute> {
+        (0..n).map(route).collect()
+    }
+
+    #[test]
+    fn redistribute_chunk_reads_the_env_hook() {
+        assert_eq!(parse_chunk(None), REDISTRIBUTE_CHUNK);
+        assert_eq!(parse_chunk(Some("junk")), REDISTRIBUTE_CHUNK);
+        assert_eq!(parse_chunk(Some("0")), REDISTRIBUTE_CHUNK);
+        assert_eq!(parse_chunk(Some(" 64 ")), 64);
+    }
+
+    #[test]
+    fn small_full_and_incrementals_are_not_split() {
+        use RedistributeUpdate::{Add, Full, Remove};
+        assert_eq!(Full(vec![]).split_with(3), [Full(vec![])]);
+        assert_eq!(
+            Full(routes(3)).split_with(3),
+            [Full(routes(3))],
+            "exact fit"
+        );
+        assert_eq!(Add(route(1)).split_with(1), [Add(route(1))]);
+        let p = route(1).prefix;
+        assert_eq!(Remove(p).split_with(1), [Remove(p)]);
+    }
+
+    #[test]
+    fn a_big_full_is_cut_in_order_and_closed_by_a_full() {
+        let frames = RedistributeUpdate::Full(routes(10)).split_with(3);
+        assert_eq!(frames.len(), 4);
+        let (last, parts) = frames.split_last().unwrap();
+        assert_eq!(last, &RedistributeUpdate::Full(vec![route(9)]));
+        let mut rejoined = Vec::new();
+        for p in parts {
+            let RedistributeUpdate::FullPart(r) = p else {
+                panic!("{p:?}")
+            };
+            assert_eq!(r.len(), 3);
+            rejoined.extend(r.iter().cloned());
+        }
+        rejoined.push(route(9));
+        assert_eq!(rejoined, routes(10));
+    }
+
+    #[test]
+    fn absorb_stages_parts_closes_with_the_full_and_passes_incrementals() {
+        let mut st = FullStaging::default();
+        let mut got = None;
+        for f in RedistributeUpdate::Full(routes(10)).split_with(4) {
+            assert!(got.is_none(), "nothing before the closing Full");
+            got = f.absorb(&mut st);
+        }
+        // v4 and v6 entries both survive the round trip.
+        assert_eq!(got, Some((RedistributeUpdate::Full(routes(10)), 3)));
+        assert!(!st.is_staging());
+        let add = RedistributeUpdate::Add(route(1));
+        assert_eq!(add.clone().absorb(&mut st), Some((add, 1)));
+        let small = RedistributeUpdate::Full(routes(2));
+        assert_eq!(small.clone().absorb(&mut st), Some((small, 1)));
+    }
+
+    /// A chunk of the widest routes (IPv6 prefix and gateway) fits one frame.
+    #[test]
+    fn a_chunk_of_worst_case_routes_fits_max_frame() {
+        let worst = RedistributedRoute {
+            prefix: IpNet::new(IpAddr::from(Ipv6Addr::from(u128::MAX)), 128).unwrap(),
+            gateway: IpAddr::from(Ipv6Addr::from(u128::MAX)),
+        };
+        let req = BgpRequest::RedistributeRoutes(RedistributeUpdate::Full(vec![
+            worst;
+            REDISTRIBUTE_CHUNK
+        ]));
+        let len = postcard::to_allocvec(&req).unwrap().len();
+        assert!(len < crate::codec::MAX_FRAME / 4, "{len}");
+    }
 }

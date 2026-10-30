@@ -111,3 +111,72 @@ async fn only_ribd_may_feed_redistribution() {
         }
     }
 }
+
+/// #728: a `RedistributeRoutes` `Full` past the codec's 16 MiB `MAX_FRAME`,
+/// cut by `RedistributeUpdate::split`, crosses the real codec as `ribd` and
+/// is staged until its closing `Full`: nothing is held from the `FullPart`s
+/// alone, then the whole set lands at once (parts applied one by one would
+/// leave only the last chunk, each `Full` replacing the raw set).
+#[tokio::test]
+async fn redistribution_past_max_frame_is_staged_until_the_closing_full() {
+    use nos_proto::RedistributedRoute;
+    use tokio_util::codec::Encoder;
+    // ~35 encoded bytes per IPv6 route: 500k is ~17 MiB.
+    const N: u32 = 500_000;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ospfv3.sock");
+    let links = LinkManager::new(1, None);
+    let _server = nos_ospfv3::server::start(
+        &path,
+        "r1".to_string(),
+        links.clone(),
+        &shared().identity("ospfv3d", "r1"),
+    )
+    .unwrap();
+
+    let v6 = |i: u32| std::net::Ipv6Addr::from((0x2001_0db8_u128 << 96) | (u128::from(i) << 16));
+    let all: Vec<RedistributedRoute> = (0..N)
+        .map(|i| RedistributedRoute {
+            prefix: nos_proto::IpNet::new(v6(i).into(), 112).unwrap(),
+            gateway: v6(N + 1).into(),
+        })
+        .collect();
+    assert!(
+        IpcCodec::<Ospfv3Request>::default()
+            .encode(
+                Ospfv3Request::RedistributeRoutes(RedistributeUpdate::Full(all.clone())),
+                &mut tokio_util::bytes::BytesMut::new()
+            )
+            .is_err(),
+        "the unchunked snapshot must exceed MAX_FRAME"
+    );
+    let mut frames = RedistributeUpdate::Full(all).split();
+    let last = frames.pop().unwrap();
+    assert!(frames.len() > 1);
+    let (mut r, mut w) = connect_as(&path, Role::Ribd).await;
+    for frame in frames {
+        w.feed(Ospfv3Request::RedistributeRoutes(frame))
+            .await
+            .unwrap();
+    }
+    w.flush().await.unwrap();
+    // Fire-and-forget: no reply to wait on, so give the server time.
+    assert!(stays_open(&mut r).await, "ribd disconnected mid-snapshot");
+    assert_eq!(
+        links.redistribute_raw_len().await,
+        0,
+        "half a snapshot held"
+    );
+
+    w.send(Ospfv3Request::RedistributeRoutes(last))
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if links.redistribute_raw_len().await == N as usize {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(links.redistribute_raw_len().await, N as usize);
+}
