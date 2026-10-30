@@ -7,6 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use reqwest::Method;
 
+use nos_proto::{ConfigOp, InterfaceOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp};
+
 use crate::consts::*;
 use crate::logs::bre;
 use crate::router::{log, strings, Id, Router, A, B, C};
@@ -7040,6 +7042,221 @@ async fn symmetric_irb(w: &World, flags_a: &[String], flags_b: &[String]) -> any
     w.dock.container_remove(IRB_HOST).await;
     w.dock.network_disconnect(NET_IRB, "router-b").await;
     w.dock.network_remove(NET_IRB).await;
+    Ok(())
+}
+
+/// `evpn-l3-chunked`'s IP-VRFs: `(table, L3 VNI)`. The first is `L3_TABLE`
+/// (VNI `L3_VNI`, its gateway on eth1); the others get a `loopback-<table>`
+/// for their statics' gateway. A static routing instance is one list of at
+/// most `CHUNKED_PER_TABLE` routes, and a table references one instance.
+const CHUNKED_TABLES: [(&str, u32); 3] = [(L3_TABLE, L3_VNI), ("tenant2", 5001), ("tenant3", 5002)];
+const CHUNKED_PER_TABLE: u32 = 25_000;
+/// Routes per table per wave (x3 tables ~ 4 000 updates, under the 8 192 outbox).
+const CHUNKED_WAVE: u32 = 1_300;
+
+/// The i-th `evpn-l3-chunked` prefix of table `t`: `100.64.0.0 + t * 25000 + i`.
+fn chunked_prefix(t: usize, i: u32) -> nos_proto::IpNet {
+    let n = u32::try_from(t).unwrap_or(0) * CHUNKED_PER_TABLE + i;
+    let addr = std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(100, 64, 0, 0)) + n);
+    nos_proto::IpNet::new(addr.into(), 32).expect("a /32")
+}
+
+/// One PE's flags for IP-VRF `table`/`vni` with no host interface.
+fn chunked_table_flags(id: Id, table: &str, vni: u32) -> Vec<String> {
+    let asn = if id.name == A.name { 65001 } else { 65002 };
+    let mut f = id.base_flags();
+    f.extend(strings(&["--peer-group", "pg-evpn", "--evpn"]));
+    f.extend(strings(&[
+        "--l3vni-table",
+        table,
+        "--l3vni",
+        &vni.to_string(),
+        "--l3vni-rd",
+        &format!("{asn}:{vni}"),
+        "--l3vni-rt",
+        &format!("65000:{vni}"),
+        "--l3vni-vtep-source-interface",
+        "eth0",
+    ]));
+    f
+}
+
+/// `evpn-l3-chunked` (#721), SLOW (`phases::SLOW`): a Type-5 `Full` larger
+/// than `EVPN_PUSH_BYTES` (4 MiB) crosses `nos-bgpd` -> `nos-ribd` as
+/// `FullPart`s and is applied once. Router-b originates 75 000 static /32s
+/// (~60 B each as an `EvpnRoute`, a little over 4 MiB) spread over three
+/// IP-VRFs, 25 000 per static routing instance, provisioned through
+/// `Router::edit`'s batched subsection PUTs. Router-a's bgpd learns them all
+/// while router-a has no IP-VRF; then router-a's three tables are created and
+/// each new `nos-ribd` gets one chunked `Full` from bgpd, which it must
+/// assemble and apply once. There is no budget knob (the watchdog clears its
+/// children's environment), so only real volume works.
+///
+/// Why the order: the same routes arriving as individual `Add`s are applied
+/// one by one, each rebuilding and reconciling the whole table
+/// (`apply_evpn_route_update`), which is quadratic and takes hours; that
+/// path is out of scope here (own issue) and this phase must not depend on it.
+pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
+    let base = |id: Id| {
+        let mut f = id.base_flags();
+        f.extend(strings(&["--peer-group", "pg-evpn", "--evpn"]));
+        f
+    };
+    w.start(A, Some(base(A)), &[]).await?;
+    w.start(B, Some(base(B)), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    b.established().await?;
+
+    // The tenant subnet on eth1 makes the first table's gateway on-link.
+    for (net, subnet, router, gw) in [
+        (NET_L3_A, L3_SUBNET_A, "router-a", L3_GW_A),
+        (NET_L3_B, L3_SUBNET_B, "router-b", L3_GW_B),
+    ] {
+        if !w.dock.network_exists(net).await {
+            w.dock.network_create(net, &[subnet], false).await?;
+        }
+        w.dock.network_connect_ip(net, router, gw).await?;
+    }
+
+    let total = CHUNKED_PER_TABLE as usize * CHUNKED_TABLES.len();
+    log(format!(
+        "router-b originates {total} static /32s in {} IP-VRFs; router-a has none yet",
+        CHUNKED_TABLES.len()
+    ));
+    b.provision_flags(&l3_pe_flags(B, L3_RD_B, L3_GW_B)).await?;
+    for (table, vni) in &CHUNKED_TABLES[1..] {
+        b.provision_flags(&chunked_table_flags(B, table, *vni))
+            .await?;
+    }
+    let started = std::time::Instant::now();
+    let closed = b.count("diff stream closed");
+    // The routes go in waves of ~4 000 in total, each learned by router-a's
+    // bgpd before the next: nos-bgpd's per-peer outbox holds 8 192 updates
+    // and ceases the session when an EVPN update overflows it, so one burst
+    // of 75 000 resets the peer forever (a bgpd limit, filed separately; this
+    // phase works around it, it is not what it tests).
+    let learned =
+        |p: &nos_proto::IpNet| format!("evpn route learned peer={IP_B} route_type=5 .*{p}");
+    let waves = CHUNKED_PER_TABLE.div_ceil(CHUNKED_WAVE);
+    let mut lasts = Vec::new();
+    for wave in 0..waves {
+        let (from, to) = (
+            wave * CHUNKED_WAVE,
+            ((wave + 1) * CHUNKED_WAVE).min(CHUNKED_PER_TABLE),
+        );
+        let wave_lasts: Vec<_> = (0..CHUNKED_TABLES.len())
+            .map(|t| chunked_prefix(t, to - 1))
+            .collect();
+        let bases: Vec<usize> = wave_lasts.iter().map(|p| a.count(&learned(p))).collect();
+        b.edit(|config| {
+            for (t, (table, _)) in CHUNKED_TABLES.iter().enumerate() {
+                let instance = format!("sri-chunked{t}");
+                let gateway: std::net::IpAddr = if t == 0 {
+                    L3_HOST_IP_B.parse()?
+                } else {
+                    format!("198.19.{t}.2").parse()?
+                };
+                let mut ops = Vec::new();
+                if wave == 0 {
+                    if t > 0 {
+                        // `loopback-<table>` is enslaved to the table's VRF by name.
+                        let lo = format!("loopback-{table}");
+                        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+                            name: lo.clone(),
+                        }));
+                        ops.push(ConfigOp::Interface(InterfaceOp::AddAddress {
+                            name: lo,
+                            address: format!("198.19.{t}.1/24").parse()?,
+                            label: None,
+                        }));
+                    }
+                    ops.push(ConfigOp::StaticRoutingInstance(
+                        StaticRoutingInstanceOp::Ensure {
+                            name: instance.clone(),
+                        },
+                    ));
+                    ops.push(ConfigOp::RoutingTable(
+                        RoutingTableOp::SetStaticRoutingInstance {
+                            name: (*table).to_string(),
+                            static_routing_instance: instance.clone(),
+                        },
+                    ));
+                }
+                ops.extend((from..to).map(|i| {
+                    ConfigOp::StaticRoute(StaticRouteOp::Set {
+                        instance: instance.clone(),
+                        subnet: chunked_prefix(t, i),
+                        gateway,
+                    })
+                }));
+                for op in ops {
+                    op.apply(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .context("committing a wave of statics (did nos-configd die?)")?;
+        // A configd that dies on a commit shows as every daemon's diff
+        // stream closing: fail at once, not after an hour.
+        if b.count("diff stream closed") != closed {
+            bail!("router-b: nos-configd died committing wave {wave}");
+        }
+        for (p, base) in wave_lasts.iter().zip(&bases) {
+            a.wait_new(&learned(p), *base, 300).await?;
+        }
+        // Per-daemon RSS and the cgroup after every wave (`SAMPLE …` lines).
+        let _ = crate::logd_mem::sample(&*w, b, &format!("wave{wave}")).await;
+        if wave + 1 == waves {
+            lasts = wave_lasts;
+        }
+    }
+    log(format!(
+        "router-b: {total} statics committed in {waves} waves after {}s",
+        started.elapsed().as_secs()
+    ));
+    log(format!(
+        "router-a's bgpd holds all {total} Type-5 routes after {}s",
+        started.elapsed().as_secs()
+    ));
+
+    log("router-a gets its three IP-VRFs: each nos-ribd must assemble one chunked Full");
+    let assembled = |t: &str| {
+        format!("assembled chunked evpn route snapshot table={t} routes=7[0-9][0-9][0-9][0-9] parts=[2-9]")
+    };
+    let added = |p: &nos_proto::IpNet| {
+        format!("added route prefix={p} gateway={IP_B} next_hops=1 .*source=Some(Evpn)")
+    };
+    let asm_base: Vec<usize> = CHUNKED_TABLES
+        .iter()
+        .map(|(t, _)| a.count(&assembled(t)))
+        .collect();
+    let added_base: Vec<usize> = lasts.iter().map(|p| a.count(&added(p))).collect();
+    let removed = a.count("removed route");
+    let applied = std::time::Instant::now();
+    a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A)).await?;
+    for (table, vni) in &CHUNKED_TABLES[1..] {
+        a.provision_flags(&chunked_table_flags(A, table, *vni))
+            .await?;
+    }
+    for ((t, _), base) in CHUNKED_TABLES.iter().zip(&asm_base) {
+        a.wait_new(&assembled(t), *base, 900).await?;
+    }
+    for (p, base) in lasts.iter().zip(&added_base) {
+        a.wait_new(&added(p), *base, 3600).await?;
+    }
+    log(format!(
+        "router-a installed all tables {}s after creating them",
+        applied.elapsed().as_secs()
+    ));
+    a.assert_quiet("removed route", removed, 3).await?;
+    if !tenant_has_evpn(a, &lasts[0].to_string()).await? {
+        bail!(
+            "router-a: {L3_TABLE} lacks {} after the chunked Full",
+            lasts[0]
+        );
+    }
     Ok(())
 }
 

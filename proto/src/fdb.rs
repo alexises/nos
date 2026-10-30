@@ -128,7 +128,8 @@ pub const EVPN_PUSH_BYTES: usize = crate::codec::MAX_FRAME / 4;
 
 /// The budget every sender passes to [`EvpnUpdate::split_with`]:
 /// [`EVPN_PUSH_BYTES`], or `NOS_EVPN_PUSH_BYTES` when set (a test hook, so
-/// e2e needs hundreds of routes rather than millions).
+/// tests and dev runs need few routes). Not usable under the watchdog, which
+/// clears its children's environment.
 #[must_use]
 pub fn evpn_push_budget() -> usize {
     parse_budget(std::env::var("NOS_EVPN_PUSH_BYTES").ok().as_deref())

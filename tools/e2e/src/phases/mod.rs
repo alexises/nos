@@ -75,6 +75,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "evpn-single-active" => bgp::evpn_single_active(w).await,
         "evpn-v6" => bgp::evpn_v6(w).await,
         "evpn-l3" => bgp::evpn_l3(w).await,
+        "evpn-l3-chunked" => bgp::evpn_l3_chunked(w).await,
         "loopback" => drivers::loopback(w).await,
         "routes-paging" => drivers::routes_paging(w).await,
         "mtu" => drivers::mtu(w).await,
@@ -287,6 +288,9 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// Phases `all` skips (hours long): run them by name, in no group.
+pub const SLOW: &[&str] = &["evpn-l3-chunked"];
+
 /// `all`: every phase in sequence, leaving the containers up for inspection.
 pub const ALL: &[&str] = &[
     "up",
@@ -342,6 +346,7 @@ pub const ALL: &[&str] = &[
     "evpn-single-active",
     "evpn-v6",
     "evpn-l3",
+    "evpn-l3-chunked",
     "reflector",
     "route-server",
     "bgp-multipath",
