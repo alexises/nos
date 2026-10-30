@@ -273,3 +273,100 @@ async fn routes_are_paged_over_a_connection_and_the_old_query_is_an_error() {
         Some(BgpEvent::Error(m)) if m.contains("GetRoutesPage")
     ));
 }
+
+/// #724: a `RedistributeMacs`/`RedistributeEvpnPrefixes` `Full` past the
+/// codec's 16 MiB `MAX_FRAME`, cut by `EvpnUpdate::split`, crosses the real
+/// codec and is staged per source until its closing `Full`: nothing is held
+/// from the `FullPart`s alone, then the whole set lands in one apply (parts
+/// applied one by one would leave only the last chunk, each `Full` replacing
+/// the previous). The domain and the table share a name and must not mix.
+#[tokio::test]
+async fn evpn_redistribution_past_max_frame_is_staged_until_the_closing_full() {
+    use nos_proto::fdb::Esi;
+    use nos_proto::{EvpnKey, EvpnRoute};
+    use tokio_util::codec::Encoder;
+    type Request = fn(EvpnUpdate) -> BgpRequest;
+    // ~80 KB per route (8000 communities, 10 bytes each): 250 is ~19 MiB.
+    const N: u8 = 250;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("bgp.sock");
+    let sessions = SessionManager::new("r1".to_string());
+    let _server = nos_bgp::server::start(
+        &path,
+        "r1".to_string(),
+        sessions.clone(),
+        &shared().identity("bgpd", "r1"),
+        tmp.path().join("no-watchdog.sock"),
+    )
+    .unwrap();
+
+    let routes = |base: u8| -> Vec<EvpnRoute> {
+        (0..N)
+            .map(|i| EvpnRoute {
+                key: EvpnKey::Mac {
+                    rd: [0; 8],
+                    mac: [0, 0, 0, 0, base, i],
+                },
+                vni: 10,
+                next_hop: "10.0.0.1".parse().unwrap(),
+                ext_communities: vec![u64::MAX; 8000],
+                esi: Esi::default(),
+                l3_vni: None,
+            })
+            .collect()
+    };
+    let requests: [(u8, Role, Request); 2] = [
+        (1, Role::Fdbd, |update| BgpRequest::RedistributeMacs {
+            domain: "x".into(),
+            update,
+        }),
+        (2, Role::Ribd, |update| {
+            BgpRequest::RedistributeEvpnPrefixes {
+                table: "x".into(),
+                update,
+            }
+        }),
+    ];
+    let mut held = 0;
+    for (base, role, request) in requests {
+        let all = routes(base);
+        assert!(
+            IpcCodec::<BgpRequest>::default()
+                .encode(
+                    request(EvpnUpdate::Full(all.clone())),
+                    &mut bytes::BytesMut::new()
+                )
+                .is_err(),
+            "the unchunked snapshot must exceed MAX_FRAME"
+        );
+        let mut frames = EvpnUpdate::Full(all).split();
+        let last = frames.pop().unwrap();
+        assert!(frames.len() > 1);
+        let (mut r, mut w) = connect_as(&path, role).await;
+        for frame in frames {
+            w.feed(request(frame)).await.unwrap();
+        }
+        w.flush().await.unwrap();
+        // Fire-and-forget: no reply to wait on, so give the server time.
+        assert!(
+            stays_open(&mut r).await,
+            "{role:?} disconnected mid-snapshot"
+        );
+        assert_eq!(
+            sessions.evpn_local_len().await,
+            held,
+            "half a snapshot held"
+        );
+
+        w.send(request(last)).await.unwrap();
+        held += usize::from(N);
+        for _ in 0..100 {
+            if sessions.evpn_local_len().await == held {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(sessions.evpn_local_len().await, held, "{role:?} snapshot");
+    }
+}

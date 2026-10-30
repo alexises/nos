@@ -1,15 +1,18 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, Stream};
-use nos_proto::{BgpEvent, BgpRequest, IpcCodec, Role};
+use nos_proto::chunk::FullStaging;
+use nos_proto::{BgpEvent, BgpRequest, EvpnRoute, EvpnUpdate, IpcCodec, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::collision::FsmCommand;
 use crate::page::{Snapshot, PAGE_BYTES};
+use crate::rib::EvpnSource;
 use crate::session::{SessionManager, VpnAsk, VpnSnapshot};
 
 /// Binds `listen_socket` and spawns the IPC accept loop for session
@@ -155,6 +158,7 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
     let mut writer = FramedWrite::new(write_half, IpcCodec::<BgpEvent>::default());
 
     let mut snapshots = Snapshots::default();
+    let mut evpn = EvpnStaging::default();
     while let Some(msg) = reader.next().await {
         let req = match msg {
             Ok(req) => req,
@@ -208,10 +212,16 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                 sessions.apply_redistribute_update(update).await;
             }
             BgpRequest::RedistributeMacs { domain, update } => {
-                sessions.apply_evpn_local(&domain, update).await;
+                let source = EvpnSource::Domain(domain.clone());
+                if let Some(update) = evpn.absorb(instance, &source, update) {
+                    sessions.apply_evpn_local(&domain, update).await;
+                }
             }
             BgpRequest::RedistributeEvpnPrefixes { table, update } => {
-                sessions.apply_evpn_prefixes(&table, update).await;
+                let source = EvpnSource::Table(table.clone());
+                if let Some(update) = evpn.absorb(instance, &source, update) {
+                    sessions.apply_evpn_prefixes(&table, update).await;
+                }
             }
             BgpRequest::RedistributeVpnPrefixes { table, update } => {
                 sessions.apply_vpn_prefixes(&table, update).await;
@@ -240,6 +250,125 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                 }
             }
         }
+    }
+}
+
+/// One connection's chunked `RedistributeMacs`/`RedistributeEvpnPrefixes`
+/// `Full`s in progress (#724), one per `EvpnSource`: a domain and a table may
+/// share a name, so they never share a buffer. Nothing reaches
+/// `apply_evpn_source` until the closing `Full` (applied once: it diffs
+/// against the old set, so a lone part would withdraw the rest); a connection
+/// lost mid-snapshot drops it and the sender resends a whole `Full`.
+#[derive(Default)]
+struct EvpnStaging(HashMap<EvpnSource, FullStaging<EvpnRoute>>);
+
+impl EvpnStaging {
+    /// `None` while `update` is a `FullPart`; otherwise the update to apply
+    /// (a closing `Full` holding every staged route, in order).
+    fn absorb(
+        &mut self,
+        instance: &str,
+        source: &EvpnSource,
+        update: EvpnUpdate,
+    ) -> Option<EvpnUpdate> {
+        let mut staging = self.0.remove(source).unwrap_or_default();
+        let absorbed = update.absorb(&mut staging);
+        // Still mid-snapshot after a part, or an incremental in between.
+        if staging.is_staging() {
+            self.0.insert(source.clone(), staging);
+        }
+        let (update, parts) = absorbed?;
+        if parts > 1
+            && let EvpnUpdate::Full(r) = &update
+        {
+            let (kind, name) = match source {
+                EvpnSource::Domain(n) => ("domain", n),
+                EvpnSource::Table(n) => ("table", n),
+            };
+            info!(
+                source = %format_args!("{kind}:{name}"),
+                routes = r.len(),
+                parts,
+                instance = %instance,
+                "assembled chunked evpn route snapshot"
+            );
+        }
+        Some(update)
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    fn route(i: u8) -> EvpnRoute {
+        EvpnRoute {
+            key: nos_proto::EvpnKey::Mac {
+                rd: [0; 8],
+                mac: [0, 0, 0, 0, 0, i],
+            },
+            vni: 10,
+            next_hop: [10, 0, 0, 1].into(),
+            ext_communities: vec![u64::MAX; 20],
+            esi: nos_proto::fdb::Esi::default(),
+            l3_vni: None,
+        }
+    }
+
+    fn routes(r: std::ops::Range<u8>) -> Vec<EvpnRoute> {
+        r.map(route).collect()
+    }
+
+    #[test]
+    fn a_domain_and_a_table_of_the_same_name_stage_apart() {
+        let mut st = EvpnStaging::default();
+        let dom = || EvpnSource::Domain("x".into());
+        let tab = || EvpnSource::Table("x".into());
+        let part = |r| EvpnUpdate::FullPart(r);
+        assert_eq!(st.absorb("r1", &dom(), part(routes(0..2))), None);
+        assert_eq!(st.absorb("r1", &tab(), part(routes(10..11))), None);
+        assert_eq!(st.absorb("r1", &dom(), part(routes(2..3))), None);
+        // Incrementals pass through without touching either buffer.
+        let add = EvpnUpdate::Add(route(99));
+        assert_eq!(st.absorb("r1", &dom(), add.clone()), Some(add));
+        assert_eq!(
+            st.absorb("r1", &tab(), EvpnUpdate::Full(routes(11..12))),
+            Some(EvpnUpdate::Full(routes(10..12)))
+        );
+        assert_eq!(
+            st.absorb("r1", &dom(), EvpnUpdate::Full(routes(3..4))),
+            Some(EvpnUpdate::Full(routes(0..4)))
+        );
+        assert!(st.0.is_empty(), "closed buffers are dropped");
+        // A plain `Full` with nothing staged passes through unchanged.
+        assert_eq!(
+            st.absorb("r1", &tab(), EvpnUpdate::Full(routes(5..6))),
+            Some(EvpnUpdate::Full(routes(5..6)))
+        );
+    }
+
+    #[test]
+    fn a_split_full_reassembles_and_a_dropped_connection_discards() {
+        let all = routes(0..40);
+        let mut st = EvpnStaging::default();
+        let src = || EvpnSource::Table("tenant".into());
+        let mut frames = EvpnUpdate::Full(all.clone()).split_with(1024);
+        let last = frames.pop().unwrap();
+        assert!(frames.len() > 1);
+        for f in frames.clone() {
+            assert_eq!(st.absorb("r1", &src(), f), None);
+        }
+        assert_eq!(
+            st.absorb("r1", &src(), last.clone()),
+            Some(EvpnUpdate::Full(all))
+        );
+        // Mid-snapshot connection loss: a new connection starts empty.
+        for f in frames {
+            st.absorb("r1", &src(), f);
+        }
+        drop(st);
+        let mut fresh = EvpnStaging::default();
+        assert_eq!(fresh.absorb("r1", &src(), last.clone()), Some(last));
     }
 }
 
@@ -279,6 +408,29 @@ mod authz_tests {
                 ),
                 role == Role::Ribd,
                 "{role:?} redistribute evpn prefixes"
+            );
+            // #724: a chunk is gated exactly like the `Full` it belongs to.
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::RedistributeMacs {
+                        domain: "bd1".to_string(),
+                        update: nos_proto::EvpnUpdate::FullPart(vec![])
+                    }
+                ),
+                role == Role::Fdbd,
+                "{role:?} redistribute macs part"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::RedistributeEvpnPrefixes {
+                        table: "tenant".to_string(),
+                        update: nos_proto::EvpnUpdate::FullPart(vec![])
+                    }
+                ),
+                role == Role::Ribd,
+                "{role:?} redistribute evpn prefixes part"
             );
             assert_eq!(
                 allowed(
