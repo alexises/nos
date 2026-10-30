@@ -27,6 +27,22 @@ pub fn split_full<T>(
     (parts, cur)
 }
 
+/// Sends `frames` (a split `Full`'s parts, or any updates) in order,
+/// stopping at the first write error: `false` then, so the caller reconnects
+/// and resends a whole `Full`.
+pub async fn send_all<S, T>(sink: &mut S, frames: impl IntoIterator<Item = T>) -> bool
+where
+    S: futures::Sink<T> + Unpin,
+{
+    use futures::SinkExt;
+    for frame in frames {
+        if sink.send(frame).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 /// One connection's chunked `Full` snapshot in progress: nothing is applied
 /// until the closing `Full`, so a table never shows half a snapshot. Drop it
 /// with the connection (a snapshot lost mid-way is resent whole on reconnect).
@@ -112,6 +128,17 @@ mod tests {
         // A leading oversized item must not yield an empty part.
         let (p, c) = split_full(strs(&[50, 2]), 10, by_len);
         assert_eq!((p.len(), c.len()), (1, 1));
+    }
+
+    #[test]
+    fn send_all_sends_in_order_and_stops_at_the_first_error() {
+        let mut sent: Vec<u8> = Vec::new();
+        assert!(futures::executor::block_on(send_all(&mut sent, [1, 2, 3])));
+        assert_eq!(sent, [1, 2, 3]);
+        // A closed channel refuses every frame.
+        let (mut tx, rx) = futures::channel::mpsc::channel::<u8>(4);
+        drop(rx);
+        assert!(!futures::executor::block_on(send_all(&mut tx, [1, 2])));
     }
 
     #[test]

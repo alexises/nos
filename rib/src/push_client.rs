@@ -10,7 +10,6 @@ use std::hash::Hash;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use futures::SinkExt;
 use nos_proto::{BgpRequest, IpcCodec, Role, ServiceRef};
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
@@ -50,6 +49,31 @@ pub trait Feed: Send + Sync + 'static {
     fn add(r: Self::Route) -> Self::Update;
     fn remove(k: Self::Key) -> Self::Update;
     fn request(table: String, update: Self::Update) -> BgpRequest;
+    /// The frames `update` goes as, cut at `budget` ([`Feed::budget`]):
+    /// itself unless the feed chunks a large `Full`.
+    fn split(update: Self::Update, budget: usize) -> Vec<Self::Update> {
+        let _ = budget;
+        vec![update]
+    }
+    /// The budget [`Feed::split`] is given.
+    fn budget() -> usize {
+        usize::MAX
+    }
+}
+
+/// Sends `update` as its [`Feed::split`] frames, in order, stopping at the
+/// first write error (`false`).
+pub(crate) async fn send<F: Feed, S>(
+    sink: &mut S,
+    table: &str,
+    update: F::Update,
+    budget: usize,
+) -> bool
+where
+    S: futures::Sink<BgpRequest> + Unpin,
+{
+    let frames = F::split(update, budget).into_iter();
+    nos_proto::chunk::send_all(sink, frames.map(|u| F::request(table.to_string(), u))).await
 }
 
 fn keyed<F: Feed>(routes: &[F::Route]) -> HashMap<F::Key, F::Route> {
@@ -126,16 +150,12 @@ async fn run<F: Feed>(
         };
         let (mut reader, w) = tokio::io::split(stream);
         let mut writer = FramedWrite::new(w, IpcCodec::<BgpRequest>::default());
-        let send = |update| F::request(table.clone(), update);
+        let budget = F::budget();
         let current = rx.borrow_and_update().clone();
         if current.bgp_instance != target.bgp_instance {
             continue;
         }
-        if writer
-            .send(send(F::full(current.routes.clone())))
-            .await
-            .is_err()
-        {
+        if !send::<F, _>(&mut writer, &table, F::full(current.routes.clone()), budget).await {
             warn!(table = %table, bgp_instance = %name, "failed to send the {what} snapshot to nos-bgpd, retrying");
             continue;
         }
@@ -150,17 +170,12 @@ async fn run<F: Feed>(
                     }
                     let new = rx.borrow_and_update().clone();
                     if new.bgp_instance.as_deref() != Some(name.as_str()) {
-                        let _ = writer.send(send(F::full(Vec::new()))).await;
+                        let _ = send::<F, _>(&mut writer, &table, F::full(Vec::new()), budget).await;
                         break;
                     }
-                    let mut failed = false;
-                    for u in diff::<F, _>(&last, &new.routes) {
-                        if writer.send(send(u)).await.is_err() {
-                            failed = true;
-                            break;
-                        }
-                    }
-                    if failed {
+                    let updates = diff::<F, _>(&last, &new.routes);
+                    let frames = updates.into_iter().map(|u| F::request(table.clone(), u));
+                    if !nos_proto::chunk::send_all(&mut writer, frames).await {
                         warn!(table = %table, bgp_instance = %name, "write failure sending {what} routes, reconnecting");
                         break;
                     }

@@ -2,7 +2,9 @@
 //! `evpn.bgp_instance` (the underlay `nos-bgpd`) over one long-lived
 //! `BgpRequest::RedistributeEvpnPrefixes` connection — independent of
 //! `bgp_client.rs` (the two may name different instances). The connection
-//! loop is `push_client`'s, shared with `vpn_client`.
+//! loop is `push_client`'s, shared with `vpn_client`. A `Full` over
+//! `evpn_push_budget()` encoded bytes goes as `FullPart`s closed by a `Full`
+//! (#725), which `nos-bgpd` assembles before applying.
 
 use std::path::PathBuf;
 
@@ -37,6 +39,12 @@ impl Feed for Evpn {
     fn request(table: String, update: EvpnUpdate) -> BgpRequest {
         BgpRequest::RedistributeEvpnPrefixes { table, update }
     }
+    fn split(update: EvpnUpdate, budget: usize) -> Vec<EvpnUpdate> {
+        update.split_with(budget)
+    }
+    fn budget() -> usize {
+        nos_proto::fdb::evpn_push_budget()
+    }
 }
 
 pub fn spawn(
@@ -52,7 +60,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::push_client::diff;
+    use crate::push_client::{diff, send};
 
     fn route(prefix: &str, vni: u32) -> EvpnRoute {
         EvpnRoute {
@@ -93,5 +101,43 @@ mod tests {
             Evpn::request("t".into(), Evpn::full(vec![])),
             BgpRequest::RedistributeEvpnPrefixes { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn a_large_full_goes_as_ordered_parts_and_a_small_one_whole() {
+        let routes: Vec<EvpnRoute> = (0..10)
+            .map(|i| route(&format!("10.{i}.0.0/24"), 1))
+            .collect();
+        let mut sent: Vec<BgpRequest> = Vec::new();
+        // A 1-byte budget: every route is oversized, so one per frame.
+        assert!(send::<Evpn, _>(&mut sent, "t", EvpnUpdate::Full(routes.clone()), 1).await);
+        let kinds: Vec<_> = sent
+            .iter()
+            .map(|r| match r {
+                BgpRequest::RedistributeEvpnPrefixes { table, update } => match update {
+                    EvpnUpdate::FullPart(p) => (table.as_str(), true, p.len()),
+                    EvpnUpdate::Full(p) => (table.as_str(), false, p.len()),
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let mut want = vec![("t", true, 1); 9];
+        want.push(("t", false, 1));
+        assert_eq!(kinds, want);
+        let rejoined: Vec<EvpnRoute> = sent
+            .into_iter()
+            .flat_map(|r| match r {
+                BgpRequest::RedistributeEvpnPrefixes {
+                    update: EvpnUpdate::FullPart(p) | EvpnUpdate::Full(p),
+                    ..
+                } => p,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(rejoined, routes);
+        let mut whole: Vec<BgpRequest> = Vec::new();
+        assert!(send::<Evpn, _>(&mut whole, "t", EvpnUpdate::Full(routes), Evpn::budget()).await);
+        assert_eq!(whole.len(), 1);
     }
 }
