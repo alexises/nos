@@ -548,6 +548,82 @@ async fn push_vpn_full_past_max_frame_is_chunked_and_applied_atomically() {
     assert_eq!(applied[0].len(), N as usize);
 }
 
+/// The OSPF twin (#726): an SPF `Full` past `MAX_FRAME` cut by
+/// `OspfRouteUpdate::frames` crosses the real codec as `ospfd`, is staged
+/// until its closing `Full` and lands as one kernel apply.
+#[tokio::test]
+async fn push_ospf_full_past_max_frame_is_chunked_and_applied_atomically() {
+    use nos_proto::{OspfRoute, OspfRouteUpdate};
+    use tokio_util::codec::Encoder;
+    // ~75 encoded bytes per IPv6 route with a hop, a backup and a tunnel:
+    // 260k is ~18 MiB.
+    const N: u32 = 260_000;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let driver = Arc::new(RecordingDriver::default());
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib.clone(),
+        driver.clone(),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
+
+    let v6 = |i: u32| {
+        IpAddr::from(std::net::Ipv6Addr::from(
+            (0x2001_0db8_u128 << 96) | (u128::from(i) << 16),
+        ))
+    };
+    let routes: Vec<OspfRoute> = (0..N)
+        .map(|i| OspfRoute {
+            prefix: nos_proto::IpNet::new(v6(i), 112).unwrap(),
+            next_hops: vec![(v6(N + 1), Some(7))],
+            backup_next_hop: Some(v6(N + 2)),
+            backup_interface_id: Some(8),
+            metric: 100_000,
+            discard: false,
+            backup_tunnel: Some(v6(N + 3)),
+        })
+        .collect();
+    let whole = RibRequest::PushOspfRoutes(vec![OspfRouteUpdate::Full(routes.clone())]);
+    assert!(
+        IpcCodec::<RibRequest>::default()
+            .encode(whole, &mut bytes::BytesMut::new())
+            .is_err(),
+        "the unchunked snapshot must exceed MAX_FRAME"
+    );
+
+    let mut frames = OspfRouteUpdate::frames(vec![OspfRouteUpdate::Full(routes)]);
+    let last = frames.pop().unwrap();
+    assert!(frames.len() > 1);
+    let (mut reader, mut writer) = connect_as(&path, "ospfd", "o1").await;
+    // `GetTableId`'s reply is the barrier: every earlier frame was handled.
+    for frame in frames {
+        writer
+            .feed(RibRequest::PushOspfRoutes(frame))
+            .await
+            .unwrap();
+    }
+    writer.send(RibRequest::GetTableId).await.unwrap();
+    reader.next().await.unwrap().unwrap();
+    assert_eq!(rib.read().await.count_source(RouteSource::Ospf), 0);
+    assert!(
+        driver.applied.lock().await.is_empty(),
+        "half a table published"
+    );
+
+    writer.send(RibRequest::PushOspfRoutes(last)).await.unwrap();
+    writer.send(RibRequest::GetTableId).await.unwrap();
+    reader.next().await.unwrap().unwrap();
+    assert_eq!(rib.read().await.count_source(RouteSource::Ospf), N);
+    let applied = driver.applied.lock().await;
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].len(), N as usize);
+}
+
 #[tokio::test]
 async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     let tmp = tempfile::tempdir().unwrap();

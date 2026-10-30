@@ -273,15 +273,91 @@ pub struct OspfRoute {
 
 /// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,
 /// long-lived connection — the OSPF analogue of `BgpRouteUpdate`, same
-/// `Full`-on-connect-then-incremental shape.
+/// `Full`-on-connect-then-incremental shape. A push is cut into frames by
+/// [`OspfRouteUpdate::frames`] so none exceeds the codec's `MAX_FRAME`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OspfRouteUpdate {
-    /// The complete route set, replacing any previous one.
+    /// The complete route set, replacing any previous one — together with
+    /// every `FullPart` received since the last `Full` on this connection.
     Full(Vec<OspfRoute>),
     /// One route added or changed.
     Add(OspfRoute),
     /// One route withdrawn.
     Remove(IpNet),
+    /// The leading part of a `Full` snapshot too large for one frame: the
+    /// receiver stages it and publishes nothing until the closing `Full`.
+    /// Appended (postcard indexes variants by position).
+    FullPart(Vec<OspfRoute>),
+}
+
+/// Most weight one `PushOspfRoutes` frame carries, a route weighing its next
+/// hop count plus one. The densest worst case (IPv6 everything, no next hop,
+/// every optional field set) is ~70 B per unit, so a frame stays near
+/// 4.5 MiB, under the 16 MiB `MAX_FRAME` (pinned by a test).
+pub const OSPF_PUSH_CHUNK: usize = 65536;
+
+/// The budget [`OspfRouteUpdate::frames`] uses: [`OSPF_PUSH_CHUNK`], or
+/// `NOS_OSPF_PUSH_CHUNK` when set (a test hook, so tests and dev runs need
+/// few routes). Not usable under the watchdog, which clears its children's
+/// environment.
+#[must_use]
+pub fn ospf_push_chunk() -> usize {
+    parse_chunk(std::env::var("NOS_OSPF_PUSH_CHUNK").ok().as_deref())
+}
+
+fn parse_chunk(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.trim().parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(OSPF_PUSH_CHUNK)
+}
+
+impl OspfRoute {
+    /// Frame budget weight: one per next hop, plus one for the route itself.
+    fn weight(&self) -> usize {
+        self.next_hops.len() + 1
+    }
+}
+
+impl OspfRouteUpdate {
+    fn weight(&self) -> usize {
+        match self {
+            Self::Full(r) | Self::FullPart(r) => {
+                r.iter().map(OspfRoute::weight).sum::<usize>().max(1)
+            }
+            Self::Add(r) => r.weight(),
+            Self::Remove(_) => 1,
+        }
+    }
+
+    /// [`Self::frames_with`] at [`ospf_push_chunk`].
+    #[must_use]
+    pub fn frames(updates: Vec<Self>) -> Vec<Vec<Self>> {
+        Self::frames_with(updates, ospf_push_chunk())
+    }
+
+    /// Cuts one push into `PushOspfRoutes` frames of at most `chunk` weight
+    /// each, in order: a heavier `Full` becomes `FullPart`s closed by a
+    /// `Full` holding the last chunk, so the receiver still swaps the whole
+    /// set at once (see [`VpnRouteUpdate::frames`]).
+    #[must_use]
+    pub fn frames_with(updates: Vec<Self>, chunk: usize) -> Vec<Vec<Self>> {
+        let mut split = Vec::with_capacity(updates.len());
+        for u in updates {
+            match u {
+                Self::Full(routes) => {
+                    let (parts, last) = crate::chunk::split_full(routes, chunk, OspfRoute::weight);
+                    split.extend(parts.into_iter().map(Self::FullPart));
+                    split.push(Self::Full(last));
+                }
+                u => split.push(u),
+            }
+        }
+        let (mut frames, last) = crate::chunk::split_full(split, chunk, Self::weight);
+        if !last.is_empty() {
+            frames.push(last);
+        }
+        frames
+    }
 }
 
 /// One path of a `VpnRoute`: a received VPN route's PE, RD and label stack,
@@ -738,5 +814,116 @@ mod tests {
         IpcCodec::<RibRequest>::default()
             .encode(frame, &mut buf)
             .unwrap();
+    }
+
+    fn ospf_route(i: u32, hops: usize) -> OspfRoute {
+        OspfRoute {
+            prefix: IpNet::new(IpAddr::from(i.to_be_bytes()), 32).unwrap(),
+            next_hops: vec![(IpAddr::from([10, 0, 0, 1]), None); hops],
+            backup_next_hop: None,
+            backup_interface_id: None,
+            metric: 10,
+            discard: false,
+            backup_tunnel: None,
+        }
+    }
+
+    fn ospf_shape(frames: &[Vec<OspfRouteUpdate>]) -> Vec<Vec<(char, usize)>> {
+        frames
+            .iter()
+            .map(|f| {
+                f.iter()
+                    .map(|u| match u {
+                        OspfRouteUpdate::Full(r) => ('F', r.len()),
+                        OspfRouteUpdate::FullPart(r) => ('P', r.len()),
+                        OspfRouteUpdate::Add(_) => ('A', 1),
+                        OspfRouteUpdate::Remove(_) => ('R', 1),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ospf_frames_weigh_next_hops_plus_one_per_route() {
+        let frames = |u, chunk| OspfRouteUpdate::frames_with(u, chunk);
+        // Small pushes stay one frame; nothing is no frame.
+        assert_eq!(frames(vec![], 10).len(), 0);
+        let f = frames(vec![OspfRouteUpdate::Full(vec![])], 10);
+        assert_eq!(ospf_shape(&f), [vec![('F', 0)]]);
+        // 5 single-hop routes weigh exactly the chunk.
+        let fits: Vec<_> = (0..5).map(|i| ospf_route(i, 1)).collect();
+        let f = frames(vec![OspfRouteUpdate::Full(fits)], 10);
+        assert_eq!(ospf_shape(&f), [vec![('F', 5)]]);
+
+        // A heavier Full: parts closed by a Full, in order, rejoined whole.
+        let all: Vec<_> = (0..12).map(|i| ospf_route(i, 2)).collect();
+        let f = frames(vec![OspfRouteUpdate::Full(all.clone())], 10);
+        assert_eq!(
+            ospf_shape(&f),
+            [
+                vec![('P', 3)],
+                vec![('P', 3)],
+                vec![('P', 3)],
+                vec![('F', 3)]
+            ]
+        );
+        let rejoined: Vec<OspfRoute> = f
+            .into_iter()
+            .flatten()
+            .flat_map(|u| match u {
+                OspfRouteUpdate::Full(r) | OspfRouteUpdate::FullPart(r) => r,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(rejoined, all);
+
+        // Add (hops + 1) and Remove (1) are packed by weight.
+        let mut u: Vec<_> = (0..7)
+            .map(|i| OspfRouteUpdate::Add(ospf_route(i, 2)))
+            .collect();
+        u.push(OspfRouteUpdate::Remove(ospf_route(1, 1).prefix));
+        let f = frames(u, 10);
+        assert_eq!(f.iter().map(Vec::len).collect::<Vec<_>>(), [3, 3, 2]);
+    }
+
+    #[test]
+    fn ospf_push_chunk_reads_the_env_hook() {
+        assert_eq!(parse_chunk(None), OSPF_PUSH_CHUNK);
+        assert_eq!(parse_chunk(Some("junk")), OSPF_PUSH_CHUNK);
+        assert_eq!(parse_chunk(Some("0")), OSPF_PUSH_CHUNK);
+        assert_eq!(parse_chunk(Some(" 64 ")), 64);
+    }
+
+    /// The worst cases `OSPF_PUSH_CHUNK` is sized for still fit one frame:
+    /// the densest bytes per weight unit (hop-less routes, every optional
+    /// field IPv6/maxed) and one route of `OSPF_PUSH_CHUNK - 1` ECMP hops.
+    #[test]
+    fn a_chunk_of_worst_case_ospf_routes_fits_max_frame() {
+        let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
+        let worst = |hops: usize| OspfRoute {
+            prefix: IpNet::new(v6(1), 128).unwrap(),
+            next_hops: vec![(v6(2), Some(u32::MAX)); hops],
+            backup_next_hop: Some(v6(3)),
+            backup_interface_id: Some(u32::MAX),
+            metric: u32::MAX,
+            discard: true,
+            backup_tunnel: Some(v6(4)),
+        };
+        for routes in [
+            vec![worst(0); OSPF_PUSH_CHUNK],
+            vec![worst(OSPF_PUSH_CHUNK - 1)],
+        ] {
+            let f =
+                OspfRouteUpdate::frames_with(vec![OspfRouteUpdate::Full(routes)], OSPF_PUSH_CHUNK);
+            assert_eq!(f.len(), 1);
+            let frame = RibRequest::PushOspfRoutes(f.into_iter().next().unwrap());
+            let len = postcard::to_allocvec(&frame).unwrap().len();
+            assert!(len < MAX_FRAME, "{len} bytes");
+            let mut buf = bytes::BytesMut::new();
+            IpcCodec::<RibRequest>::default()
+                .encode(frame, &mut buf)
+                .unwrap();
+        }
     }
 }
