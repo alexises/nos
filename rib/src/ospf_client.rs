@@ -18,6 +18,7 @@ use nos_proto::{
     IpcCodec, OspfRequest, Ospfv3Request, RedistributeUpdate, RedistributedRoute, Role, ServiceRef,
 };
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
@@ -75,14 +76,16 @@ pub struct RedistributeTarget {
 /// Spawns the background task that owns the redistribution-push connection
 /// for this table's lifetime and returns the `watch::Sender` `resync` uses
 /// to publish the current desired state. Seeded with an empty target
-/// (`instance: None`) — the task starts idle until the first resync.
+/// (`instance: None`) — the task starts idle until the first resync. `chunk`
+/// is the routes per frame of the initial `Full` (`RedistributeUpdate::split_with`).
 pub fn spawn<R: Serialize + Send + 'static>(
     watchdog_socket: PathBuf,
     shutdown: watch::Receiver<bool>,
     peer: Peer<R>,
+    chunk: usize,
 ) -> watch::Sender<RedistributeTarget> {
     let (tx, rx) = watch::channel(RedistributeTarget::default());
-    tokio::spawn(run(watchdog_socket, rx, shutdown, peer));
+    tokio::spawn(run(watchdog_socket, rx, shutdown, peer, chunk));
     tx
 }
 
@@ -93,6 +96,7 @@ async fn run<R: Serialize>(
     mut target_rx: watch::Receiver<RedistributeTarget>,
     mut shutdown: watch::Receiver<bool>,
     peer: Peer<R>,
+    chunk: usize,
 ) {
     let daemon = peer.role.as_str();
     while !*shutdown.borrow() {
@@ -131,7 +135,11 @@ async fn run<R: Serialize>(
             }
         };
 
-        let mut writer = FramedWrite::new(stream, IpcCodec::<R>::default());
+        // The peer never replies, so a read returning means it went away (a
+        // restart): reconnect with a fresh `Full`, like `bgp_client.rs` (#729).
+        let (mut reader, write_half) = tokio::io::split(stream);
+        let mut writer = FramedWrite::new(write_half, IpcCodec::<R>::default());
+        let mut eof_buf = [0u8; 1];
 
         // Re-read the target once more: it may have changed while we were
         // resolving/connecting. If it no longer names the instance we just
@@ -143,13 +151,10 @@ async fn run<R: Serialize>(
             continue;
         }
 
-        if writer
-            .send((peer.wrap)(RedistributeUpdate::Full(
-                current.routes.clone(),
-            )))
-            .await
-            .is_err()
-        {
+        // A `Full` over `chunk` routes goes as `FullPart`s closed by a `Full`
+        // (16 MiB frame cap, #729); `last_sent` moves only once all are out.
+        let frames = RedistributeUpdate::Full(current.routes.clone()).split_with(chunk);
+        if !nos_proto::chunk::send_all(&mut writer, frames.into_iter().map(peer.wrap)).await {
             warn!(daemon, instance = %name, "failed to send initial redistribution snapshot, retrying");
             if wait_retry(RETRY_DELAY, &mut target_rx, &mut shutdown).await {
                 break;
@@ -196,6 +201,10 @@ async fn run<R: Serialize>(
                         break;
                     }
                     last_sent = build_last_sent(&new_target.routes);
+                }
+                _ = reader.read(&mut eof_buf) => {
+                    warn!(daemon, instance = %name, "redistribution target closed the connection, reconnecting");
+                    break;
                 }
                 _ = shutdown.changed() => return,
             }
@@ -353,5 +362,63 @@ mod tests {
         let target = RedistributeTarget::default();
         assert_eq!(target.instance, None);
         assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
+    }
+
+    /// Frames the client sends for `routes` with a `chunk` budget, on a first
+    /// connection and again once the receiver closes it (a restart, which
+    /// must get a fresh `Full`).
+    async fn sent(chunk: usize, routes: Vec<RedistributedRoute>) -> [Vec<RedistributeUpdate>; 2] {
+        use nos_test_support::{serve, FakeWatchdog, Reply};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = FakeWatchdog::new(&tmp.path().join("wd.sock"));
+        let peer = serve(
+            &tmp.path().join("peer.sock"),
+            "ospfd",
+            "i1",
+            |_: &OspfRequest| Reply::<()>::None,
+        );
+        wd.set(ServiceRef::OspfInstance("i1".into()), peer.path.clone());
+        let (_stop, shutdown) = watch::channel(false);
+        let tx = spawn(wd.path().to_path_buf(), shutdown, OSPFV2, chunk);
+        tx.send(RedistributeTarget {
+            instance: Some("i1".into()),
+            routes,
+        })
+        .unwrap();
+        let mut out = [Vec::new(), Vec::new()];
+        for (i, o) in out.iter_mut().enumerate() {
+            for _ in 0..500 {
+                o.extend(peer.take_seen().into_iter().map(|r| match r {
+                    OspfRequest::RedistributeRoutes(u) => u,
+                    other => panic!("unexpected {other:?}"),
+                }));
+                if matches!(o.last(), Some(RedistributeUpdate::Full(_))) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if i == 0 {
+                peer.close_connections();
+            }
+        }
+        out
+    }
+
+    /// #729: a `Full` over the chunk crosses as `FullPart`s closed by a
+    /// `Full`, in order; one under it stays a single request.
+    #[tokio::test]
+    async fn initial_full_is_split_at_the_chunk_and_resent_on_close() {
+        let all: Vec<_> = (0..5)
+            .map(|i| route(&format!("10.{i}.0.0/24"), "10.0.0.1"))
+            .collect();
+        let split = vec![
+            RedistributeUpdate::FullPart(all[0..2].to_vec()),
+            RedistributeUpdate::FullPart(all[2..4].to_vec()),
+            RedistributeUpdate::Full(all[4..].to_vec()),
+        ];
+        assert_eq!(sent(2, all.clone()).await, [split.clone(), split]);
+        let whole = vec![RedistributeUpdate::Full(all.clone())];
+        assert_eq!(sent(5, all).await, [whole.clone(), whole]);
     }
 }

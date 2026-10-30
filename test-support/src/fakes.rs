@@ -288,6 +288,10 @@ impl FakeRibd {
     pub fn connections(&self) -> usize {
         self.server.connections()
     }
+    /// Drops every live connection, as a restarted `nos-ribd` would.
+    pub fn close_connections(&self) {
+        self.server.close_connections();
+    }
 }
 
 // ------------------------------------------------------------- interfaced
