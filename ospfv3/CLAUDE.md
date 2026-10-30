@@ -23,6 +23,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **BFD** (#288): `bfd_client.rs` is `ospf/src/bfd_client.rs` included by `#[path]`; sessions run between link-local addresses with `interface = kernel_interface`; `LinkManager::set_bfd` + `Host for LinkManager`, kill through `LinkEntry.bfd_tx`. Same rules as `ospf/CLAUDE.md`.
 - **Graceful restart** (RFC 5187): same shape as v2 minus the IP-address TLV (`lsa::LSA_TYPE_GRACE` `0x000B`); only SIGTERM announces; nothing is aged on shutdown, the restarter resyncs cold.
 - **DBD pagination**: `exchange::mtu_based_max_headers(LinkConfig.mtu)` (IPv6 40 + OSPFv3 16 + DBD 12 header bytes); `Ospfv3Profile.mtu` overrides the interface MTU (`reconcile::resolve_effective_mtu`); `--dbd-max-headers` is test-only.
+- **Route push**: chunked like v2's (`rib_push_client::push`, test-only `--push-chunk`, #727).
 - **Redistribution**: `Ospfv3Request::RedistributeRoutes` is `ribd`'s only (`server::allowed`); `reconcile::resolve_redistribute_policy` is a `ponytail:` copy of v2's.
 - **Receive hardening** (#394): non-link-local sources are dropped in `link::run`; same neighbor cap and `warn_limited!` as v2.
 - **Not built**: stub areas/NSSA, area ranges, virtual links, RFC 5838 multi-AF, RFC 8362 sparse mode; list in `docs/protocols/ospfv3.md`.
