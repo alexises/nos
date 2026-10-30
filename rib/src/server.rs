@@ -143,7 +143,7 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
     }
 }
 
-/// One connection's chunked BGP/EVPN/VPN `Full` snapshot in progress
+/// One connection's chunked BGP/EVPN/VPN/OSPF `Full` snapshot in progress
 /// (`BgpRouteUpdate::FullPart`s, see `BgpRouteUpdate::frames`): nothing
 /// reaches the `Rib` until the closing `Full`, so the table never shows half
 /// a snapshot, and a connection lost mid-snapshot simply drops it.
@@ -152,11 +152,12 @@ struct FullStaging {
     bgp: nos_proto::chunk::FullStaging<BgpRoute>,
     evpn: nos_proto::chunk::FullStaging<nos_proto::EvpnRoute>,
     vpn: nos_proto::chunk::FullStaging<VpnRoute>,
+    ospf: nos_proto::chunk::FullStaging<OspfRoute>,
 }
 
 impl FullStaging {
     /// Stages every `FullPart` of a `PushBgpRoutes`/`PushEvpnRoutes`/
-    /// `PushVpnRoutes` and folds
+    /// `PushVpnRoutes`/`PushOspfRoutes` and folds
     /// the staged routes into the closing `Full` (`None`: a part, nothing to
     /// dispatch yet); any other request passes through.
     fn absorb(&mut self, table: &str, req: RibRequest) -> Option<RibRequest> {
@@ -195,6 +196,26 @@ impl FullStaging {
                     }
                 }
                 return Some(RibRequest::PushVpnRoutes(out));
+            }
+            RibRequest::PushOspfRoutes(updates) => {
+                let mut out = Vec::with_capacity(updates.len());
+                for update in updates {
+                    match update {
+                        OspfRouteUpdate::FullPart(routes) => self.ospf.part(routes),
+                        OspfRouteUpdate::Full(routes) if self.ospf.is_staging() => {
+                            let (all, parts) = self.ospf.close(routes);
+                            info!(
+                                table = %table,
+                                routes = all.len(),
+                                parts,
+                                "assembled chunked ospf route snapshot"
+                            );
+                            out.push(OspfRouteUpdate::Full(all));
+                        }
+                        update => out.push(update),
+                    }
+                }
+                return Some(RibRequest::PushOspfRoutes(out));
             }
             req => return Some(req),
         };
@@ -540,6 +561,8 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                 guard.replace_source(RouteSource::Ospf, routes.into_iter().map(ospf_entry));
                 full_replace = true;
             }
+            // Staged by `FullStaging::absorb` before dispatch.
+            OspfRouteUpdate::FullPart(_) => {}
             OspfRouteUpdate::Add(r) => {
                 guard.set_ospf_metric(r.prefix, Some(r.metric));
                 let prefix = r.prefix;
@@ -751,7 +774,10 @@ mod authz_tests {
                 role == Role::Bgpd
             );
             assert_eq!(
-                allowed(role, &RibRequest::PushOspfRoutes(vec![])),
+                allowed(
+                    role,
+                    &RibRequest::PushOspfRoutes(vec![OspfRouteUpdate::FullPart(vec![])])
+                ),
                 matches!(role, Role::Ospfd | Role::Ospfv3d)
             );
             assert_eq!(
