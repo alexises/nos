@@ -263,6 +263,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "evpn-single-active",
             "evpn-v6",
             "evpn-l3",
+            "evpn-l3-chunked",
             "reflector",
             "route-server",
             "bgp-multipath",
@@ -287,9 +288,6 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         _ => return None,
     })
 }
-
-/// Phases `all` skips (hours long): run them by name, in no group.
-pub const SLOW: &[&str] = &["evpn-l3-chunked"];
 
 /// `all`: every phase in sequence, leaving the containers up for inspection.
 pub const ALL: &[&str] = &[

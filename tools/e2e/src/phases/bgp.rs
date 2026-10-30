@@ -6866,11 +6866,16 @@ fn l3_pe_flags(id: Id, rd: &str, gw: &str) -> Vec<String> {
 
 /// Whether `r`'s `L3_TABLE` lists `prefix` as an `Evpn` route, over REST.
 async fn tenant_has_evpn(r: &Router, prefix: &str) -> anyhow::Result<bool> {
-    let table = r.routes_walk(L3_TABLE, None).await?;
-    Ok(table.iter().any(|p| {
+    table_has_evpn(r, L3_TABLE, L3_VNI, prefix).await
+}
+
+/// Whether `r`'s `table` lists `prefix` as an `Evpn` route of `vni`.
+async fn table_has_evpn(r: &Router, table: &str, vni: u32, prefix: &str) -> anyhow::Result<bool> {
+    let routes = r.routes_walk(table, Some(1000)).await?;
+    Ok(routes.iter().any(|p| {
         p["prefix"] == prefix
             && p["candidates"].as_array().into_iter().flatten().any(|c| {
-                c["source"] == "Evpn" && c["evpn"]["vni"] == L3_VNI && c["evpn"]["router_mac"] != ""
+                c["source"] == "Evpn" && c["evpn"]["vni"] == vni && c["evpn"]["router_mac"] != ""
             })
     }))
 }
@@ -7081,7 +7086,7 @@ fn chunked_table_flags(id: Id, table: &str, vni: u32) -> Vec<String> {
     f
 }
 
-/// `evpn-l3-chunked` (#721), SLOW (`phases::SLOW`): a Type-5 `Full` larger
+/// `evpn-l3-chunked` (#721): a Type-5 `Full` larger
 /// than `EVPN_PUSH_BYTES` (4 MiB) crosses `nos-bgpd` -> `nos-ribd` as
 /// `FullPart`s and is applied once. Router-b originates 75 000 static /32s
 /// (~60 B each as an `EvpnRoute`, a little over 4 MiB) spread over three
@@ -7225,14 +7230,10 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     let assembled = |t: &str| {
         format!("assembled chunked evpn route snapshot table={t} routes=7[0-9][0-9][0-9][0-9] parts=[2-9]")
     };
-    let added = |p: &nos_proto::IpNet| {
-        format!("added route prefix={p} gateway={IP_B} next_hops=1 .*source=Some(Evpn)")
-    };
     let asm_base: Vec<usize> = CHUNKED_TABLES
         .iter()
         .map(|(t, _)| a.count(&assembled(t)))
         .collect();
-    let added_base: Vec<usize> = lasts.iter().map(|p| a.count(&added(p))).collect();
     let removed = a.count("removed route");
     let applied = std::time::Instant::now();
     a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A)).await?;
@@ -7243,8 +7244,20 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     for ((t, _), base) in CHUNKED_TABLES.iter().zip(&asm_base) {
         a.wait_new(&assembled(t), *base, 900).await?;
     }
-    for (p, base) in lasts.iter().zip(&added_base) {
-        a.wait_new(&added(p), *base, 3600).await?;
+    // The routes are in each table (REST, not the log: 75 000 `added route`
+    // lines overrun the harness's log follower, which then drops lines).
+    for ((table, vni), last) in CHUNKED_TABLES.iter().zip(&lasts) {
+        let mut found = false;
+        for _ in 0..60 {
+            if table_has_evpn(a, table, *vni, &last.to_string()).await? {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        if !found {
+            bail!("router-a: {table} never listed {last} as an evpn route");
+        }
     }
     log(format!(
         "router-a installed all tables {}s after creating them",
