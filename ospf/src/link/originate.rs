@@ -904,6 +904,11 @@ impl LinkManager {
         }
     }
 
+    /// How many prefixes `nos-ribd` redistributes (before policy).
+    pub async fn redistribute_raw_len(&self) -> usize {
+        self.redistribute_raw.lock().await.len()
+    }
+
     /// Applies one `OspfRequest::RedistributeRoutes` update (`Full`/`Add`/
     /// `Remove`, pushed continuously by the owning `nos-ribd` instance) to
     /// the raw redistributed-prefix set. This is `OSPFv2` (IPv4-only,
@@ -929,6 +934,9 @@ impl LinkManager {
                 }
                 IpNet::V6(_) => {}
             },
+            // Staged by `server.rs` (`RedistributeUpdate::absorb`); only the
+            // closing `Full` gets here.
+            RedistributeUpdate::FullPart(_) => {}
         }
     }
 

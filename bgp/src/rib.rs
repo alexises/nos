@@ -1455,6 +1455,11 @@ impl BgpRib {
         }
     }
 
+    /// How many prefixes `nos-ribd` redistributes (before policy).
+    pub fn redistribute_raw_len(&self) -> usize {
+        self.redistribute_raw.len()
+    }
+
     /// Applies one `nos_proto::RedistributeUpdate` from `nos-ribd`. `gateway`
     /// on the wire type is never read — a locally-redistributed route always
     /// gets next-hop-self, regardless of the destination peer-group's
@@ -1486,6 +1491,9 @@ impl BgpRib {
                 self.refilter_redistribute(prefix);
                 self.recompute_and_propagate(prefix);
             }
+            // Staged by `server.rs` (`RedistributeUpdate::absorb`); only the
+            // closing `Full` gets here. A stray part is not a whole set.
+            RedistributeUpdate::FullPart(_) => return,
         }
         // `nos-ribd` sends a `Full` (maybe empty) as soon as it connects.
         self.redistribute_seen = true;
