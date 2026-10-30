@@ -251,8 +251,7 @@ fn evpn_op() -> impl Strategy<Value = EvpnOp> {
     prop_oneof![
         (0..12u8, 1..3u8).prop_map(|(i, nh)| EvpnOp::Add(i, nh)),
         (0..12u8).prop_map(EvpnOp::Remove),
-        (proptest::collection::vec(0..12u8, 0..12), 1..3u8)
-            .prop_map(|(v, nh)| EvpnOp::Full(v, nh)),
+        (proptest::collection::vec(0..12u8, 0..12), 1..3u8).prop_map(|(v, nh)| EvpnOp::Full(v, nh)),
         Just(EvpnOp::Step),
     ]
 }

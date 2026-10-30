@@ -7189,7 +7189,9 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
             if t > 0 {
                 // `loopback-<table>` is enslaved to the table's VRF by name.
                 let lo = format!("loopback-{table}");
-                ops.push(ConfigOp::Interface(InterfaceOp::Ensure { name: lo.clone() }));
+                ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+                    name: lo.clone(),
+                }));
                 ops.push(ConfigOp::Interface(InterfaceOp::AddAddress {
                     name: lo,
                     address: format!("198.19.{t}.1/24").parse()?,
@@ -7253,8 +7255,11 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
         format!("bgp: outbox backlog drained peer={IP_A}"),
     );
     let established = "bgp session established";
-    let (coalescing_base, drained_base, est_base) =
-        (b.count(&coalescing), b.count(&drained), b.count(established));
+    let (coalescing_base, drained_base, est_base) = (
+        b.count(&coalescing),
+        b.count(&drained),
+        b.count(established),
+    );
     b.rest_expect(
         Method::POST,
         &format!("/v1/bgp/r1/peer/{IP_A}/clear"),
