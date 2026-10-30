@@ -658,6 +658,12 @@ impl SessionManager {
             .apply_evpn_source(crate::rib::EvpnSource::Table(table.to_string()), update);
     }
 
+    /// How many local EVPN routes (`RedistributeMacs`,
+    /// `RedistributeEvpnPrefixes`) are held, across every source.
+    pub async fn evpn_local_len(&self) -> usize {
+        self.bgp_rib.lock().await.evpn_local_len()
+    }
+
     /// One `nos-ribd`'s VRF export (`BgpRequest::RedistributeVpnPrefixes`).
     pub async fn apply_vpn_prefixes(&self, table: &str, update: nos_proto::VpnPrefixUpdate) {
         self.bgp_rib.lock().await.apply_vpn_prefixes(table, update);

@@ -163,6 +163,11 @@ impl BgpRib {
         self.apply_evpn_source(EvpnSource::Domain(domain.to_string()), update);
     }
 
+    /// How many local EVPN routes are held, across every source.
+    pub fn evpn_local_len(&self) -> usize {
+        self.evpn_local.values().map(HashMap::len).sum()
+    }
+
     /// Applies one push of local EVPN routes — `RedistributeMacs` from a
     /// domain's `nos-fdbd` or `RedistributeEvpnPrefixes` from a table's
     /// `nos-ribd` (MAC mobility is a no-op for its Type-5 routes).
@@ -218,7 +223,7 @@ impl BgpRib {
                     self.withdraw_evpn(&nlri_of(&r));
                 }
             }
-            // Staged by the connection handler (#724); nothing to apply yet.
+            // Staged per source by `server.rs`'s `EvpnStaging` (#724).
             EvpnUpdate::FullPart(_) => {}
         }
     }
