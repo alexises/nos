@@ -445,6 +445,22 @@ impl Dock {
         Ok(())
     }
 
+    /// `kill_process` for only the `comm` processes whose command line holds
+    /// `needle` (one `nos-ribd` among several: `--table <name>`).
+    pub async fn kill_process_matching(
+        &self,
+        container: &str,
+        comm: &str,
+        needle: &str,
+    ) -> anyhow::Result<()> {
+        let script = format!(
+            "for p in /proc/[0-9]*; do [ \"$(cat \"$p/comm\" 2>/dev/null)\" = \"{comm}\" ] || continue; \
+             case \"$(tr '\\0' ' ' < \"$p/cmdline\")\" in *\"{needle}\"*) kill -9 \"${{p#/proc/}}\";; esac; done"
+        );
+        self.exec_root(container, &["sh", "-c", &script]).await?;
+        Ok(())
+    }
+
     pub async fn pid(&self, container: &str) -> anyhow::Result<i64> {
         let info = self.docker.inspect_container(container, None).await?;
         info.state

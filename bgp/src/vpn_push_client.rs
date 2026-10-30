@@ -87,12 +87,7 @@ async fn run(
                     if updates.is_empty() {
                         continue;
                     }
-                    if conn
-                        .writer
-                        .send(RibRequest::PushVpnRoutes(updates))
-                        .await
-                        .is_ok()
-                    {
+                    if send_frames(&mut conn.writer, updates).await {
                         conn.last_sent = routes;
                     } else {
                         warn!(table = %table, "write failure pushing vpn routes, reconnecting");
@@ -240,11 +235,7 @@ async fn connect(watchdog_socket: &Path, table: &str, routes: Routes) -> Option<
     let (write_half, reader) = split(stream);
     let mut writer = FramedWrite::new(write_half, IpcCodec::default());
     let full = VpnRouteUpdate::Full(routes.values().cloned().collect());
-    if writer
-        .send(RibRequest::PushVpnRoutes(vec![full]))
-        .await
-        .is_err()
-    {
+    if !send_frames(&mut writer, vec![full]).await {
         warn!(table = %table, "failed to send the initial vpn snapshot, retrying");
         return None;
     }
@@ -254,6 +245,22 @@ async fn connect(watchdog_socket: &Path, table: &str, routes: Routes) -> Option<
         reader,
         last_sent: routes,
     })
+}
+
+/// Sends one push cut by `VpnRouteUpdate::frames` (an internet VRF's `Full`
+/// passes the 16 MiB frame cap), in order, stopping at the first write
+/// error: the caller then drops the connection and the reconnect resends a
+/// whole `Full`, so `nos-ribd` never applies half of one.
+async fn send_frames<S>(sink: &mut S, updates: Vec<VpnRouteUpdate>) -> bool
+where
+    S: futures::Sink<RibRequest> + Unpin,
+{
+    for frame in VpnRouteUpdate::frames(updates) {
+        if sink.send(RibRequest::PushVpnRoutes(frame)).await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 /// The `Add`/`Remove`s that bring `last_sent` up to `new`. Pure, unit-tested.
@@ -424,6 +431,37 @@ mod tests {
         log_changes(&HashMap::new(), &base);
         log_changes(&base, &build(&imports(200), &resolved("10.0.0.1")));
         log_changes(&base, &HashMap::new());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_over_the_frame_budget_goes_as_parts_then_a_full() {
+        let routes: Vec<VpnRoute> = (0..20_000u32)
+            .map(|i| VpnRoute {
+                prefix: IpNet::new(IpAddr::from(i.to_be_bytes()), 32).unwrap(),
+                paths: vec![build(&imports(7), &resolved("10.0.0.1"))["red"]
+                    .values()
+                    .next()
+                    .unwrap()
+                    .paths[0]
+                    .clone()],
+            })
+            .collect();
+        let mut sent: Vec<RibRequest> = Vec::new();
+        assert!(send_frames(&mut sent, vec![VpnRouteUpdate::Full(routes.clone())]).await);
+        let mut got = Vec::new();
+        let n = sent.len();
+        for (i, req) in sent.into_iter().enumerate() {
+            let RibRequest::PushVpnRoutes(frame) = req else {
+                panic!("{req:?}")
+            };
+            match &frame[..] {
+                [VpnRouteUpdate::FullPart(r)] if i + 1 < n => got.extend(r.clone()),
+                [VpnRouteUpdate::Full(r)] if i + 1 == n => got.extend(r.clone()),
+                other => panic!("frame {i}/{n}: {other:?}"),
+            }
+        }
+        assert_eq!(n, 2, "40 000 weight is two frames");
+        assert_eq!(got, routes);
     }
 
     #[tokio::test]

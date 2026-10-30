@@ -235,6 +235,10 @@ pub const L3_TABLE: &str = "tenant";
 /// `vpn`: router-a's L3VPN VRF (RFC 4364 import, #579), `nos-provision`'s
 /// `--vpn-table` default.
 pub const VPN_TABLE: &str = "vrf-red";
+/// `vpn`'s chunked stage (#715): single-path VPNv4 routes GoBGP announces.
+/// Each weighs 2 (`VpnRoute::weight`, paths + 1), so 20 000 are 40 000 >
+/// `VPN_PUSH_CHUNK` (32 768): `vrf-red`'s `Full` crosses as two frames.
+pub const VPN_CHUNKED_ROUTES: usize = 20_000;
 /// `vpn`/`vpn-export`: router-a's RD (also its export RT toward GoBGP).
 pub const VPN_RD_A: &str = "65000:100";
 /// `vpn-export`: router-b's RD and the RT both PEs export and import.
