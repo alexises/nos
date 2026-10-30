@@ -243,6 +243,8 @@ pub async fn phase(w: &World) -> anyhow::Result<()> {
 /// `PUT /v1/transactions/{tx}` docs).
 const MAX_ROUTES_PER_INSTANCE: u64 = 25_000;
 const WAVE_TX: &str = "wavemem";
+/// `nos-configd`'s per-commit dhat `HeapStats` line (dhat image only, #796).
+const HEAP_LINE: &str = "heap after commit";
 /// One `sample_all` result under its label.
 type Labelled = (String, HashMap<String, (u64, u64, u64)>);
 
@@ -400,9 +402,24 @@ async fn wave_load(w: &World, r: &Router) -> anyhow::Result<Vec<Labelled>> {
                 take(w, r, label, &mut pids, &mut out).await?;
             }
         }
+        let heaps = r.count(HEAP_LINE);
         r.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
             .await?;
         take(w, r, format!("wave{wave}-committed"), &mut pids, &mut out).await?;
+        // Dhat image only (#796): configd's live heap at this commit, next to
+        // the RSS sample above. Wave 0 waits once to learn whether it logs one.
+        if (wave == 0 || heaps > 0)
+            && r.logs
+                .wait_over(HEAP_LINE, heaps, Duration::from_secs(5))
+                .await
+        {
+            let line = r.logs.last(HEAP_LINE).unwrap_or_default();
+            let rss = out
+                .last()
+                .and_then(|(_, s)| s.get("nos-configd"))
+                .map_or(0, |v| v.1);
+            log(format!("HEAP wave{wave} configd VmRSS={rss} kB {line}"));
+        }
         tokio::time::sleep(Duration::from_secs(idle)).await;
         take(w, r, format!("wave{wave}-idle"), &mut pids, &mut out).await?;
     }

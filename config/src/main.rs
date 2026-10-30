@@ -47,6 +47,8 @@ async fn main() -> anyhow::Result<()> {
     let _profiler = dhat::Profiler::builder()
         .file_name(args.profile_memory_out.clone())
         .build();
+    #[cfg(feature = "dhat-heap")]
+    nos_config::store::DHAT_PROFILING.store(true, std::sync::atomic::Ordering::Relaxed);
     // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
     let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
     // No graceful-shutdown signal of its own (see the bare `ctrl_c()` wait

@@ -19,6 +19,11 @@ use crate::secrets::unmask_op;
 use crate::users::{hash_clear_passwords, is_clear, normalize_names};
 
 const BROADCAST_CAPACITY: usize = 16;
+/// Set by `main` once its dhat profiler runs (`HeapStats::get` panics without
+/// one); then every commit logs the live heap (#796).
+#[cfg(feature = "dhat-heap")]
+pub static DHAT_PROFILING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// Most open transactions at once; a new name past this is refused (#388).
 pub const MAX_TRANSACTIONS: usize = 32;
 pub const MAX_TX_NAME: usize = 64;
@@ -600,6 +605,15 @@ impl ConfigStore {
         drop(running);
         info!(transaction = %name, "config committed");
         self.broadcast(config, prev);
+        #[cfg(feature = "dhat-heap")]
+        if DHAT_PROFILING.load(std::sync::atomic::Ordering::Relaxed) {
+            let s = dhat::HeapStats::get();
+            info!(
+                curr_bytes = s.curr_bytes,
+                max_bytes = s.max_bytes,
+                "heap after commit"
+            );
+        }
         Ok(warnings)
     }
 
