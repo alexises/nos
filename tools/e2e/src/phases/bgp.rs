@@ -7056,8 +7056,6 @@ async fn symmetric_irb(w: &World, flags_a: &[String], flags_b: &[String]) -> any
 /// most `CHUNKED_PER_TABLE` routes, and a table references one instance.
 const CHUNKED_TABLES: [(&str, u32); 3] = [(L3_TABLE, L3_VNI), ("tenant2", 5001), ("tenant3", 5002)];
 const CHUNKED_PER_TABLE: u32 = 25_000;
-/// Routes per table per wave (x3 tables ~ 4 000 updates, under the 8 192 outbox).
-const CHUNKED_WAVE: u32 = 1_300;
 
 /// The i-th `evpn-l3-chunked` prefix of table `t`: `100.64.0.0 + t * 25000 + i`.
 fn chunked_prefix(t: usize, i: u32) -> nos_proto::IpNet {
@@ -7136,95 +7134,89 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     }
     let started = std::time::Instant::now();
     let closed = b.count("diff stream closed");
-    // The routes go in waves of ~4 000 in total, each learned by router-a's
-    // bgpd before the next: nos-bgpd's per-peer outbox holds 8 192 updates
-    // and ceases the session when an EVPN update overflows it, so one burst
-    // of 75 000 resets the peer forever (a bgpd limit, filed separately; this
-    // phase works around it, it is not what it tests).
+    // One commit, one burst (#764): 75 000 Type-5 updates overflow router-b's
+    // 8 192-entry per-peer outbox, which must coalesce and drain them without
+    // ever resetting the session.
     let learned =
         |p: &nos_proto::IpNet| format!("evpn route learned peer={IP_B} route_type=5 .*{p}");
-    let waves = CHUNKED_PER_TABLE.div_ceil(CHUNKED_WAVE);
-    let mut lasts = Vec::new();
-    for wave in 0..waves {
-        let (from, to) = (
-            wave * CHUNKED_WAVE,
-            ((wave + 1) * CHUNKED_WAVE).min(CHUNKED_PER_TABLE),
-        );
-        let wave_lasts: Vec<_> = (0..CHUNKED_TABLES.len())
-            .map(|t| chunked_prefix(t, to - 1))
-            .collect();
-        let bases: Vec<usize> = wave_lasts.iter().map(|p| a.count(&learned(p))).collect();
-        b.edit(|config| {
-            for (t, (table, _)) in CHUNKED_TABLES.iter().enumerate() {
-                let instance = format!("sri-chunked{t}");
-                let gateway: std::net::IpAddr = if t == 0 {
-                    L3_HOST_IP_B.parse()?
-                } else {
-                    format!("198.19.{t}.2").parse()?
-                };
-                let mut ops = Vec::new();
-                if wave == 0 {
-                    if t > 0 {
-                        // `loopback-<table>` is enslaved to the table's VRF by name.
-                        let lo = format!("loopback-{table}");
-                        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
-                            name: lo.clone(),
-                        }));
-                        ops.push(ConfigOp::Interface(InterfaceOp::AddAddress {
-                            name: lo,
-                            address: format!("198.19.{t}.1/24").parse()?,
-                            label: None,
-                        }));
-                    }
-                    ops.push(ConfigOp::StaticRoutingInstance(
-                        StaticRoutingInstanceOp::Ensure {
-                            name: instance.clone(),
-                        },
-                    ));
-                    ops.push(ConfigOp::RoutingTable(
-                        RoutingTableOp::SetStaticRoutingInstance {
-                            name: (*table).to_string(),
-                            static_routing_instance: instance.clone(),
-                        },
-                    ));
-                }
-                ops.extend((from..to).map(|i| {
-                    ConfigOp::StaticRoute(StaticRouteOp::Set {
-                        instance: instance.clone(),
-                        subnet: chunked_prefix(t, i),
-                        gateway,
-                    })
+    let lasts: Vec<_> = (0..CHUNKED_TABLES.len())
+        .map(|t| chunked_prefix(t, CHUNKED_PER_TABLE - 1))
+        .collect();
+    let bases: Vec<usize> = lasts.iter().map(|p| a.count(&learned(p))).collect();
+    let (coalescing, drained) = (
+        format!("bgp: outbox full, coalescing peer={IP_A}"),
+        format!("bgp: outbox backlog drained peer={IP_A}"),
+    );
+    let (coalescing_base, drained_base) = (b.count(&coalescing), b.count(&drained));
+    let flaps = "bgp session established\\|sent cease notification\\|received notification";
+    let (flaps_a, flaps_b) = (a.count(flaps), b.count(flaps));
+    b.edit(|config| {
+        for (t, (table, _)) in CHUNKED_TABLES.iter().enumerate() {
+            let instance = format!("sri-chunked{t}");
+            let gateway: std::net::IpAddr = if t == 0 {
+                L3_HOST_IP_B.parse()?
+            } else {
+                format!("198.19.{t}.2").parse()?
+            };
+            let mut ops = Vec::new();
+            if t > 0 {
+                // `loopback-<table>` is enslaved to the table's VRF by name.
+                let lo = format!("loopback-{table}");
+                ops.push(ConfigOp::Interface(InterfaceOp::Ensure { name: lo.clone() }));
+                ops.push(ConfigOp::Interface(InterfaceOp::AddAddress {
+                    name: lo,
+                    address: format!("198.19.{t}.1/24").parse()?,
+                    label: None,
                 }));
-                for op in ops {
-                    op.apply(config).map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
             }
-            Ok(())
-        })
-        .await
-        .context("committing a wave of statics (did nos-configd die?)")?;
-        // A configd that dies on a commit shows as every daemon's diff
-        // stream closing: fail at once, not after an hour.
-        if b.count("diff stream closed") != closed {
-            bail!("router-b: nos-configd died committing wave {wave}");
+            ops.push(ConfigOp::StaticRoutingInstance(
+                StaticRoutingInstanceOp::Ensure {
+                    name: instance.clone(),
+                },
+            ));
+            ops.push(ConfigOp::RoutingTable(
+                RoutingTableOp::SetStaticRoutingInstance {
+                    name: (*table).to_string(),
+                    static_routing_instance: instance.clone(),
+                },
+            ));
+            ops.extend((0..CHUNKED_PER_TABLE).map(|i| {
+                ConfigOp::StaticRoute(StaticRouteOp::Set {
+                    instance: instance.clone(),
+                    subnet: chunked_prefix(t, i),
+                    gateway,
+                })
+            }));
+            for op in ops {
+                op.apply(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
         }
-        for (p, base) in wave_lasts.iter().zip(&bases) {
-            a.wait_new(&learned(p), *base, 300).await?;
-        }
-        // Per-daemon RSS and the cgroup after every wave (`SAMPLE …` lines).
-        let _ = crate::logd_mem::sample(&*w, b, &format!("wave{wave}")).await;
-        if wave + 1 == waves {
-            lasts = wave_lasts;
-        }
+        Ok(())
+    })
+    .await
+    .context("committing the statics (did nos-configd die?)")?;
+    // A configd that dies on a commit shows as every daemon's diff stream
+    // closing: fail at once, not after an hour.
+    if b.count("diff stream closed") != closed {
+        bail!("router-b: nos-configd died committing the statics");
     }
     log(format!(
-        "router-b: {total} statics committed in {waves} waves after {}s",
+        "router-b: {total} statics committed in one burst after {}s",
         started.elapsed().as_secs()
     ));
+    b.wait_new(&coalescing, coalescing_base, 300).await?;
+    for (p, base) in lasts.iter().zip(&bases) {
+        a.wait_new(&learned(p), *base, 600).await?;
+    }
+    b.wait_new(&drained, drained_base, 300).await?;
+    // Per-daemon RSS and the cgroup after the burst (`SAMPLE burst` lines).
+    let _ = crate::logd_mem::sample(&*w, b, "burst").await;
     log(format!(
         "router-a's bgpd holds all {total} Type-5 routes after {}s",
         started.elapsed().as_secs()
     ));
+    a.assert_quiet(flaps, flaps_a, 1).await?;
+    b.assert_quiet(flaps, flaps_b, 1).await?;
 
     log("router-a gets its three IP-VRFs: each nos-ribd must assemble one chunked Full");
     let assembled = |t: &str| {

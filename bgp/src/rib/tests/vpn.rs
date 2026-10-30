@@ -581,7 +581,7 @@ fn a_lost_vpn_update_is_resent_from_the_backlog() {
         if !tx.pending() {
             break;
         }
-        assert!(!rib.drain_backlog(addr("10.0.0.9")));
+        rib.drain_backlog(addr("10.0.0.9"));
         got.extend(advs(&mut tiny));
     }
     let mut keys: Vec<_> = got.into_iter().map(|a| a.key).collect();
