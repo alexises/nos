@@ -593,10 +593,25 @@ impl Router {
         self.wait_new(pattern, 0, 60).await
     }
 
-    /// Waits for a BGP session to be established (peer-groups retry every
-    /// `CONNECT_RETRY_SECS`, so a collision costs seconds, not minutes).
+    /// Waits until `GET /v1/bgp/summary` shows an Established peer (any peer).
+    /// State-based, not log-based: a log-flooding phase evicts the
+    /// "bgp session established" line from the ring while the session is up
+    /// (#790). Peer-groups retry every `CONNECT_RETRY_SECS`, so a collision
+    /// costs seconds. A non-200 summary fails fast.
     pub async fn established(&self) -> anyhow::Result<()> {
-        self.wait_new("bgp session established", 0, 60).await
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let body = self
+                .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+                .await?;
+            if body.contains("\"state\":\"Established\"") {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("{}: no bgp peer Established after 60s: {body}", self.name());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     /// Waits for more than `baseline` matches of the BRE `pattern`.

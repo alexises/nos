@@ -12,7 +12,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | Phase | Family | Groups | Requires | Proves |
 |---|---|---|---|---|
 | `up` | BGP | base, drivers, rpl, ospf-suite, pki-suite, logd-memory-lab, config-memory-lab | - | Starts both routers (config seeded, REST pinned) configured as BGP peers. |
-| `established` | BGP | base, drivers, rpl, ospf-suite, pki-suite, logd-memory-lab, config-memory-lab | - | Both sides log `bgp session established` (graceful-restart capability checked too); `GET /v1/version` on both routers reports the same revision, not `unknown`. |
+| `established` | BGP | base, drivers, rpl, ospf-suite, pki-suite, logd-memory-lab, config-memory-lab | - | Both routers' `GET /v1/bgp/summary` shows an Established peer (graceful-restart / extended-message capabilities still checked from the log); `GET /v1/version` on both routers reports the same revision, not `unknown`. |
 | `reconnect` | BGP | base | - | Killing one side's `nos-bgpd` is detected by the other and both re-establish. |
 | `collision` | BGP | base | - | Restarting both `nos-bgpd` at once yields an RFC 4271 §6.8 collision event (best-effort, timing-dependent). |
 | `shutdown` | BGP | base | - | RFC 9003 shutdown message reaches router-b as Cease/Administrative Shutdown (inside an RFC 8538 Hard Reset); the session stays down until cleared; removing the peer sends Cease/Peer De-configured. |
@@ -134,7 +134,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 Topology: router-a (AS 65001) and router-b (AS 65002) on one docker network, peered in `rt1`. Self-contained phases add ExaBGP (`router-g`, scripted speakers, `asn4 disable`, API-fed paths), StayRTR, FRR (`router-f`) or a third nos router. `nos-e2e` sets `connect-retry-time` to 3s on every peer-group (the default 120s would stall "established" waits). Phases that change config take a baseline first and wait for a new session rather than a stale log line.
 
 - `up`: start both routers (config seeded, REST pinned), configured as peers
-- `established`: wait for both sides to log "bgp session established"
+- `established`: wait until both routers' `GET /v1/bgp/summary` shows an Established peer (graceful-restart / extended-message capabilities still checked from the log)
 - `reconnect`: kill one side's nos-bgpd, confirm the other detects it and both re-establish
 - `collision`: restart both nos-bgpd processes at once, check for/report a collision event
 - `shutdown`: shut router-a's peer-group, then its peer alone, with an RFC 9003 message: router-b logs the Cease/Administrative Shutdown text (an RFC 8538 Hard Reset wrapping it, graceful restart being on) and the session stays down until cleared; removing the peer sends Cease/Peer De-configured
