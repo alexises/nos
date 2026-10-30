@@ -7064,6 +7064,39 @@ fn chunked_prefix(t: usize, i: u32) -> nos_proto::IpNet {
     nos_proto::IpNet::new(addr.into(), 32).expect("a /32")
 }
 
+/// Polls `GET /v1/bgp/summary` until some peer's accepted EVPN prefixes
+/// (`accepted_prefixes[2]`) reach `want`.
+async fn wait_evpn_accepted(r: &Router, want: usize, secs: u64) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let body = r
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        let mut best = 0;
+        let mut stack = vec![&v];
+        while let Some(n) = stack.pop() {
+            match n {
+                serde_json::Value::Object(m) => {
+                    if let Some(c) = m.get("accepted_prefixes").and_then(|a| a.get(2)) {
+                        best = best.max(c.as_u64().unwrap_or(0));
+                    }
+                    stack.extend(m.values());
+                }
+                serde_json::Value::Array(a) => stack.extend(a),
+                _ => {}
+            }
+        }
+        if usize::try_from(best)? >= want {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("{}: only {best} of {want} evpn prefixes accepted", r.name());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 /// One PE's flags for IP-VRF `table`/`vni` with no host interface.
 fn chunked_table_flags(id: Id, table: &str, vni: u32) -> Vec<String> {
     let asn = if id.name == A.name { 65001 } else { 65002 };
@@ -7089,7 +7122,9 @@ fn chunked_table_flags(id: Id, table: &str, vni: u32) -> Vec<String> {
 /// `FullPart`s and is applied once. Router-b originates 75 000 static /32s
 /// (~60 B each as an `EvpnRoute`, a little over 4 MiB) spread over three
 /// IP-VRFs, 25 000 per static routing instance, provisioned through
-/// `Router::edit`'s batched subsection PUTs. Router-a's bgpd learns them all
+/// `Router::edit`'s batched subsection PUTs in one commit; a session clear
+/// then overflows router-b's outbox for sure, which must coalesce, not
+/// cease (#764). Router-a's bgpd learns them all
 /// while router-a has no IP-VRF; then router-a's three tables are created and
 /// each new `nos-ribd` gets one chunked `Full` from bgpd, which it must
 /// assemble and apply once. There is no budget knob (the watchdog clears its
@@ -7134,20 +7169,12 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     }
     let started = std::time::Instant::now();
     let closed = b.count("diff stream closed");
-    // One commit, one burst (#764): 75 000 Type-5 updates overflow router-b's
-    // 8 192-entry per-peer outbox, which must coalesce and drain them without
-    // ever resetting the session.
-    let learned =
-        |p: &nos_proto::IpNet| format!("evpn route learned peer={IP_B} route_type=5 .*{p}");
+    // One commit, one burst (#764): 75 000 Type-5 updates, which may or may
+    // not overflow router-b's 8 192-entry per-peer outbox (the FSM drains it
+    // concurrently), and must never reset the session.
     let lasts: Vec<_> = (0..CHUNKED_TABLES.len())
         .map(|t| chunked_prefix(t, CHUNKED_PER_TABLE - 1))
         .collect();
-    let bases: Vec<usize> = lasts.iter().map(|p| a.count(&learned(p))).collect();
-    let (coalescing, drained) = (
-        format!("bgp: outbox full, coalescing peer={IP_A}"),
-        format!("bgp: outbox backlog drained peer={IP_A}"),
-    );
-    let (coalescing_base, drained_base) = (b.count(&coalescing), b.count(&drained));
     let flaps = "bgp session established\\|sent cease notification\\|received notification";
     let (flaps_a, flaps_b) = (a.count(flaps), b.count(flaps));
     b.edit(|config| {
@@ -7204,11 +7231,9 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
         "router-b: {total} statics committed in one burst after {}s",
         started.elapsed().as_secs()
     ));
-    b.wait_new(&coalescing, coalescing_base, 300).await?;
-    for (p, base) in lasts.iter().zip(&bases) {
-        a.wait_new(&learned(p), *base, 600).await?;
-    }
-    b.wait_new(&drained, drained_base, 300).await?;
+    // Counted over REST: 75 000 `evpn route learned` lines overrun the
+    // harness's log follower.
+    wait_evpn_accepted(a, total, 600).await?;
     // Per-daemon RSS and the cgroup after the burst (`SAMPLE burst` lines).
     let _ = crate::logd_mem::sample(&*w, b, "burst").await;
     log(format!(
@@ -7216,6 +7241,33 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
         started.elapsed().as_secs()
     ));
     a.assert_quiet(flaps, flaps_a, 1).await?;
+    b.assert_quiet(flaps, flaps_b, 1).await?;
+
+    // The deterministic overflow: on re-establishment `announce_evpn_to` sends
+    // all 75 003 routes from the FSM task itself, which cannot drain the queue
+    // meanwhile, so the outbox must coalesce; before #764 it ceased the
+    // session, and the next establishment overflowed again, forever.
+    log("router-b clears its session: the initial EVPN dump overflows the outbox");
+    let (coalescing, drained) = (
+        format!("bgp: outbox full, coalescing peer={IP_A}"),
+        format!("bgp: outbox backlog drained peer={IP_A}"),
+    );
+    let established = "bgp session established";
+    let (coalescing_base, drained_base, est_base) =
+        (b.count(&coalescing), b.count(&drained), b.count(established));
+    b.rest_expect(
+        Method::POST,
+        &format!("/v1/bgp/r1/peer/{IP_A}/clear"),
+        None,
+        200,
+    )
+    .await?;
+    b.wait_new(established, est_base, 60).await?;
+    b.wait_new(&coalescing, coalescing_base, 120).await?;
+    b.wait_new(&drained, drained_base, 300).await?;
+    wait_evpn_accepted(a, total, 600).await?;
+    let (flaps_a, flaps_b) = (a.count(flaps), b.count(flaps));
+    a.assert_quiet(flaps, flaps_a, 5).await?;
     b.assert_quiet(flaps, flaps_b, 1).await?;
 
     log("router-a gets its three IP-VRFs: each nos-ribd must assemble one chunked Full");
