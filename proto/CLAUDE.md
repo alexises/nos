@@ -25,6 +25,7 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 | `paths` | The two bootstrap socket defaults that stay fixed (config, watchdog) plus the PKI ones. |
 | `page` | Opaque keyset cursors (#714): `encode`/`decode`, `wire_len`. |
 | `codec` | `IpcCodec<T>`: 4-byte LE length prefix + postcard payload, generic over any `Serialize + DeserializeOwned`. |
+
 ## Schema pitfalls
 
 - `#[serde(default)]` on every field added after release, or an old `config.yaml` no longer loads.
