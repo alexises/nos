@@ -468,7 +468,7 @@ fn drain_all(
 ) -> Vec<OutboundUpdate> {
     let mut got = recv_all(rx);
     while tx.pending() {
-        assert!(!rib.drain_backlog(peer));
+        rib.drain_backlog(peer);
         got.extend(recv_all(rx));
     }
     got

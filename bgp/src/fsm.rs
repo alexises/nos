@@ -1133,30 +1133,14 @@ async fn send_outbound(
 }
 
 /// Once the outbox queue is empty, has the RIB re-send what it dropped (#395).
-/// `Some` ends the session: a lost EVPN update cannot be coalesced.
-async fn resync_outbox(
-    cx: &SessionCtx<'_>,
-    writer: &mut SessionWriter,
-    state: &State,
-    rx: &mpsc::Receiver<OutboundUpdate>,
-) -> Option<FsmOutcome> {
+async fn resync_outbox(cx: &SessionCtx<'_>, rx: &mpsc::Receiver<OutboundUpdate>) {
     if !cx.outbox_tx.pending() || !rx.is_empty() {
-        return None;
+        return;
     }
-    let stuck = cx
-        .bgp_rib
+    cx.bgp_rib
         .lock()
         .await
         .drain_backlog(cx.peer.remote_address);
-    if !stuck {
-        return None;
-    }
-    warn!(peer = %cx.peer.remote_address, "bgp: EVPN update lost to a full outbox, ceasing");
-    let cmd = FsmCommand::Cease {
-        subcode: CeaseSubcode::OutOfResources,
-        data: Bytes::new(),
-    };
-    handle_command(cx, writer, state, cmd).await
 }
 
 /// Purges the families whose RFC 7313 stale deadline passed.
@@ -1658,17 +1642,13 @@ pub async fn run(
                 }
                 Some(update) = outbox_rx.recv() => {
                     send_outbound(&mut writer, &mut mrai, update).await;
-                    if let Some(outcome) = resync_outbox(&cx, &mut writer, &state, &outbox_rx).await {
-                        break 'session outcome;
-                    }
+                    resync_outbox(&cx, &outbox_rx).await;
                     continue;
                 }
                 // Something was parked in the bounded outbox (#395); `Established`
                 // only, before that the RIB knows no outbox for this session.
                 () = outbox_tx.parked(), if matches!(state, State::Established(_)) => {
-                    if let Some(outcome) = resync_outbox(&cx, &mut writer, &state, &outbox_rx).await {
-                        break 'session outcome;
-                    }
+                    resync_outbox(&cx, &outbox_rx).await;
                     continue;
                 }
                 () = sleep_until_opt(refresh.stale_until.values().min().copied()) => {

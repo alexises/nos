@@ -3,8 +3,9 @@
 //! the channel; so the channel is bounded and what does not fit is
 //! *coalesced*: an `Announce`/`Withdraw` only marks its prefix dirty, and
 //! once the FSM has emptied the queue `BgpRib::drain_backlog` re-sends the
-//! *current* state of each dirty prefix. Memory is bounded by the table size,
-//! like Adj-RIB-Out itself.
+//! *current* state of each dirty prefix. EVPN NLRIs coalesce the same way,
+//! resynced from `evpn_adj_rib_out` (#764). Memory is bounded by the table
+//! size, like Adj-RIB-Out itself.
 //!
 //! Invariant: while a backlog exists, every new item joins it, so a later
 //! item never overtakes a lost one.
@@ -19,6 +20,7 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{info, warn};
 
 use super::{build_advertisement, family_of, message, BgpRib, FlowspecKey, OutboundUpdate};
+use crate::evpn::EvpnNlri;
 use crate::vpn::VpnKey;
 
 /// Queued updates per peer. Steady state needs far less; a full-table dump
@@ -40,8 +42,8 @@ pub(super) struct Backlog {
     lost_ids: HashMap<IpNet, HashSet<u32>>,
     /// Ordered, deduplicated `EndOfRib`/`RefreshMarker`s.
     markers: Vec<OutboundUpdate>,
-    /// An EVPN update was dropped: not coalescable, the session is ceased.
-    evpn_lost: bool,
+    /// EVPN NLRIs whose latest update was dropped.
+    evpns: HashSet<EvpnNlri>,
     /// Flowspec rules whose latest update was dropped.
     flows: HashSet<FlowspecKey>,
     /// VPN keys whose latest update was dropped.
@@ -56,7 +58,7 @@ impl Backlog {
             && self.flows.is_empty()
             && self.vpns.is_empty()
             && self.markers.is_empty()
-            && !self.evpn_lost
+            && self.evpns.is_empty()
     }
 
     fn push(&mut self, update: OutboundUpdate) {
@@ -70,8 +72,11 @@ impl Backlog {
                     self.lost_ids.entry(prefix).or_default().insert(id);
                 }
             }
-            OutboundUpdate::AnnounceEvpn(_) | OutboundUpdate::WithdrawEvpn(_) => {
-                self.evpn_lost = true;
+            OutboundUpdate::AnnounceEvpn(adv) => {
+                self.evpns.insert(adv.nlri);
+            }
+            OutboundUpdate::WithdrawEvpn(nlri) => {
+                self.evpns.insert(nlri);
             }
             OutboundUpdate::AnnounceFlowspec(adv) => {
                 self.flows.insert((adv.family, adv.nlri));
@@ -106,7 +111,7 @@ impl Backlog {
                 self.markers.push(m);
             }
         }
-        self.evpn_lost |= newer.evpn_lost;
+        self.evpns.extend(newer.evpns);
         self.drained += newer.drained;
     }
 }
@@ -198,21 +203,16 @@ pub fn test_channel() -> (OutboxTx, mpsc::Receiver<OutboundUpdate>) {
 impl BgpRib {
     /// Re-sends the current state of what `peer`'s outbox dropped. Call when
     /// its queue is empty; at most `DRAIN_BATCH` prefixes per call, the
-    /// outbox re-arms itself until the backlog is gone. Returns `true` when
-    /// an EVPN update was lost, which only a session reset can repair.
-    pub fn drain_backlog(&mut self, peer: IpAddr) -> bool {
+    /// outbox re-arms itself until the backlog is gone.
+    pub fn drain_backlog(&mut self, peer: IpAddr) {
         let Some(outbox) = self.peer_outboxes.get(&peer) else {
-            return false;
+            return;
         };
         if self.deferring() {
-            return false; // the end of the deferral re-sends everything
+            return; // the end of the deferral re-sends everything
         }
         let tx = outbox.tx.clone();
         let mut backlog = tx.take();
-        if backlog.evpn_lost {
-            tx.restore(backlog);
-            return true;
-        }
         let (lead, trail): (Vec<_>, Vec<_>) = std::mem::take(&mut backlog.markers)
             .into_iter()
             .partition(|m| {
@@ -246,7 +246,19 @@ impl BgpRib {
             self.sync_vpn_to(peer, k, true);
         }
         backlog.drained += vpns.len();
-        if backlog.dirty.is_empty() && backlog.vpns.is_empty() {
+        // Batched like `dirty`: a Type-5 burst can be a full table (#764).
+        let evpns: Vec<_> = backlog.evpns.iter().take(DRAIN_BATCH).cloned().collect();
+        for nlri in &evpns {
+            backlog.evpns.remove(nlri);
+            let update = match self.evpn_adj_rib_out.get(&peer).and_then(|s| s.get(nlri)) {
+                Some(adv) => OutboundUpdate::AnnounceEvpn(adv.clone()),
+                // Withdrawing an unknown route is legal, as in `resync_prefix`.
+                None => OutboundUpdate::WithdrawEvpn(nlri.clone()),
+            };
+            tx.send(update);
+        }
+        backlog.drained += evpns.len();
+        if backlog.dirty.is_empty() && backlog.vpns.is_empty() && backlog.evpns.is_empty() {
             for m in trail {
                 tx.send(m);
             }
@@ -256,7 +268,6 @@ impl BgpRib {
             backlog.markers = trail;
         }
         tx.restore(backlog);
-        false
     }
 
     /// Brings `peer` in line with the current state of `prefix`, whatever
