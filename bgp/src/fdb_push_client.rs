@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::SinkExt;
 use nos_proto::{
     EvpnKey, EvpnRoute, EvpnUpdate, FdbRequest, IpcCodec, RibRequest, Role, ServiceRef,
 };
@@ -91,12 +90,7 @@ async fn send_split<S, T>(
 where
     S: futures::Sink<T> + Unpin,
 {
-    for part in update.split_with(budget) {
-        if sink.send(wrap(part)).await.is_err() {
-            return false;
-        }
-    }
-    true
+    nos_proto::chunk::send_all(sink, update.split_with(budget).into_iter().map(wrap)).await
 }
 
 impl Writer {

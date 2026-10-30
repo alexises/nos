@@ -4,13 +4,14 @@
 //! change, fire-and-forget (`BgpRequest::RedistributeMacs` gets no reply).
 //! Unlike `nos-ribd`'s twin, the otherwise write-only connection is also
 //! read for EOF, so a `nos-bgpd` restart (which forgets everything pushed) is
-//! noticed at once and answered with a fresh `Full`.
+//! noticed at once and answered with a fresh `Full`. A `Full` over
+//! `evpn_push_budget()` encoded bytes goes as `FullPart`s (#725).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use nos_proto::{BgpEvent, BgpRequest, EvpnKey, EvpnRoute, EvpnUpdate, IpcCodec, Role, ServiceRef};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -71,15 +72,9 @@ async fn run(
         if current.bgp_instance != target.bgp_instance {
             continue;
         }
+        let budget = nos_proto::fdb::evpn_push_budget();
         let full = EvpnUpdate::Full(current.routes.values().cloned().collect());
-        if writer
-            .send(BgpRequest::RedistributeMacs {
-                domain: domain.clone(),
-                update: full,
-            })
-            .await
-            .is_err()
-        {
+        if !send(&mut writer, &domain, full, budget).await {
             warn!(bgp_instance = %name, "failed to send the initial evpn snapshot to nos-bgpd, retrying");
             retry_wait(&mut target_rx, &mut shutdown).await;
             continue;
@@ -94,23 +89,13 @@ async fn run(
                     let new = target_rx.borrow_and_update().clone();
                     if new.bgp_instance.as_deref() != Some(name.as_str()) {
                         // Withdraw before switching away (best effort).
-                        let _ = writer
-                            .send(BgpRequest::RedistributeMacs {
-                                domain: domain.clone(),
-                                update: EvpnUpdate::Full(Vec::new()),
-                            })
-                            .await;
+                        let _ = send(&mut writer, &domain, EvpnUpdate::Full(Vec::new()), budget).await;
                         break;
                     }
-                    let mut failed = false;
-                    for update in diff(&last_sent, &new.routes) {
-                        let req = BgpRequest::RedistributeMacs { domain: domain.clone(), update };
-                        if writer.send(req).await.is_err() {
-                            failed = true;
-                            break;
-                        }
-                    }
-                    if failed {
+                    let frames = diff(&last_sent, &new.routes)
+                        .into_iter()
+                        .map(|update| BgpRequest::RedistributeMacs { domain: domain.clone(), update });
+                    if !nos_proto::chunk::send_all(&mut writer, frames).await {
                         warn!(bgp_instance = %name, "write failure sending evpn update, reconnecting");
                         break;
                     }
@@ -125,6 +110,24 @@ async fn run(
             }
         }
     }
+}
+
+/// Sends `update` cut at `budget` encoded bytes (`EvpnUpdate::split_with`:
+/// a large `Full` as `FullPart`s closed by a `Full`, which `nos-bgpd`
+/// assembles), in order, stopping at the first write error (`false`).
+async fn send<S>(sink: &mut S, domain: &str, update: EvpnUpdate, budget: usize) -> bool
+where
+    S: futures::Sink<BgpRequest> + Unpin,
+{
+    let frames = update.split_with(budget).into_iter();
+    nos_proto::chunk::send_all(
+        sink,
+        frames.map(|update| BgpRequest::RedistributeMacs {
+            domain: domain.to_string(),
+            update,
+        }),
+    )
+    .await
 }
 
 async fn retry_wait(
@@ -189,5 +192,30 @@ mod tests {
         assert!(matches!(&d[0], EvpnUpdate::Add(r) if r.key == route(3).0));
         assert!(matches!(&d[1], EvpnUpdate::Remove(k) if *k == route(1).0));
         assert_eq!(diff(&new, &new), []);
+    }
+
+    #[tokio::test]
+    async fn a_large_full_goes_as_ordered_parts_and_a_small_one_whole() {
+        let routes: Vec<EvpnRoute> = (0..5).map(|i| route(i).1).collect();
+        let mut sent: Vec<BgpRequest> = Vec::new();
+        // A 1-byte budget: every route is oversized, so one per frame.
+        assert!(send(&mut sent, "bd1", EvpnUpdate::Full(routes.clone()), 1).await);
+        let mut rejoined = Vec::new();
+        for (i, r) in sent.into_iter().enumerate() {
+            let BgpRequest::RedistributeMacs { domain, update } = r else {
+                panic!("{r:?}");
+            };
+            assert_eq!(domain, "bd1");
+            match update {
+                EvpnUpdate::FullPart(p) if i < 4 => rejoined.extend(p),
+                EvpnUpdate::Full(p) if i == 4 => rejoined.extend(p),
+                other => panic!("frame {i}: {other:?}"),
+            }
+        }
+        assert_eq!(rejoined, routes);
+        let mut whole: Vec<BgpRequest> = Vec::new();
+        let budget = nos_proto::fdb::evpn_push_budget();
+        assert!(send(&mut whole, "bd1", EvpnUpdate::Full(routes), budget).await);
+        assert_eq!(whole.len(), 1);
     }
 }

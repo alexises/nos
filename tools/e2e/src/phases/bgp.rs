@@ -7135,6 +7135,13 @@ async fn symmetric_irb(w: &World, flags_a: &[String], flags_b: &[String]) -> any
 /// most `CHUNKED_PER_TABLE` routes, and a table references one instance.
 const CHUNKED_TABLES: [(&str, u32); 3] = [(L3_TABLE, L3_VNI), ("tenant2", 5001), ("tenant3", 5002)];
 const CHUNKED_PER_TABLE: u32 = 25_000;
+/// Extra export RTs on router-b's `L3_TABLE` (`65000:9000` + i, imported by
+/// nothing): each adds ~8 encoded bytes to every route it originates, so its
+/// 25 000 routes weigh ~7.5 MiB, past the 4 MiB `EVPN_PUSH_BYTES`, and its
+/// `nos-ribd`'s `RedistributeEvpnPrefixes` `Full` is chunked (#725). A table
+/// cannot simply hold more statics: one static routing instance is one list,
+/// and a list must fit one 2 MiB REST `PUT`.
+const CHUNKED_EXTRA_RTS: u32 = 32;
 
 /// The i-th `evpn-l3-chunked` prefix of table `t`: `100.64.0.0 + t * 25000 + i`.
 fn chunked_prefix(t: usize, i: u32) -> nos_proto::IpNet {
@@ -7207,7 +7214,11 @@ fn chunked_table_flags(id: Id, table: &str, vni: u32) -> Vec<String> {
 /// while router-a has no IP-VRF; then router-a's three tables are created and
 /// each new `nos-ribd` gets one chunked `Full` from bgpd, which it must
 /// assemble and apply once. There is no budget knob (the watchdog clears its
-/// children's environment), so only real volume works.
+/// children's environment), so only real volume works. Last, the origination
+/// direction (#725): router-b's tenant routes carry `CHUNKED_EXTRA_RTS` more
+/// RTs, so a restart of its `nos-ribd` sends a chunked
+/// `RedistributeEvpnPrefixes` `Full`, which router-b's bgpd assembles with
+/// nothing withdrawn on router-a.
 ///
 /// Why the order: the same routes arriving as individual `Add`s are applied
 /// one by one, each rebuilding and reconciling the whole table
@@ -7257,6 +7268,15 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     let flaps = "bgp session established\\|sent cease notification\\|received notification";
     let (flaps_a, flaps_b) = (a.count(flaps), b.count(flaps));
     b.edit(|config| {
+        let tenant = config
+            .routing_tables
+            .iter_mut()
+            .find(|t| t.name == L3_TABLE)
+            .context("router-b has no tenant table")?;
+        tenant
+            .evpn
+            .route_targets_export
+            .extend((0..CHUNKED_EXTRA_RTS).map(|i| format!("65000:{}", 9000 + i)));
         for (t, (table, _)) in CHUNKED_TABLES.iter().enumerate() {
             let instance = format!("sri-chunked{t}");
             let gateway: std::net::IpAddr = if t == 0 {
@@ -7395,6 +7415,32 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     if !tenant_has_evpn(a, &lasts[0].to_string()).await? {
         bail!(
             "router-a: {L3_TABLE} lacks {} after the chunked Full",
+            lasts[0]
+        );
+    }
+
+    // The origination direction (#725): router-b's tenant `nos-ribd` pushed
+    // its statics as `Add`s (it was connected before the commit); a restart
+    // makes it send them as one `RedistributeEvpnPrefixes` `Full`, ~7.5 MiB
+    // with the extra RTs, so chunked, and router-b's bgpd must assemble it
+    // and apply it once: the same set, so router-a withdraws nothing.
+    log("router-b restarts its tenant nos-ribd: its Type-5 Full reaches bgpd chunked");
+    let originated = format!(
+        "assembled chunked evpn route snapshot source=table:{L3_TABLE} routes=250[0-9][0-9] parts=[2-9]"
+    );
+    let (orig_base, removed) = (b.count(&originated), a.count("removed route"));
+    let withdrawn = a.count("evpn route withdrawn");
+    w.dock
+        .kill_process_matching("router-b", "nos-ribd", &format!("--table {L3_TABLE} "))
+        .await?;
+    b.wait_new(&originated, orig_base, 300).await?;
+    let _ = crate::logd_mem::sample(&*w, b, "origination").await;
+    a.assert_quiet("removed route", removed, 10).await?;
+    a.assert_quiet("evpn route withdrawn", withdrawn, 1).await?;
+    wait_evpn_accepted(a, total, 60).await?;
+    if !tenant_has_evpn(a, &lasts[0].to_string()).await? {
+        bail!(
+            "router-a: {L3_TABLE} lost {} after router-b's chunked origination",
             lasts[0]
         );
     }
