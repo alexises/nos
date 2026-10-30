@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::SinkExt;
 use ipnet::IpNet;
 use nos_proto::{IpcCodec, OspfRoute, OspfRouteUpdate, RibRequest, Role, ServiceRef};
 use tokio::sync::watch;
@@ -41,8 +40,15 @@ pub fn spawn(
     links: Arc<LinkManager>,
     routing_table_rx: watch::Receiver<Option<String>>,
     shutdown: watch::Receiver<bool>,
+    chunk: usize,
 ) -> JoinHandle<()> {
-    tokio::spawn(run(watchdog_socket, links, routing_table_rx, shutdown))
+    tokio::spawn(run(
+        watchdog_socket,
+        links,
+        routing_table_rx,
+        shutdown,
+        chunk,
+    ))
 }
 
 async fn run(
@@ -50,6 +56,7 @@ async fn run(
     links: Arc<LinkManager>,
     routing_table_rx: watch::Receiver<Option<String>>,
     mut shutdown: watch::Receiver<bool>,
+    chunk: usize,
 ) {
     while !*shutdown.borrow() {
         let Some(table) = routing_table_rx.borrow().clone() else {
@@ -85,14 +92,17 @@ async fn run(
             }
         };
 
+        // ponytail: write-only, so a restarted nos-ribd only gets its routes
+        // back at the next route change (the write fails, then a fresh `Full`);
+        // read for EOF like `bgp::rib_push_client` if that gap matters.
         let mut writer = FramedWrite::new(stream, IpcCodec::<RibRequest>::default());
         let routes = compute_routes(&links).await;
-        if writer
-            .send(RibRequest::PushOspfRoutes(vec![OspfRouteUpdate::Full(
-                to_routes(&routes),
-            )]))
-            .await
-            .is_err()
+        if !push(
+            &mut writer,
+            vec![OspfRouteUpdate::Full(to_routes(&routes))],
+            chunk,
+        )
+        .await
         {
             warn!(table = %table, "failed to send initial ospfv3 route snapshot to nos-ribd, retrying");
             if wait_or_shutdown(RETRY_DELAY, &mut shutdown).await {
@@ -110,21 +120,12 @@ async fn run(
             }
             let new_table = routing_table_rx.borrow().clone();
             if new_table.as_deref() != Some(table.as_str()) {
-                let _ = writer
-                    .send(RibRequest::PushOspfRoutes(vec![OspfRouteUpdate::Full(
-                        Vec::new(),
-                    )]))
-                    .await;
+                push(&mut writer, vec![OspfRouteUpdate::Full(Vec::new())], chunk).await;
                 break;
             }
             let new_routes = compute_routes(&links).await;
             let updates = diff_routes(&last_sent, &new_routes);
-            if !updates.is_empty()
-                && writer
-                    .send(RibRequest::PushOspfRoutes(updates))
-                    .await
-                    .is_err()
-            {
+            if !push(&mut writer, updates, chunk).await {
                 warn!(table = %table, "write failure sending ospfv3 route update, reconnecting");
                 break;
             }
@@ -160,6 +161,18 @@ impl Pushed {
             backup_tunnel: None,
         }
     }
+}
+
+/// Sends one push as `PushOspfRoutes` frames of at most `chunk` weight
+/// (`OspfRouteUpdate::frames_with`: a big `Full` becomes `FullPart`s plus a
+/// closing `Full`), in order, stopping on the first error. Nothing is sent
+/// for an empty push. `false` means the connection is gone.
+async fn push<S>(writer: &mut S, updates: Vec<OspfRouteUpdate>, chunk: usize) -> bool
+where
+    S: futures::Sink<RibRequest> + Unpin,
+{
+    let frames = OspfRouteUpdate::frames_with(updates, chunk);
+    nos_proto::chunk::send_all(writer, frames.into_iter().map(RibRequest::PushOspfRoutes)).await
 }
 
 /// Waits for the next reason to recompute routes: an LSDB change (then a
@@ -344,5 +357,58 @@ mod tests {
         // The burst is spent: the next wait falls back to the poll tick.
         assert!(!wait_for_change(&n, &mut rx).await);
         assert_eq!(start.elapsed(), HOLD_DOWN + POLL_INTERVAL);
+    }
+
+    /// A snapshot heavier than `chunk` reaches the RIB as `FullPart`s closed
+    /// by one `Full`, in order, one `PushOspfRoutes` per frame (#727).
+    #[tokio::test]
+    async fn push_cuts_a_heavy_full_into_ordered_frames() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::FramedRead;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ribd = nos_test_support::FakeRibd::new(&tmp.path().join("rib.sock"), "rt1");
+        let stream = nos_pki::connect(ribd.path(), Role::Ribd, "rt1")
+            .await
+            .unwrap();
+        let (r, w) = tokio::io::split(stream);
+        let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
+        let mut reader = FramedRead::new(r, IpcCodec::<nos_proto::RibEvent>::default());
+        // One next hop each: weight 2, so a chunk of 4 carries two routes.
+        let all: Vec<OspfRoute> = (0..5)
+            .map(|i| OspfRoute {
+                prefix: format!("2001:db8:{i}::/64").parse().unwrap(),
+                next_hops: vec![("fe80::1".parse().unwrap(), None)],
+                backup_next_hop: None,
+                backup_interface_id: None,
+                backup_tunnel: None,
+                metric: 10,
+                discard: false,
+            })
+            .collect();
+
+        assert!(push(&mut writer, Vec::new(), 4).await);
+        assert!(push(&mut writer, vec![OspfRouteUpdate::Full(all.clone())], 4).await);
+        // The query's reply proves every push before it was read.
+        writer.send(RibRequest::GetVrfName).await.unwrap();
+        reader.next().await.unwrap().unwrap();
+
+        let frames: Vec<Vec<OspfRouteUpdate>> = ribd
+            .take_pushed()
+            .into_iter()
+            .map(|r| match r {
+                RibRequest::PushOspfRoutes(f) => f,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        let expect = |i: usize| all[i..(i + 2).min(5)].to_vec();
+        assert_eq!(
+            frames,
+            vec![
+                vec![OspfRouteUpdate::FullPart(expect(0))],
+                vec![OspfRouteUpdate::FullPart(expect(2))],
+                vec![OspfRouteUpdate::Full(expect(4))],
+            ]
+        );
     }
 }

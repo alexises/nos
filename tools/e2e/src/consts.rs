@@ -426,6 +426,16 @@ pub const GR_B_PREFIX: &str = "198.18.211.0/24";
 /// 100.64.0.0/16). With `REDISTRIBUTE_PREFIX` router-b's push is 5001 routes,
 /// over two `BGP_PUSH_CHUNK`s (2048): a `Full` of 3 frames.
 pub const CHUNKED_ROUTES: usize = 5000;
+/// `ospf-push-chunked`: extra /32 statics router-a redistributes into OSPF
+/// (in 100.64.0.0/16), plus one more as the trigger. With `ASBR_PREFIX` and
+/// the intra-area routes router-b holds 80-odd single-hop routes (weight 2
+/// each, `OspfRoute::weight`), so `OSPF_PUSH_CHUNK_TEST` cuts its `Full` into
+/// 32-route frames: 3 of them. Kept under ~100: every Type-5 travels in one
+/// unsplit LSU and the 4 KB receive buffer truncates a bigger one (#606).
+pub const OSPF_CHUNKED_ROUTES: usize = 80;
+/// `ospf-push-chunked`: `nos-ospfd --push-chunk` (the real
+/// `OSPF_PUSH_CHUNK` is 65 536, far too many routes for a CI phase).
+pub const OSPF_PUSH_CHUNK_TEST: usize = 64;
 pub const NET_OSPF_FRR: &str = "nos-verify-net-ospf-frr";
 pub const OSPF_FRR_SUBNET: &str = "10.51.0.0/24";
 pub const OSPF_FRR_IP_A: &str = "10.51.0.2";

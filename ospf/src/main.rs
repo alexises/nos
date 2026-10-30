@@ -61,6 +61,13 @@ struct Args {
     /// graceful-restart marker (`<instance>.gr`, consumed at start).
     #[arg(long, default_value = "/var/lib/nos/ospfd")]
     state_dir: PathBuf,
+
+    /// Weight budget per `PushOspfRoutes` frame (`OspfRouteUpdate::frames_with`).
+    /// Unset: `nos_proto::rib::ospf_push_chunk()`. Test-only, via `--ospfd-arg`
+    /// (the watchdog clears its children's environment, so `NOS_OSPF_PUSH_CHUNK`
+    /// cannot reach a supervised daemon); never a config field.
+    #[arg(long, hide = true)]
+    push_chunk: Option<usize>,
 }
 
 #[tokio::main]
@@ -131,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
         links.clone(),
         routing_table_rx,
         shutdown_rx,
+        args.push_chunk
+            .filter(|&n| n > 0)
+            .unwrap_or_else(nos_proto::rib::ospf_push_chunk),
     );
     let server_task = server::start(
         &listen_socket,
