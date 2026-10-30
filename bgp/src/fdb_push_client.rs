@@ -80,11 +80,31 @@ enum Writer {
     Rib(FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<RibRequest>>),
 }
 
+/// Sends `update` cut at `budget` encoded bytes (`EvpnUpdate::split_with`),
+/// in order, stopping at the first write error.
+async fn send_split<S, T>(
+    sink: &mut S,
+    update: EvpnUpdate,
+    budget: usize,
+    wrap: fn(EvpnUpdate) -> T,
+) -> bool
+where
+    S: futures::Sink<T> + Unpin,
+{
+    for part in update.split_with(budget) {
+        if sink.send(wrap(part)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 impl Writer {
     async fn send(&mut self, update: EvpnUpdate) -> bool {
+        let budget = nos_proto::fdb::evpn_push_budget();
         match self {
-            Writer::Fdb(w) => w.send(FdbRequest::PushEvpnRoutes(update)).await.is_ok(),
-            Writer::Rib(w) => w.send(RibRequest::PushEvpnRoutes(update)).await.is_ok(),
+            Writer::Fdb(w) => send_split(w, update, budget, FdbRequest::PushEvpnRoutes).await,
+            Writer::Rib(w) => send_split(w, update, budget, RibRequest::PushEvpnRoutes).await,
         }
     }
 }
@@ -259,6 +279,43 @@ mod tests {
                 EvpnUpdate::Remove(route(3, 0).0)
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_large_full_goes_as_ordered_parts_closed_by_a_full() {
+        let routes: Vec<EvpnRoute> = (0..10).map(|i| route(i, 10).1).collect();
+        let one = postcard::to_allocvec(&routes[0]).unwrap().len();
+        let mut sent: Vec<FdbRequest> = Vec::new();
+        // Three routes per frame.
+        assert!(
+            send_split(
+                &mut sent,
+                EvpnUpdate::Full(routes.clone()),
+                one * 3,
+                FdbRequest::PushEvpnRoutes
+            )
+            .await
+        );
+        let kinds: Vec<_> = sent
+            .iter()
+            .map(|r| match r {
+                FdbRequest::PushEvpnRoutes(EvpnUpdate::FullPart(p)) => (true, p.len()),
+                FdbRequest::PushEvpnRoutes(EvpnUpdate::Full(p)) => (false, p.len()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, [(true, 3), (true, 3), (true, 3), (false, 1)]);
+        let mut one_frame: Vec<RibRequest> = Vec::new();
+        assert!(
+            send_split(
+                &mut one_frame,
+                EvpnUpdate::Full(routes),
+                usize::MAX,
+                RibRequest::PushEvpnRoutes
+            )
+            .await
+        );
+        assert_eq!(one_frame.len(), 1);
     }
 
     #[test]
