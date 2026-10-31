@@ -489,7 +489,19 @@ pub async fn flowspec_dataplane(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&unsupported, base, 60).await?;
     fsd_show_contains(a, "unsupported (packet length: no flower key)").await?;
 
-    log("step 4: GoBGP withdraws every rule: eth0 is cleared");
+    log("step 4: nos-acld is killed: nos-bgpd reconnects and re-pushes, rules count again");
+    let reconnect = "connected to nos-acld, pushing flowspec rules";
+    let (rebase, applied) = (a.count(reconnect), a.count(&fsd_applied(2)));
+    w.dock.kill_process("router-a", "nos-acld").await?;
+    let a = w.a()?;
+    a.wait_new(reconnect, rebase, 60).await?;
+    a.wait_new(&fsd_applied(2), applied, 60).await?;
+    let probe = format!("echo > /dev/tcp/{IP_A}/{FSD_TCP_PORT}");
+    fsd_counted(w, &probe, "rate 0 bytes/s").await?;
+    let a = w.a()?;
+    fsd_show_contains(a, "\"dataplane\":\"installed\"").await?;
+
+    log("step 5: GoBGP withdraws every rule: eth0 is cleared");
     let cleared = a.count(&fsd_applied(0));
     for m in [&tcp[..], &udp[..], &len[..]] {
         super::bgp::gobgp_owned(w, fsd_rule("del", m, &[])).await?;
