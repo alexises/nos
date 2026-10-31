@@ -31,5 +31,5 @@ The pure core (`bpdu`, `vector`, `cost`, `timers`, `machines`, `bridge`, `action
 
 - Time enters only through `Bridge::tick` (1 s); no clock reads. A change to a machine guard needs a sim scenario or proptest run (`PROPTEST_CASES=3000`), the unit tests alone do not catch stalls.
 - Timers in a BPDU stay raw `u16` (1/256 s) so any peer value round-trips; use `secs`/`raw_secs` for whole seconds.
-- Decode ignores trailing bytes and NIC padding past the length field; a type 0x02 BPDU of version >= 2 (MSTP's 3 too) decodes as RST.
+- Decode ignores trailing bytes and NIC padding past the length field; a type 0x02 BPDU of version >= 2 (MSTP's 3 too) decodes as RST; so does a version 3 BPDU with an invalid Version 3 Length or a short version 3 body (`decode_any` falls back, never errors).
 - Linux's kernel STP only emits Config BPDUs: the Config test vectors are real captures, the RST and TCN vectors follow the clause 14 layout.

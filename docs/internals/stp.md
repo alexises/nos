@@ -42,7 +42,7 @@ Reference for `nos-stp` (IEEE 802.1Q-2022). User-facing configuration: [Spanning
 | 102 | 16 each | MSTI message |
 
 - MSTI message: flags (as RST, bit 7 is Master), regional root id (priority plus the MSTID as extension, 8), internal root path cost (4), bridge priority (1, high nibble), port priority (1, high nibble), remaining hops (1).
-- A bad Version 3 Length (below 64, not 64 plus a multiple of 16, over 64 messages) is rejected. `bpdu::decode` still reads a version 3 BPDU as its RST part; `decode_any` keeps the MST part.
+- A bad Version 3 Length (below 64, not 64 plus a multiple of 16, over 64 messages) (or a body shorter than that length) makes the BPDU be processed as its RST part (802.1Q cl.14), never dropped. `bpdu::decode` still reads a version 3 BPDU as its RST part; `decode_any` keeps the MST part.
 - The Configuration Digest is HMAC-MD5 with the key `13AC06A62E47FD51F95D2BA243CD0346` over 4096 big-endian 16-bit MSTIDs, entry `i` for VLAN `i`. An empty table gives `AC36177F50283CD4B83821D8AB26DE62`.
 
 ## Priority vector
