@@ -4430,4 +4430,79 @@ pub(crate) mod tests {
             assert_eq!(got.is_ok(), sent, "{state:?}");
         }
     }
+
+    /// RFC 2328 §10.7/§13/§13.7 (kept by RFC 5340): LSR, LSU and LSAck from
+    /// a neighbor below Exchange are ignored; from Exchange they are handled.
+    #[tokio::test]
+    async fn lsr_lsu_lsack_ignored_below_exchange() {
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        let cfg = link("eth0.0", 10);
+        let (area, link_store, as_scope) = (
+            Mutex::new(Lsdb::new()),
+            Mutex::new(Lsdb::new()),
+            Mutex::new(Lsdb::new()),
+        );
+        let stores = Stores {
+            area: &area,
+            link: &link_store,
+            as_scope: &as_scope,
+        };
+        let header = LsaHeader {
+            age: 0,
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: neighbor_id,
+            sequence_number: 0x8000_0001u32.cast_signed(),
+            checksum: 1,
+            length: 20,
+        };
+        for (state, handled) in [
+            (NeighborState::ExStart, false),
+            (NeighborState::Exchange, true),
+        ] {
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            status.send_modify(|s| {
+                let mut info = neighbor_info(state, "fe80::2".parse().unwrap(), 7);
+                let mut adj = AdjacencyData::default();
+                adj.retransmission_list.insert(
+                    header.key(),
+                    Arc::new(Lsa {
+                        header,
+                        body: LsaBody::Opaque(vec![]),
+                    }),
+                );
+                info.adjacency = Some(adj);
+                s.neighbors.insert(neighbor_id, info);
+            });
+            let lsr = LsrPacket {
+                router_id: neighbor_id,
+                area_id: Ipv4Addr::UNSPECIFIED,
+                requests: vec![],
+            };
+            let got = handle_lsr(&cfg, Ipv4Addr::new(1, 1, 1, 1), &status, &stores, &lsr).await;
+            assert_eq!(got.is_some(), handled, "lsr {state:?}");
+            let lsu = LsuPacket {
+                router_id: neighbor_id,
+                area_id: Ipv4Addr::UNSPECIFIED,
+                lsas: vec![],
+            };
+            let got = handle_lsu(&cfg, Ipv4Addr::new(1, 1, 1, 1), &status, &stores, &lsu).await;
+            assert_eq!(got.is_some(), handled, "lsu {state:?}");
+            handle_lsack(
+                &status,
+                &LsAckPacket {
+                    router_id: neighbor_id,
+                    area_id: Ipv4Addr::UNSPECIFIED,
+                    lsa_headers: vec![header],
+                },
+            );
+            let left = status.borrow().neighbors[&neighbor_id]
+                .adjacency
+                .as_ref()
+                .unwrap()
+                .retransmission_list
+                .len();
+            assert_eq!(left == 0, handled, "lsack {state:?}");
+        }
+    }
 }

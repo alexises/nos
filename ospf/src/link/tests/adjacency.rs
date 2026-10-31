@@ -424,3 +424,37 @@ fn lsack_ignored_below_exchange() {
         assert_eq!(left == 0, cleared, "{state:?}");
     }
 }
+
+/// RFC 2328 §10.7/§13: LSR and LSU from a neighbor below Exchange are
+/// ignored; from Exchange they are handled.
+#[tokio::test]
+async fn lsr_and_lsu_ignored_below_exchange() {
+    let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+    let cfg = link("eth0.0", 10);
+    let (lsdb, link_local) = (Mutex::new(Lsdb::new()), Mutex::new(Lsdb::new()));
+    for (state, handled) in [
+        (NeighborState::ExStart, false),
+        (NeighborState::Exchange, true),
+    ] {
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        status.send_modify(|s| {
+            let mut info = neighbor_info(state, Ipv4Addr::new(10, 0, 0, 2));
+            info.adjacency = Some(AdjacencyData::default());
+            s.neighbors.insert(neighbor_id, info);
+        });
+        let lsr = LsrPacket {
+            router_id: neighbor_id,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            requests: vec![],
+        };
+        let got = rx::handle_lsr(&cfg, id(1), &status, &lsdb, &link_local, &lsr).await;
+        assert_eq!(got.is_some(), handled, "lsr {state:?}");
+        let lsu = LsuPacket {
+            router_id: neighbor_id,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![],
+        };
+        let got = rx::handle_lsu(&cfg, id(1), &status, &lsdb, &link_local, &lsu).await;
+        assert_eq!(got.is_some(), handled, "lsu {state:?}");
+    }
+}
