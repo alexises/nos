@@ -341,6 +341,10 @@ pub const AGGREGATE_PREFIX: &str = "198.51.0.0/16";
 pub const AGGREGATE_CONTRIBUTOR_B: &str = "198.51.200.0/24";
 /// TEST-NET-3 — the loopback scenario's address.
 pub const LOOPBACK_ADDRESS: &str = "203.0.113.1/32";
+/// `loopback` (#655): the same IPv6 host address, /64 then /48 — the kernel
+/// refuses a second copy of an IPv6 address, so the old one must go first.
+pub const LOOPBACK_V6_OLD: &str = "2001:db8:655::1/64";
+pub const LOOPBACK_V6_NEW: &str = "2001:db8:655::1/48";
 /// TEST-NET-3 — `port-aggregate`'s bond address (tag 0, in rt1), and the
 /// connected route nos-ribd derives from it.
 pub const PORT_AGGREGATE_ADDRESS: &str = "203.0.113.33/29";

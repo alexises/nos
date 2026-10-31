@@ -34,6 +34,38 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
     // it in rt1, connected route included.
     a.wait_connected(LOOPBACK_ADDRESS).await?;
 
+    // #655: a prefix-length change on one IPv6 address must converge
+    // (remove old, then add new) instead of failing with EEXIST.
+    a.provision(&[
+        "--loopback-remove-address",
+        LOOPBACK_ADDRESS,
+        "--loopback-address",
+        LOOPBACK_V6_OLD,
+    ])
+    .await?;
+    a.wait(&format!(
+        "added interface address interface=loopback-rt1 address={LOOPBACK_V6_OLD}"
+    ))
+    .await?;
+    let failed = "failed to .* interface address";
+    let failed_base = a.count(failed);
+    let added_new =
+        format!("added interface address interface=loopback-rt1 address={LOOPBACK_V6_NEW}");
+    let removed_old =
+        format!("removed interface address interface=loopback-rt1 address={LOOPBACK_V6_OLD}");
+    let removed_old_base = a.count(&removed_old);
+    let added_base = a.count(&added_new);
+    a.provision(&[
+        "--loopback-remove-address",
+        LOOPBACK_V6_OLD,
+        "--loopback-address",
+        LOOPBACK_V6_NEW,
+    ])
+    .await?;
+    a.wait_new(&removed_old, removed_old_base, 30).await?;
+    a.wait_new(&added_new, added_base, 30).await?;
+    a.assert_quiet(failed, failed_base, 5).await?;
+
     log("removing router-a's loopback interface");
     a.provision(&["--delete-loopback"]).await?;
     a.wait(&format!(
