@@ -187,6 +187,20 @@ async fn drain<E>(ops: impl IntoIterator<Item = impl Future<Output = Result<(), 
         .await
 }
 
+/// The shadow entry after an install: unset when the add was deferred or
+/// skipped (no `l3` bridge / tunnel device / resolved hop yet), so a retry
+/// of the same entry is not a no-op (#686).
+fn shadow_after_install(sent: bool, new: &Hops) -> Option<Hops> {
+    sent.then(|| new.clone())
+}
+
+/// Drops slots whose add was deferred or skipped from a seeded shadow map.
+fn unset_deferred(installed: &mut HashMap<Slot, Hops>, deferred: &[Slot]) {
+    for slot in deferred {
+        installed.remove(slot);
+    }
+}
+
 /// One kernel route of a prefix: `false` is the primary, `true` its backup.
 type Slot = (IpNet, bool);
 
@@ -759,6 +773,7 @@ impl LinuxRibDriver {
     /// Installs `hops` at a slot: a replace when the slot holds `old` (its
     /// install request replaces the kernel route in one step), then removes
     /// `old` itself only if the install was deferred and left it behind.
+    /// Returns whether the new route is in the kernel.
     async fn install(
         &self,
         table_id: u32,
@@ -766,7 +781,7 @@ impl LinuxRibDriver {
         hops: &[NextHop],
         old: Option<&Hops>,
         (source, backup, tunnel): (Option<RouteSource>, bool, bool),
-    ) -> Result<(), DriverError> {
+    ) -> Result<bool, DriverError> {
         let sent = self
             .add_route(
                 table_id,
@@ -781,7 +796,7 @@ impl LinuxRibDriver {
         if let (false, Some(old)) = (sent, old) {
             self.remove_route(table_id, prefix, old, backup).await?;
         }
-        Ok(())
+        Ok(sent)
     }
 
     /// Applies only `changes` directly against the kernel, using
@@ -847,7 +862,7 @@ impl LinuxRibDriver {
                         (SlotOp::Add | SlotOp::Replace, o, Some(n)) => self
                             .install(table_id, prefix, n, o, (source, slot.1, tunnel))
                             .await
-                            .map(|()| Some(n.clone())),
+                            .map(|sent| shadow_after_install(sent, n)),
                         (_, _, n) => Ok(n.cloned()),
                     };
                     match step {
@@ -941,6 +956,8 @@ impl LinuxRibDriver {
         }))
         .await;
 
+        let deferred = std::sync::Mutex::new(Vec::new());
+        let deferred_ref = &deferred;
         let add_failed = drain(to_add.into_iter().map(|(slot, _)| {
             let source = best_routes.get(&slot.0).map(|e| e.source);
             let tunnel = best_routes.get(&slot.0).is_some_and(|e| e.backup_tunnel);
@@ -957,6 +974,9 @@ impl LinuxRibDriver {
                     .add_route(table_id, slot.0, &want, source, slot.1, tunnel, replace)
                     .await
                     .map_err(|e| (slot, e))?;
+                if !sent {
+                    deferred_ref.lock().unwrap().push(slot);
+                }
                 // Deferred or skipped: the old route is still there, drop it.
                 match gone {
                     Some((Some(mut message), key)) if !sent => {
@@ -978,6 +998,8 @@ impl LinuxRibDriver {
         // (an empty `desired` on `teardown` correctly clears it): `desired`,
         // except where an op failed and the kernel keeps what it had.
         let mut installed = desired_full;
+        // A deferred or skipped add is not in the kernel (#686).
+        unset_deferred(&mut installed, &deferred.into_inner().unwrap());
         let mut first_error = None;
         for (slot, e) in add_failed {
             // A failed replace leaves what the kernel had (like a failed
@@ -1499,6 +1521,18 @@ fn diff_routes<K: Copy + Eq + std::hash::Hash, V: Clone + PartialEq>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deferred_install_leaves_slot_unset() {
+        let hops: super::Hops = super::Hops::default();
+        assert_eq!(super::shadow_after_install(false, &hops), None);
+        assert_eq!(super::shadow_after_install(true, &hops), Some(hops.clone()));
+        let slot = ("10.0.0.0/8".parse().unwrap(), false);
+        let other = ("10.1.0.0/16".parse().unwrap(), false);
+        let mut m = std::collections::HashMap::from([(slot, hops.clone()), (other, hops)]);
+        super::unset_deferred(&mut m, &[slot]);
+        assert!(!m.contains_key(&slot) && m.contains_key(&other));
+    }
+
     use super::*;
 
     fn net(s: &str) -> IpNet {
