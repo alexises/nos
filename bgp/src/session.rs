@@ -675,6 +675,11 @@ impl SessionManager {
         self.bgp_rib.lock().await.apply_vpn_prefixes(table, update);
     }
 
+    /// How many VPN export routes `nos-ribd` pushed are held, across tables.
+    pub async fn vpn_local_len(&self) -> usize {
+        self.bgp_rib.lock().await.vpn_local_len()
+    }
+
     /// The consumers `fdb_push_client` feeds and what to feed them: every
     /// received Type-5 route to the IP-VRF routing tables (`to_tables`), every
     /// other received EVPN route to the broadcast domains, and a symmetric IRB

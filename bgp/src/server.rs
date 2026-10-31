@@ -5,7 +5,10 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, Stream};
 use nos_proto::chunk::FullStaging;
-use nos_proto::{BgpEvent, BgpRequest, EvpnRoute, EvpnUpdate, IpcCodec, RedistributeUpdate, Role};
+use nos_proto::{
+    BgpEvent, BgpRequest, EvpnRoute, EvpnUpdate, IpcCodec, RedistributeUpdate, Role, VpnPrefix,
+    VpnPrefixUpdate,
+};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
@@ -160,6 +163,7 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
     let mut snapshots = Snapshots::default();
     let mut evpn = EvpnStaging::default();
     let mut redistribute = FullStaging::default();
+    let mut vpn = VpnStaging::default();
     while let Some(msg) = reader.next().await {
         let req = match msg {
             Ok(req) => req,
@@ -237,7 +241,9 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                 }
             }
             BgpRequest::RedistributeVpnPrefixes { table, update } => {
-                sessions.apply_vpn_prefixes(&table, update).await;
+                if let Some(update) = vpn.absorb(instance, &table, update) {
+                    sessions.apply_vpn_prefixes(&table, update).await;
+                }
             }
             BgpRequest::SendRouteRefresh { peer } => {
                 let event = if sessions
@@ -304,6 +310,39 @@ impl EvpnStaging {
                 parts,
                 instance = %instance,
                 "assembled chunked evpn route snapshot"
+            );
+        }
+        Some(update)
+    }
+}
+
+/// One connection's chunked `RedistributeVpnPrefixes` `Full`s in progress
+/// (#791), one per table: `apply_vpn_prefixes` replaces the table's whole
+/// export set on `Full`, so a lone part would withdraw the rest. Dropped with
+/// the connection; `nos-ribd` resends a whole `Full` on reconnect.
+#[derive(Default)]
+struct VpnStaging(HashMap<String, FullStaging<VpnPrefix>>);
+
+impl VpnStaging {
+    /// `None` while `update` is a `FullPart`; otherwise the update to apply.
+    fn absorb(
+        &mut self,
+        instance: &str,
+        table: &str,
+        update: VpnPrefixUpdate,
+    ) -> Option<VpnPrefixUpdate> {
+        let mut staging = self.0.remove(table).unwrap_or_default();
+        let absorbed = update.absorb(&mut staging);
+        if staging.is_staging() {
+            self.0.insert(table.to_string(), staging);
+        }
+        let (update, parts) = absorbed?;
+        if parts > 1
+            && let VpnPrefixUpdate::Full(r) = &update
+        {
+            info!(
+                table = %table, routes = r.len(), parts, instance = %instance,
+                "assembled chunked vpn export snapshot"
             );
         }
         Some(update)
@@ -382,6 +421,62 @@ mod staging_tests {
         drop(st);
         let mut fresh = EvpnStaging::default();
         assert_eq!(fresh.absorb("r1", &src(), last.clone()), Some(last));
+    }
+}
+
+#[cfg(test)]
+mod vpn_staging_tests {
+    use super::*;
+
+    fn route(i: u8) -> VpnPrefix {
+        VpnPrefix {
+            rd: [0; 8],
+            prefix: nos_proto::IpNet::new([10, i, 0, 0].into(), 24).unwrap(),
+            labels: vec![1000],
+            ext_communities: vec![u64::MAX; 20],
+        }
+    }
+
+    fn routes(r: std::ops::Range<u8>) -> Vec<VpnPrefix> {
+        r.map(route).collect()
+    }
+
+    /// A chunk is gated exactly like the `Full` it belongs to.
+    #[test]
+    fn a_vpn_export_part_is_ribd_only() {
+        for role in Role::ALL {
+            let req = BgpRequest::RedistributeVpnPrefixes {
+                table: "red".to_string(),
+                update: VpnPrefixUpdate::FullPart(vec![]),
+            };
+            assert_eq!(allowed(role, &req), role == Role::Ribd, "{role:?}");
+        }
+    }
+
+    #[test]
+    fn tables_stage_apart_and_a_dropped_connection_discards() {
+        use VpnPrefixUpdate::{Add, Full, FullPart};
+        let mut st = VpnStaging::default();
+        assert_eq!(st.absorb("r1", "red", FullPart(routes(0..2))), None);
+        assert_eq!(st.absorb("r1", "blue", FullPart(routes(10..11))), None);
+        // Incrementals pass through without touching either buffer.
+        assert_eq!(st.absorb("r1", "red", Add(route(99))), Some(Add(route(99))));
+        assert_eq!(
+            st.absorb("r1", "blue", Full(routes(11..12))),
+            Some(Full(routes(10..12)))
+        );
+        assert_eq!(
+            st.absorb("r1", "red", Full(routes(2..3))),
+            Some(Full(routes(0..3)))
+        );
+        assert!(st.0.is_empty(), "closed buffers are dropped");
+        st.absorb("r1", "red", FullPart(routes(0..2)));
+        drop(st);
+        let mut fresh = VpnStaging::default();
+        assert_eq!(
+            fresh.absorb("r1", "red", Full(routes(2..3))),
+            Some(Full(routes(2..3)))
+        );
     }
 }
 

@@ -437,3 +437,79 @@ async fn redistribution_past_max_frame_is_staged_until_the_closing_full() {
     }
     assert_eq!(sessions.redistribute_raw_len().await, N as usize);
 }
+
+/// #791: a `RedistributeVpnPrefixes` `Full` past the codec's 16 MiB
+/// `MAX_FRAME`, cut by `VpnPrefixUpdate::split_with`, crosses the real codec
+/// as `ribd` and is staged per table until its closing `Full`: nothing is
+/// held from the `FullPart`s alone, a reconnect mid-snapshot discards the
+/// staged parts, and the whole set lands in one apply.
+#[tokio::test]
+async fn vpn_export_past_max_frame_is_staged_until_the_closing_full() {
+    use nos_proto::{VpnPrefix, VpnPrefixUpdate};
+    use tokio_util::codec::Encoder;
+    // ~80 KB per route (8000 RTs, 10 varint bytes each): 250 is ~19 MiB.
+    const N: u8 = 250;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("bgp.sock");
+    let sessions = SessionManager::new("r1".to_string());
+    let _server = nos_bgp::server::start(
+        &path,
+        "r1".to_string(),
+        sessions.clone(),
+        &shared().identity("bgpd", "r1"),
+        tmp.path().join("no-watchdog.sock"),
+    )
+    .unwrap();
+    let request = |update| BgpRequest::RedistributeVpnPrefixes {
+        table: "red".into(),
+        update,
+    };
+    let all: Vec<VpnPrefix> = (0..N)
+        .map(|i| VpnPrefix {
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            prefix: nos_proto::IpNet::new([10, i, 0, 0].into(), 24).unwrap(),
+            labels: vec![1000],
+            ext_communities: vec![u64::MAX; 8000],
+        })
+        .collect();
+    assert!(
+        IpcCodec::<BgpRequest>::default()
+            .encode(
+                request(VpnPrefixUpdate::Full(all.clone())),
+                &mut bytes::BytesMut::new()
+            )
+            .is_err(),
+        "the unchunked snapshot must exceed MAX_FRAME"
+    );
+    let mut frames = VpnPrefixUpdate::Full(all).split_with(nos_proto::fdb::EVPN_PUSH_BYTES);
+    let last = frames.pop().unwrap();
+    assert!(frames.len() > 1);
+
+    // A connection lost mid-snapshot: its parts never surface.
+    let (mut r, mut w) = connect_as(&path, Role::Ribd).await;
+    for frame in frames.clone() {
+        w.feed(request(frame)).await.unwrap();
+    }
+    w.flush().await.unwrap();
+    assert!(stays_open(&mut r).await, "ribd disconnected mid-snapshot");
+    assert_eq!(sessions.vpn_local_len().await, 0, "half a snapshot held");
+    drop((r, w));
+
+    // The reconnect resends the whole snapshot.
+    let (mut r, mut w) = connect_as(&path, Role::Ribd).await;
+    for frame in frames {
+        w.feed(request(frame)).await.unwrap();
+    }
+    w.flush().await.unwrap();
+    assert!(stays_open(&mut r).await, "ribd disconnected mid-snapshot");
+    assert_eq!(sessions.vpn_local_len().await, 0, "half a snapshot held");
+    w.send(request(last)).await.unwrap();
+    for _ in 0..200 {
+        if sessions.vpn_local_len().await == usize::from(N) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(sessions.vpn_local_len().await, usize::from(N));
+}

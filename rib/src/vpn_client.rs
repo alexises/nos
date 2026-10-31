@@ -1,7 +1,9 @@
 //! Exports this table's best routes as VPN routes into its
 //! `vpn.bgp_instance` (the underlay `nos-bgpd`) over one long-lived
 //! `BgpRequest::RedistributeVpnPrefixes` connection; `push_client`'s loop,
-//! like `evpn_client`.
+//! like `evpn_client`. A `Full` over `evpn_push_budget()` encoded bytes
+//! goes as `FullPart`s closed by a `Full` (#791), which `nos-bgpd` assembles
+//! before applying.
 
 use std::path::PathBuf;
 
@@ -35,6 +37,12 @@ impl Feed for Vpn {
     }
     fn request(table: String, update: VpnPrefixUpdate) -> BgpRequest {
         BgpRequest::RedistributeVpnPrefixes { table, update }
+    }
+    fn split(update: VpnPrefixUpdate, budget: usize) -> Vec<VpnPrefixUpdate> {
+        update.split_with(budget)
+    }
+    fn budget() -> usize {
+        nos_proto::fdb::evpn_push_budget()
     }
 }
 
@@ -79,5 +87,42 @@ mod tests {
             BgpRequest::RedistributeVpnPrefixes { table, update: VpnPrefixUpdate::Full(v) }
                 if table == "red" && v.is_empty()
         ));
+    }
+
+    /// #791: a `Full` over the budget goes as ordered `FullPart`s closed by
+    /// a `Full`; the detach `Full([])` and a small one stay one frame; a
+    /// closed sink fails the send (so `run` reconnects and resends whole).
+    #[tokio::test]
+    async fn a_large_full_goes_as_ordered_parts_and_a_small_one_whole() {
+        use crate::push_client::send;
+        let routes: Vec<VpnPrefix> = (0..5)
+            .map(|i| route(&format!("10.{i}.0.0/24"), 1000))
+            .collect();
+        let mut sent: Vec<BgpRequest> = Vec::new();
+        // A 1-byte budget: every route is oversized, so one per frame.
+        assert!(send::<Vpn, _>(&mut sent, "red", Vpn::full(routes.clone()), 1).await);
+        let mut rejoined = Vec::new();
+        for (i, r) in sent.into_iter().enumerate() {
+            match r {
+                BgpRequest::RedistributeVpnPrefixes {
+                    update: VpnPrefixUpdate::FullPart(p),
+                    ..
+                } if i < 4 => rejoined.extend(p),
+                BgpRequest::RedistributeVpnPrefixes {
+                    update: VpnPrefixUpdate::Full(p),
+                    ..
+                } if i == 4 => rejoined.extend(p),
+                other => panic!("frame {i}: {other:?}"),
+            }
+        }
+        assert_eq!(rejoined, routes);
+        for update in [Vpn::full(vec![]), Vpn::full(routes)] {
+            let mut whole: Vec<BgpRequest> = Vec::new();
+            assert!(send::<Vpn, _>(&mut whole, "red", update, Vpn::budget()).await);
+            assert_eq!(whole.len(), 1);
+        }
+        let (mut tx, rx) = futures::channel::mpsc::channel::<BgpRequest>(8);
+        drop(rx);
+        assert!(!send::<Vpn, _>(&mut tx, "red", Vpn::full(vec![]), 1).await);
     }
 }
