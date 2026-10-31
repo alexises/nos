@@ -1504,10 +1504,11 @@ pub struct LinkManager {
     redistribute_policy: Mutex<Arc<CompiledPolicy>>,
     /// Link State IDs of prefix-keyed LSAs (Inter-Area-Prefix,
     /// AS-External), which are opaque in v3 (RFC 5340 §4.4.3.3/§4.4.3.5):
-    /// one per `(legacy LS type, prefix)`, handed out from a counter and
-    /// kept for the process's life. A restart may hand out other IDs; the
-    /// stateless `withdraw_undesired` then flushes the old incarnation's.
-    lsids: Mutex<HashMap<(u16, Ipv6Net), Ipv4Addr>>,
+    /// one per `(legacy LS type, prefix)`, handed out from a monotonic
+    /// counter (never reused) and pruned by `originate_all` once the prefix
+    /// is no longer originated. A restart or re-advertise may hand out
+    /// another ID; the stateless `withdraw_undesired` flushes the old one.
+    lsids: Mutex<Lsids>,
     router_id: Mutex<Option<Ipv4Addr>>,
     /// Loopback (`Interface.ospfv3_profile`) attach points' own prefixes,
     /// per area — no live `LinkConfig`/socket for these (see
@@ -1554,6 +1555,13 @@ const OWNED_TYPES: [u16; 14] = [
     lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
     lsa::LSA_TYPE_E_AS_EXTERNAL,
 ];
+
+/// See `LinkManager::lsids`: `(ID, asked for since the last prune)` per key.
+#[derive(Default)]
+struct Lsids {
+    map: HashMap<(u16, Ipv6Net), (Ipv4Addr, bool)>,
+    next: u32,
+}
 
 /// The keys one origination tick originated, per store.
 #[derive(Default)]
@@ -1688,7 +1696,7 @@ impl LinkManager {
             redistribute_raw: Mutex::new(HashSet::new()),
             redistribute_filtered: Mutex::new(HashSet::new()),
             redistribute_policy: Mutex::new(Arc::new(nos_rpl::ACCEPT_ALL.clone())),
-            lsids: Mutex::new(HashMap::new()),
+            lsids: Mutex::new(Lsids::default()),
             router_id: Mutex::new(None),
             loopback_prefixes: Mutex::new(HashMap::new()),
             age_multiplier,
@@ -1843,12 +1851,22 @@ impl LinkManager {
     /// The Link State ID for a prefix-keyed LSA — see `lsids`.
     async fn lsid(&self, lsa_type: u16, prefix: Ipv6Net) -> Ipv4Addr {
         let mut lsids = self.lsids.lock().await;
-        let next = u32::try_from(lsids.len())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
-        *lsids
-            .entry((lsa_type, prefix))
-            .or_insert_with(|| lsa::interface_id_key(next))
+        let Lsids { map, next } = &mut *lsids;
+        let (id, used) = map.entry((lsa_type, prefix)).or_insert_with(|| {
+            // ponytail: u32 wrap after 2^32 allocations is ignored.
+            *next = next.wrapping_add(1);
+            (lsa::interface_id_key(*next), false)
+        });
+        *used = true;
+        *id
+    }
+
+    /// Drops the IDs of prefixes `lsid` was not asked for since the last
+    /// prune (not originated this tick); the counter never goes back, so a
+    /// live entry's ID is never handed out again.
+    async fn prune_lsids(&self) {
+        let mut lsids = self.lsids.lock().await;
+        lsids.map.retain(|_, (_, used)| std::mem::take(used));
     }
 
     /// Recomputes and (re)installs this router's own Router-LSA per area —
@@ -2296,6 +2314,7 @@ impl LinkManager {
             local_router_id,
             &done.as_scope,
         );
+        self.prune_lsids().await;
     }
 
     /// The config a running link was started with (`None` once stopped), so
@@ -3340,6 +3359,58 @@ pub(crate) mod tests {
         assert!(link_age(8).unwrap() < lsa::MAX_AGE);
         let router = age_of(&*area.lock().await, lsa::LSA_TYPE_ROUTER, me, me);
         assert!(router.unwrap() < lsa::MAX_AGE);
+    }
+
+    async fn set_redist(m: &LinkManager, ps: &[u16]) {
+        *m.redistribute_filtered.lock().await = ps.iter().map(|n| ext_prefix(*n)).collect();
+    }
+
+    async fn ext_lsid(m: &LinkManager, n: u16) -> Ipv4Addr {
+        m.lsids.lock().await.map[&(lsa::LSA_TYPE_AS_EXTERNAL, ext_prefix(n))].0
+    }
+
+    fn ext_prefix(n: u16) -> Ipv6Net {
+        format!("2001:db8:{n:x}::/48").parse().unwrap()
+    }
+
+    /// #685: `lsids` tracks the live prefix set (no growth under churn), two
+    /// live prefixes never share an ID after a prune, and a re-advertised
+    /// prefix gets a fresh ID while its old LSA is MaxAge-flushed.
+    #[tokio::test]
+    async fn lsids_are_pruned_and_never_reused() {
+        let manager = LinkManager::new(1, None);
+        let me = Ipv4Addr::new(1, 1, 1, 1);
+
+        set_redist(&manager, &[1, 2]).await;
+        manager.originate_all(me).await;
+        let (id1, id2) = (ext_lsid(&manager, 1).await, ext_lsid(&manager, 2).await);
+        assert_ne!(id1, id2);
+
+        // Prefix 1 goes away; 3 arrives. len()+1 would hand 3 the ID of 2.
+        set_redist(&manager, &[2, 3]).await;
+        manager.originate_all(me).await;
+        assert_eq!(manager.lsids.lock().await.map.len(), 2);
+        assert_eq!(ext_lsid(&manager, 2).await, id2);
+        let id3 = ext_lsid(&manager, 3).await;
+        assert_ne!(id3, id2);
+        assert_ne!(id3, id1);
+
+        // Churn: the map stays bounded by the live set.
+        for n in 10..60 {
+            set_redist(&manager, &[2, n]).await;
+            manager.originate_all(me).await;
+            assert_eq!(manager.lsids.lock().await.map.len(), 2);
+        }
+
+        // Re-advertise 1: fresh ID, and the old LSA was flushed.
+        set_redist(&manager, &[1]).await;
+        manager.originate_all(me).await;
+        assert_ne!(ext_lsid(&manager, 1).await, id1);
+        let as_lsdb = manager.as_lsdb.lock().await;
+        assert_eq!(
+            age_of(&as_lsdb, lsa::LSA_TYPE_AS_EXTERNAL, id1, me),
+            Some(lsa::MAX_AGE)
+        );
     }
 
     #[tokio::test]
