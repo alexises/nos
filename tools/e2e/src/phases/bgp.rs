@@ -4442,6 +4442,10 @@ async fn vpn_soo_and_policy(w: &World, flags: &dyn Fn(&str) -> Vec<String>) -> a
     .await?;
 
     log("vpn site-of-origin 65001:77 on the VRF");
+    let advertised = format!(
+        "vpn route advertised peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix={VPN_EXPORT_A}"
+    );
+    let adv_before = a.count(&advertised);
     a.provision_flags(&with(&["--vpn-site-of-origin", soo]))
         .await?;
     for (prefix, label) in [("10.30.0.0/24", "500"), ("10.31.0.0/24", "501")] {
@@ -4484,6 +4488,8 @@ async fn vpn_soo_and_policy(w: &World, flags: &dyn Fn(&str) -> Vec<String>) -> a
     }
 
     log("the exported VRF loopback carries the SoO to GoBGP");
+    // Bisects a failure: bgpd never advertised it vs GoBGP dropped it (#746).
+    a.wait_new(&advertised, adv_before, 30).await?;
     let in_gobgp = format!("{VPN_RD_A}:{VPN_EXPORT_A}");
     gobgp_vpn_until(w, "vpnv4", &in_gobgp, true).await?;
     let json: serde_json::Value =
