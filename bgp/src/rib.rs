@@ -122,8 +122,8 @@ pub use vpn_out::AdvertisedVpn;
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
 pub use decision::Hops;
 use decision::{
-    best_path, build_advertisement, decision_cmp, igp_lookup, multipath_next_hops, origin_rank,
-    otc_leak, redistributed_route, runner_up_next_hop, Candidate,
+    best_index, best_path, build_advertisement, igp_lookup, multipath_next_hops, origin_rank,
+    otc_leak, rank, redistributed_route, runner_up_next_hop, Candidate,
 };
 pub use flowspec_validate::{FlowValidity, InvalidReason};
 
@@ -1765,11 +1765,11 @@ impl BgpRib {
         let (mut ranked, mut rs_ranked) = (None, None);
         for peer in peers {
             let list: &[Candidate] = if self.peer_outboxes[&peer].is_rs_client {
-                rs_ranked.get_or_insert_with(|| self.ranked(self.rs_candidates(prefix)))
+                rs_ranked.get_or_insert_with(|| self.ranked(&self.rs_candidates(prefix)))
             } else if suppressed {
                 &[]
             } else {
-                ranked.get_or_insert_with(|| self.ranked(self.candidates(prefix, false)))
+                ranked.get_or_insert_with(|| self.ranked(&self.candidates(prefix, false)))
             };
             self.send_add_paths(prefix, peer, list, only.is_some());
         }
@@ -1797,9 +1797,8 @@ impl BgpRib {
     }
 
     /// `candidates` sorted best first.
-    fn ranked(&self, mut candidates: Vec<Candidate>) -> Vec<Candidate> {
-        candidates.sort_by(|a, b| decision_cmp(b, a, &self.igp));
-        candidates
+    fn ranked(&self, candidates: &[Candidate]) -> Vec<Candidate> {
+        rank(candidates, &self.igp)
     }
 
     /// Sends `peer` the first `add_path_send_count` paths of `ranked` it may

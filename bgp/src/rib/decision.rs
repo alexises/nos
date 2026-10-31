@@ -119,17 +119,66 @@ pub(super) fn igp_cost(igp: &HashMap<IpNet, u32>, next_hop: Option<IpAddr>) -> u
 /// is its `PathKey`. The id breaks the final tie (step 10).
 pub(super) type Candidate = (RibRoute, u32);
 
+/// Index of the best candidate, deterministic-MED (RFC 4271 §9.1.2.2(c)):
+/// the best path of each neighbouring-AS group (where MED is a plain key, so
+/// `decision_cmp` is total), then the best of those winners (distinct
+/// neighbouring ASes, MED never consulted). Independent of input order.
+pub(super) fn best_index(candidates: &[Candidate], igp: &HashMap<IpNet, u32>) -> Option<usize> {
+    let mut winners: HashMap<Option<u32>, usize> = HashMap::new();
+    for (i, c) in candidates.iter().enumerate() {
+        winners
+            .entry(neighboring_as(&c.0))
+            .and_modify(|w| {
+                if decision_cmp(c, &candidates[*w], igp).is_gt() {
+                    *w = i;
+                }
+            })
+            .or_insert(i);
+    }
+    winners
+        .into_values()
+        .max_by(|&a, &b| decision_cmp(&candidates[a], &candidates[b], igp))
+}
+
 /// The full RFC 4271 §9.1.2.2 decision process — see the module doc
 /// comment for the ten-step order.
 pub(super) fn best_path(candidates: &[Candidate], igp: &HashMap<IpNet, u32>) -> Option<RibRoute> {
-    candidates
-        .iter()
-        .max_by(|a, b| decision_cmp(a, b, igp))
-        .map(|(route, _)| route.clone())
+    best_index(candidates, igp).map(|i| candidates[i].0.clone())
+}
+
+/// `candidates` best first, same deterministic-MED rule as `best_index`
+/// (`rank(..)[0]` is `best_path`). Never hand a mixed-AS set to
+/// `sort_by`/`max_by` with `decision_cmp` directly: it is only a total order
+/// within one neighbouring AS, and `sort_by` may panic otherwise.
+pub(super) fn rank(candidates: &[Candidate], igp: &HashMap<IpNet, u32>) -> Vec<Candidate> {
+    let mut groups: HashMap<Option<u32>, Vec<Candidate>> = HashMap::new();
+    for c in candidates {
+        groups
+            .entry(neighboring_as(&c.0))
+            .or_default()
+            .push(c.clone());
+    }
+    let mut groups: Vec<std::collections::VecDeque<Candidate>> = groups
+        .into_values()
+        .map(|mut g| {
+            g.sort_by(|a, b| decision_cmp(b, a, igp));
+            g.into()
+        })
+        .collect();
+    let mut out = Vec::with_capacity(candidates.len());
+    while let Some(g) = (0..groups.len())
+        .filter(|&g| !groups[g].is_empty())
+        .max_by(|&a, &b| decision_cmp(&groups[a][0], &groups[b][0], igp))
+    {
+        out.extend(groups[g].pop_front());
+    }
+    out
 }
 
 /// `best_path`'s comparator over two `(route, source_peer)` candidates:
-/// `Greater` means `a` is preferred.
+/// `Greater` means `a` is preferred. Total only when both share a
+/// neighbouring AS (MED is skipped across ASes): use `rank`/`best_index`
+/// for mixed sets.
 pub(super) fn decision_cmp(
     (a, a_id): &Candidate,
     (b, b_id): &Candidate,

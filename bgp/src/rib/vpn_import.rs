@@ -19,7 +19,7 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 
 use super::decision::multipath_ties;
-use super::{decision_cmp, BgpRib, Candidate, VpnRoute};
+use super::{best_index, BgpRib, Candidate, VpnRoute};
 use crate::vpn::{Rd, VpnKey, VrfSet};
 
 /// One route imported into one VRF.
@@ -117,10 +117,7 @@ impl BgpRib {
             .zip(0u32..)
             .map(|((_, r), id)| (r.route.clone(), id))
             .collect();
-        let (i, _) = scored
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| decision_cmp(a, b, &self.igp))?;
+        let i = best_index(&scored, &self.igp)?;
         let best = &scored[i].0;
         best.next_hop?;
         let mut paths: Vec<VpnImportPath> = Vec::new();
