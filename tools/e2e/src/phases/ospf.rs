@@ -3601,28 +3601,29 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
     let absent0 = a.count(absent);
     let filter = format!("ip proto 4 and dst host {d_lo}");
     let tcpdump = ["timeout", "30", "tcpdump", "-c", "1", "-ni", "any", &filter];
-    let (captured, pinged) =
-        tokio::join!(w.dock.in_netns(HOST_IMAGE, "router-d", &tcpdump), async {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+    // The ping starts before the cut and runs across it: one started after
+    // the cut pays container-start latency and can miss the short window in
+    // which the tunnel backup is the only route (#735).
+    let ping = [
+        "ping", "-I", RLFA_VRF, "-c", "100", "-i", "0.2", "-W", "1", &b_lo,
+    ];
+    let dock = &w.dock;
+    let (captured, pinged, cut) = tokio::join!(
+        dock.in_netns(HOST_IMAGE, "router-d", &tcpdump),
+        dock.in_netns(HOST_IMAGE, "router-a", &ping),
+        async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
             log("cutting router-a's link to router-b");
-            w.dock
-                .ip(
-                    NETNS_HELPER_IMAGE,
-                    Some("router-a"),
-                    false,
-                    &["link", "del", "eth1"],
-                )
-                .await?;
-            w.dock
-                .in_netns(
-                    HOST_IMAGE,
-                    "router-a",
-                    &[
-                        "ping", "-I", RLFA_VRF, "-c", "20", "-i", "0.2", "-W", "1", &b_lo,
-                    ],
-                )
-                .await
-        });
+            dock.ip(
+                NETNS_HELPER_IMAGE,
+                Some("router-a"),
+                false,
+                &["link", "del", "eth1"],
+            )
+            .await
+        }
+    );
+    cut?;
     let pinged = pinged?;
     log(format!("router-a's ping to {b_lo}: {}", pinged.trim()));
     let captured =
