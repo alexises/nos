@@ -1065,7 +1065,11 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         } else {
             self.handle
                 .link()
-                .add(LinkBridge::new(&ifname).build())
+                .add(
+                    LinkBridge::new(&ifname)
+                        .address(random_local_mac().to_vec())
+                        .build(),
+                )
                 .execute()
                 .await?;
             info!(domain = %desired.name, bridge = %ifname, "created broadcast domain bridge");
@@ -1304,6 +1308,21 @@ async fn dump_links(handle: &Handle, hub: &LinkHub) {
 
 /// Pure, netlink-free: `desired`/`observed` are both plain address lists —
 /// no kernel involved, so this is directly unit-testable.
+/// A random locally administered unicast MAC. Fixed on the bridge at creation
+/// so it never auto-follows its lowest port: `nos-fdbd` enslaves `vx<vni>`
+/// moments after the bridge exists, and the address change flushes the SVI's
+/// neighbours and leaves hosts holding a stale gateway MAC (#812).
+// ponytail: `RandomState` is per-process random, not cryptographic; only
+// uniqueness between routers matters (46 random bits).
+fn random_local_mac() -> [u8; 6] {
+    use std::hash::{BuildHasher, Hasher};
+    let r = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+        .to_be_bytes();
+    [(r[0] & 0xfc) | 0x02, r[1], r[2], r[3], r[4], r[5]]
+}
+
 fn diff_addresses(observed: &[IpNet], desired: &[IpNet]) -> (Vec<IpNet>, Vec<IpNet>) {
     let to_add = desired
         .iter()
@@ -1320,6 +1339,13 @@ fn diff_addresses(observed: &[IpNet], desired: &[IpNet]) -> (Vec<IpNet>, Vec<IpN
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bridge_mac_is_local_unicast_and_varies() {
+        let a = super::random_local_mac();
+        assert_eq!(a[0] & 0b11, 0b10, "locally administered, unicast");
+        assert_ne!(a, super::random_local_mac());
+    }
+
     use super::*;
 
     #[test]
