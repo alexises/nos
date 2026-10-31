@@ -786,6 +786,10 @@ async fn handle_lsr(
         let neighbor = snapshot.neighbors.get(&lsr.router_id)?;
         (neighbor.state, neighbor.adjacency.clone()?)
     };
+    if !neighbor::exchange_or_later(old_state) {
+        debug!(neighbor = %lsr.router_id, state = ?old_state, "ospfv3 lsr ignored below exchange");
+        return None;
+    }
 
     let actions = {
         let lsdb = stores.area.lock().await;
@@ -817,6 +821,10 @@ async fn handle_lsu(
         let neighbor = snapshot.neighbors.get(&lsu.router_id)?;
         (neighbor.state, neighbor.adjacency.clone()?)
     };
+    if !neighbor::exchange_or_later(old_state) {
+        debug!(neighbor = %lsu.router_id, state = ?old_state, "ospfv3 lsu ignored below exchange");
+        return None;
+    }
 
     let (actions, newly_installed) = {
         let mut lsdb = stores.area.lock().await;
@@ -879,6 +887,7 @@ fn handle_lsack(status: &StatusHandle, ack: &LsAckPacket) {
         .borrow()
         .neighbors
         .get(&ack.router_id)
+        .filter(|n| neighbor::exchange_or_later(n.state))
         .and_then(|n| n.adjacency.clone())
     else {
         return;

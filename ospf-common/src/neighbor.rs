@@ -51,6 +51,16 @@ pub enum Event {
     AdjacencyLost,
 }
 
+/// RFC 2328 §10.7/§13/§13.7: LSR, LSU and `LSAck` are ignored from a neighbor
+/// below `Exchange`.
+#[must_use]
+pub fn exchange_or_later(state: NeighborState) -> bool {
+    matches!(
+        state,
+        NeighborState::Exchange | NeighborState::Loading | NeighborState::Full
+    )
+}
+
 /// Pure state transition — no I/O, no timers. `link.rs` drives real
 /// Hello/DBD/LSR/LSU/LSAck send/receive and every timer around this.
 pub fn step(state: NeighborState, event: Event) -> NeighborState {
@@ -281,5 +291,21 @@ mod tests {
             ),
             NeighborState::Init
         );
+    }
+
+    #[test]
+    fn exchange_or_later_truth_table() {
+        use NeighborState::*;
+        for (s, want) in [
+            (Down, false),
+            (Init, false),
+            (TwoWay, false),
+            (ExStart, false),
+            (Exchange, true),
+            (Loading, true),
+            (Full, true),
+        ] {
+            assert_eq!(exchange_or_later(s), want, "{s:?}");
+        }
     }
 }

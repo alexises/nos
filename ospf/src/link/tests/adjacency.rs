@@ -373,3 +373,54 @@ async fn retransmit_pending_resends_a_dbd_only_while_negotiating() {
         assert_eq!(got.is_ok(), sent, "{state:?}");
     }
 }
+
+/// RFC 2328 §13.7: an `LSAck` from a neighbor below Exchange is ignored.
+#[test]
+fn lsack_ignored_below_exchange() {
+    let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+    let header = LsaHeader {
+        age: 0,
+        options: 0,
+        lsa_type: lsa::LSA_TYPE_ROUTER,
+        link_state_id: neighbor_id,
+        advertising_router: neighbor_id,
+        sequence_number: 0x8000_0001u32.cast_signed(),
+        checksum: 1,
+        length: 24,
+    };
+    let key = header.key();
+    for (state, cleared) in [
+        (NeighborState::ExStart, false),
+        (NeighborState::Exchange, true),
+    ] {
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        status.send_modify(|s| {
+            let mut info = neighbor_info(state, Ipv4Addr::new(10, 0, 0, 2));
+            let mut adj = AdjacencyData::default();
+            adj.retransmission_list.insert(
+                key,
+                Arc::new(Lsa {
+                    header,
+                    body: router_body(0),
+                }),
+            );
+            info.adjacency = Some(adj);
+            s.neighbors.insert(neighbor_id, info);
+        });
+        rx::handle_lsack(
+            &status,
+            &LsAckPacket {
+                router_id: neighbor_id,
+                area_id: Ipv4Addr::UNSPECIFIED,
+                lsa_headers: vec![header],
+            },
+        );
+        let left = status.borrow().neighbors[&neighbor_id]
+            .adjacency
+            .as_ref()
+            .unwrap()
+            .retransmission_list
+            .len();
+        assert_eq!(left == 0, cleared, "{state:?}");
+    }
+}

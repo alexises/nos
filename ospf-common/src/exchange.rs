@@ -478,7 +478,15 @@ pub fn take_pending_acks<L: Lsa>(adj: &mut AdjacencyData<L>) -> Option<Action<L>
 /// retransmitting whatever it acknowledges.
 pub fn on_lsack_received<L: Lsa>(adj: &mut AdjacencyData<L>, acked: &[L::Header]) {
     for header in acked {
-        adj.retransmission_list.remove(&header.key());
+        // §13.7: only an ack of the very same instance counts; one for an
+        // older or newer instance leaves the entry to be retransmitted.
+        if adj
+            .retransmission_list
+            .get(&header.key())
+            .is_some_and(|l| l.header().is_newer(header) == std::cmp::Ordering::Equal)
+        {
+            adj.retransmission_list.remove(&header.key());
+        }
     }
 }
 
