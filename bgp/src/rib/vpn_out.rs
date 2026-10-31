@@ -183,9 +183,19 @@ impl BgpRib {
         tables.into_iter().find_map(|t| self.vpn_local[t].get(k))
     }
 
+    /// How many VPN export routes `nos-ribd` pushed are held, across tables.
+    pub fn vpn_local_len(&self) -> usize {
+        self.vpn_local.values().map(HashMap::len).sum()
+    }
+
     /// Applies one `RedistributeVpnPrefixes` push from `table`'s `nos-ribd`
     /// and re-selects every key it touched.
     pub fn apply_vpn_prefixes(&mut self, table: &str, update: VpnPrefixUpdate) {
+        // Staged per table by `server.rs`'s `VpnStaging` (#791); a stray part
+        // creates nothing.
+        if matches!(update, VpnPrefixUpdate::FullPart(_)) {
+            return;
+        }
         let local = |r: VpnPrefix| {
             let mut route = decision::redistributed_route();
             route.extended_communities = r.ext_communities;
@@ -220,6 +230,7 @@ impl BgpRib {
                 slot.remove(&(rd, prefix));
                 vec![(rd, prefix)]
             }
+            VpnPrefixUpdate::FullPart(_) => unreachable!("returned above"),
         };
         for k in touched {
             self.select_vpn(&k);

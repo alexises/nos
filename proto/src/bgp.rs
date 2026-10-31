@@ -378,6 +378,49 @@ pub enum VpnPrefixUpdate {
     Add(VpnPrefix),
     /// One route no longer exported, by (RD, prefix).
     Remove([u8; 8], IpNet),
+    /// A leading part of a `Full` too large for one frame (#791): the
+    /// receiver stages it and applies nothing until the closing `Full`.
+    /// Appended (postcard indexes variants by position).
+    FullPart(Vec<VpnPrefix>),
+}
+
+impl VpnPrefixUpdate {
+    /// The frames to send for this update: anything but a `Full` over
+    /// `budget` encoded bytes is itself; that one becomes `FullPart`s closed
+    /// by a `Full` holding the last chunk (see [`crate::chunk::split_full`]).
+    /// Bytes, not routes: `ext_communities` (export RTs, Site of Origin) is unbounded.
+    #[must_use]
+    pub fn split_with(self, budget: usize) -> Vec<Self> {
+        let Self::Full(routes) = self else {
+            return vec![self];
+        };
+        let weight = |r: &VpnPrefix| postcard::to_allocvec(r).map_or(usize::MAX, |v| v.len());
+        let (parts, last) = crate::chunk::split_full(routes, budget, weight);
+        let mut out: Vec<_> = parts.into_iter().map(Self::FullPart).collect();
+        out.push(Self::Full(last));
+        out
+    }
+
+    /// Receiver side of [`Self::split_with`]: stages a `FullPart` (returns
+    /// `None`), folds the staged parts into the closing `Full`, passes
+    /// `Add`/`Remove` through. The `usize` is the frames the update took (1
+    /// when unchunked), for the receiver's log.
+    pub fn absorb(
+        self,
+        staging: &mut crate::chunk::FullStaging<VpnPrefix>,
+    ) -> Option<(Self, usize)> {
+        match self {
+            Self::FullPart(r) => {
+                staging.part(r);
+                None
+            }
+            Self::Full(r) => {
+                let (all, parts) = staging.close(r);
+                Some((Self::Full(all), parts))
+            }
+            other => Some((other, 1)),
+        }
+    }
 }
 
 /// Messages sent from a client to one `nos-bgpd` instance's IPC socket.
@@ -726,6 +769,83 @@ mod tests {
         assert_eq!(add.clone().absorb(&mut st), Some((add, 1)));
         let small = RedistributeUpdate::Full(routes(2));
         assert_eq!(small.clone().absorb(&mut st), Some((small, 1)));
+    }
+
+    fn vpn(i: u8, rts: usize) -> VpnPrefix {
+        VpnPrefix {
+            rd: [0, 0, 0, 0, 0, 0, 0, 1],
+            prefix: IpNet::new(IpAddr::from([10, i, 0, 0]), 24).unwrap(),
+            labels: vec![1000],
+            ext_communities: vec![u64::MAX; rts],
+        }
+    }
+
+    /// #791: a VPN export `Full` is cut by encoded bytes, rejoins in order
+    /// through `absorb`, and incrementals pass through untouched.
+    #[test]
+    fn vpn_full_splits_by_bytes_and_absorbs_back() {
+        use VpnPrefixUpdate::{Add, Full, FullPart, Remove};
+        let all: Vec<_> = (0..40).map(|i| vpn(i, usize::from(i % 5) * 4)).collect();
+        let budget = 300;
+        let frames = Full(all.clone()).split_with(budget);
+        assert!(frames.len() > 2);
+        let (last, parts) = frames.split_last().unwrap();
+        assert!(matches!(last, Full(_)));
+        assert!(parts.iter().all(|f| matches!(f, FullPart(_))));
+        for f in &frames {
+            let (Full(r) | FullPart(r)) = f else {
+                unreachable!()
+            };
+            let bytes: usize = r
+                .iter()
+                .map(|v| postcard::to_allocvec(v).unwrap().len())
+                .sum();
+            assert!(bytes <= budget, "{bytes}");
+        }
+        let mut st = FullStaging::default();
+        let mut got = None;
+        for f in frames {
+            assert!(got.is_none(), "nothing before the closing Full");
+            got = f.absorb(&mut st);
+        }
+        let (u, n) = got.unwrap();
+        assert_eq!(u, Full(all));
+        assert!(n > 2);
+        assert_eq!(Full(vec![]).split_with(1), [Full(vec![])]);
+        assert_eq!(Add(vpn(1, 0)).split_with(1), [Add(vpn(1, 0))]);
+        let rm = Remove([0; 8], vpn(1, 0).prefix);
+        assert_eq!(rm.clone().split_with(1), std::slice::from_ref(&rm));
+        assert_eq!(rm.clone().absorb(&mut st), Some((rm, 1)));
+    }
+
+    /// `FullPart` is appended: variants 0-2 keep their wire index.
+    #[test]
+    fn vpn_full_part_is_the_last_wire_variant() {
+        let idx = |u: VpnPrefixUpdate| postcard::to_allocvec(&u).unwrap()[0];
+        assert_eq!(idx(VpnPrefixUpdate::Full(vec![])), 0);
+        assert_eq!(idx(VpnPrefixUpdate::Remove([0; 8], vpn(1, 0).prefix)), 2);
+        assert_eq!(idx(VpnPrefixUpdate::FullPart(vec![])), 3);
+    }
+
+    /// A `Full` over `MAX_FRAME` is cut so every frame, at the production
+    /// budget, still encodes.
+    #[test]
+    fn a_vpn_full_over_max_frame_splits_under_it() {
+        use tokio_util::codec::Encoder;
+        let all: Vec<_> = (0..=255).map(|i| vpn(i, 8000)).collect();
+        let req = |u| BgpRequest::RedistributeVpnPrefixes {
+            table: "red".into(),
+            update: u,
+        };
+        let encode = |u| {
+            crate::IpcCodec::<BgpRequest>::default().encode(req(u), &mut bytes::BytesMut::new())
+        };
+        assert!(encode(VpnPrefixUpdate::Full(all.clone())).is_err());
+        let frames = VpnPrefixUpdate::Full(all).split_with(crate::fdb::EVPN_PUSH_BYTES);
+        assert!(frames.len() > 1);
+        for f in frames {
+            assert!(encode(f).is_ok());
+        }
     }
 
     /// A chunk of the widest routes (IPv6 prefix and gateway) fits one frame.

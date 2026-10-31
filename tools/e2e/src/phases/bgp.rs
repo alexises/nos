@@ -7451,6 +7451,124 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// GoBGP's VPNv4 destination count (`gobgp global rib summary -a vpnv4`).
+async fn gobgp_vpnv4_count(w: &World) -> anyhow::Result<usize> {
+    let out = gobgp(w, &["global", "rib", "summary", "-a", "vpnv4"]).await?;
+    out.split("Destination:")
+        .nth(1)
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.trim().parse().ok())
+        .with_context(|| format!("no destination count in: {out}"))
+}
+
+/// `vpn-export-chunked` (#791): a VRF export `Full` heavier than
+/// `EVPN_PUSH_BYTES` (4 MiB) crosses `nos-ribd` -> `nos-bgpd` as
+/// `FullPart`s and is applied once. Router-a's `VPN_TABLE` gets
+/// `CHUNKED_PER_TABLE` static /32s and `CHUNKED_EXTRA_RTS` more export RTs
+/// (~320 encoded bytes per `VpnPrefix`, ~8 MiB), exported to GoBGP over
+/// VPNv4. Killing only that table's `nos-ribd` makes the new one send the
+/// whole set as one `Full`, which bgpd must assemble; the set is unchanged,
+/// so GoBGP loses nothing. No budget knob reaches a supervised `nos-ribd`
+/// (the watchdog clears its children's environment): only real volume works.
+pub async fn vpn_export_chunked(w: &mut World) -> anyhow::Result<()> {
+    gobgp_speaker(w, vpn_flags("65000:1"), &["l3vpn-ipv4-unicast"], &[]).await?;
+    mpls_ready(w, &["router-a"]).await?;
+    let a = w.a()?;
+    a.wait(&format!(
+        "sent initial vpn snapshot to nos-bgpd table={VPN_TABLE} bgp_instance=r1"
+    ))
+    .await?;
+    let n = CHUNKED_PER_TABLE as usize;
+    log(format!(
+        "router-a exports {n} static /32s from {VPN_TABLE} with {} export RTs",
+        CHUNKED_EXTRA_RTS + 1
+    ));
+    let started = std::time::Instant::now();
+    a.edit(|config| {
+        let red = config
+            .routing_tables
+            .iter_mut()
+            .find(|t| t.name == VPN_TABLE)
+            .context("router-a has no vpn table")?;
+        red.vpn
+            .route_targets_export
+            .extend((0..CHUNKED_EXTRA_RTS).map(|i| format!("65000:{}", 9000 + i)));
+        let instance = "sri-vpn-chunked".to_string();
+        // `loopback-<table>` is enslaved to the table's VRF by name; its
+        // subnet makes the statics' gateway on-link.
+        let lo = format!("loopback-{VPN_TABLE}");
+        let mut ops = vec![
+            ConfigOp::Interface(InterfaceOp::Ensure { name: lo.clone() }),
+            ConfigOp::Interface(InterfaceOp::AddAddress {
+                name: lo,
+                address: "198.19.0.1/24".parse()?,
+                label: None,
+            }),
+            ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure {
+                name: instance.clone(),
+            }),
+            ConfigOp::RoutingTable(RoutingTableOp::SetStaticRoutingInstance {
+                name: VPN_TABLE.to_string(),
+                static_routing_instance: instance.clone(),
+            }),
+        ];
+        let gateway: std::net::IpAddr = "198.19.0.2".parse()?;
+        ops.extend((0..CHUNKED_PER_TABLE).map(|i| {
+            ConfigOp::StaticRoute(StaticRouteOp::Set {
+                instance: instance.clone(),
+                subnet: chunked_prefix(0, i),
+                gateway,
+            })
+        }));
+        for op in ops {
+            op.apply(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        Ok(())
+    })
+    .await?;
+    // Counted on GoBGP: 25 000 `vpn route advertised` lines overrun the
+    // harness's log follower.
+    let mut held = 0;
+    for _ in 0..120 {
+        held = gobgp_vpnv4_count(w).await?;
+        if held >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    if held < n {
+        bail!("GoBGP holds only {held} of {n} VPNv4 routes");
+    }
+    log(format!(
+        "GoBGP holds {held} VPNv4 routes after {}s",
+        started.elapsed().as_secs()
+    ));
+    let _ = crate::logd_mem::sample(&*w, a, "vpn-export").await;
+
+    log(format!(
+        "killing {VPN_TABLE}'s nos-ribd: its export Full reaches bgpd chunked"
+    ));
+    let assembled = format!(
+        "assembled chunked vpn export snapshot table={VPN_TABLE} routes=250[0-9][0-9] parts=[2-9] instance=r1"
+    );
+    let withdrawn = format!(
+        "vpn route advertisement withdrawn peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix=100\\."
+    );
+    let (asm_base, wd_base) = (a.count(&assembled), a.count(&withdrawn));
+    w.dock
+        .kill_process_matching("router-a", "nos-ribd", &format!("--table {VPN_TABLE} "))
+        .await?;
+    a.wait_new(&assembled, asm_base, 300).await?;
+    let _ = crate::logd_mem::sample(&*w, a, "vpn-export-chunked").await;
+    a.assert_quiet(&withdrawn, wd_base, 10).await?;
+    let after = gobgp_vpnv4_count(w).await?;
+    if after != held {
+        bail!("GoBGP went from {held} to {after} VPNv4 routes across the chunked Full");
+    }
+    w.dock.container_remove("router-g").await;
+    Ok(())
+}
+
 /// `evpn-l3`: RFC 9136 Type-5 routes over an RFC 9135 §4.4.1 L3 VNI, for real.
 /// Two `nos` PEs peer `l2vpn-evpn` over the underlay (`rt1`); each has an
 /// IP-VRF (`L3_TABLE`) with `l3-vni`, whose `nos-ribd` builds `vx<vni>` on a

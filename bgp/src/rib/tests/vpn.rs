@@ -846,6 +846,22 @@ fn a_label_change_reannounces_a_remove_withdraws_and_tables_are_isolated() {
     );
 }
 
+/// #791: parts are staged by `server.rs`; one reaching the RIB is a no-op
+/// and creates no table slot.
+#[test]
+fn a_stray_full_part_changes_nothing() {
+    let (mut rib, mut rx) = setup();
+    rib.apply_vpn_prefixes("red", full(vec![export(P, 1000)]));
+    assert_eq!(advs(&mut rx[1]).len(), 1);
+    rib.apply_vpn_prefixes("red", nos_proto::VpnPrefixUpdate::FullPart(vec![]));
+    rib.apply_vpn_prefixes(
+        "blue",
+        nos_proto::VpnPrefixUpdate::FullPart(vec![export("10.30.0.0/24", 1)]),
+    );
+    assert_eq!(vpns(&mut rx[1]), [] as [OutboundUpdate; 0]);
+    assert_eq!(rib.vpn_local_len(), 1);
+}
+
 #[test]
 fn the_export_policy_runs_on_a_vrf_export() {
     let mut rib = new_rib(65000);
