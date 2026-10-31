@@ -566,18 +566,34 @@ impl LinuxInterfaceDriver {
         let observed_keys: Vec<IpNet> = observed.iter().map(|(net, _)| *net).collect();
         let (to_add, to_remove) = diff_addresses(&observed_keys, desired);
 
+        // Removes first: a prefix-length change on the same IPv6 address
+        // ("add /48, remove /64") otherwise hits EEXIST on the add and the
+        // remove never runs (#655). A failing op is logged and skipped, never
+        // aborting the rest of the link's reconcile; the 10 s resync retries.
+        for net in to_remove {
+            if let Some((_, msg)) = observed.iter().find(|(o, _)| *o == net) {
+                match self.handle.address().del(msg.clone()).execute().await {
+                    Ok(()) => {
+                        info!(interface = %interface, address = %net, "removed interface address");
+                    }
+                    Err(e) => {
+                        warn!(interface = %interface, address = %net, error = %e, "failed to remove interface address");
+                    }
+                }
+            }
+        }
         for net in to_add {
-            self.handle
+            match self
+                .handle
                 .address()
                 .add(index, net.addr(), net.prefix_len())
                 .execute()
-                .await?;
-            info!(interface = %interface, address = %net, "added interface address");
-        }
-        for net in to_remove {
-            if let Some((_, msg)) = observed.iter().find(|(o, _)| *o == net) {
-                self.handle.address().del(msg.clone()).execute().await?;
-                info!(interface = %interface, address = %net, "removed interface address");
+                .await
+            {
+                Ok(()) => info!(interface = %interface, address = %net, "added interface address"),
+                Err(e) => {
+                    warn!(interface = %interface, address = %net, error = %e, "failed to add interface address");
+                }
             }
         }
         Ok(())
@@ -1407,6 +1423,21 @@ mod tests {
         let (to_add, to_remove) = diff_addresses(&observed, &desired);
         assert_eq!(to_add, vec!["10.0.0.2/24".parse().unwrap()]);
         assert_eq!(to_remove, vec!["10.0.0.9/24".parse().unwrap()]);
+    }
+
+    #[test]
+    fn diff_addresses_prefix_length_change_is_remove_plus_add() {
+        // #655: same host address, new prefix length — both sides non-empty,
+        // so `reconcile_addresses` must remove before it adds.
+        for (old, new) in [
+            ("2001:db8::1/64", "2001:db8::1/48"),
+            ("10.0.0.1/24", "10.0.0.1/16"),
+        ] {
+            let (old, new): (nos_proto::IpNet, nos_proto::IpNet) =
+                (old.parse().unwrap(), new.parse().unwrap());
+            let (to_add, to_remove) = diff_addresses(&[old], &[new]);
+            assert_eq!((to_add, to_remove), (vec![new], vec![old]));
+        }
     }
 
     #[test]
