@@ -1212,6 +1212,78 @@ fn lsu_as_scope_without_as_store_asserts() {
 }
 
 #[test]
+fn compute_request_list_picks_missing_and_older_in_neighbor_order() {
+    let local = [
+        header("0.0.0.1", 5),
+        header("0.0.0.2", 5),
+        header("0.0.0.3", 5),
+    ];
+    let nbr = [
+        header("0.0.0.9", 1), // missing locally
+        header("0.0.0.1", 6), // newer than ours
+        header("0.0.0.2", 5), // equal
+        header("0.0.0.3", 4), // older
+        header("0.0.0.4", 1), // missing locally
+    ];
+    let id = |s: &str| u32::from(router_id(s));
+    assert_eq!(
+        compute_request_list(&nbr, &local),
+        vec![id("0.0.0.9"), id("0.0.0.1"), id("0.0.0.4")]
+    );
+}
+
+#[test]
+fn compute_request_list_handles_ten_thousand_headers() {
+    let h = |id, seq| H {
+        id,
+        seq,
+        age: 0,
+        checksum: 0,
+    };
+    let local: Vec<H> = (0..10_000).map(|i| h(i, 1)).collect();
+    let nbr: Vec<H> = (0..10_000)
+        .map(|i| h(i, if i % 2 == 0 { 2 } else { 1 }))
+        .collect();
+    let want: Vec<u32> = (0..10_000).filter(|i| i % 2 == 0).collect();
+    assert_eq!(compute_request_list(&nbr, &local), want);
+}
+
+#[test]
+fn lsu_trims_a_large_request_list_keeping_order() {
+    let mut adj = AdjacencyData {
+        request_list: (0..10_000).collect(),
+        ..Default::default()
+    };
+    let mut area = Lsdb::new();
+    // LSU order differs from list order.
+    let lsas = [lsa_id(3, SEQ1), lsa_id(450, SEQ1), lsa_id(42, SEQ1)];
+    let (actions, installed) = lsu(&mut adj, &mut area, &lsas);
+    assert_eq!(actions, []);
+    assert_eq!(installed.len(), 3);
+    let want: Vec<u32> = (0..10_000).filter(|i| ![3, 42, 450].contains(i)).collect();
+    assert_eq!(adj.request_list, want);
+}
+
+#[test]
+fn lsu_max_age_of_requested_key_installs_but_unknown_key_only_acks() {
+    let mut adj = AdjacencyData {
+        request_list: vec![1, 2],
+        ..Default::default()
+    };
+    let mut area = Lsdb::new();
+    let aged = |id| {
+        let mut l = lsa_id(id, SEQ1);
+        l.0.age = MAX_AGE;
+        l
+    };
+    let (_, installed) = lsu(&mut adj, &mut area, &[aged(1), aged(77)]);
+    assert_eq!(installed.len(), 1);
+    assert!(area.get(&1).is_some() && area.get(&77).is_none());
+    assert_eq!(adj.pending_acks.len(), 2);
+    assert_eq!(adj.request_list, vec![2]);
+}
+
+#[test]
 fn lsack_clears_retransmission_list() {
     let l = lsa_id(1, SEQ1);
     let mut adj = AdjacencyData {

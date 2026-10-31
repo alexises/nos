@@ -561,6 +561,9 @@ where
     FE: Fn(&L::Header) -> bool,
 {
     let mut newly_installed = Vec::new();
+    // Hash view of the request list: O(list + LSAs) per LSU, not O(LSAs x list).
+    // Keys leave it as they're satisfied; one `retain` at the end keeps the Vec's order.
+    let mut pending: std::collections::HashSet<Key<L>> = adj.request_list.iter().copied().collect();
     for l in lsas {
         let h = *l.header();
         if discard(&h) {
@@ -587,7 +590,7 @@ where
         if h.age() >= MAX_AGE
             && !exempt_max_age(&h)
             && store.get(&key).is_none()
-            && !adj.request_list.contains(&key)
+            && !pending.contains(&key)
         {
             adj.pending_acks.push(h);
             continue;
@@ -600,7 +603,10 @@ where
             InstallOutcome::Installed | InstallOutcome::Superseded => newly_installed.push(h),
         }
         adj.pending_acks.push(h);
-        adj.request_list.retain(|k| *k != key);
+        pending.remove(&key);
+    }
+    if pending.len() != adj.request_list.len() {
+        adj.request_list.retain(|k| pending.contains(k));
     }
     let mut actions = Vec::new();
     if adj.request_list.is_empty() {
@@ -612,14 +618,14 @@ where
 /// RFC 2328 §10.8: request any LSA the neighbor's summary lists that this
 /// router either doesn't have, or holds an older instance of.
 fn compute_request_list<H: LsaHeader>(neighbor_headers: &[H], local_headers: &[H]) -> Vec<H::Key> {
+    let local: std::collections::HashMap<H::Key, &H> =
+        local_headers.iter().map(|h| (h.key(), h)).collect();
     neighbor_headers
         .iter()
-        .filter(
-            |nh| match local_headers.iter().find(|lh| lh.key() == nh.key()) {
-                None => true,
-                Some(lh) => nh.is_newer(lh) == Ordering::Greater,
-            },
-        )
+        .filter(|nh| match local.get(&nh.key()) {
+            None => true,
+            Some(lh) => nh.is_newer(lh) == Ordering::Greater,
+        })
         .map(LsaHeader::key)
         .collect()
 }
