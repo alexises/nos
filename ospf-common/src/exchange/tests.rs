@@ -1221,3 +1221,16 @@ fn lsack_clears_retransmission_list() {
     on_lsack_received(&mut adj, &[l.0]);
     assert!(adj.retransmission_list.is_empty());
 }
+
+#[test]
+fn lsack_of_other_instance_keeps_entry() {
+    for acked_seq in [SEQ1 - 1, SEQ1 + 1] {
+        let l = lsa_id(1, SEQ1);
+        let mut adj = AdjacencyData {
+            retransmission_list: HashMap::from([(1, Arc::new(l))]),
+            ..Default::default()
+        };
+        on_lsack_received(&mut adj, &[lsa_id(1, acked_seq).0]);
+        assert_eq!(adj.retransmission_list.len(), 1, "seq {acked_seq}");
+    }
+}
