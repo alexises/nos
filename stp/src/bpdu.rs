@@ -35,8 +35,6 @@ pub enum BpduError {
     LengthField(usize),
     #[error("LLC header is not 42 42 03")]
     BadLlc,
-    #[error("MST BPDU with Version 3 Length {0} (need 64 plus a multiple of 16, at most 64 MSTI messages)")]
-    BadVersion3Length(usize),
 }
 
 /// Role carried in an RST BPDU's flags (bits 2-3).
@@ -315,24 +313,20 @@ pub fn decode_any(b: &[u8]) -> Result<Rx, BpduError> {
     if b.len() < 4 || b[3] != TYPE_RST || b[2] < 3 || be16(b, 0) != 0 {
         return decode(b).map(Rx::Plain);
     }
+    // Invalid Version 3 information (short body, bad length): process the
+    // BPDU as the RST BPDU its first 36 bytes are (IEEE 802.1Q cl.14), never drop it.
     if b.len() < MST_FIXED_LEN {
-        return Err(BpduError::Truncated {
-            need: MST_FIXED_LEN,
-            got: b.len(),
-        });
+        return decode(b).map(Rx::Plain);
     }
     let v3len = usize::from(be16(b, 36));
-    if v3len < V3_BASE || !(v3len - V3_BASE).is_multiple_of(MSTI_LEN) {
-        return Err(BpduError::BadVersion3Length(v3len));
+    if v3len < V3_BASE
+        || !(v3len - V3_BASE).is_multiple_of(MSTI_LEN)
+        || (v3len - V3_BASE) / MSTI_LEN > MST_MAX_MSTIS
+        || b.len() < 38 + v3len
+    {
+        return decode(b).map(Rx::Plain);
     }
     let n = (v3len - V3_BASE) / MSTI_LEN;
-    if n > MST_MAX_MSTIS {
-        return Err(BpduError::BadVersion3Length(v3len));
-    }
-    let need = 38 + v3len;
-    if b.len() < need {
-        return Err(BpduError::Truncated { need, got: b.len() });
-    }
     let mstis = (0..n)
         .map(|k| {
             let m = &b[MST_FIXED_LEN + k * MSTI_LEN..][..MSTI_LEN];
@@ -670,23 +664,19 @@ mod tests {
     }
 
     #[test]
-    fn mst_decode_rejects_bad_lengths_and_plain_versions_stay_plain() {
+    fn mst_decode_falls_back_to_rst_and_plain_versions_stay_plain() {
         let good = encode_mst(&mst(2));
+        let rst_part = Ok(Rx::Plain(decode(&good).unwrap()));
+        // Invalid Version 3 information: processed as the RST BPDU, not dropped.
         for bad in [63, 65, 64 + 16 * 65] {
             let mut b = good.clone();
             b[36..38].copy_from_slice(&u16::try_from(bad).unwrap().to_be_bytes());
-            assert_eq!(
-                decode_any(&b),
-                Err(BpduError::BadVersion3Length(bad)),
-                "{bad}"
-            );
+            assert_eq!(decode_any(&b), rst_part, "{bad}");
         }
+        assert_eq!(decode_any(&good[..good.len() - 1]), rst_part);
+        assert_eq!(decode_any(&good[..60]), rst_part);
         assert!(matches!(
-            decode_any(&good[..good.len() - 1]),
-            Err(BpduError::Truncated { .. })
-        ));
-        assert!(matches!(
-            decode_any(&good[..60]),
+            decode_any(&good[..30]),
             Err(BpduError::Truncated { .. })
         ));
         // An RSTP (version 2) and a Config BPDU are not MST BPDUs.

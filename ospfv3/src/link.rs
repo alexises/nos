@@ -4502,7 +4502,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// RFC 2328 §10.7/§13/§13.7 (kept by RFC 5340): LSR, LSU and `LSAck` from
+    /// RFC 2328 §10.7/§13/§13.7 (kept by RFC 5340): `LSR`, `LSU` and `LSAck` from
     /// a neighbor below Exchange are ignored; from Exchange they are handled.
     #[tokio::test]
     async fn lsr_lsu_lsack_ignored_below_exchange() {
