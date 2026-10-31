@@ -212,6 +212,11 @@ async fn drop_udp_and_recover(w: &World, port: &str) -> anyhow::Result<()> {
 /// re-establishes; `max-hops 2` turns both into multihop sessions (UDP 4784,
 /// #287) with the same behaviour; removing `bfd` again resets nothing.
 pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
+    // Fresh pair on the base config: an earlier BFD phase leaves `nos-ribd`
+    // holding the single-hop session to the peer, so BGP's `max-hops 1`
+    // would rejoin it silently and never log `bfd session registered` (#739).
+    w.start(A, None, &[]).await?;
+    w.start(B, None, &[]).await?;
     let (a, b) = (w.a()?, w.b()?);
     let cease = "sent cease notification";
     let est = "bgp session established";
