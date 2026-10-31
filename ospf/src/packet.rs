@@ -102,7 +102,7 @@ pub enum CryptoAlgorithm {
 impl CryptoAlgorithm {
     /// The digest length this algorithm produces — also the wire's Auth
     /// Data Length byte's expected value for a packet signed with it.
-    fn digest_len(self) -> usize {
+    pub(crate) fn digest_len(self) -> usize {
         match self {
             CryptoAlgorithm::Md5 => 16,
             CryptoAlgorithm::HmacSha1 => 20,

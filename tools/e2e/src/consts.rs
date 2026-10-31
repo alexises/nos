@@ -470,6 +470,14 @@ pub const ASBR_GATEWAY: &str = "10.50.0.98";
 pub const MTU_VALUE: u32 = 9000;
 /// The RFC 791 minimum: resolves to one header per DBD packet.
 pub const OSPF_MTU_VALUE: u32 = 68;
+/// `ospf-mtu-pagination` (v2 LSU/LSR/LSAck split, #806): with no auth the LSU
+/// budget is 200-20-24-4 = 152 bytes (4 Type-5s of 36), the LSR/LSAck budget
+/// 156 (13 requests, 7 acks), a DBD holds ~7 headers: several entries per
+/// packet yet `OSPF_SPLIT_ROUTES` LSAs still need several packets.
+pub const OSPF_SPLIT_MTU_VALUE: u32 = 200;
+/// Type-5 LSAs router-a originates in `ospf-mtu-pagination`: `ASBR_PREFIX`
+/// plus 19 /32s from `ospf_chunked_routes` (so 21 LSAs with the Router-LSA).
+pub const OSPF_SPLIT_ROUTES: usize = 20;
 
 pub const OSPFV3_INSTANCE: &str = "ospfv3-1";
 pub const OSPFV3_ROUTER_ID: &str = "9.9.9.9";

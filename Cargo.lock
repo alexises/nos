@@ -2025,6 +2025,7 @@ dependencies = [
  "ipnet",
  "libc",
  "md-5",
+ "nix",
  "nos-daemon",
  "nos-log-client",
  "nos-ospf-common",

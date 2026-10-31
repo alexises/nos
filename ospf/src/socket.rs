@@ -22,22 +22,18 @@
 //! independent of which device a socket names in `SO_BINDTODEVICE`), while
 //! scoping reception to just this link.
 
-use std::io::{self, Read};
+use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::os::fd::AsRawFd;
 
+use nix::sys::socket::{recv, MsgFlags};
+use nos_ospf_common::exchange::{truncated, RECV_BUF_LEN};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
+use tracing::warn;
 
 pub const OSPF_IP_PROTO: i32 = 89;
 pub const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
-
-/// Largest OSPF packet this crate ever sends/receives (Hello, DBD, LSR, LSU,
-/// `LSAck` alike) — well above any realistic packet size on the small
-/// topologies this NOS targets, generous enough that a legitimately larger
-/// packet from a peer is still fully captured rather than silently
-/// truncated.
-const RECV_BUF_LEN: usize = 4096;
 
 /// A raw protocol-89 socket bound to one specific L3 interface and joined
 /// to 224.0.0.5 on that interface's local address — one per OSPF link.
@@ -118,12 +114,20 @@ impl OspfSocket {
     /// always the minimum 20 bytes), and the source address always sits at
     /// a fixed offset (bytes 12..16) regardless of options.
     pub async fn recv_packet(&self) -> io::Result<(Ipv4Addr, Vec<u8>)> {
+        // Heap, once per call: 64 KB is too big for the async loop's stack.
+        let mut buf = vec![0u8; RECV_BUF_LEN];
         loop {
             let mut guard = self.inner.readable().await?;
-            let mut buf = [0u8; RECV_BUF_LEN];
-            match guard.try_io(|inner| inner.get_ref().read(&mut buf)) {
+            // `MSG_TRUNC`: the return value is the datagram's real length.
+            let fd = self.inner.get_ref().as_raw_fd();
+            match guard.try_io(|_| recv(fd, &mut buf, MsgFlags::MSG_TRUNC).map_err(io::Error::from))
+            {
                 Ok(Ok(n)) => {
                     if n == 0 {
+                        continue;
+                    }
+                    if truncated(n, RECV_BUF_LEN) {
+                        warn!(bytes = n, "ospf packet truncated, dropped");
                         continue;
                     }
                     let ihl = usize::from(buf[0] & 0x0f) * 4;

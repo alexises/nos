@@ -13,6 +13,7 @@ mod areas;
 mod grace;
 mod hello;
 mod lsa_origination;
+mod split;
 mod status;
 
 fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
