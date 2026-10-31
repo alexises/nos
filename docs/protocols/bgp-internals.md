@@ -209,7 +209,9 @@ Verified by `nos-e2e bgp-graceful-restart` (nos↔nos, both sides) and `bgp-gr-f
 
 EVPN origination (`evpn_out::advertise`) follows the same table. On receipt, confed segments from an `External` peer, or from anyone when no confederation is configured, are treat-as-withdraw (`withdraw_announced`, logged `treating bgp update as withdraw: as_path has confederation segments ...`); loop detection drops the identifier (or `asn`) in a plain segment and the member AS in a confed segment, with the existing `dropping bgp update: as_path already contains our own asn` line. Decision step 6 ranks external > confed-external > internal (`peer_rank`; step 8's oldest-route rule applies between two external routes only); a route learned from a confed peer is not iBGP-learned, so it reaches `Internal` peers without route reflection, and the RFC 4456 gate stays keyed on `Internal` only. RPL sees the flat path (`AsPath::flat`), confed ASNs included; an RPL prepend joins the leading `AS_SEQUENCE`.
 
-`AS_PATH` is a structured `as_path::AsPath` (segment types kept, `Debug` of a pure sequence unchanged: `[a, b]`; mixed: `[(65101), 65003, {1, 2}]`), so step 3 counts an `AS_SET` as one hop and confed segments as none, and MED's neighbour AS skips confed segments. Not implemented: a `bestpath med confed` knob. Verified by `nos-e2e confederation`.
+`AS_PATH` is a structured `as_path::AsPath` (segment types kept, `Debug` of a pure sequence unchanged: `[a, b]`; mixed: `[(65101), 65003, {1, 2}]`), so step 3 counts an `AS_SET` as one hop and confed segments as none, and MED's neighbour AS skips confed segments. Not implemented: a `bestpath med confed` knob.
+
+**Deterministic MED (#600).** `decision_cmp` is a total order only between paths of one neighbouring AS (MED is skipped across ASes), so a mixed set is never fed to `sort_by`/`max_by` directly: `decision::rank` (ADD-PATH / route-server ranking) and `best_index` (`best_path`, VPN import) take each neighbouring-AS group's best first, then compare those winners. The result no longer depends on input or `HashMap` order, and `rank(..)[0]` is always `best_path`. Verified by `nos-e2e confederation`.
 
 ### local-as (#166)
 

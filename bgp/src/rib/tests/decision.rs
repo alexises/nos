@@ -946,3 +946,95 @@ fn identical_reannouncement_keeps_oldest_route_tiebreak() {
         RouteOrigin::Peer(old)
     );
 }
+
+mod deterministic_med {
+    use super::*;
+    use crate::as_path::SegKind;
+    use proptest::prelude::*;
+
+    fn cand(asn: u32, med: u32, id: u32) -> Candidate {
+        let mut path = AsPath::default();
+        path.push_segment(SegKind::Sequence, &[asn]);
+        let mut r = redistributed_route();
+        r.origin = RouteOrigin::Peer(IpAddr::V4(Ipv4Addr::new(
+            10,
+            0,
+            0,
+            u8::try_from(id).unwrap() + 1,
+        )));
+        r.as_path = Arc::new(path);
+        r.med = Some(med);
+        r.router_id = Some(Ipv4Addr::new(1, 1, 1, u8::try_from(id).unwrap() + 1));
+        r.next_hop = Some(IpAddr::V4(Ipv4Addr::new(
+            192,
+            0,
+            2,
+            u8::try_from(id).unwrap() + 1,
+        )));
+        (r, id)
+    }
+
+    fn ids(v: &[Candidate]) -> Vec<u32> {
+        v.iter().map(|c| c.1).collect()
+    }
+
+    /// A, B share AS 1 (A has the worse MED); C is AS 2. Pairwise, B > A
+    /// (MED), A > C (router-id), C > B (router-id): a cycle.
+    #[test]
+    fn mixed_as_cycle_is_ranked_by_group_winners() {
+        let igp = HashMap::new();
+        let all = vec![cand(1, 20, 0), cand(2, 0, 1), cand(1, 10, 2)];
+        // B wins its group; B vs C -> C has the lower router-id.
+        assert_eq!(ids(&rank(&all, &igp)), [1, 2, 0]);
+        assert_eq!(best_path(&all, &igp).unwrap().next_hop, all[1].0.next_hop);
+    }
+
+    #[test]
+    fn ranked_does_not_panic_on_many_mixed_as_candidates() {
+        let rib = new_rib(65000);
+        let cands: Vec<Candidate> = (0..30).map(|i| cand(1 + i % 3, 30 - i, i)).collect();
+        assert_eq!(rib.ranked(&cands).len(), 30);
+    }
+
+    fn arb_cands() -> impl Strategy<Value = Vec<Candidate>> {
+        proptest::collection::vec((1..5u32, 0..4u32, 0..3u32), 0..40).prop_map(|v| {
+            v.into_iter()
+                .zip(0u32..)
+                .map(|((asn, med, lp), id)| {
+                    let mut c = cand(asn, med, id % 200);
+                    c.0.local_pref = 100 + lp;
+                    c.1 = id;
+                    c
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn rank_is_total_and_order_independent(cands in arb_cands(), seed in any::<u64>()) {
+            let igp = HashMap::new();
+            let r = rank(&cands, &igp);
+            let mut sorted = ids(&r);
+            sorted.sort_unstable();
+            prop_assert_eq!(sorted, (0..u32::try_from(cands.len()).unwrap()).collect::<Vec<_>>());
+            let mut shuffled = cands.clone();
+            shuffled.rotate_left(usize::try_from(seed).unwrap() % cands.len().max(1));
+            shuffled.reverse();
+            prop_assert_eq!(ids(&rank(&shuffled, &igp)), ids(&r));
+            if let Some(first) = r.first() {
+                prop_assert_eq!(best_path(&cands, &igp), Some(first.0.clone()));
+            }
+            // Within one neighbouring AS, an otherwise-equal lower MED never ranks later.
+            for (i, x) in r.iter().enumerate() {
+                for y in &r[..i] {
+                    if x.0.as_path.neighbor_as() == y.0.as_path.neighbor_as()
+                        && x.0.local_pref == y.0.local_pref
+                    {
+                        prop_assert!(y.0.med <= x.0.med);
+                    }
+                }
+            }
+        }
+    }
+}
