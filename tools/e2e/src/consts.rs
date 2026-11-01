@@ -514,6 +514,21 @@ pub const OSPFV3_ASBR_GATEWAY: &str = "2001:db8:1::2";
 pub const OSPFV3_AREA_1: &str = "0.0.0.1";
 pub const OSPFV3_PROFILE_AREA1: &str = "ospfv3-profile-area1";
 pub const OSPFV3_ABR_LOOPBACK_ADDRESS: &str = "2001:db8:5::1/128";
+/// `ospfv3-lsinfinity-asbr`: the area-1 link between router-b (the ABR) and
+/// router-c (the ASBR), a docker network of its own so the two areas sit on
+/// different L2 segments (docker names it `eth1` on both).
+pub const NET_OSPFV3_A1: &str = "nos-verify-net-ospfv3-a1";
+pub const OSPFV3_A1_SUBNET: &str = "10.52.0.0/24";
+pub const OSPFV3_A1_SUBNET6: &str = "fd19:3::/64";
+pub const OSPFV3_A1_IP_B: &str = "10.52.0.2";
+pub const OSPFV3_A1_IP_C: &str = "10.52.0.3";
+pub const OSPFV3_A1_ADDRESS_B: &str = "fd19:3::2/64";
+pub const OSPFV3_A1_ADDRESS_C: &str = "fd19:3::3/64";
+/// RFC 5340 A.4.1 Inter-Area-Router-LSA (0x2004) and RFC 8362 E-Inter-Area-Router (0xA024).
+pub const LSA_TYPE_INTER_AREA_ROUTER: u16 = 0x2004;
+pub const LSA_TYPE_E_INTER_AREA_ROUTER: u16 = 0xA024;
+/// router-c's redistributed IPv6 static, behind router-b's address on the area-1 link.
+pub const OSPFV3_A1_ASBR_PREFIX: &str = "2001:db8:78::/48";
 pub const OSPFV3_BROADCAST_ADDRESS_A: &str = "2001:db8:3::1/64";
 pub const OSPFV3_BROADCAST_ADDRESS_B: &str = "2001:db8:3::2/64";
 pub const OSPFV3_BROADCAST_ADDRESS_C: &str = "2001:db8:3::3/64";
