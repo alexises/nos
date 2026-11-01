@@ -2270,6 +2270,17 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
     let best =
         |med: u32| format!("loc-rib best path for {ADD_PATH_PREFIX} updated .*med=Some({med})");
     a.wait(&best(ADD_PATH_MED_2)).await?;
+    log("path 1's eBGP LOCAL_PREF 1000 is ignored (RFC 4271 §5.1.5, #601)");
+    a.wait(&format!(
+        "loc-rib best path for {ADD_PATH_PREFIX} updated .*local_pref=100"
+    ))
+    .await?;
+    a.assert_quiet(
+        &format!("best path for {ADD_PATH_PREFIX} updated .*local_pref=1000"),
+        0,
+        5,
+    )
+    .await?;
 
     log("withdrawing path 2 alone: path 1 takes over, the prefix stays");
     let established = a.count("bgp session established");
@@ -2295,8 +2306,14 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
 
 /// ExaBGP's API line announcing `ADD_PATH_PREFIX` as path `id`.
 fn add_path_announce(id: u32, med: u32) -> String {
+    // Path 1 carries LOCAL_PREF 1000, which an eBGP peer must not get to use (#601).
+    let lp = if id == 1 {
+        "local-preference 1000 "
+    } else {
+        ""
+    };
     format!(
-        "announce route {ADD_PATH_PREFIX} next-hop {IP_G} med {med} community [ 65000:{id} ] \
+        "announce route {ADD_PATH_PREFIX} next-hop {IP_G} med {med} {lp}community [ 65000:{id} ] \
          as-path [ {ASN_G} ] path-information {id}"
     )
 }
