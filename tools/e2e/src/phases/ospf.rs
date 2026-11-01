@@ -2294,24 +2294,38 @@ pub(super) async fn frr_until(
 // --- OSPFv3 (RFC 5340) ---
 
 /// `ospf_mtu_pagination` for `OSPFv3`, self-contained: a real
-/// `Ospfv3Profile.mtu` override alone (no `--dbd-max-headers`) drives
-/// `exchange::mtu_based_max_headers` — each router already holds several LSAs
-/// (Router, Link, Intra-Area-Prefix) before the DBD exchange, so no ASBR needed.
+/// `Ospfv3Profile.mtu` override alone (200, no `--dbd-max-headers`) drives
+/// `exchange::mtu_based_max_headers`, and router-a redistributes
+/// `OSPFV3_SPLIT_ROUTES` statics (AS-External-LSAs) so the LSU/LSR/LSAck are
+/// also cut to the MTU (#807): router-a must log `ospfv3 lsu split` and
+/// router-b must learn the last prefix, which one oversize LSU would lose.
 pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     w.up(&[]).await?;
     let (a, b) = (w.a()?, w.b()?);
     let mtu = |mut f: Vec<String>| {
         f.extend(strings(&[
             "--ospfv3-profile-mtu",
-            &OSPF_MTU_VALUE.to_string(),
+            &OSPF_SPLIT_MTU_VALUE.to_string(),
         ]));
         f
     };
-    a.provision_flags(&with_base(
-        A,
-        mtu(ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)),
-    ))
-    .await?;
+    let prefix = |i: usize| format!("2001:db8:{:x}::/48", 0x100 + i);
+    let mut a_flags = mtu(ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID));
+    for i in 0..OSPFV3_SPLIT_ROUTES {
+        a_flags.extend(strings(&["--static-route", &prefix(i)]));
+    }
+    a_flags.extend(strings(&[
+        "--static-gateway",
+        OSPFV3_ASBR_GATEWAY,
+        "--redistribute-to-ospfv3",
+    ]));
+    let split = "ospfv3 lsu split.*packets=";
+    let split_a = a.count(split);
+    let last = format!(
+        "added route prefix={}.*source=Some(Ospf)",
+        prefix(OSPFV3_SPLIT_ROUTES - 1)
+    );
+    a.provision_flags(&with_base(A, a_flags)).await?;
     b.provision_flags(&with_base(
         B,
         mtu(ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)),
@@ -2325,7 +2339,9 @@ pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     b.wait(&format!(
         "ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
     ))
-    .await
+    .await?;
+    a.wait_new(split, split_a, 60).await?;
+    b.wait(&last).await
 }
 
 /// RFC 7166: matching HMAC-SHA-256 trailer keys on both routers' eth0.0
