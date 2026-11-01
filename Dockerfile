@@ -8,6 +8,7 @@ WORKDIR /app
 
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        make \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 

@@ -13,6 +13,11 @@ use tracing::info;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+// dhat and jemalloc are mutually exclusive: `dhat-heap` keeps profiling the live heap.
+#[cfg(not(feature = "dhat-heap"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser)]
 #[command(name = "nos-restd", about = "NOS REST API daemon")]
 struct Args {
