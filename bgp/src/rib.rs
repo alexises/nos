@@ -1660,7 +1660,7 @@ impl BgpRib {
             return;
         }
         if let Some(route) = &best {
-            debug!(origin = ?route.origin, as_path = ?route.as_path, communities = ?route.communities, med = ?route.med, next_hop = ?route.next_hop, "bgp: loc-rib best path for {prefix} updated");
+            debug!(origin = ?route.origin, as_path = ?route.as_path, communities = ?route.communities, med = ?route.med, local_pref = route.local_pref, next_hop = ?route.next_hop, "bgp: loc-rib best path for {prefix} updated");
             self.loc_rib.insert(prefix, route.clone());
         } else {
             debug!("bgp: loc-rib route for {prefix} withdrawn");

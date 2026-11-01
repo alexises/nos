@@ -20,13 +20,16 @@ fn peer_learned_route_beats_nothing_and_is_never_echoed_back_to_source() {
 
 #[test]
 fn higher_local_pref_wins_best_path() {
-    // peer_a/peer_b are eBGP sources (so split-horizon doesn't remove
-    // them from consideration for the iBGP observer below) proposing the
-    // same prefix with different LOCAL_PREF values.
+    // peer_a/peer_b are confederation sources (LOCAL_PREF is honoured from
+    // them, unlike plain eBGP, #601; and split-horizon doesn't remove them
+    // for the iBGP observer below) proposing the same prefix with different
+    // LOCAL_PREF values.
     let mut rib = new_rib(65000);
     let peer_a = addr("10.0.0.1");
     let peer_b = addr("10.0.0.2");
     let observer = addr("10.0.0.3");
+    rib.set_peer_confed(peer_a, true);
+    rib.set_peer_confed(peer_b, true);
     let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
     let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
     let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.252"));
@@ -1037,4 +1040,62 @@ mod deterministic_med {
             }
         }
     }
+}
+
+fn lp_update(local_pref: u32, next_hop: &str) -> UpdateMessage {
+    let mut u = ebgp_update(vec!["9.9.9.0/24"], vec![65001], next_hop);
+    u.attributes.as_mut().unwrap().local_pref = Some(local_pref);
+    u
+}
+
+#[test]
+fn ebgp_local_pref_is_ignored_ibgp_and_confed_keep_it() {
+    // RFC 4271 §5.1.5 (#601).
+    let p = prefix("9.9.9.0/24");
+    for (ibgp, confed, want) in [
+        (false, false, 100),
+        (true, false, 1000),
+        (false, true, 1000),
+    ] {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        rib.set_peer_confed(peer, confed);
+        let _rx = register_peer(&mut rib, peer, ibgp, addr("10.0.0.254"));
+        rib.handle_update(
+            peer,
+            ibgp,
+            v4("1.1.1.1"),
+            &lp_update(1000, "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        assert_eq!(
+            rib.loc_rib[&p].local_pref, want,
+            "ibgp={ibgp} confed={confed}"
+        );
+    }
+}
+
+#[test]
+fn ebgp_local_pref_loses_to_ibgp_150_and_policy_can_still_set_it() {
+    let p = prefix("9.9.9.0/24");
+    let mut rib = new_rib(65000);
+    let (e, i) = (addr("10.0.0.1"), addr("10.0.0.2"));
+    let _rx_e = register_peer(&mut rib, e, false, addr("10.0.0.254"));
+    let _rx_i = register_peer(&mut rib, i, true, addr("10.0.0.253"));
+    rib.handle_update(
+        e,
+        false,
+        v4("1.1.1.1"),
+        &lp_update(1000, "10.0.0.1"),
+        &nos_rpl::ACCEPT_ALL,
+    );
+    rib.handle_update(
+        i,
+        true,
+        v4("2.2.2.2"),
+        &lp_update(150, "10.0.0.2"),
+        &nos_rpl::ACCEPT_ALL,
+    );
+    assert_eq!(rib.loc_rib[&p].local_pref, 150);
+    assert_eq!(rib.loc_rib[&p].origin, RouteOrigin::Peer(i));
 }

@@ -646,7 +646,7 @@ impl BgpRib {
             origin: RouteOrigin::Peer(from),
             as_path: Arc::new(as_path),
             bgp_origin: attrs.origin,
-            local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
+            local_pref: received_local_pref(attrs.local_pref, remote_is_ibgp || from_confed),
             med: attrs.med,
             learned_via_ibgp: remote_is_ibgp,
             learned_via_confed: from_confed,
@@ -824,4 +824,14 @@ struct Received<'a> {
     local_as: Option<nos_proto::BgpLocalAs>,
     attrs: &'a message::PathAttributes,
     update: &'a UpdateMessage,
+}
+
+/// RFC 4271 §5.1.5: `LOCAL_PREF` is only meaningful from iBGP (and
+/// confederation) peers; an eBGP peer's value is ignored (#601).
+fn received_local_pref(received: Option<u32>, internal: bool) -> u32 {
+    if internal {
+        received.unwrap_or(DEFAULT_LOCAL_PREF)
+    } else {
+        DEFAULT_LOCAL_PREF
+    }
 }
