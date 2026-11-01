@@ -273,7 +273,9 @@ impl Port {
         ] {
             *t = t.saturating_sub(1);
         }
-        self.tx_count = 0;
+        // Port Timers SM decrements txCount once per second (802.1D-2004 17.19.44 /
+        // 802.1Q 13.25; same as mstpd's PTSM_tick), it is not reset (#695).
+        self.tx_count = self.tx_count.saturating_sub(1);
     }
 }
 

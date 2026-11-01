@@ -117,7 +117,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
   - `set_port_enabled(port, up)` is `portEnabled` (carrier and admin state).
   - `set_oper_point_to_point(port, bool)` is `operPointToPoint` (full duplex or configured).
   - `receive(port, bpdu)` delivers a decoded BPDU.
-  - `tick()` once per second; every 13.22 timer decrements here and the per-second `txCount` resets.
+  - `tick()` once per second; every 13.22 timer decrements here, and so does `txCount` (by 1, floor 0, like mstpd; not reset).
   - `set_path_cost`, `set_bridge_id` re-run role selection.
 - Output: `take_actions()` returns, in order:
   - `Transmit { port, bpdu }`: encode with `bpdu::encode_frame` and send.
