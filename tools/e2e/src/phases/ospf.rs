@@ -3072,7 +3072,7 @@ pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
 /// `nos-ospfv3d --originate-lsinfinity` (test-only, via `--ospfv3d-arg`), has
 /// router-b originate the Inter-Area-Prefix and AS-External LSAs at
 /// `0xFFFFFF`: router-a holds both LSAs yet installs neither route. The
-/// Inter-Area-Router (ASBR distance) path is covered by `spf.rs` unit tests only.
+/// Inter-Area-Router (ASBR distance) path is `ospfv3-lsinfinity-asbr`.
 pub async fn ospfv3_lsinfinity(w: &mut World) -> anyhow::Result<()> {
     for infinity in [false, true] {
         if infinity {
@@ -3129,6 +3129,147 @@ pub async fn ospfv3_lsinfinity(w: &mut World) -> anyhow::Result<()> {
             a.wait_new(&asbr_route, 0, 60).await?;
         }
     }
+    Ok(())
+}
+
+/// RFC 5340 §3.8.7.1/§16.4 `LSInfinity` on the Inter-Area-Router path
+/// (self-contained, #733): router-a -(area 0)- router-b -(area 1, own docker
+/// network)- router-c, an ASBR redistributing an IPv6 static. router-b is the
+/// ABR, so it originates the Inter-Area-Router-LSA for router-c into area 0.
+/// Control: router-a installs router-c's external route. Second run, only
+/// router-b with `--originate-lsinfinity` (router-a and router-c without, or
+/// the AS-External itself would be infinite): router-a holds both LSAs but the
+/// ASBR distance is unreachable, so no route (`asbr_distance` in `spf.rs`).
+pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
+    w.require_ipv6().await?;
+    if !w.dock.network_exists(NET_OSPFV3_A1).await {
+        w.dock
+            .network_create(NET_OSPFV3_A1, &[OSPFV3_A1_SUBNET, OSPFV3_A1_SUBNET6], true)
+            .await?;
+    }
+    for infinity in [false, true] {
+        w.start(A, None, &[]).await?;
+        // The flag goes to router-b alone — see the doc comment.
+        let b_args: &[&str] = if infinity {
+            &["--ospfv3d-arg=--originate-lsinfinity"]
+        } else {
+            &[]
+        };
+        w.start(B, None, b_args).await?;
+        w.start(C, None, &[]).await?;
+        w.dock
+            .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B)
+            .await?;
+        w.dock
+            .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C)
+            .await?;
+        let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+
+        // An eth1 attachment in area 1 (docker names the second NIC `eth1`).
+        let area1 = |id: Id, v4: &str, v6: &str, router_id: &str| {
+            strings(&[
+                "--interface",
+                "eth1",
+                "--address",
+                v4,
+                "--address6",
+                v6,
+                "--asn",
+                &id.asn.to_string(),
+                "--router-id",
+                id.rid,
+                "--remote-as",
+                &id.remote_as.to_string(),
+                "--peer",
+                id.peer_ip,
+                "--ospfv3-instance",
+                OSPFV3_INSTANCE,
+                "--ospfv3-router-id",
+                router_id,
+                "--ospfv3-area",
+                OSPFV3_AREA_1,
+                "--ospfv3-profile",
+                OSPFV3_PROFILE_AREA1,
+                "--ospfv3-interface-profile",
+                OSPFV3_PROFILE_AREA1,
+            ])
+        };
+        a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+            .await?;
+        b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+            .await?;
+        b.provision_flags(&area1(
+            B,
+            &format!("{OSPFV3_A1_IP_B}/24"),
+            OSPFV3_A1_ADDRESS_B,
+            OSPFV3_ROUTER_ID_B,
+        ))
+        .await?;
+        // router-c: no OSPFv3 on eth0 (`ospfv3_instance_only` attaches nothing).
+        c.provision_flags(&with_base(C, vec![])).await?;
+        let mut c_flags = area1(
+            C,
+            &format!("{OSPFV3_A1_IP_C}/24"),
+            OSPFV3_A1_ADDRESS_C,
+            OSPFV3_ROUTER_ID_C,
+        );
+        c_flags.extend(strings(&[
+            "--static-route",
+            OSPFV3_A1_ASBR_PREFIX,
+            "--static-gateway",
+            OSPFV3_A1_ADDRESS_B.trim_end_matches("/64"),
+            "--redistribute-to-ospfv3",
+        ]));
+        c.provision_flags(&c_flags).await?;
+
+        a.wait_new(
+            &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
+            0,
+            90,
+        )
+        .await?;
+        b.wait_new(
+            &format!("ospfv3 neighbor reached full link=eth1.0 neighbor={OSPFV3_ROUTER_ID_C}"),
+            0,
+            90,
+        )
+        .await?;
+        let installed = |legacy, extended, router_id: &str| {
+            either_form(legacy, extended, |t| {
+                format!("ospfv3 lsa installed.*lsa_type={t} .*advertising_router={router_id}")
+            })
+        };
+        a.wait_new(
+            &installed(
+                LSA_TYPE_INTER_AREA_ROUTER,
+                LSA_TYPE_E_INTER_AREA_ROUTER,
+                OSPFV3_ROUTER_ID_B,
+            ),
+            0,
+            90,
+        )
+        .await?;
+        a.wait_new(
+            &installed(
+                LSA_TYPE_AS_EXTERNAL_V3,
+                LSA_TYPE_E_AS_EXTERNAL,
+                OSPFV3_ROUTER_ID_C,
+            ),
+            0,
+            90,
+        )
+        .await?;
+        let route = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}.*source=Some(Ospf)");
+        if infinity {
+            log("LSInfinity Inter-Area-Router-LSA held; the external route must not be installed");
+            a.assert_quiet(&route, 0, 20).await?;
+        } else {
+            a.wait_new(&route, 0, 60).await?;
+        }
+        w.remove(C).await;
+        w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
+    }
+    w.dock.network_remove(NET_OSPFV3_A1).await;
     Ok(())
 }
 

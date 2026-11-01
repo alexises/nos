@@ -166,6 +166,7 @@ impl World {
             NET_CE_B,
             NET_H,
             NET_OSPF_FRR,
+            NET_OSPFV3_A1,
             NET_L3_A,
             NET_L3_B,
         ] {
