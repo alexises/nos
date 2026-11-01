@@ -491,12 +491,15 @@ pub fn decode_counted(mut data: &[u8]) -> Result<(Lldpdu, TlvCounts), DecodeErro
             TLV_SYSTEM_NAME => pdu.system_name = Some(lossy(value)),
             TLV_SYSTEM_DESCRIPTION => pdu.system_description = Some(lossy(value)),
             TLV_SYSTEM_CAPABILITIES => {
-                if value.len() != 4 {
+                // Matches lldpd (lldp.c, LLDP_TLV_SYSTEM_CAP): shorter than 4
+                // bytes rejects the LLDPDU, extra bytes are ignored, and a
+                // repeat silently overwrites (last wins).
+                let [a, b, c, d, ..] = *value else {
                     return Err(DecodeError::Malformed("system capabilities"));
-                }
+                };
                 pdu.capabilities = Some(Capabilities {
-                    supported: u16::from_be_bytes([value[0], value[1]]),
-                    enabled: u16::from_be_bytes([value[2], value[3]]),
+                    supported: u16::from_be_bytes([a, b]),
+                    enabled: u16::from_be_bytes([c, d]),
                 });
             }
             // Optional and untrusted: a malformed or non-IP one is skipped
@@ -909,6 +912,44 @@ mod tests {
         // Names past 32 bytes are cut on a char boundary.
         assert_eq!(truncate_at_char("ééé", 3), "é");
         assert_eq!(truncate_at_char("abc", 32), "abc");
+    }
+
+    #[test]
+    fn system_capabilities_follows_lldpd() {
+        let mut pdu = sample();
+        pdu.capabilities = None;
+        let with = |tlvs: &[&[u8]]| {
+            let mut bytes = encode(&pdu);
+            bytes.truncate(bytes.len() - 2);
+            for t in tlvs {
+                push_tlv(&mut bytes, TLV_SYSTEM_CAPABILITIES, t);
+            }
+            push_tlv(&mut bytes, TLV_END, &[]);
+            decode_counted(&bytes)
+        };
+        // Shorter than 4 bytes: the LLDPDU is rejected.
+        for bad in [&[][..], &[0; 3]] {
+            assert!(matches!(with(&[bad]), Err(DecodeError::Malformed(_))));
+        }
+        // Longer: the first 4 bytes are used, the rest ignored.
+        let (got, counts) = with(&[&[0, 1, 0, 2, 9, 9]]).unwrap();
+        assert_eq!(
+            got.capabilities,
+            Some(Capabilities {
+                supported: 1,
+                enabled: 2
+            })
+        );
+        assert_eq!(counts.discarded, 0);
+        // Repeat: last wins.
+        let (got, _) = with(&[&[0, 1, 0, 1], &[0, 3, 0, 4]]).unwrap();
+        assert_eq!(
+            got.capabilities,
+            Some(Capabilities {
+                supported: 3,
+                enabled: 4
+            })
+        );
     }
 
     #[test]
