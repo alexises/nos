@@ -407,8 +407,8 @@ fn decode_org(value: &[u8], org: &mut OrgTlvs) -> OrgOutcome {
 /// `statsTLVsDiscardedTotal`/`statsTLVsUnrecognizedTotal`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TlvCounts {
-    /// A malformed/non-IP Management Address, or one past the cap; a known
-    /// org-specific TLV that is malformed, repeated, or past the cap.
+    /// A malformed System Capabilities TLV; a malformed/non-IP Management
+    /// Address, or one past the cap; a known org-specific TLV that is malformed, repeated, or past the cap.
     pub discarded: u64,
     /// A reserved TLV type (9–126), or an organizationally-specific one (127)
     /// whose OUI/subtype nos doesn't decode.
@@ -491,13 +491,16 @@ pub fn decode_counted(mut data: &[u8]) -> Result<(Lldpdu, TlvCounts), DecodeErro
             TLV_SYSTEM_NAME => pdu.system_name = Some(lossy(value)),
             TLV_SYSTEM_DESCRIPTION => pdu.system_description = Some(lossy(value)),
             TLV_SYSTEM_CAPABILITIES => {
-                if value.len() != 4 {
-                    return Err(DecodeError::Malformed("system capabilities"));
+                // Optional: a wrong-length one is discarded, not fatal (802.1AB
+                // §9.2.6 discards the erroring TLV and keeps parsing).
+                if let [a, b, c, d] = *value {
+                    pdu.capabilities = Some(Capabilities {
+                        supported: u16::from_be_bytes([a, b]),
+                        enabled: u16::from_be_bytes([c, d]),
+                    });
+                } else {
+                    counts.discarded += 1;
                 }
-                pdu.capabilities = Some(Capabilities {
-                    supported: u16::from_be_bytes([value[0], value[1]]),
-                    enabled: u16::from_be_bytes([value[2], value[3]]),
-                });
             }
             // Optional and untrusted: a malformed or non-IP one is skipped
             // rather than rejecting the whole LLDPDU (and its neighbor).
@@ -909,6 +912,26 @@ mod tests {
         // Names past 32 bytes are cut on a char boundary.
         assert_eq!(truncate_at_char("ééé", 3), "é");
         assert_eq!(truncate_at_char("abc", 32), "abc");
+    }
+
+    #[test]
+    fn malformed_system_capabilities_is_skipped_not_fatal() {
+        let mut pdu = sample();
+        pdu.capabilities = None;
+        for bad in [vec![], vec![0; 3], vec![0; 6]] {
+            let mut bytes = encode(&pdu);
+            bytes.truncate(bytes.len() - 2);
+            push_tlv(&mut bytes, TLV_SYSTEM_CAPABILITIES, &bad);
+            push_tlv(&mut bytes, TLV_SYSTEM_NAME, b"after");
+            push_tlv(&mut bytes, TLV_END, &[]);
+            let (got, counts) = decode_counted(&bytes).unwrap();
+            assert_eq!(got.capabilities, None);
+            assert_eq!(got.system_name.as_deref(), Some("after"));
+            assert_eq!(counts.discarded, 1);
+        }
+        let (got, counts) = decode_counted(&encode(&sample())).unwrap();
+        assert_eq!(got.capabilities, sample().capabilities);
+        assert_eq!(counts.discarded, 0);
     }
 
     #[test]
