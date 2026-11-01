@@ -68,7 +68,7 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - Detection time: `remote detect mult x max(local required min RX, remote desired min TX)`.
 - Jitter: the caller draws 75..=100 (clamped; 75..=90 when the local detect mult is 1).
 - Changing an interval opens a Poll sequence (P=1 on every packet); the new value takes effect locally on Final. An incoming P is answered with F.
-- When a session reaches Up the caller restores the configured Desired Min TX with `Timers::change` (starts a Poll sequence); `Timers` does not watch the state itself.
+- When a session reaches Up the 1 s floor lifts, which is a Desired Min TX change: `Core::apply` calls `Timers::on_state`, which opens a Poll sequence (P=1 carrying the configured value; transmission uses it at once, Final only closes the sequence). Leaving Up restores the floor and drops the moot sequence. No sequence when the configured value is already >= 1 s.
 
 ## Add a packet field
 

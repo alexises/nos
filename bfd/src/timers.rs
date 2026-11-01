@@ -30,6 +30,9 @@ pub struct Timers {
     detect_mult: u8,
     /// A changed (tx, rx) advertised with P=1 and not yet confirmed by F.
     pending: Option<(u32, u32)>,
+    /// The 1 s not-Up floor was the Desired Min TX in force: set at creation
+    /// and on leaving Up, cleared on reaching Up (which opens the Poll).
+    floored: bool,
     remote: Option<Remote>,
     last_rx: Instant,
     next_tx: Instant,
@@ -44,6 +47,7 @@ impl Timers {
             required_min_rx,
             detect_mult,
             pending: None,
+            floored: true,
             remote: None,
             last_rx: now,
             next_tx: now,
@@ -59,6 +63,28 @@ impl Timers {
             .unwrap_or((self.desired_min_tx, self.required_min_rx));
         if new != current {
             self.pending = Some(new);
+        }
+    }
+
+    /// The session state changed. Reaching Up lifts the 1 s floor, which
+    /// is a Desired Min TX change: open a Poll sequence for it (§6.8.3).
+    /// Leaving Up restores the floor and drops the moot Up-time sequence.
+    pub fn on_state(&mut self, state: BfdState) {
+        if state == BfdState::Up {
+            if self.floored && self.desired_min_tx < SLOW_US {
+                self.pending
+                    .get_or_insert((self.desired_min_tx, self.required_min_rx));
+            }
+            // We transmit at the configured rate at once (the remote's
+            // detection time already follows the advertised value, so
+            // holding 1 s until Final would flap it); Final only closes
+            // the sequence.
+            self.floored = false;
+        } else {
+            self.floored = true;
+            if self.pending == Some((self.desired_min_tx, self.required_min_rx)) {
+                self.pending = None;
+            }
         }
     }
 
@@ -162,12 +188,19 @@ mod tests {
         Timers::new(300_000, 400_000, 3, now)
     }
 
+    /// Up with the reaching-Up Poll sequence answered: no floor, no pending.
+    fn settled(now: Instant, mult: u8) -> Timers {
+        let mut x = Timers::new(300_000, 400_000, mult, now);
+        x.on_state(BfdState::Up);
+        x.on_rx(now, R, false, true);
+        x
+    }
+
     #[test]
     fn interval_negotiation() {
         let now = Instant::now();
-        let mut x = t(now);
-        assert_eq!(x.tx_interval_us(BfdState::Up), None);
-        x.on_rx(now, R, false, false);
+        assert_eq!(t(now).tx_interval_us(BfdState::Up), None);
+        let x = settled(now, 3);
         // max(local desired 300k, remote required 500k)
         assert_eq!(x.tx_interval_us(BfdState::Up), Some(500_000));
         // detect = 4 x max(local required 400k, remote desired 200k)
@@ -189,15 +222,13 @@ mod tests {
     #[test]
     fn jitter_bounds() {
         let now = Instant::now();
-        let mut x = t(now);
-        x.on_rx(now, R, false, false);
+        let mut x = settled(now, 3);
         let at = |x: &mut Timers, p| x.schedule_tx(now, BfdState::Up, p) - now;
         assert_eq!(at(&mut x, 75), Duration::from_millis(375));
         assert_eq!(at(&mut x, 100), Duration::from_millis(500));
         assert_eq!(at(&mut x, 10), Duration::from_millis(375));
         assert_eq!(at(&mut x, 999), Duration::from_millis(500));
-        let mut one = Timers::new(300_000, 400_000, 1, now);
-        one.on_rx(now, R, false, false);
+        let mut one = settled(now, 1);
         assert_eq!(at(&mut one, 100), Duration::from_millis(450));
         assert_eq!(at(&mut one, 75), Duration::from_millis(375));
     }
@@ -227,8 +258,7 @@ mod tests {
     #[test]
     fn poll_final_cycle() {
         let now = Instant::now();
-        let mut x = t(now);
-        x.on_rx(now, R, false, false);
+        let mut x = settled(now, 3);
         assert!(!x.poll());
         x.change(100_000, 150_000);
         assert!(x.poll());
@@ -244,6 +274,43 @@ mod tests {
         assert!(!x.poll());
         assert_eq!(x.advertised(BfdState::Up), (100_000, 150_000));
         assert_eq!(x.detection_time_us(), Some(4 * 200_000));
+    }
+
+    #[test]
+    fn reaching_up_polls_to_lift_the_floor() {
+        let now = Instant::now();
+        let mut x = t(now);
+        x.on_rx(now, R, false, false);
+        x.on_state(BfdState::Up);
+        assert!(x.poll());
+        // P=1 packets carry the configured value, used at once (the remote's
+        // detection time follows it; 1 s until Final would flap it).
+        assert_eq!(x.advertised(BfdState::Up), (300_000, 400_000));
+        assert_eq!(x.tx_interval_us(BfdState::Up), Some(500_000));
+        // A user change mid-sequence replaces the pending pair.
+        x.change(200_000, 400_000);
+        assert_eq!(x.advertised(BfdState::Up), (200_000, 400_000));
+        x.on_rx(now, R, false, true);
+        assert!(!x.poll());
+        assert_eq!(x.tx_interval_us(BfdState::Up), Some(500_000));
+        assert_eq!(x.advertised(BfdState::Up), (200_000, 400_000));
+        // Up -> Down drops a still-open Up-time sequence; Up again reopens.
+        x.on_state(BfdState::Down);
+        assert_eq!(x.tx_interval_us(BfdState::Down), Some(SLOW_US));
+        x.on_state(BfdState::Up);
+        assert!(x.poll());
+        x.on_state(BfdState::Down);
+        assert!(!x.poll());
+    }
+
+    #[test]
+    fn slow_configured_interval_opens_no_poll() {
+        let now = Instant::now();
+        let mut x = Timers::new(2_000_000, 400_000, 3, now);
+        x.on_rx(now, R, false, false);
+        x.on_state(BfdState::Up);
+        assert!(!x.poll());
+        assert_eq!(x.tx_interval_us(BfdState::Up), Some(2_000_000));
     }
 
     #[test]
