@@ -635,6 +635,25 @@ pub(super) async fn handle_lsu(
                 link_local_lsdb.remove(&l.header.key());
             }
         }
+        // RFC 2328 §13.4: our own LSA, newer than ours, came back — the
+        // originator goes above it at once (`install_self_originated`).
+        for h in nos_ospf_common::lsa::reflected_self_lsas(&result.1, local_router_id) {
+            let store = if lsa::is_link_local_scope(h.lsa_type) {
+                &mut *link_local_lsdb
+            } else {
+                &mut *lsdb
+            };
+            if store.get(&h.key()).is_none() {
+                continue;
+            }
+            store.mark_reflected(h.key());
+            info!(
+                link = %cfg.attach_point, neighbor = %lsu.router_id,
+                lsa_type = h.lsa_type, link_state_id = %h.link_state_id,
+                received_sequence_number = h.sequence_number,
+                "ospf self-originated lsa received with newer sequence, reoriginating"
+            );
+        }
         result
     };
     if adj.pending_acks_since.is_none() && !adj.pending_acks.is_empty() {

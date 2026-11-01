@@ -759,6 +759,9 @@ pub struct LinkManager {
     lsdbs: Mutex<HashMap<Ipv4Addr, Arc<Mutex<Lsdb>>>>,
     /// Woken by every LSDB change; see `route_changed`.
     route_changed: Arc<tokio::sync::Notify>,
+    /// Woken when a neighbor floods one of our own LSAs back newer
+    /// (`Lsdb::mark_reflected`), so origination runs at once.
+    reoriginate: Arc<tokio::sync::Notify>,
     /// Set on every `reconcile` call, read by the background origination
     /// task started in `new`.
     router_id: Mutex<Option<Ipv4Addr>>,
@@ -925,6 +928,7 @@ impl LinkManager {
             resolved_virtual: Mutex::new(Vec::new()),
             lsdbs: Mutex::new(HashMap::new()),
             route_changed: Arc::new(tokio::sync::Notify::new()),
+            reoriginate: Arc::new(tokio::sync::Notify::new()),
             router_id: Mutex::new(None),
             stub_networks: Mutex::new(HashMap::new()),
             age_multiplier,
@@ -958,19 +962,9 @@ impl LinkManager {
             age_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
-                    _ = origination_tick.tick() => {
-                        if background.shutting_down.load(Ordering::Relaxed) {
-                            continue;
-                        }
-                        let router_id_opt = *background.router_id.lock().await;
-                        if let Some(router_id) = router_id_opt {
-                            background.resolve_virtual_links(router_id).await;
-                            background.originate_router_lsas(router_id).await;
-                            background.originate_as_external_lsas(router_id).await;
-                            background.flood_external_lsas_across_areas(router_id).await;
-                            background.originate_summary_lsas(router_id).await;
-                        }
-                    }
+                    _ = origination_tick.tick() => background.origination_pass().await,
+                    // RFC 2328 §13.4: a neighbor flooded our own LSA back newer.
+                    () = background.reoriginate.notified() => background.origination_pass().await,
                     _ = age_tick.tick() => {
                         background.age_lsdbs().await;
                     }
@@ -1093,9 +1087,10 @@ impl LinkManager {
     /// Gets or creates the shared LSDB for `area_id`.
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
         Arc::clone(self.lsdbs.lock().await.entry(area_id).or_insert_with(|| {
-            Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
-                &self.route_changed,
-            ))))
+            Arc::new(Mutex::new(
+                Lsdb::with_notify(Arc::clone(&self.route_changed))
+                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
+            ))
         }))
     }
 
@@ -1253,9 +1248,10 @@ impl LinkManager {
                 0
             };
             let (commands, commands_rx) = mpsc::unbounded_channel();
-            let link_local_lsdb = Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
-                &self.route_changed,
-            ))));
+            let link_local_lsdb = Arc::new(Mutex::new(
+                Lsdb::with_notify(Arc::clone(&self.route_changed))
+                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
+            ));
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),
