@@ -46,6 +46,36 @@ pub fn mtu_based_max_headers(mtu: u16, overhead: usize) -> usize {
         .max(1)
 }
 
+/// Receive buffer for one OSPF packet: the largest IP datagram.
+pub const RECV_BUF_LEN: usize = 65_535;
+
+/// `recv` with `MSG_TRUNC` returns the datagram's real length: `true` when it
+/// did not fit the `cap`-byte buffer, so the bytes held are a cut-off packet.
+pub fn truncated(n: usize, cap: usize) -> bool {
+    n > cap
+}
+
+/// Splits `items` into consecutive chunks whose summed `size_of` stays within
+/// `budget` bytes (greedy, order kept). Every chunk holds at least one item, so
+/// an item larger than the budget travels alone (RFC 2328 §13.3: the kernel
+/// then fragments it); empty input gives no chunks.
+pub fn chunk_by_budget<T>(items: &[T], budget: usize, size_of: impl Fn(&T) -> usize) -> Vec<&[T]> {
+    let mut chunks = Vec::new();
+    let (mut start, mut used) = (0, 0);
+    for (i, item) in items.iter().enumerate() {
+        let size = size_of(item);
+        if i > start && used + size > budget {
+            chunks.push(&items[start..i]);
+            (start, used) = (i, 0);
+        }
+        used += size;
+    }
+    if start < items.len() {
+        chunks.push(&items[start..]);
+    }
+    chunks
+}
+
 /// RFC 2328 §10.6 (RFC 5340 §4.2.1 keeps it): a DBD whose Interface MTU
 /// exceeds this link's effective MTU is rejected, since the neighbor could send
 /// DBDs we can't receive whole. Smaller, equal and 0 (not advertised) are fine,

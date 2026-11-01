@@ -42,7 +42,7 @@ fn ospf_instance_only(router_id: &str) -> Vec<String> {
 fn with_mtu(mut f: Vec<String>) -> Vec<String> {
     f.extend(strings(&[
         "--ospf-profile-mtu",
-        &OSPF_MTU_VALUE.to_string(),
+        &OSPF_SPLIT_MTU_VALUE.to_string(),
     ]));
     f
 }
@@ -1256,20 +1256,33 @@ pub async fn ospf_dbd_pagination(w: &mut World) -> anyhow::Result<()> {
     both_full_p2p(a, b).await
 }
 
-/// The same, driven purely by a real `OspfProfile.mtu` override (the RFC 791
-/// minimum) via `exchange::mtu_based_max_headers` — no `--dbd-max-headers` flag.
+/// The same, driven purely by a real `OspfProfile.mtu` override (200 bytes)
+/// via `exchange::mtu_based_max_headers` — no `--dbd-max-headers` flag — and
+/// with enough Type-5 LSAs that LSR/LSU/LSAck also split to the MTU (#806):
+/// router-a must log `ospf lsu split`, and router-b must end up holding the
+/// last LSA.
 pub async fn ospf_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     w.up(&[]).await?;
     let (a, b) = (w.a()?, w.b()?);
-    a.provision_flags(&with_base(A, asbr(with_mtu(ospf(OSPF_ROUTER_ID)))))
-        .await?;
-    router_a_holds_two_lsas(a).await?;
+    let mut a_flags = asbr(with_mtu(ospf(OSPF_ROUTER_ID)));
+    a_flags.extend(ospf_chunked_routes(OSPF_SPLIT_ROUTES - 1));
+    let last = format!("100.64.0.{}", OSPF_SPLIT_ROUTES - 2);
+    let split = "ospf lsu split.*packets=";
+    let split_a = a.count(split);
+    a.provision_flags(&with_base(A, a_flags)).await?;
+    a.wait(&format!(
+        "ospf lsa originated.*lsa_type=5 link_state_id={last} "
+    ))
+    .await?;
     b.provision_flags(&with_base(B, with_mtu(ospf(OSPF_ROUTER_ID_B))))
         .await?;
     a.wait(&format!("ospf profile resolved instance={OSPF_INSTANCE}"))
         .await?;
     paginated(a, b).await?;
-    both_full_p2p(a, b).await
+    both_full_p2p(a, b).await?;
+    a.wait_new(split, split_a, 60).await?;
+    b.wait(&format!("ospf lsa installed.*link_state_id={last} "))
+        .await
 }
 
 /// `n` /32 statics in 100.64.0.0/16 as repeated `--static-route` arguments.

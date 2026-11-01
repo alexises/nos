@@ -1306,3 +1306,27 @@ fn lsack_of_other_instance_keeps_entry() {
         assert_eq!(adj.retransmission_list.len(), 1, "seq {acked_seq}");
     }
 }
+
+#[test]
+fn chunk_by_budget_cases() {
+    let sz = |n: &usize| *n;
+    let empty: [usize; 0] = [];
+    assert_eq!(chunk_by_budget(&empty, 10, sz).len(), 0);
+    // Exact fit stays one chunk; one over splits.
+    assert_eq!(chunk_by_budget(&[5, 5], 10, sz), vec![&[5, 5][..]]);
+    assert_eq!(
+        chunk_by_budget(&[5, 5, 1], 10, sz),
+        vec![&[5, 5][..], &[1][..]]
+    );
+    // An oversize item goes alone, order kept.
+    let items = [3, 50, 3, 3];
+    let chunks = chunk_by_budget(&items, 10, sz);
+    assert_eq!(chunks, vec![&[3][..], &[50][..], &[3, 3][..]]);
+    assert_eq!(chunks.concat(), items);
+}
+
+#[test]
+fn truncated_only_past_the_buffer() {
+    assert!(!truncated(RECV_BUF_LEN, RECV_BUF_LEN));
+    assert!(truncated(RECV_BUF_LEN + 1, RECV_BUF_LEN));
+}

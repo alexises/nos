@@ -46,15 +46,17 @@
 //! nothing to strip here at all.
 
 use std::borrow::Cow;
-use std::io;
+use std::io::{self, IoSliceMut};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nix::sys::socket::{recvfrom, SockaddrIn6};
+use nix::sys::socket::{recvmsg, MsgFlags, SockaddrIn6};
+use nos_ospf_common::exchange::{truncated, RECV_BUF_LEN};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
+use tracing::warn;
 
 use crate::packet::{self, TrailerAuth};
 
@@ -65,10 +67,6 @@ pub const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5)
 /// (§A.3.1: Version/Type/Length(4) + Router ID(4) + Area ID(4) = 12 bytes
 /// precede it) — see the module doc comment.
 const CHECKSUM_OFFSET: libc::c_int = 12;
-
-/// Largest `OSPFv3` packet this crate ever sends/receives — same generous
-/// bound as `ospf::socket`'s own.
-const RECV_BUF_LEN: usize = 4096;
 
 /// A raw protocol-89 IPv6 socket bound to one specific L3 interface and
 /// joined to `FF02::5` on it — one per `OSPFv3` link.
@@ -168,16 +166,25 @@ impl OspfSocket {
     /// identify which neighbor a Hello came from) has to come from
     /// `recv_from` itself rather than a stripped header.
     pub async fn recv_packet(&self) -> io::Result<(Ipv6Addr, Vec<u8>)> {
+        // Heap, once per call: 64 KB is too big for the async loop's stack.
+        let mut buf = vec![0u8; RECV_BUF_LEN];
         loop {
             let mut guard = self.inner.readable().await?;
-            let mut buf = [0u8; RECV_BUF_LEN];
-            let io_result = guard.try_io(|inner| {
-                recvfrom::<SockaddrIn6>(inner.get_ref().as_raw_fd(), &mut buf)
+            let fd = self.inner.get_ref().as_raw_fd();
+            // `MSG_TRUNC`: `bytes` is the datagram's real length.
+            let io_result = guard.try_io(|_| {
+                let mut iov = [IoSliceMut::new(&mut buf)];
+                recvmsg::<SockaddrIn6>(fd, &mut iov, None, MsgFlags::MSG_TRUNC)
+                    .map(|m| (m.bytes, m.address))
                     .map_err(io::Error::from)
             });
             match io_result {
                 Ok(Ok((n, addr))) => {
                     if n == 0 {
+                        continue;
+                    }
+                    if truncated(n, RECV_BUF_LEN) {
+                        warn!(bytes = n, "ospfv3 packet truncated, dropped");
                         continue;
                     }
                     let Some(source) = addr.map(|a| a.ip()) else {

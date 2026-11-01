@@ -332,6 +332,22 @@ impl LinkAuthConfig {
         matches!(self, LinkAuthConfig::Crypto { extended: true, .. })
     }
 
+    /// Bytes the authentication trailer adds to every packet (RFC 5709 digest;
+    /// Simple's password sits in the header, so 0).
+    fn digest_len(&self) -> usize {
+        match self {
+            LinkAuthConfig::Crypto {
+                keys,
+                current_key_id,
+                ..
+            } => keys
+                .iter()
+                .find(|(id, _, _)| id == current_key_id)
+                .map_or(0, |(_, alg, _)| alg.digest_len()),
+            _ => 0,
+        }
+    }
+
     /// `source` is the received packet's IP source address (RFC 7474 binds
     /// the digest to it).
     fn as_policy(&self, source: Ipv4Addr) -> packet::AuthPolicy<'_> {

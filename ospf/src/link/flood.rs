@@ -1,10 +1,10 @@
 //! Acks, retransmission, reliable flooding and the neighbor liveness timers.
 //! Moved verbatim out of `link.rs`.
 
-use super::rx::{execute_actions, next_crypto_seq};
+use super::rx::{execute_actions, next_crypto_seq, split_lsr, split_lsu};
 use super::{
     bfd, exchange, info, lsa, neighbor, packet, warn, Duration, Instant, Ipv4Addr, LinkConfig,
-    LinkSocket, Lsa, Lsdb, LsrPacket, LsuPacket, Mutex, NeighborState, NetworkType, StatusHandle,
+    LinkSocket, Lsa, Lsdb, Mutex, NeighborState, NetworkType, StatusHandle,
 };
 
 /// RFC 2328 §13.5 delayed acknowledgment: sends each neighbor's queued acks
@@ -88,33 +88,18 @@ pub(super) fn retransmit_pending(
         ) {
             continue;
         }
-        if !adj.request_list.is_empty() {
-            let lsr = LsrPacket {
-                router_id: local_router_id,
-                area_id: cfg.area_id,
-                requests: adj.request_list.clone(),
-            };
-            let auth = cfg
-                .auth
-                .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsr(&lsr, &auth)) {
+        for payload in split_lsr(cfg, next_seq, local_router_id, &adj.request_list) {
+            if let Err(e) = socket.send_unicast(info.address, &payload) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsr");
             }
         }
-        if !adj.retransmission_list.is_empty() {
-            let lsu = LsuPacket {
-                router_id: local_router_id,
-                area_id: cfg.area_id,
-                lsas: adj
-                    .retransmission_list
-                    .values()
-                    .map(|l| (**l).clone())
-                    .collect(),
-            };
-            let auth = cfg
-                .auth
-                .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsu(&lsu, &auth)) {
+        let retransmit: Vec<Lsa> = adj
+            .retransmission_list
+            .values()
+            .map(|l| (**l).clone())
+            .collect();
+        for payload in split_lsu(cfg, next_seq, local_router_id, &retransmit) {
+            if let Err(e) = socket.send_unicast(info.address, &payload) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
             }
         }
@@ -184,20 +169,11 @@ pub(super) async fn flood_full_neighbors(
         if group.is_empty() || lsas.is_empty() {
             continue;
         }
-        let auth = cfg
-            .auth
-            .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-        let payload = packet::encode_lsu(
-            &LsuPacket {
-                router_id: local_router_id,
-                area_id: cfg.area_id,
-                lsas,
-            },
-            &auth,
-        );
-        for (neighbor_id, neighbor_addr, _) in group {
-            if let Err(e) = socket.send_unicast(*neighbor_addr, &payload) {
-                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
+        for payload in split_lsu(cfg, next_seq, local_router_id, &lsas) {
+            for (neighbor_id, neighbor_addr, _) in &group {
+                if let Err(e) = socket.send_unicast(*neighbor_addr, &payload) {
+                    warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
+                }
             }
         }
     }

@@ -6,11 +6,11 @@ use nos_ospf_common::ratelimit::{WarnLimiter, MAX_NEIGHBORS_PER_LINK};
 use super::grace::{in_grace, on_grace_lsa};
 use super::originate::local_netmask;
 use super::{
-    election, exchange, info, lsa, neighbor, packet, should_form_adjacency, start_negotiation,
-    warn, AdjacencyData, Candidate, DbdPacket, Duration, HashMap, Instant, InterfaceState,
-    Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, LsAckPacket, LsaBody, Lsdb, LsrPacket,
-    LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket, StatusHandle,
-    SystemTime, UNIX_EPOCH,
+    debug, election, exchange, info, lsa, neighbor, packet, should_form_adjacency,
+    start_negotiation, warn, AdjacencyData, Candidate, DbdPacket, Duration, HashMap, Instant,
+    InterfaceState, Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, LsAckPacket, LsaBody, Lsdb,
+    LsrPacket, LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket,
+    StatusHandle, SystemTime, UNIX_EPOCH,
 };
 
 /// `warn!` through the link's `WarnLimiter` (#394): a peer sending bad Hellos
@@ -61,6 +61,128 @@ pub(super) fn next_crypto_seq(counter: &mut u64, auth: &LinkAuthConfig) -> u64 {
         counter.saturating_add(1).max(crypto_seq_floor())
     };
     *counter
+}
+
+/// Bytes of one packet's budget on this link left for entries: the effective
+/// MTU minus IP (20), OSPF header (24), the crypto digest and `extra` (LSU's
+/// 4-byte count; 0 for LSR/LSAck).
+fn split_budget(cfg: &LinkConfig, extra: usize) -> usize {
+    usize::from(cfg.mtu).saturating_sub(20 + 24 + cfg.auth.digest_len() + extra)
+}
+
+/// Splits `entries` into MTU-sized chunks and encodes each as its own signed
+/// packet (fresh crypto sequence per chunk). Empty input yields no packets.
+/// Logs `ospf <kind> split packets=<n>` when more than one results.
+pub(super) fn encode_split<T>(
+    cfg: &LinkConfig,
+    next_seq: &mut u64,
+    kind: &'static str,
+    entries: &[T],
+    extra: usize,
+    size_of: impl Fn(&T) -> usize,
+    encode: impl Fn(&[T], &packet::OutgoingAuth<'_>) -> Vec<u8>,
+) -> Vec<Vec<u8>> {
+    let chunks =
+        nos_ospf_common::exchange::chunk_by_budget(entries, split_budget(cfg, extra), size_of);
+    if chunks.len() > 1 {
+        // LSU is the headline split (the e2e anchor); LSR/LSAck are noise.
+        if kind == "lsu" {
+            info!(link = %cfg.attach_point, packets = chunks.len(), "ospf lsu split");
+        } else {
+            debug!(link = %cfg.attach_point, packets = chunks.len(), "ospf {kind} split");
+        }
+    }
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let auth = cfg
+                .auth
+                .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
+            encode(chunk, &auth)
+        })
+        .collect()
+}
+
+pub(super) fn split_lsr(
+    cfg: &LinkConfig,
+    next_seq: &mut u64,
+    router_id: Ipv4Addr,
+    requests: &[crate::lsa::LsaKey],
+) -> Vec<Vec<u8>> {
+    // RFC 2328 §A.3.4: type, id and advertising router, 4 bytes each.
+    encode_split(
+        cfg,
+        next_seq,
+        "lsr",
+        requests,
+        0,
+        |_| 12,
+        |c, auth| {
+            let requests = c.to_vec();
+            packet::encode_lsr(
+                &LsrPacket {
+                    router_id,
+                    area_id: cfg.area_id,
+                    requests,
+                },
+                auth,
+            )
+        },
+    )
+}
+
+pub(super) fn split_lsu(
+    cfg: &LinkConfig,
+    next_seq: &mut u64,
+    router_id: Ipv4Addr,
+    lsas: &[crate::lsa::Lsa],
+) -> Vec<Vec<u8>> {
+    encode_split(
+        cfg,
+        next_seq,
+        "lsu",
+        lsas,
+        4,
+        |l| usize::from(l.header.length),
+        |c, auth| {
+            let lsas = c.to_vec();
+            packet::encode_lsu(
+                &LsuPacket {
+                    router_id,
+                    area_id: cfg.area_id,
+                    lsas,
+                },
+                auth,
+            )
+        },
+    )
+}
+
+pub(super) fn split_lsack(
+    cfg: &LinkConfig,
+    next_seq: &mut u64,
+    router_id: Ipv4Addr,
+    headers: &[crate::lsa::LsaHeader],
+) -> Vec<Vec<u8>> {
+    encode_split(
+        cfg,
+        next_seq,
+        "lsack",
+        headers,
+        0,
+        |_| 20,
+        |c, auth| {
+            let lsa_headers = c.to_vec();
+            packet::encode_lsack(
+                &LsAckPacket {
+                    router_id,
+                    area_id: cfg.area_id,
+                    lsa_headers,
+                },
+                auth,
+            )
+        },
+    )
 }
 
 /// RFC 2328 D.4.3's anti-replay check: `true` if this packet should be
@@ -661,11 +783,9 @@ pub(super) fn execute_actions(
     for action in actions {
         // Each packet sent gets its own crypto sequence number — RFC 2328
         // D.4.3's non-decreasing guarantee is per packet, not per action
-        // batch.
-        let auth = cfg
-            .auth
-            .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-        let (kind, payload) = match action {
+        // batch. LSR/LSU/LSAck are split to the link MTU, one signed packet
+        // per chunk (`encode_split`).
+        let (kind, payloads) = match action {
             exchange::Action::SendDbd(pkt) => {
                 // A genuine mid-pagination continuation chunk (not the
                 // initial empty negotiation attempt, which also always has
@@ -678,45 +798,28 @@ pub(super) fn execute_actions(
                         "ospf dbd chunk sent, more remaining"
                     );
                 }
-                ("dbd", packet::encode_dbd(&pkt, &auth))
+                let auth = cfg
+                    .auth
+                    .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
+                ("dbd", vec![packet::encode_dbd(&pkt, &auth)])
             }
-            exchange::Action::SendLsr(requests) => (
-                "lsr",
-                packet::encode_lsr(
-                    &LsrPacket {
-                        router_id: local_router_id,
-                        area_id: cfg.area_id,
-                        requests,
-                    },
-                    &auth,
-                ),
-            ),
-            exchange::Action::SendLsu(lsas) => (
-                "lsu",
-                packet::encode_lsu(
-                    &LsuPacket {
-                        router_id: local_router_id,
-                        area_id: cfg.area_id,
-                        lsas: lsas.iter().map(|l| (**l).clone()).collect(),
-                    },
-                    &auth,
-                ),
-            ),
+            exchange::Action::SendLsr(requests) => {
+                ("lsr", split_lsr(cfg, next_seq, local_router_id, &requests))
+            }
+            exchange::Action::SendLsu(lsas) => {
+                let lsas: Vec<_> = lsas.iter().map(|l| (**l).clone()).collect();
+                ("lsu", split_lsu(cfg, next_seq, local_router_id, &lsas))
+            }
             exchange::Action::SendLsAck(lsa_headers) => (
                 "lsack",
-                packet::encode_lsack(
-                    &LsAckPacket {
-                        router_id: local_router_id,
-                        area_id: cfg.area_id,
-                        lsa_headers,
-                    },
-                    &auth,
-                ),
+                split_lsack(cfg, next_seq, local_router_id, &lsa_headers),
             ),
             exchange::Action::NeighborEvent(_) => continue,
         };
-        if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
-            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospf packet");
+        for payload in payloads {
+            if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospf packet");
+            }
         }
     }
 }
