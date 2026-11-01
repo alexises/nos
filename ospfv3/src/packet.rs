@@ -197,6 +197,14 @@ pub struct TrailerAuth {
 }
 
 impl TrailerAuth {
+    /// Bytes `sign` appends: trailer header plus the current key's digest.
+    pub fn trailer_len(&self) -> usize {
+        self.keys
+            .iter()
+            .find(|(id, _, _)| *id == self.current_key_id)
+            .map_or(0, |(_, a, _)| TRAILER_HEADER_LEN + a.digest_len())
+    }
+
     /// Appends the trailer to `packet` (an `encode_*` result, checksum 0),
     /// signing with the current key. `sequence` is this send's own strictly
     /// increasing number; `source` is the IPv6 address the packet leaves

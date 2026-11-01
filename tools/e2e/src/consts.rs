@@ -468,8 +468,6 @@ pub const OSPF_FRR_FA_PREFIX: &str = "198.18.101.0/24";
 pub const OSPF_FRR_FA: &str = "10.51.0.9";
 pub const ASBR_GATEWAY: &str = "10.50.0.98";
 pub const MTU_VALUE: u32 = 9000;
-/// The RFC 791 minimum: resolves to one header per DBD packet.
-pub const OSPF_MTU_VALUE: u32 = 68;
 /// `ospf-mtu-pagination` (v2 LSU/LSR/LSAck split, #806): with no auth the LSU
 /// budget is 200-20-24-4 = 152 bytes (4 Type-5s of 36), the LSR/LSAck budget
 /// 156 (13 requests, 7 acks), a DBD holds ~7 headers: several entries per
@@ -506,6 +504,10 @@ pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0xA023;
 /// `ospfv3-asbr`'s redistributed IPv6 static: via router-b's eth0 address,
 /// so router-a's kernel can install it too.
 pub const OSPFV3_ASBR_PREFIX: &str = "2001:db8:77::/48";
+/// AS-External-LSAs router-a originates in `ospfv3-mtu-pagination` (#807): at
+/// `OSPF_SPLIT_MTU_VALUE` the LSU budget is 200-40-16-4 = 140 bytes (~3 of
+/// ~44), so 20 of them need several LSUs.
+pub const OSPFV3_SPLIT_ROUTES: usize = 20;
 pub const OSPFV3_ASBR_GATEWAY: &str = "2001:db8:1::2";
 /// `ospfv3-abr`'s second area, its profile and router-b's loopback in it (a
 /// prefix no other phase uses, so `nos-ribd` logs a fresh install).

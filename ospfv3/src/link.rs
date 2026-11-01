@@ -966,6 +966,103 @@ fn finish_neighbor_event(
     actions
 }
 
+/// Bytes of one packet's budget on this link left for entries: the effective
+/// MTU minus IPv6 (40), the `OSPFv3` header (16), the LSU LSA count (4; slack
+/// for LSR/LSAck) and the RFC 7166 trailer when the link is authenticated.
+fn split_budget(cfg: &LinkConfig) -> usize {
+    usize::from(cfg.mtu).saturating_sub(
+        40 + 16
+            + 4
+            + cfg
+                .auth
+                .as_ref()
+                .map_or(0, packet::TrailerAuth::trailer_len),
+    )
+}
+
+/// Cuts `items` to the link MTU and encodes each chunk as its own packet (the
+/// socket signs each with its own trailer sequence). An oversize item goes
+/// alone. Logs `ospfv3 lsu split` when an LSU needs more than one packet.
+fn split_packets<T>(
+    cfg: &LinkConfig,
+    kind: &'static str,
+    items: &[T],
+    size_of: impl Fn(&T) -> usize,
+    encode: impl Fn(&[T]) -> Vec<u8>,
+) -> Vec<Vec<u8>> {
+    let chunks = nos_ospf_common::exchange::chunk_by_budget(items, split_budget(cfg), size_of);
+    if chunks.len() > 1 {
+        // LSU is the headline split (the e2e anchor); LSR/LSAck are noise.
+        if kind == "lsu" {
+            info!(link = %cfg.attach_point, packets = chunks.len(), "ospfv3 lsu split");
+        } else {
+            debug!(link = %cfg.attach_point, packets = chunks.len(), "ospfv3 {kind} split");
+        }
+    }
+    chunks.into_iter().map(encode).collect()
+}
+
+fn lsu_packets(
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    lsas: &[Arc<crate::lsa::Lsa>],
+) -> Vec<Vec<u8>> {
+    split_packets(
+        cfg,
+        "lsu",
+        lsas,
+        // Header `length` is not reliable on a freshly built LSA.
+        |l| crate::lsa::encode_lsa(l).len(),
+        |c| {
+            packet::encode_lsu(&LsuPacket {
+                router_id: local_router_id,
+                area_id: cfg.area_id,
+                lsas: c.iter().map(|l| (**l).clone()).collect(),
+            })
+        },
+    )
+}
+
+fn lsr_packets(
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    requests: &[crate::lsa::LsaKey],
+) -> Vec<Vec<u8>> {
+    split_packets(
+        cfg,
+        "lsr",
+        requests,
+        |_| crate::lsa::KEY_LEN,
+        |c| {
+            packet::encode_lsr(&LsrPacket {
+                router_id: local_router_id,
+                area_id: cfg.area_id,
+                requests: c.to_vec(),
+            })
+        },
+    )
+}
+
+fn lsack_packets(
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    headers: &[crate::lsa::LsaHeader],
+) -> Vec<Vec<u8>> {
+    split_packets(
+        cfg,
+        "lsack",
+        headers,
+        |_| crate::lsa::LSA_HEADER_LEN,
+        |c| {
+            packet::encode_lsack(&LsAckPacket {
+                router_id: local_router_id,
+                area_id: cfg.area_id,
+                lsa_headers: c.to_vec(),
+            })
+        },
+    )
+}
+
 fn execute_actions(
     socket: &LinkSocket,
     cfg: &LinkConfig,
@@ -983,7 +1080,7 @@ fn execute_actions(
         return;
     };
     for action in actions {
-        let (kind, payload) = match action {
+        let (kind, payloads) = match action {
             exchange::Action::SendDbd(pkt) => {
                 if !pkt.init && pkt.more {
                     info!(
@@ -992,36 +1089,21 @@ fn execute_actions(
                         "ospfv3 dbd chunk sent, more remaining"
                     );
                 }
-                ("dbd", packet::encode_dbd(&pkt))
+                ("dbd", vec![packet::encode_dbd(&pkt)])
             }
-            exchange::Action::SendLsr(requests) => (
-                "lsr",
-                packet::encode_lsr(&LsrPacket {
-                    router_id: local_router_id,
-                    area_id: cfg.area_id,
-                    requests,
-                }),
-            ),
-            exchange::Action::SendLsu(lsas) => (
-                "lsu",
-                packet::encode_lsu(&LsuPacket {
-                    router_id: local_router_id,
-                    area_id: cfg.area_id,
-                    lsas: lsas.iter().map(|l| (**l).clone()).collect(),
-                }),
-            ),
-            exchange::Action::SendLsAck(lsa_headers) => (
-                "lsack",
-                packet::encode_lsack(&LsAckPacket {
-                    router_id: local_router_id,
-                    area_id: cfg.area_id,
-                    lsa_headers,
-                }),
-            ),
+            exchange::Action::SendLsr(requests) => {
+                ("lsr", lsr_packets(cfg, local_router_id, &requests))
+            }
+            exchange::Action::SendLsu(lsas) => ("lsu", lsu_packets(cfg, local_router_id, &lsas)),
+            exchange::Action::SendLsAck(lsa_headers) => {
+                ("lsack", lsack_packets(cfg, local_router_id, &lsa_headers))
+            }
             exchange::Action::NeighborEvent(_) => continue,
         };
-        if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, &payload) {
-            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospfv3 packet");
+        for payload in payloads {
+            if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, &payload) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospfv3 packet");
+            }
         }
     }
 }
@@ -1093,31 +1175,18 @@ fn retransmit_pending(
             continue;
         }
         if !adj.request_list.is_empty() {
-            let lsr = LsrPacket {
-                router_id: local_router_id,
-                area_id: cfg.area_id,
-                requests: adj.request_list.clone(),
-            };
-            if let Err(e) =
-                socket.send_unicast(info.address, cfg.interface_id, &packet::encode_lsr(&lsr))
-            {
-                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsr");
+            for payload in lsr_packets(cfg, local_router_id, &adj.request_list) {
+                if let Err(e) = socket.send_unicast(info.address, cfg.interface_id, &payload) {
+                    warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsr");
+                }
             }
         }
         if !adj.retransmission_list.is_empty() {
-            let lsu = LsuPacket {
-                router_id: local_router_id,
-                area_id: cfg.area_id,
-                lsas: adj
-                    .retransmission_list
-                    .values()
-                    .map(|l| (**l).clone())
-                    .collect(),
-            };
-            if let Err(e) =
-                socket.send_unicast(info.address, cfg.interface_id, &packet::encode_lsu(&lsu))
-            {
-                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
+            let lsas: Vec<_> = adj.retransmission_list.values().cloned().collect();
+            for payload in lsu_packets(cfg, local_router_id, &lsas) {
+                if let Err(e) = socket.send_unicast(info.address, cfg.interface_id, &payload) {
+                    warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
+                }
             }
         }
     }
@@ -1146,14 +1215,12 @@ async fn flood_full_neighbors(
     if lsas.is_empty() {
         return;
     }
-    let payload = packet::encode_lsu(&LsuPacket {
-        router_id: local_router_id,
-        area_id: cfg.area_id,
-        lsas: lsas.iter().map(|l| (**l).clone()).collect(),
-    });
+    let payloads = lsu_packets(cfg, local_router_id, &lsas);
     for (neighbor_id, neighbor_addr) in full_neighbors {
-        if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, &payload) {
-            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
+        for payload in &payloads {
+            if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, payload) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
+            }
         }
     }
 }
@@ -2863,6 +2930,100 @@ pub(crate) mod tests {
             auth: None,
             instance_id: 0,
         }
+    }
+
+    fn external(i: u8) -> Arc<Lsa> {
+        let mut l = Lsa {
+            header: LsaHeader {
+                age: 0,
+                lsa_type: lsa::LSA_TYPE_AS_EXTERNAL,
+                link_state_id: Ipv4Addr::new(0, 0, 0, i),
+                advertising_router: Ipv4Addr::new(9, 9, 9, 9),
+                sequence_number: i32::MIN + 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::AsExternal(AsExternalLsaBody {
+                type2: false,
+                metric: 1,
+                prefix_options: 0,
+                prefix: Ipv6Net::new(
+                    Ipv6Addr::new(0x2001, 0xdb8, u16::from(i), 0, 0, 0, 0, 0),
+                    48,
+                )
+                .unwrap(),
+                forwarding_address: None,
+                route_tag: None,
+                referenced_ls_type: 0,
+                referenced_link_state_id: None,
+            }),
+        };
+        lsa::fill_checksum(&mut l);
+        Arc::new(l)
+    }
+
+    #[test]
+    fn split_budget_subtracts_headers_and_trailer_and_saturates() {
+        let mut cfg = link("eth0", 10);
+        cfg.mtu = 200;
+        assert_eq!(split_budget(&cfg), 200 - 60);
+        cfg.auth = Some(trailer(b"k")); // 16 + 32
+        assert_eq!(split_budget(&cfg), 200 - 60 - 48);
+        cfg.mtu = 68;
+        cfg.auth = None;
+        assert_eq!(split_budget(&cfg), 8);
+        cfg.mtu = 10;
+        assert_eq!(split_budget(&cfg), 0);
+    }
+
+    #[test]
+    fn lsu_lsr_lsack_split_within_mtu_and_union_is_the_input() {
+        let rid = Ipv4Addr::new(9, 9, 9, 9);
+        for auth in [None, Some(trailer(b"k"))] {
+            let mut cfg = link("eth0", 10);
+            cfg.mtu = 200;
+            cfg.auth = auth;
+            let lsas: Vec<_> = (0..20).map(external).collect();
+            let keys: Vec<_> = lsas.iter().map(|l| l.header.key()).collect();
+            let headers: Vec<_> = lsas.iter().map(|l| l.header).collect();
+            let lsu = lsu_packets(&cfg, rid, &lsas);
+            let lsr = lsr_packets(&cfg, rid, &keys);
+            let ack = lsack_packets(&cfg, rid, &headers);
+            let trailer_len = cfg
+                .auth
+                .as_ref()
+                .map_or(0, packet::TrailerAuth::trailer_len);
+            for p in lsu.iter().chain(&lsr).chain(&ack) {
+                assert!(p.len() + 40 + trailer_len <= 200, "{} bytes", p.len());
+            }
+            assert!(lsu.len() > 1 && lsr.len() > 1 && ack.len() > 1);
+            let got: Vec<_> = lsu
+                .iter()
+                .flat_map(|p| packet::decode_lsu(p).unwrap().lsas)
+                .collect();
+            assert_eq!(got.len(), 20);
+            assert!(got.iter().zip(&lsas).all(|(g, l)| g.body == l.body));
+            let got: Vec<_> = lsr
+                .iter()
+                .flat_map(|p| packet::decode_lsr(p).unwrap().requests)
+                .collect();
+            assert_eq!(got, keys);
+            let got: Vec<_> = ack
+                .iter()
+                .flat_map(|p| packet::decode_lsack(p).unwrap().lsa_headers)
+                .collect();
+            assert_eq!(got, headers);
+        }
+    }
+
+    #[test]
+    fn oversize_lsa_goes_alone_and_empty_sends_nothing() {
+        let mut cfg = link("eth0", 10);
+        cfg.mtu = 68;
+        let rid = Ipv4Addr::LOCALHOST;
+        let lsas = vec![external(1), external(2)];
+        assert_eq!(lsu_packets(&cfg, rid, &lsas).len(), 2);
+        assert_eq!(lsu_packets(&cfg, rid, &[]).len(), 0);
     }
 
     #[test]
