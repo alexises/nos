@@ -85,6 +85,11 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     a.rest_expect(Method::GET, "/v1/bfd/sessions?peer=nope", None, 400)
         .await?;
 
+    log("reaching Up opens a Poll sequence (#694): it completes without a flap");
+    let (any_down_a, any_down_b) = (a.count("bfd session down"), b.count("bfd session down"));
+    a.assert_quiet("bfd session down", any_down_a, 5).await?;
+    b.assert_quiet("bfd session down", any_down_b, 5).await?;
+
     log("dropping UDP 3784 on router-a: Down by detection time, route withdrawn");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     let (n_down, n_removed, n_up, n_added) = (
@@ -148,6 +153,10 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     // when a BFD static route points at FRR.
     w.a()?.provision(&bfd_route(BFD_PREFIX_F, IP_G)).await?;
     w.a()?.wait(&format!("bfd session up peer={IP_G}")).await?;
+    // FRR answers the Up-time Poll sequence (P=1) with F and stays Up.
+    let down_g = format!("bfd session down peer={IP_G}");
+    let n_down_g = w.a()?.count(&down_g);
+    w.a()?.assert_quiet(&down_g, n_down_g, 5).await?;
     super::ospf::frr_until(w, "show bfd peers json", 60, |out| {
         out.contains("\"status\":\"up\"")
     })

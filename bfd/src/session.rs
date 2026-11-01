@@ -388,6 +388,9 @@ impl Core {
         }
         let changed = next != self.state;
         self.state = next;
+        if changed && !self.unaffiliated() {
+            self.timers.on_state(next);
+        }
         // §6.8.4: the remote is forgotten when it stops talking.
         if changed && ev == Event::DetectTimeout {
             self.remote_disc = 0;
@@ -815,6 +818,48 @@ mod tests {
         assert_eq!(p.a.diag, BfdDiag::ControlDetectionTimeExpired);
         assert_eq!(p.a.remote_disc, 0);
         assert!(p.now - t0 <= Duration::from_millis(400), "{:?}", p.now - t0);
+    }
+
+    #[test]
+    fn reaching_up_poll_sequence_completes_on_both_sides() {
+        let mut p = Pair::new(profile(100, 100), profile(100, 100));
+        p.run_until(|p| p.a.state == BfdState::Up && p.b.state == BfdState::Up);
+        p.run_until(|p| !p.a.timers.poll() && !p.b.timers.poll());
+        assert_eq!(p.a.status().tx_interval_us, 100_000);
+        assert_eq!(p.b.status().tx_interval_us, 100_000);
+    }
+
+    #[test]
+    fn up_transition_packet_carries_poll() {
+        let now = Instant::now();
+        let mut c = core(profile(100, 100), 1, now);
+        let remote = Packet {
+            state: BfdState::Init,
+            my_discriminator: 2,
+            your_discriminator: 1,
+            ..c.packet(false)
+        };
+        let pkt = c
+            .on_packet(now, &remote, 100)
+            .expect("state change answers");
+        assert_eq!(c.state, BfdState::Up);
+        assert!(pkt.poll);
+        assert_eq!(pkt.desired_min_tx, 100_000);
+    }
+
+    #[test]
+    fn unaffiliated_up_sets_no_poll() {
+        let mut c = core(
+            BfdProfile {
+                echo_mode: EchoMode::Unaffiliated,
+                ..profile(100, 100)
+            },
+            1,
+            Instant::now(),
+        );
+        c.apply(Event::RxState(BfdState::Init));
+        assert_eq!(c.state, BfdState::Up);
+        assert!(!c.timers.poll());
     }
 
     #[test]
