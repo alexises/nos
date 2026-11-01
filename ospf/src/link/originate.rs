@@ -190,8 +190,15 @@ pub(super) fn install_self_originated_with_options(
     let needs_refresh = existing
         .as_ref()
         .is_some_and(|e| e.header.age >= lsa::LS_REFRESH_TIME);
+    // RFC 2328 §13.4: the held copy is a neighbor's newer instance of ours,
+    // so go above it — unchanged body and `MinLSInterval` don't apply.
+    let reflected = lsdb.take_reflected(&key);
     let sequence_number = match &existing {
-        Some(e) if e.body == body && e.header.options == options && !needs_refresh => return false,
+        Some(e)
+            if e.body == body && e.header.options == options && !needs_refresh && !reflected =>
+        {
+            return false
+        }
         // RFC 2328 §12.1.6: at `MaxSequenceNumber` the instance is flushed
         // (at that same sequence number — never the reserved 0x8000_0000 a
         // wrapping increment would produce) and re-originated at
@@ -207,7 +214,7 @@ pub(super) fn install_self_originated_with_options(
         // `ORIGINATION_INTERVAL` tick retries. `age` is the local clock
         // since origination (a neighbor's echo never supersedes it, see
         // `lsa::fill_checksum`), so no extra timestamp is needed.
-        Some(e) if e.header.age < lsa::MIN_LS_INTERVAL => return false,
+        Some(e) if e.header.age < lsa::MIN_LS_INTERVAL && !reflected => return false,
         Some(e) => e.header.sequence_number + 1,
         None => lsa::INITIAL_SEQUENCE_NUMBER,
     };
@@ -230,7 +237,7 @@ pub(super) fn install_self_originated_with_options(
     lsdb.install(fresh);
     info!(
         lsa_type, link_state_id = %link_state_id, advertising_router = %local_router_id,
-        refreshed = needs_refresh,
+        refreshed = needs_refresh, reflected,
         "ospf lsa originated"
     );
     true
@@ -321,6 +328,37 @@ pub(super) fn withdraw_undesired(
     }
 }
 
+/// RFC 2328 §13.4's other half: a Network-LSA of another advertising router
+/// whose Link State ID is one of `addrs` (this router's own interface
+/// addresses) is ours under a stale router-id — a previous incarnation as DR.
+/// It can't be re-originated under that key, so it is flushed. Returns the
+/// flushed keys.
+pub(super) fn flush_stale_network_lsas(
+    lsdb: &mut Lsdb,
+    local_router_id: Ipv4Addr,
+    addrs: &HashSet<Ipv4Addr>,
+) -> Vec<LsaKey> {
+    let stale: Vec<LsaKey> = lsdb
+        .headers()
+        .into_iter()
+        .filter(|h| {
+            h.lsa_type == lsa::LSA_TYPE_NETWORK
+                && h.advertising_router != local_router_id
+                && h.age < lsa::MAX_AGE
+                && addrs.contains(&h.link_state_id)
+        })
+        .map(|h| h.key())
+        .collect();
+    for key in &stale {
+        withdraw_self_originated(lsdb, key);
+        info!(
+            link_state_id = %key.link_state_id, advertising_router = %key.advertising_router,
+            "ospf stale network lsa flushed"
+        );
+    }
+    stale
+}
+
 /// Inserts `prefix` into `raw` if it's IPv4 — see `LinkManager::
 /// apply_redistribute_update`'s doc comment for why a v6 entry is skipped
 /// rather than stored.
@@ -383,6 +421,49 @@ impl LinkManager {
         let max_metric = self.max_metric_tick();
         self.originate_router_lsas_with(local_router_id, max_metric)
             .await;
+    }
+
+    /// One origination pass: every LSA type, then RFC 2328 §13.4's cleanup —
+    /// a reflected own LSA (`Lsdb::mark_reflected`) that no pass
+    /// re-originated is one this router no longer advertises (an opaque LSA
+    /// of a previous incarnation, say), so it is flushed.
+    pub(super) async fn origination_pass(&self) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(router_id) = *self.router_id.lock().await else {
+            return;
+        };
+        let addrs: HashSet<Ipv4Addr> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| e.config.local_addr)
+            .collect();
+        for store in self.lsdbs.lock().await.values() {
+            flush_stale_network_lsas(&mut *store.lock().await, router_id, &addrs);
+        }
+        let mut stores: Vec<Arc<Mutex<Lsdb>>> = self.lsdbs.lock().await.values().cloned().collect();
+        stores.extend(self.link_local_lsdbs().await.into_iter().map(|(_, s)| s));
+        let mut marked = Vec::new();
+        for store in stores {
+            let keys = store.lock().await.reflected_keys();
+            marked.push((store, keys));
+        }
+        self.resolve_virtual_links(router_id).await;
+        self.originate_router_lsas(router_id).await;
+        self.originate_as_external_lsas(router_id).await;
+        self.flood_external_lsas_across_areas(router_id).await;
+        self.originate_summary_lsas(router_id).await;
+        for (store, keys) in marked {
+            let mut lsdb = store.lock().await;
+            for key in keys {
+                if lsdb.take_reflected(&key) {
+                    withdraw_self_originated(&mut lsdb, &key);
+                }
+            }
+        }
     }
 
     /// The Router-LSA flag byte (B/E/H) and RFC 7770 capability bits shared

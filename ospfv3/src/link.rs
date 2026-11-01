@@ -847,6 +847,27 @@ async fn handle_lsu(
                 link_local_lsdb.remove(&l.header.key());
             }
         }
+        // RFC 2328 §13.4: our own LSA, newer than ours, came back — the
+        // originator goes above it at once (`install_self_originated`).
+        for h in nos_ospf_common::lsa::reflected_self_lsas(&result.1, local_router_id) {
+            let store = if lsa::is_link_local_scope(h.lsa_type) {
+                &mut link_local_lsdb
+            } else if lsa::is_as_scope(h.lsa_type) {
+                &mut as_lsdb
+            } else {
+                &mut lsdb
+            };
+            if store.get(&h.key()).is_none() {
+                continue;
+            }
+            store.mark_reflected(h.key());
+            info!(
+                link = %cfg.attach_point, neighbor = %lsu.router_id,
+                lsa_type = h.lsa_type, link_state_id = %h.link_state_id,
+                received_sequence_number = h.sequence_number,
+                "ospfv3 self-originated lsa received with newer sequence, reoriginating"
+            );
+        }
         result
     };
     if adj.pending_acks_since.is_none() && !adj.pending_acks.is_empty() {
@@ -1552,6 +1573,9 @@ pub struct LinkManager {
     lsdbs: Mutex<HashMap<Ipv4Addr, Arc<Mutex<Lsdb>>>>,
     /// Woken by every LSDB change; see `route_changed`.
     route_changed: Arc<tokio::sync::Notify>,
+    /// Woken when a neighbor floods one of our own LSAs back newer
+    /// (`Lsdb::mark_reflected`), so origination runs at once.
+    reoriginate: Arc<tokio::sync::Notify>,
     /// Link-local-scoped LSAs (Link-LSA/E-Link-LSA), per attach point —
     /// exclusively that link's own, so a link's DBD summary/flood can never
     /// offer another link's Link-LSAs (RFC 5340 §4.5.1). SPF still merges
@@ -1754,12 +1778,17 @@ impl LinkManager {
         opener: Opener,
     ) -> Arc<Self> {
         let route_changed = Arc::new(tokio::sync::Notify::new());
+        let reoriginate = Arc::new(tokio::sync::Notify::new());
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
             link_local_lsdbs: Mutex::new(HashMap::new()),
-            as_lsdb: Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(&route_changed)))),
+            as_lsdb: Arc::new(Mutex::new(
+                Lsdb::with_notify(Arc::clone(&route_changed))
+                    .with_reflect_notify(Arc::clone(&reoriginate)),
+            )),
             route_changed,
+            reoriginate,
             redistribute_raw: Mutex::new(HashSet::new()),
             redistribute_filtered: Mutex::new(HashSet::new()),
             redistribute_policy: Mutex::new(Arc::new(nos_rpl::ACCEPT_ALL.clone())),
@@ -1782,12 +1811,9 @@ impl LinkManager {
             age_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
-                    _ = origination_tick.tick() => {
-                        let router_id_opt = *background.router_id.lock().await;
-                        if let Some(router_id) = router_id_opt {
-                            background.originate_all(router_id).await;
-                        }
-                    }
+                    _ = origination_tick.tick() => background.origination_pass().await,
+                    // RFC 2328 §13.4: a neighbor flooded our own LSA back newer.
+                    () = background.reoriginate.notified() => background.origination_pass().await,
                     _ = age_tick.tick() => {
                         background.age_lsdbs().await;
                     }
@@ -1799,9 +1825,10 @@ impl LinkManager {
 
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
         Arc::clone(self.lsdbs.lock().await.entry(area_id).or_insert_with(|| {
-            Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
-                &self.route_changed,
-            ))))
+            Arc::new(Mutex::new(
+                Lsdb::with_notify(Arc::clone(&self.route_changed))
+                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
+            ))
         }))
     }
 
@@ -1812,9 +1839,10 @@ impl LinkManager {
                 .await
                 .entry(attach_point.to_string())
                 .or_insert_with(|| {
-                    Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
-                        &self.route_changed,
-                    ))))
+                    Arc::new(Mutex::new(
+                        Lsdb::with_notify(Arc::clone(&self.route_changed))
+                            .with_reflect_notify(Arc::clone(&self.reoriginate)),
+                    ))
                 }),
         )
     }
@@ -2350,6 +2378,31 @@ impl LinkManager {
     /// other RFC 8362 flavor, and a previous incarnation's LSAs learned
     /// over DBD alike. Only the stores of links this tick saw are swept: a
     /// removed link's store has no neighbor to flood to.
+    async fn origination_pass(&self) {
+        let Some(router_id) = *self.router_id.lock().await else {
+            return;
+        };
+        // RFC 2328 §13.4: a reflected own LSA that no pass re-originated (a
+        // type the daemon no longer advertises) is flushed afterwards.
+        let mut stores: Vec<Arc<Mutex<Lsdb>>> = self.lsdbs.lock().await.values().cloned().collect();
+        stores.extend(self.link_local_lsdbs.lock().await.values().cloned());
+        stores.push(Arc::clone(&self.as_lsdb));
+        let mut marked = Vec::new();
+        for store in stores {
+            let keys = store.lock().await.reflected_keys();
+            marked.push((store, keys));
+        }
+        self.originate_all(router_id).await;
+        for (store, keys) in marked {
+            let mut lsdb = store.lock().await;
+            for key in keys {
+                if lsdb.take_reflected(&key) {
+                    withdraw_self_originated(&mut lsdb, &key);
+                }
+            }
+        }
+    }
+
     async fn originate_all(&self, local_router_id: Ipv4Addr) {
         let mut done = Originated::default();
         self.originate_router_lsas(local_router_id, &mut done).await;
@@ -2735,8 +2788,11 @@ fn install_self_originated(
     let needs_refresh = existing
         .as_ref()
         .is_some_and(|e| e.header.age >= lsa::LS_REFRESH_TIME);
+    // RFC 2328 §13.4: the held copy is a neighbor's newer instance of ours,
+    // so go above it even with an unchanged body.
+    let reflected = lsdb.take_reflected(&key);
     let sequence_number = match &existing {
-        Some(e) if e.body == body && !needs_refresh => return key,
+        Some(e) if e.body == body && !needs_refresh && !reflected => return key,
         // RFC 2328 §12.1.6: flush at MaxSequenceNumber; once the held copy is
         // evicted the `None` arm restarts at `INITIAL_SEQUENCE_NUMBER`.
         Some(e) if e.header.sequence_number == lsa::MAX_SEQUENCE_NUMBER => {
@@ -2762,7 +2818,7 @@ fn install_self_originated(
     lsdb.install(lsa);
     info!(
         lsa_type, link_state_id = %link_state_id, advertising_router = %local_router_id,
-        refreshed = needs_refresh,
+        refreshed = needs_refresh, reflected,
         "ospfv3 lsa originated"
     );
     key
@@ -3326,6 +3382,97 @@ pub(crate) mod tests {
             lsa::INITIAL_SEQUENCE_NUMBER
         );
         assert_eq!(installed.body, body);
+    }
+
+    fn own_router_lsa(seq: i32) -> Lsa {
+        let mut l = Lsa {
+            header: LsaHeader {
+                age: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: Ipv4Addr::new(1, 1, 1, 1),
+                advertising_router: Ipv4Addr::new(1, 1, 1, 1),
+                sequence_number: seq,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                options: 0,
+                links: Vec::new(),
+            }),
+        };
+        lsa::fill_checksum(&mut l);
+        l
+    }
+
+    /// RFC 2328 §13.4: a reflected newer copy is re-originated above it even
+    /// with an unchanged body; the mark is consumed (no storm), and at
+    /// `MAX_SEQUENCE_NUMBER` the copy is flushed instead.
+    #[test]
+    fn install_self_originated_reoriginates_above_a_reflected_copy() {
+        let me = Ipv4Addr::new(1, 1, 1, 1);
+        let body = own_router_lsa(0).body;
+        let key = own_router_lsa(0).header.key();
+        let mut lsdb = Lsdb::new();
+        let seq_after = |lsdb: &mut Lsdb| {
+            install_self_originated(lsdb, me, lsa::LSA_TYPE_ROUTER, me, body.clone());
+            lsdb.get(&key).unwrap().header.sequence_number
+        };
+        let base = lsa::INITIAL_SEQUENCE_NUMBER + 9;
+        lsdb.install(own_router_lsa(base));
+        assert_eq!(seq_after(&mut lsdb), base);
+        lsdb.mark_reflected(key);
+        assert_eq!(seq_after(&mut lsdb), base + 1);
+        assert_eq!(seq_after(&mut lsdb), base + 1);
+
+        let mut lsdb = Lsdb::new();
+        lsdb.install(own_router_lsa(lsa::MAX_SEQUENCE_NUMBER));
+        lsdb.mark_reflected(key);
+        seq_after(&mut lsdb);
+        assert_eq!(lsdb.get(&key).unwrap().header.age, lsa::MAX_AGE);
+    }
+
+    /// A reflected own LSA is marked in the store it landed in and wakes the
+    /// originator; a foreign one is not.
+    #[tokio::test]
+    async fn handle_lsu_marks_a_reflected_own_lsa_and_wakes_the_originator() {
+        use futures::FutureExt as _;
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        let cfg = link("eth0.0", 10);
+        let n = Arc::new(tokio::sync::Notify::new());
+        let area = Mutex::new(Lsdb::new().with_reflect_notify(Arc::clone(&n)));
+        let (link_store, as_scope) = (Mutex::new(Lsdb::new()), Mutex::new(Lsdb::new()));
+        let stores = Stores {
+            area: &area,
+            link: &link_store,
+            as_scope: &as_scope,
+        };
+        area.lock()
+            .await
+            .install(own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER));
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        status.send_modify(|s| {
+            let mut info = neighbor_info(NeighborState::Full, "fe80::2".parse().unwrap(), 7);
+            info.adjacency = Some(AdjacencyData::default());
+            s.neighbors.insert(neighbor_id, info);
+        });
+        let lsu = |lsas| LsuPacket {
+            router_id: neighbor_id,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas,
+        };
+        let me = Ipv4Addr::new(1, 1, 1, 1);
+        let mut foreign = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 1);
+        foreign.header.link_state_id = neighbor_id;
+        foreign.header.advertising_router = neighbor_id;
+        handle_lsu(&cfg, me, &status, &stores, &lsu(vec![foreign])).await;
+        assert_eq!(area.lock().await.reflected_keys(), Vec::<LsaKey>::new());
+        assert!(n.notified().now_or_never().is_none());
+
+        let newer = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 5);
+        handle_lsu(&cfg, me, &status, &stores, &lsu(vec![newer.clone()])).await;
+        assert_eq!(area.lock().await.reflected_keys(), vec![newer.header.key()]);
+        assert!(n.notified().now_or_never().is_some());
     }
 
     #[test]

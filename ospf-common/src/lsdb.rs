@@ -42,6 +42,11 @@ pub struct Lsdb<L: Lsa> {
     /// (`install_received`) — see `MIN_LS_ARRIVAL`. Self-originated installs
     /// don't record here: they're paced by `MinLSInterval` instead.
     last_received: HashMap<Key<L>, Instant>,
+    /// Own LSAs a neighbor flooded back newer than ours (RFC 2328 §13.4) —
+    /// see `mark_reflected`.
+    reflected: HashSet<Key<L>>,
+    /// Woken by `mark_reflected` so the originator runs at once.
+    reflect_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl<L: Lsa> Default for Lsdb<L> {
@@ -51,6 +56,8 @@ impl<L: Lsa> Default for Lsdb<L> {
             max_age_ticks: HashMap::new(),
             notify: None,
             last_received: HashMap::new(),
+            reflected: HashSet::new(),
+            reflect_notify: None,
         }
     }
 }
@@ -88,6 +95,37 @@ impl<L: Lsa> Lsdb<L> {
             notify: Some(notify),
             ..Self::default()
         }
+    }
+
+    /// Wakes `notify` whenever an own LSA is marked reflected.
+    #[must_use]
+    pub fn with_reflect_notify(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
+        self.reflect_notify = Some(notify);
+        self
+    }
+
+    /// RFC 2328 §13.4: records that the held instance of `key`, one of this
+    /// router's own LSAs, is a neighbor's newer copy, and wakes the
+    /// originator. The next origination of `key` (`take_reflected`) goes
+    /// above it regardless of body or `MinLSInterval`; a mark nobody takes
+    /// (`reflected_keys`) is an LSA this router no longer originates.
+    pub fn mark_reflected(&mut self, key: Key<L>) {
+        self.reflected.insert(key);
+        if let Some(n) = &self.reflect_notify {
+            n.notify_one();
+        }
+    }
+
+    /// Whether `key` was marked reflected, clearing the mark.
+    pub fn take_reflected(&mut self, key: &Key<L>) -> bool {
+        self.reflected.remove(key)
+    }
+
+    /// Every mark currently set. An origination pass snapshots these before
+    /// it runs and `take_reflected`s them after: a mark it left is a key no
+    /// pass originated, i.e. an LSA this router no longer advertises.
+    pub fn reflected_keys(&self) -> Vec<Key<L>> {
+        self.reflected.iter().copied().collect()
     }
 
     fn kick(&self) {
@@ -150,6 +188,7 @@ impl<L: Lsa> Lsdb<L> {
         self.kick();
         self.max_age_ticks.remove(key);
         self.last_received.remove(key);
+        self.reflected.remove(key);
     }
 
     pub fn get(&self, key: &Key<L>) -> Option<Arc<L>> {
@@ -397,6 +436,23 @@ mod tests {
         db.install_received(lsa(1), t0);
         db.remove(&key());
         assert_eq!(db.install_received(lsa(2), t0), InstallOutcome::Installed);
+    }
+
+    #[tokio::test]
+    async fn reflected_marks_are_taken_once_drained_and_wake_the_originator() {
+        let n = Arc::new(tokio::sync::Notify::new());
+        let mut db = Db::new().with_reflect_notify(Arc::clone(&n));
+        db.install(lsa(1));
+        assert!(!db.take_reflected(&key()));
+        db.mark_reflected(key());
+        assert!(n.notified().now_or_never().is_some());
+        assert!(db.take_reflected(&key()));
+        assert!(!db.take_reflected(&key()));
+        db.mark_reflected(key());
+        assert_eq!(db.reflected_keys(), vec![key()]);
+        db.mark_reflected(key());
+        db.remove(&key());
+        assert!(!db.take_reflected(&key()));
     }
 
     /// Every change that can alter SPF input wakes the notify; a rejected

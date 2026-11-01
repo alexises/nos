@@ -1,3 +1,5 @@
+use futures::FutureExt as _;
+
 use super::*;
 
 #[test]
@@ -1435,4 +1437,137 @@ fn run_election_keeps_a_neighbor_past_two_way_in_the_candidate_pool() {
     let result = status.borrow();
     assert_eq!(result.dr, Some(neighbor_id));
     assert_eq!(result.bdr, Some(local_router_id));
+}
+
+fn own_router_lsa(seq: i32, flags: u8) -> Lsa {
+    let mut l = Lsa {
+        header: LsaHeader {
+            age: 0,
+            options: 0,
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: id(1),
+            advertising_router: id(1),
+            sequence_number: seq,
+            checksum: 0,
+            length: 0,
+        },
+        body: router_body(flags),
+    };
+    lsa::fill_checksum(&mut l);
+    l
+}
+
+/// RFC 2328 §13.4: a reflected newer copy is re-originated above it even
+/// with an unchanged body, inside `MinLSInterval`; without the mark the same
+/// call stays a no-op.
+#[test]
+fn install_self_originated_reoriginates_above_a_reflected_copy() {
+    let mut lsdb = Lsdb::new();
+    let key = router_key(id(1));
+    let seq_after = |lsdb: &mut Lsdb| {
+        install_self_originated(lsdb, id(1), lsa::LSA_TYPE_ROUTER, id(1), router_body(0));
+        lsdb.get(&key).unwrap().header.sequence_number
+    };
+    lsdb.install(own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 9, 0));
+    assert_eq!(seq_after(&mut lsdb), lsa::INITIAL_SEQUENCE_NUMBER + 9);
+    lsdb.mark_reflected(key);
+    assert_eq!(seq_after(&mut lsdb), lsa::INITIAL_SEQUENCE_NUMBER + 10);
+    // The mark is consumed: no re-origination storm.
+    assert_eq!(seq_after(&mut lsdb), lsa::INITIAL_SEQUENCE_NUMBER + 10);
+}
+
+#[test]
+fn install_self_originated_reflected_at_max_sequence_flushes() {
+    let mut lsdb = Lsdb::new();
+    let key = router_key(id(1));
+    lsdb.install(own_router_lsa(lsa::MAX_SEQUENCE_NUMBER, 0));
+    lsdb.mark_reflected(key);
+    install_self_originated(
+        &mut lsdb,
+        id(1),
+        lsa::LSA_TYPE_ROUTER,
+        id(1),
+        router_body(0),
+    );
+    let held = lsdb.get(&key).unwrap();
+    assert_eq!(held.header.age, lsa::MAX_AGE);
+    assert_eq!(held.header.sequence_number, lsa::MAX_SEQUENCE_NUMBER);
+}
+
+/// A reflected own LSA is marked and wakes the originator; a foreign LSA
+/// is not.
+#[tokio::test]
+async fn handle_lsu_marks_a_reflected_own_lsa_and_wakes_the_originator() {
+    let neighbor_id = id(9);
+    let cfg = link("eth0.0", 10);
+    let n = Arc::new(tokio::sync::Notify::new());
+    let lsdb = Mutex::new(Lsdb::new().with_reflect_notify(Arc::clone(&n)));
+    let link_local = Mutex::new(Lsdb::new());
+    lsdb.lock()
+        .await
+        .install(own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER, 0));
+    let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    status.send_modify(|s| {
+        let mut info = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        info.adjacency = Some(AdjacencyData::default());
+        s.neighbors.insert(neighbor_id, info);
+    });
+    let lsu = |lsas| LsuPacket {
+        router_id: neighbor_id,
+        area_id: Ipv4Addr::UNSPECIFIED,
+        lsas,
+    };
+    let mut foreign = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 1, 0);
+    foreign.header.link_state_id = id(2);
+    foreign.header.advertising_router = id(2);
+    rx::handle_lsu(
+        &cfg,
+        id(1),
+        &status,
+        &lsdb,
+        &link_local,
+        &lsu(vec![foreign]),
+    )
+    .await;
+    assert_eq!(lsdb.lock().await.reflected_keys(), Vec::<LsaKey>::new());
+    assert!(n.notified().now_or_never().is_none());
+
+    let newer = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 5, 1);
+    rx::handle_lsu(&cfg, id(1), &status, &lsdb, &link_local, &lsu(vec![newer])).await;
+    assert_eq!(lsdb.lock().await.reflected_keys(), vec![router_key(id(1))]);
+    assert!(n.notified().now_or_never().is_some());
+}
+
+/// §13.4: a Network-LSA of a stale router-id whose Link State ID is one of
+/// our addresses is flushed; one for another address is left alone.
+#[test]
+fn stale_network_lsa_for_our_address_is_flushed() {
+    let mut lsdb = Lsdb::new();
+    let network = |lsid: Ipv4Addr| {
+        let mut l = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER, 0);
+        l.header.lsa_type = lsa::LSA_TYPE_NETWORK;
+        l.header.link_state_id = lsid;
+        l.header.advertising_router = id(7);
+        l.body = LsaBody::Network(NetworkLsaBody {
+            network_mask: Ipv4Addr::new(255, 255, 255, 0),
+            attached_routers: vec![id(7)],
+        });
+        l
+    };
+    let ours = Ipv4Addr::new(10, 0, 0, 1);
+    let (stale, other) = (network(ours), network(Ipv4Addr::new(10, 0, 0, 77)));
+    lsdb.install(stale.clone());
+    lsdb.install(other.clone());
+    let flushed = flush_stale_network_lsas(&mut lsdb, id(1), &HashSet::from([ours]));
+    assert_eq!(flushed, vec![stale.header.key()]);
+    assert_eq!(
+        lsdb.get(&stale.header.key()).unwrap().header.age,
+        lsa::MAX_AGE
+    );
+    assert_eq!(lsdb.get(&other.header.key()).unwrap().header.age, 0);
+    // Already flushed: nothing more to do.
+    assert_eq!(
+        flush_stale_network_lsas(&mut lsdb, id(1), &HashSet::from([ours])),
+        Vec::<LsaKey>::new()
+    );
 }

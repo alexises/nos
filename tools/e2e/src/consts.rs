@@ -362,6 +362,9 @@ pub const SVI_ADDRESS: &str = "203.0.113.9/32";
 pub const OSPF_INSTANCE: &str = "ospf1";
 pub const OSPF_ROUTER_ID: &str = "9.9.9.9";
 pub const OSPF_ROUTER_ID_B: &str = "9.9.9.10";
+/// `ospf-dr`: router-b's temporary router-id, so its restart finds its old
+/// Network-LSA (advertised under `OSPF_ROUTER_ID_B`) as a stale own LSA.
+pub const OSPF_ROUTER_ID_B_RENUMBERED: &str = "9.9.9.11";
 /// Deliberately lower than both, so router-b stays DR and router-a Backup
 /// (RFC 2328 §9.4 incumbent stickiness) and router-c settles as DrOther.
 pub const OSPF_ROUTER_ID_C: &str = "9.9.9.8";

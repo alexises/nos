@@ -463,7 +463,32 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
     // to the kernel — no add (which used to fail with EEXIST every 10s
     // reapply), no add-then-remove flap. Over 15s, more than one reapply tick.
     c.assert_quiet(&format!("route prefix={SUBNET}"), 0, 15)
-        .await
+        .await?;
+
+    // RFC 2328 §13.4 (#731): router-b, the bridge's DR, restarts under
+    // another router-id. router-a/c still hold its old Network-LSA, whose
+    // Link State ID is router-b's bridge address: ours under a stale
+    // router-id, so the restarted router-b flushes it. Then the id is restored.
+    let stale0 = b.count("ospf stale network lsa flushed");
+    log("renumbering router-b's router-id; it must flush its previous incarnation's network-lsa");
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B_RENUMBERED)))
+        .await?;
+    // Running links keep the router-id they were spawned with: restart.
+    w.dock.kill_process("router-b", "nos-ospfd").await?;
+    b.wait_new("ospf stale network lsa flushed", stale0, 90)
+        .await?;
+    let full0 = a.count(&format!(
+        "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_B}"
+    ));
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    w.dock.kill_process("router-b", "nos-ospfd").await?;
+    a.wait_new(
+        &format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_B}"),
+        full0,
+        90,
+    )
+    .await
 }
 
 /// OSPF on router-b's loopback (a destination with no neighbor of its own):
@@ -980,6 +1005,10 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
     let boots = b.count("ospf link using rfc 7474 extended sequence numbers");
     let replays = a.count("crypto sequence number not increasing");
+    // RFC 2328 §13.4 (#731): the restarted router-b learns its own previous
+    // Router-LSA back from router-a with a newer sequence number and must
+    // re-originate above it.
+    let reflected = b.count("ospf self-originated lsa received with newer sequence");
     log("killing router-b's nos-ospfd; it must return to Full without replay drops");
     w.dock.kill_process("router-b", "nos-ospfd").await?;
     b.wait_new(
@@ -989,6 +1018,16 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    b.wait_new(
+        "ospf self-originated lsa received with newer sequence",
+        reflected,
+        30,
+    )
+    .await?;
+    b.wait(&format!(
+        "ospf lsa originated.*advertising_router={OSPF_ROUTER_ID_B}.*reflected=true"
+    ))
+    .await?;
     a.assert_quiet("crypto sequence number not increasing", replays, 5)
         .await
 }
@@ -3320,7 +3359,30 @@ pub async fn ospfv3_flush(w: &mut World) -> anyhow::Result<()> {
         .await?;
     // Dead interval (40s) on router-b, then one origination tick.
     b.wait_new(&aged, aged0, 90).await?;
-    a.wait_new(&flushed, flushed0, 60).await
+    a.wait_new(&flushed, flushed0, 60).await?;
+
+    // RFC 2328 §13.4 (#731): a SIGKILLed router-b restarts with an empty
+    // LSDB and gets its own Router-LSA back from router-a with a newer
+    // sequence number (its links changed above); it re-originates above it.
+    let full_on_a =
+        format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}");
+    let (reflected0, full0) = (
+        b.count("ospfv3 self-originated lsa received with newer sequence"),
+        a.count(&full_on_a),
+    );
+    log("killing router-b's nos-ospfv3d; it must re-originate above its reflected router-lsa");
+    w.dock.kill_process("router-b", "nos-ospfv3d").await?;
+    b.wait_new(
+        "ospfv3 self-originated lsa received with newer sequence",
+        reflected0,
+        90,
+    )
+    .await?;
+    b.wait(&format!(
+        "ospfv3 lsa originated.*advertising_router={OSPFV3_ROUTER_ID_B}.*reflected=true"
+    ))
+    .await?;
+    a.wait_new(&full_on_a, full0, 90).await
 }
 
 /// RFC 2328 §9.5 point-to-multipoint (requires `ospf`): the shared profile's

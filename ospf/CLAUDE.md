@@ -27,6 +27,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - One `Lsdb` per area (`Arc<Mutex<_>>`), plus one per link for type-9. `Lsdb::install` takes only a strictly newer instance; `install_received` adds `MinLSArrival`. A MaxAge LSA with no held copy and not requested is acked and discarded (§13 step 4), or two routers reinstall each other's echo forever.
 - Self-originated LSAs are held with their real wire checksum (`lsa::fill_checksum`), or a neighbor's echo supersedes the held copy and undoes a flush. Premature aging (§14.1) reinstalls at `MAX_AGE` with the sequence number unchanged; every origination pass ends with `withdraw_undesired`.
 - Shutdown (`LinkManager::shutdown`) flushes self-originated LSAs and keeps links up `PREMATURE_AGE_FLOOD_WINDOW` (6s); with RFC 6987's on-shutdown hold the sum stays <= 9s (`const` assertion) inside the watchdog's 10s SIGINT budget (`stop_grace_period: 15s` for `docker stop`).
+- Own LSA flooded back newer (§13.4, #731): `Lsdb::mark_reflected` + `LinkManager::reoriginate` wake `origination_pass`; `install_self_originated` takes the mark. See `docs/protocols/ospf-internals.md`.
 - Origination runs on its own 2s tick and aging on a 1s tick (`--lsa-age-multiplier`, test-only), both independent of the 10s config re-apply tick. LSAs leave with `INF_TRANS_DELAY` added to the wire age only.
 - `run()`'s select is `biased;` (Hello first, RFC 4222); `note_alive` runs after `accept_crypto_sequence`; any packet proves liveness only for a neighbor at `ExStart` or later.
 

@@ -43,6 +43,17 @@ pub trait LsaHeader: Copy + Debug + PartialEq {
     }
 }
 
+/// RFC 2328 §13.4: the headers among `installed` that this router itself
+/// advertised — its own LSAs a neighbor flooded back newer than the held
+/// copy (including a `MaxAge` one).
+pub fn reflected_self_lsas<H: LsaHeader>(installed: &[H], router_id: Ipv4Addr) -> Vec<H> {
+    installed
+        .iter()
+        .filter(|h| h.advertising_router() == router_id)
+        .copied()
+        .collect()
+}
+
 /// A whole LSA: a header plus a family-specific body the database never reads.
 pub trait Lsa: Clone + Debug + PartialEq {
     type Header: LsaHeader;
@@ -140,6 +151,27 @@ mod tests {
         for (a, b, want) in table {
             assert_eq!(a.is_newer(&b), want, "{a:?} vs {b:?}");
         }
+    }
+
+    #[test]
+    fn reflected_self_lsas_keeps_only_own_including_max_age() {
+        let own = |age| H {
+            id: 5,
+            seq: 1,
+            age,
+            checksum: 0,
+        };
+        let foreign = H {
+            id: 6,
+            seq: 1,
+            age: 0,
+            checksum: 0,
+        };
+        let me = Ipv4Addr::from(5u32);
+        assert_eq!(
+            reflected_self_lsas(&[own(0), foreign, own(MAX_AGE)], me),
+            vec![own(0), own(MAX_AGE)]
+        );
     }
 
     #[test]
