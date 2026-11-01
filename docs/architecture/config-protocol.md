@@ -130,17 +130,18 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - Reading: the growth is free memory glibc keeps inside its heaps, not live data. On the dhat image (4 x 2500) the live heap after each commit stays at 13.8 MB while `VmRSS` goes 67 -> 156 MB. The once-per-wave whole-config reply (3.8 MB, 74 ms at 66k routes) is not the cause, and neither one arena nor a fixed trim threshold helps, because those only trim the top of a heap. An explicit `malloc_trim(0)`, which also releases free pages in the middle of a heap, keeps `VmRSS` flat.
 - The allocation churn comes mostly from the harness's own `GET /v1/logs?follow` stream: `show::logs_follow` builds a `Vec<sse::Event>` per log batch (largest allocator by total and peak, 10.5 MB), next to a 4.7 MB live read buffer. Each `PUT` also allocates three fresh 8 KiB `FramedRead` buffers (`ipc::exchange`: two from `client_auth`, one to the broker and one to `nos-configd`, plus the `PUT`'s own call).
 
-- Allocator (#801): `nos-restd` links `tikv-jemallocator` (`rest/src/main.rs`, off under `nos-rest/dhat-heap`). Jemalloc purges free pages back to the OS, which the glibc env knobs above could not do. The `config-mem` phase asserts `nos-restd`'s `VmRSS` after each commit from wave 2 on within ±25% or +15 MB (15 360 kB) of wave 2's, whichever is wider.
+- Allocator (#801): `nos-restd` links `tikv-jemallocator` (`rest/src/main.rs`, off under `nos-rest/dhat-heap`). Jemalloc purges free pages back to the OS, which the glibc env knobs above could not do.
+- `config-mem` baseline (#801): the median of waves 2-4, not wave 2 alone, because one sample can sit on a peak or a trough of the allocator's purge cycle. `nos-restd`'s `VmRSS` after each commit from wave 2 on must stay within ±25% or +15 MB (15 360 kB) of it, whichever is wider; the lower bound has no slack. `nos-configd` uses the same median and ±25%, no slack. The `nos-configd` band is a known-creep tolerance for the live-heap growth of #796 (closed as won't fix), not a proof that its RSS is flat.
 - #801 measurements, router-b, `nos-restd` `VmRSS` MiB after each commit (default image, 12 x 5500 routes; glibc rows from #798):
 
-  | Variant | Wave 2 | Wave 5 | Wave 8 | Wave 11 |
+  | Variant | Wave 2 | Wave 4 | Wave 7 | Wave 11 |
   |---|---|---|---|---|
-  | glibc baseline (run 1) | 93 | 177 | 294 | 314 |
-  | glibc baseline (run 2) | 96 | 207 | 263 | 271 |
-  | jemalloc, run A | 78 | 46 | 80 | 95 |
-  | jemalloc, run B | 64 | 91 | 94 | 88 |
+  | glibc baseline (run 1) | 93 | - | - | 314 |
+  | glibc baseline (run 2) | 96 | - | - | 271 |
+  | jemalloc | 63 | 63 | 95 | 88 |
+  | mimalloc | 58 | 99 | 61 | 75 |
 
-- Reading: jemalloc cuts wave 11 from ~270-314 to ~90-95 MiB, but does not make the curve flat: RSS saw-tooths between ~46 and ~97 MiB as its decay purge fires, so the wave-2 sample is a lucky or unlucky point of the tooth (run B's `VmRSS` of 80 MiB at wave 4 is outside +15 MB of wave 2's 64 MiB). `nos-configd`'s own creep (live heap, #796) fails the ±25% check on its own at waves 7-8, before restd's verdict matters.
+- Reading: both allocators cut wave 11 from ~270-314 MiB to ~75-95 MiB but neither is flat: RSS saw-tooths between ~40 and ~100 MiB as the allocator's purge fires, so no baseline makes the +15 MB band reliable. mimalloc was not clearly better (similar swing, higher cgroup peak: 328 vs 272 MB), so jemalloc stays.
 
 ### Path edits (#775)
 

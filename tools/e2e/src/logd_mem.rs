@@ -356,16 +356,20 @@ pub async fn config_phase(w: &World) -> anyhow::Result<()> {
 const RESTD_SLACK_KB: u64 = 15_360;
 
 /// Checks every after-commit `VmRSS` of `name` from wave 2 on is within ±25% of
-/// wave 2's, the upper bound widened to `base + slack_kb` if that is larger;
-/// returns that baseline and the verdict.
+/// the baseline, the upper bound widened to `base + slack_kb` if that is larger.
+/// The baseline is the median of waves 2-4 (one sample can sit on a peak or a
+/// trough of an allocator's purge cycle, #801); returns it and the verdict.
 fn rss_flat(
     name: &str,
     committed: &[u64],
     slack_kb: u64,
 ) -> anyhow::Result<(u64, anyhow::Result<()>)> {
-    let Some(&base) = committed.get(2) else {
-        bail!("config-mem needs at least 3 waves, got {committed:?}");
-    };
+    if committed.len() < 5 {
+        bail!("config-mem needs at least 5 waves, got {committed:?}");
+    }
+    let mut early = committed[2..5].to_vec();
+    early.sort_unstable();
+    let base = early[1];
     let (lo, hi) = (base - base / 4, base + (base / 4).max(slack_kb));
     let verdict = match committed[2..]
         .iter()
@@ -373,7 +377,7 @@ fn rss_flat(
         .find(|(_, r)| !(lo..=hi).contains(*r))
     {
         Some((i, r)) => Err(anyhow::anyhow!(
-            "{name} VmRSS {r} kB after wave {} is outside the band of wave 2's {base} kB (±25%, +{slack_kb} kB slack)",
+            "{name} VmRSS {r} kB after wave {} is outside the band of the waves 2-4 median {base} kB (±25%, +{slack_kb} kB slack)",
             i + 2
         )),
         None => Ok(()),
@@ -615,22 +619,28 @@ mod tests {
     }
 
     #[test]
-    fn rss_flat_is_twenty_five_percent_of_wave_two() {
+    fn rss_flat_is_twenty_five_percent_of_the_waves_two_to_four_median() {
         let ok = |c: &[u64]| rss_flat("d", c, 0).map(|(_, v)| v.is_ok());
-        assert!(ok(&[1, 2]).is_err(), "fewer than 3 waves");
+        assert!(ok(&[1, 2, 3, 4]).is_err(), "fewer than 5 waves");
+        // Median of waves 2-4: 400, 300 and 500 -> 400.
         assert_eq!(rss_flat("d", &[9, 9, 400, 300, 500], 0).unwrap().0, 400);
-        // Slack: base 40000 -> +25% = 50000 fails, +15360 = 55360 passes.
-        let slack = |c: &[u64]| rss_flat("d", c, 15_360).unwrap().1.is_ok();
-        assert!(slack(&[9, 9, 40_000, 55_000]));
-        assert!(rss_flat("d", &[9, 9, 40_000, 55_000], 0)
-            .unwrap()
-            .1
-            .is_err());
-        assert!(!slack(&[9, 9, 40_000, 55_361]), "fails both bands");
-        assert!(!slack(&[9, 9, 40_000, 29_999]), "slack is upper-only");
         assert!(ok(&[9, 9, 400, 300, 500]).unwrap());
-        assert!(!ok(&[9, 9, 400, 501]).unwrap());
-        assert!(!ok(&[9, 9, 400, 299]).unwrap());
+        assert!(ok(&[9, 9, 400, 400, 400, 500]).unwrap());
+        assert!(!ok(&[9, 9, 400, 400, 400, 501]).unwrap());
+        assert!(!ok(&[9, 9, 400, 400, 400, 299]).unwrap());
+        // A peak at wave 2 does not set the baseline.
+        assert_eq!(rss_flat("d", &[9, 9, 900, 400, 400], 0).unwrap().0, 400);
+        // Slack: base 40000 -> +25% = 50000 fails, +15360 = 55360 passes.
+        let flat = [9, 9, 40_000, 40_000, 40_000];
+        let with = |last: u64, slack: u64| {
+            let mut c = flat.to_vec();
+            c.push(last);
+            rss_flat("d", &c, slack).unwrap().1.is_ok()
+        };
+        assert!(with(55_000, 15_360));
+        assert!(!with(55_000, 0));
+        assert!(!with(55_361, 15_360), "fails both bands");
+        assert!(!with(29_999, 15_360), "slack is upper-only");
     }
 
     #[test]
