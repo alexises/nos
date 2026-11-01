@@ -141,6 +141,19 @@ mod tests {
     }
 
     #[test]
+    fn tick_decrements_tx_count_by_one() {
+        let mut b = bridge(1);
+        ready(&mut b);
+        let hold = b.timers.tx_hold_count;
+        b.ports[0].tx_count = hold;
+        b.ports[0].tick();
+        assert_eq!(b.ports[0].tx_count, hold - 1);
+        b.ports[0].tx_count = 0;
+        b.ports[0].tick();
+        assert_eq!(b.ports[0].tx_count, 0);
+    }
+
+    #[test]
     fn stp_peer_gets_config_from_designated_and_tcn_from_root() {
         let mut b = bridge(1);
         ready(&mut b);
