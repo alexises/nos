@@ -63,13 +63,13 @@ utoipa              = { version = "6", features = ["axum_extras"] }
 utoipa-axum         = "0.3"
 # `vendored`: the UI assets ship inside the crate — no CDN at runtime (the API
 # lives in a management VRF) and no GitHub download at build time.
-utoipa-swagger-ui   = { version = "10", features = ["axum", "vendored"] }
+utoipa-swagger-ui   = { version = "10.0.2", features = ["axum", "vendored"] }
 percent-encoding    = "2"
 rpassword           = "7"
 base64              = "0.22"
 # aws-lc-rs, not ring: it is the only rustls provider with ML-KEM key exchange
 # and ML-DSA signatures. TLS 1.3 only (no `tls12`) — see pki/CLAUDE.md.
-rustls              = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+rustls              = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
 tokio-rustls        = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 rustls-webpki       = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
 rcgen               = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
