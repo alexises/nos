@@ -32,6 +32,8 @@ hyper              = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util         = { version = "0.1", features = ["server-auto", "server-graceful", "tokio", "http1", "http2", "service"] }
 tower              = { version = "0.5", features = ["util"] }
 
+# Returns freed pages to the OS; glibc malloc fragments under REST churn (#801).
+tikv-jemallocator = "0.6"
 dhat = { version = "0.3", optional = true }
 
 [features]

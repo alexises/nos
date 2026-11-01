@@ -6,6 +6,10 @@ An HTTP+JSON management API for the whole system: every `nos-cli` `show` query a
 
 `RoutingTable.rest_api: Option<RestApi { address, port }>` (`set routing-table <t> rest-api address <ip> [port <n>]`). `nos-watchdogd` runs `nos-restd --table <name>` for every table that has it set, via the same `instances::manage` as `nos-ribd`/`nos-bgpd`/`nos-ospfd`, with one addition: `Managed.claim_label`. The other families spawn a process per section; this one is *opt-in per table*, and a field flip on an existing table is a `Modified` diff (a no-op for the others), so the watchdog keys on the `rest-api` `FieldDiff` (`nos_proto::diff::routing_table::REST_API_LABEL`): a value other than `"unset"` spawns, `"unset"`/removal stops. It has no IPC query listener, so `Managed.endpoint` is `None` (no `--listen-socket`, no registry entry).
 
+## Allocator
+
+`nos-restd` uses `tikv-jemallocator` as its global allocator (not under `dhat-heap`): glibc malloc kept freed pages in its heaps under REST churn (RSS 55 -> 159 MB at flat live heap, #798/#801). Needs `make` in the Dockerfile builder stage.
+
 ## Errors (`error.rs`)
 
 Every error is an RFC 9457 problem document, `Content-Type: application/problem+json`: `{"type":"about:blank","title":<reason phrase>,"status":<HTTP status>,"detail":<message>}` (`ErrorBody`; `instance` is omitted, since a handler can't see the URI). Handlers return `ApiError`, whose variant picks the status (400/401/404/412/422/503/502). Errors the framework raises itself — unknown route 404, 405 (its `Allow` header is preserved), extractor rejections — are re-rendered by `problem_for_framework_errors`, the outermost layer in `api::router`; it leaves problems and non-error responses (SSE included) alone. `openapi::document` re-keys every `ErrorBody` response to `application/problem+json`, so the `#[utoipa::path]` annotations just say `body = ErrorBody`. Never build an error response by hand.
