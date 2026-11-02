@@ -83,7 +83,18 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
+    env:
+      # Line tables only: full debuginfo filled the runner disk (#827). Local builds keep
+      # full debuginfo (Cargo.toml untouched), so gdb is unaffected.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
+      # Preinstalled toolchains we never use (~25-30 GB); df before/after for diagnosis.
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -98,7 +109,18 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
+    env:
+      # Line tables only: full debuginfo filled the runner disk (#827). Local builds keep
+      # full debuginfo (Cargo.toml untouched), so gdb is unaffected.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
+      # Preinstalled toolchains we never use (~25-30 GB); df before/after for diagnosis.
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -154,6 +176,8 @@ jobs:
     name: Miri (UB check)
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
+    # Fail fast: with no cap a slow suite ran 5 h until GitHub cancelled it (#827).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The pinned stable too: `make` checks rustc against it to stay native.
