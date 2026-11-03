@@ -1227,8 +1227,6 @@ async fn as_set_export_policy(w: &mut World) -> anyhow::Result<()> {
         "--static-gateway",
         REDISTRIBUTE_GATEWAY,
         "--redistribute",
-        "--remove-static-route",
-        REDISTRIBUTE_PREFIX,
     ])
     .await?;
     a.wait_new(&learned_b, a_learned, 30).await?;
