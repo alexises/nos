@@ -62,11 +62,121 @@ pub enum Value {
     Enum(u8),
 }
 
+/// `AS_PATH` segment type (RFC 4271 §4.3, RFC 5065 §3); `nos-rpl` has its own
+/// copy, like [`Origin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegKind {
+    /// `AS_SEQUENCE`, rendered bare: `1 2`.
+    Sequence,
+    /// `AS_SET`, rendered `{1 2}`.
+    Set,
+    /// `AS_CONFED_SEQUENCE`, rendered `(1 2)`.
+    ConfedSequence,
+    /// `AS_CONFED_SET`, rendered `({1 2})`.
+    ConfedSet,
+}
+
+/// One `AS_PATH` segment, nearest hop first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment<'a> {
+    /// The segment type.
+    pub kind: SegKind,
+    /// The segment's ASNs.
+    pub asns: &'a [u32],
+}
+
 /// Compiled as-path regexes, matched against the path rendered as
-/// space-separated ASNs (`"65001 65002"`). `_` is the Cisco-style boundary
-/// (start, end or a space), so `_65001_` matches the ASN 65001 anywhere.
+/// space-separated ASNs with segment delimiters (`"65001 {65002 65003}"`, see
+/// [`SegKind`]). `_` is the Cisco-style boundary (start, end, space or one of
+/// `{ } ( )`), so `_65001_` matches the ASN 65001 anywhere. `_` inside `[...]`
+/// is a literal, and `\_` is a literal `_` outside it.
 #[derive(Debug, Clone)]
 pub struct AsPathRegexes(Vec<regex::Regex>);
+
+/// `_` expansion that leaves character classes and escapes alone.
+fn expand_underscore(p: &str) -> String {
+    let mut out = String::with_capacity(p.len() + 16);
+    let mut depth = 0usize;
+    // Just after `[` or `[^`: a `]` here is a literal member.
+    let mut class_start = false;
+    let mut chars = p.chars().peekable();
+    while let Some(c) = chars.next() {
+        let was_start = std::mem::take(&mut class_start);
+        match c {
+            '\\' => match chars.next() {
+                Some('_') => out.push('_'),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            },
+            '[' => {
+                depth += 1;
+                class_start = true;
+                out.push('[');
+                if chars.peek() == Some(&'^') {
+                    out.push('^');
+                    chars.next();
+                }
+            }
+            ']' if depth > 0 && !was_start => {
+                depth -= 1;
+                out.push(']');
+            }
+            '_' if depth == 0 => out.push_str("(?:^|$|[ {}()])"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Appends one rendered segment (space-separated ASNs between delimiters).
+fn push_seg(out: &mut String, asns: impl Iterator<Item = u32>, open: &str, close: &str) {
+    use std::fmt::Write;
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(open);
+    for (i, a) in asns.enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let _ = write!(out, "{a}");
+    }
+    out.push_str(close);
+}
+
+/// Renders the path as the regexes see it; the first `added` ASNs of `flat`
+/// (from `prepend`) join the first `AS_SEQUENCE`. With no segment view the
+/// flat list is one sequence.
+fn render_path(flat: &[u32], segments: &[Segment], added: usize) -> String {
+    let mut out = String::new();
+    if segments.is_empty() {
+        push_seg(&mut out, flat.iter().copied(), "", "");
+        return out;
+    }
+    let new = &flat[..added.min(flat.len())];
+    let mut pending = !new.is_empty();
+    if pending && segments[0].kind != SegKind::Sequence {
+        push_seg(&mut out, new.iter().copied(), "", "");
+        pending = false;
+    }
+    for sg in segments {
+        let asns = sg.asns.iter().copied();
+        match sg.kind {
+            SegKind::Sequence if pending => {
+                pending = false;
+                push_seg(&mut out, new.iter().copied().chain(asns), "", "");
+            }
+            SegKind::Sequence => push_seg(&mut out, asns, "", ""),
+            SegKind::Set => push_seg(&mut out, asns, "{", "}"),
+            SegKind::ConfedSequence => push_seg(&mut out, asns, "(", ")"),
+            SegKind::ConfedSet => push_seg(&mut out, asns, "({", "})"),
+        }
+    }
+    out
+}
 
 impl AsPathRegexes {
     /// Compiles each pattern; an invalid regex is the error string.
@@ -74,7 +184,7 @@ impl AsPathRegexes {
         patterns
             .iter()
             .map(|p| {
-                regex::Regex::new(&p.replace('_', "(?:^| |$)"))
+                regex::Regex::new(&expand_underscore(p))
                     .map_err(|e| format!("invalid as-path regex '{p}': {e}"))
             })
             .collect::<Result<_, _>>()
@@ -84,13 +194,8 @@ impl AsPathRegexes {
     // ponytail: allocates the rendered path per evaluation, only for
     // scripts that use a regex; render lazily once per run if it shows up
     // in profiles.
-    fn is_match(&self, as_path: &[u32]) -> bool {
-        let text = as_path
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(" ");
-        self.0.iter().any(|re| re.is_match(&text))
+    fn is_match(&self, text: &str) -> bool {
+        self.0.iter().any(|re| re.is_match(text))
     }
 }
 
@@ -231,6 +336,9 @@ pub struct BgpInput<'a> {
     pub origin: Origin,
     /// `AS_PATH` as a flat ASN list (RFC 4271 §5.1.2).
     pub as_path: &'a [u32],
+    /// The same path split into segments, for `matches`/`as-path-list`
+    /// rendering. Empty means "one `AS_SEQUENCE` of `as_path`".
+    pub as_path_segments: &'a [Segment<'a>],
     /// `LOCAL_PREF` (RFC 4271 §5.1.5).
     pub local_pref: u32,
     /// `MULTI_EXIT_DISC`, if present (RFC 4271 §5.1.4).
@@ -376,7 +484,11 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 _ => unreachable!("check.rs rejects ListContainsIp for {id:?}"),
             })),
             Op::ListContainsCommunity(id, val) => push!(Value::Bool(lists.has(*id, val))),
-            Op::AsPathMatches(re) => push!(Value::Bool(re.is_match(&lists.as_path))),
+            Op::AsPathMatches(re) => {
+                let added = lists.as_path.len().saturating_sub(input.bgp.as_path.len());
+                let text = render_path(&lists.as_path, input.bgp.as_path_segments, added);
+                push!(Value::Bool(re.is_match(&text)));
+            }
             Op::AsPathPrepend(asn, count) => {
                 lists
                     .as_path
@@ -677,5 +789,56 @@ fn as_prefix(v: Value) -> IpNet {
     match v {
         Value::Prefix(p) => p,
         other => unreachable!("codegen.rs guarantees a Prefix here, got {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(pat: &str, text: &str) -> bool {
+        AsPathRegexes::new(&[pat]).unwrap().is_match(text)
+    }
+
+    #[test]
+    fn underscore_is_a_boundary_only_outside_classes() {
+        assert!(m("_65001_", "1 65001 2"));
+        assert!(m("^65001_", "65001"));
+        assert!(m("_65001_", "{65001 2}"));
+        assert!(m("_65001_", "(65001)"));
+        assert!(!m("_65001_", "165001"));
+        // `[_]` and `[^_]` are literal classes.
+        assert!(!m("^[_]", "65001"));
+        assert!(m("^[_]", "_"));
+        assert!(m("^[^_]+$", "65001 2"));
+        assert!(m("^[]_]$", "]"));
+        // `\_` is a literal underscore.
+        assert!(m(r"^\_$", "_"));
+        assert!(!m(r"^\_$", ""));
+    }
+
+    #[test]
+    fn rendering_keeps_segment_boundaries() {
+        use SegKind::*;
+        let seg = |kind, asns| Segment { kind, asns };
+        let flat = [65101, 65001, 1, 2, 3];
+        let segs = [
+            seg(ConfedSequence, &flat[..1]),
+            seg(Sequence, &flat[1..2]),
+            seg(Set, &flat[2..4]),
+            seg(ConfedSet, &flat[4..]),
+        ];
+        assert_eq!(render_path(&flat, &segs, 0), "(65101) 65001 {1 2} ({3})");
+        assert_eq!(render_path(&[7, 8], &[], 0), "7 8");
+        // Prepended ASNs join the first sequence, or start one.
+        let flat2 = [9, 9, 65001, 1];
+        let segs2 = [seg(Sequence, &flat2[2..3]), seg(Set, &flat2[3..])];
+        assert_eq!(render_path(&flat2, &segs2, 2), "9 9 65001 {1}");
+        let segs3 = [seg(Set, &flat2[2..])];
+        assert_eq!(render_path(&flat2, &segs3, 2), "9 9 {65001 1}");
+        // The flat view no longer matches a set member as a bare sequence ASN.
+        assert!(!m("^65001_", "{65001 2}"));
+        assert!(m(r"^\{", "{65001 2}"));
+        assert!(m(r"^\(", "(65001) 1"));
     }
 }

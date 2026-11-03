@@ -127,16 +127,36 @@ use decision::{
 };
 pub use flowspec_validate::{FlowValidity, InvalidReason};
 
+/// The route's `AS_PATH` segments in `nos_rpl`'s shape.
+// ponytail: one small Vec per policy run; cache on the route if profiles show it.
+fn policy_segments(route: &RibRoute) -> Vec<nos_rpl::Segment<'_>> {
+    use crate::as_path::SegKind;
+    route
+        .as_path
+        .segments()
+        .map(|(kind, asns)| nos_rpl::Segment {
+            kind: match kind {
+                SegKind::Sequence => nos_rpl::SegKind::Sequence,
+                SegKind::Set => nos_rpl::SegKind::Set,
+                SegKind::ConfedSequence => nos_rpl::SegKind::ConfedSequence,
+                SegKind::ConfedSet => nos_rpl::SegKind::ConfedSet,
+            },
+            asns,
+        })
+        .collect()
+}
+
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
 /// "Execution model". A plain function, not an adapter trait: there is
 /// exactly one producer (`RibRoute`) today, so a trait would add indirection
 /// with nothing to abstract over yet.
-fn to_policy_input(
+fn to_policy_input<'a>(
     prefix: IpNet,
-    route: &RibRoute,
+    route: &'a RibRoute,
+    segments: &'a [nos_rpl::Segment<'a>],
     peer: Option<(IpAddr, u32)>,
     rd: Option<[u8; 8]>,
-) -> nos_rpl::Input<'_> {
+) -> nos_rpl::Input<'a> {
     nos_rpl::Input {
         prefix,
         bgp: nos_rpl::BgpInput {
@@ -146,6 +166,7 @@ fn to_policy_input(
                 message::Origin::Incomplete => nos_rpl::Origin::Incomplete,
             },
             as_path: route.as_path.flat(),
+            as_path_segments: segments,
             local_pref: route.local_pref,
             med: route.med,
             next_hop: route.next_hop,
@@ -178,7 +199,11 @@ fn apply_policy(
     peer: Option<(IpAddr, u32)>,
     rd: Option<[u8; 8]>,
 ) -> Option<RibRoute> {
-    let verdict = nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate, peer, rd));
+    let segs = policy_segments(&candidate);
+    let verdict = nos_rpl::vm::run(
+        policy,
+        &to_policy_input(prefix, &candidate, &segs, peer, rd),
+    );
     apply_verdict(&mut candidate, verdict).map(|_| candidate)
 }
 

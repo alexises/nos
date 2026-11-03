@@ -2876,6 +2876,7 @@ fn passes_redistribute_policy(prefix: Ipv6Net, policy: &CompiledPolicy) -> bool 
         bgp: nos_rpl::BgpInput {
             origin: nos_rpl::Origin::Igp,
             as_path: &[],
+            as_path_segments: &[],
             local_pref: 0,
             med: None,
             next_hop: None,
