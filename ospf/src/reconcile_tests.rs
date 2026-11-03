@@ -887,6 +887,7 @@ fn verdict(policy: &nos_rpl::CompiledPolicy, prefix: &str, communities: &[u32]) 
         bgp: nos_rpl::BgpInput {
             origin: nos_rpl::Origin::Igp,
             as_path: &[65001, 65002],
+            as_path_segments: &[],
             local_pref: 100,
             med: None,
             next_hop: None,

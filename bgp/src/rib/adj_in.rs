@@ -43,6 +43,7 @@ pub(super) fn evpn_rejected(
         bgp: nos_rpl::BgpInput {
             origin: nos_rpl::Origin::Igp,
             as_path: &[],
+            as_path_segments: &[],
             local_pref: DEFAULT_LOCAL_PREF,
             med: None,
             next_hop: Some(route.next_hop),

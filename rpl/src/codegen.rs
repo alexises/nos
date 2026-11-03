@@ -895,6 +895,7 @@ mod tests {
             bgp: BgpInput {
                 origin: Origin::Igp,
                 as_path,
+                as_path_segments: &[],
                 local_pref,
                 med,
                 next_hop: None,
@@ -924,6 +925,7 @@ mod tests {
             bgp: BgpInput {
                 origin: Origin::Igp,
                 as_path: &[],
+                as_path_segments: &[],
                 local_pref: 100,
                 med: None,
                 next_hop: None,

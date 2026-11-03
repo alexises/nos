@@ -3,9 +3,9 @@
 //! calls. Moved verbatim out of `rib.rs`.
 
 use super::{
-    apply_verdict, family_of, message, to_policy_input, AddressFamily, AdvertisedRoute, Arc,
-    AsPath, HashMap, Instant, IpAddr, IpNet, Ipv4Addr, NextHopMode, PeerOutbox, RibRoute,
-    RouteOrigin, DEFAULT_LOCAL_PREF,
+    apply_verdict, family_of, message, policy_segments, to_policy_input, AddressFamily,
+    AdvertisedRoute, Arc, AsPath, HashMap, Instant, IpAddr, IpNet, Ipv4Addr, NextHopMode,
+    PeerOutbox, RibRoute, RouteOrigin, DEFAULT_LOCAL_PREF,
 };
 use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
 
@@ -362,11 +362,13 @@ pub(super) fn build_advertisement(
     {
         adjusted.med = None;
     }
+    let segs = policy_segments(&adjusted);
     let verdict = nos_rpl::vm::run(
         flow.map_or(&*outbox.export_policy, |(_, p, _)| p),
         &to_policy_input(
             prefix,
             &adjusted,
+            &segs,
             Some((peer, outbox.remote_asn)),
             flow.and_then(|(.., rd)| rd),
         ),

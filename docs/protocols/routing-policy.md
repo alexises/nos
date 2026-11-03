@@ -312,7 +312,13 @@ $C -X PUT -H 'Content-Type: application/json' -d '"65001:901"' \
 
 An AS-path list is a named set of regular expressions, used as `this.bgp.as_path in <name>`. It matches when any of its patterns matches. `this.bgp.as_path.matches("<regex>")` does the same for a single pattern written in the script.
 
-Each pattern is matched against the AS path written as its AS numbers separated by single spaces, for example `65002 65010 65020`. The pattern may match anywhere in that text unless anchored with `^` (start) and `$` (end). `_` matches the start, the end or a space between two AS numbers, so `_65010_` matches AS 65010 anywhere in the path but not 165010. Otherwise the syntax is that of the Rust `regex` crate: `.`, `*`, `+`, `?`, `[0-9]`, `(a|b)`, `{n,m}` and so on. An empty AS path is the empty string, which `^$` matches.
+Each pattern is matched against the AS path written as its AS numbers separated by single spaces, for example `65002 65010 65020`. The pattern may match anywhere in that text unless anchored with `^` (start) and `$` (end). Otherwise the syntax is that of the Rust `regex` crate: `.`, `*`, `+`, `?`, `[0-9]`, `(a|b)`, `{n,m}` and so on. An empty AS path is the empty string, which `^$` matches.
+
+- Segments keep their delimiters: an `AS_SEQUENCE` is bare (`65002 65010`), an `AS_SET` is `{65002 65010}`, a confederation sequence is `(65101 65102)` and a confederation set is `({65101 65102})`. Write `\{`, `\}`, `\(`, `\)` to match the delimiters literally.
+- `_` matches the start, the end, a space or one of `{ } ( )`, so `_65010_` matches AS 65010 anywhere (also inside a set) but not 165010.
+- `_` inside `[...]` is a plain underscore, and `\_` is a literal underscore outside brackets.
+- A set member is therefore not a bare sequence AS: `^65002$` does not match `{65002}`; use `^\{65002\}$`.
+- After `this.bgp.as_path.prepend(..)`, a later `matches` sees the prepended ASNs at the front of the first sequence.
 
 - `^65002_` matches paths learned from AS 65002 (its first AS).
 - `_65010$` matches paths originated by AS 65010 (its last AS).

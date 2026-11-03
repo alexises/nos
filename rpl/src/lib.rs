@@ -19,8 +19,8 @@ pub mod vm;
 
 pub use symbols::{PrefixListEntry, Symbols};
 pub use vm::{
-    AsPathRegexes, BgpInput, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin, ValidationState,
-    Value, Verdict,
+    AsPathRegexes, BgpInput, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin, SegKind,
+    Segment, ValidationState, Value, Verdict,
 };
 
 use std::fmt;
@@ -124,6 +124,7 @@ mod tests {
             bgp: BgpInput {
                 origin: Origin::Igp,
                 as_path: &[],
+                as_path_segments: &[],
                 local_pref: 100,
                 med: None,
                 next_hop: None,
@@ -160,6 +161,7 @@ mod tests {
             bgp: BgpInput {
                 origin: Origin::Igp,
                 as_path: &[],
+                as_path_segments: &[],
                 local_pref: 100,
                 med: None,
                 next_hop: None,

@@ -854,3 +854,38 @@ fn routes_lists_paths_local_routes_and_states() {
     assert_eq!(routes[2].validation_state, S::NotFound);
     assert_eq!(routes[2].origin_as, Some(65000), "local route: our own AS");
 }
+
+/// #667: the policy sees `AS_SET` / confed segments, not a flattened path.
+#[test]
+fn as_path_regex_sees_segment_delimiters() {
+    use crate::as_path::{AsPath, SegKind};
+    let run = |pat: &str, segs: &[(SegKind, &[u32])]| {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _s = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
+        let policy = nos_rpl::compile(
+            &format!("if this.bgp.as_path.matches(\"{pat}\"):\n    accept\nelse:\n    reject\n"),
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
+        let mut update = ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1");
+        let mut path = AsPath::default();
+        for (k, a) in segs {
+            path.push_segment(*k, a);
+        }
+        update.attributes.as_mut().unwrap().as_path = path;
+        rib.handle_update(source, false, v4("192.0.2.1"), &update, &policy);
+        announced(&mut rx, "1.2.3.0/24").is_some()
+    };
+    let set = [(SegKind::Set, &[65001u32, 65002][..])];
+    assert!(run(r"^\{65001 65002\}$", &set));
+    assert!(!run("^65001_", &set), "a set member is not a sequence ASN");
+    let seq_set = [
+        (SegKind::Sequence, &[65001u32][..]),
+        (SegKind::Set, &[65002][..]),
+    ];
+    assert!(run("^65001_", &seq_set));
+    assert!(run(r"_\{65002\}$", &seq_set));
+}

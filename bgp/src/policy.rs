@@ -192,6 +192,7 @@ mod tests {
             bgp: nos_rpl::BgpInput {
                 origin: nos_rpl::Origin::Igp,
                 as_path: &[],
+                as_path_segments: &[],
                 local_pref: 100,
                 med: None,
                 next_hop: None,

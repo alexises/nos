@@ -1191,7 +1191,82 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
     log("reverting router-b's import policy to the accept-all default");
     let after = b.count(&learned());
     b.provision::<&str>(&[]).await?;
-    b.wait_new(&learned(), after, 60).await
+    b.wait_new(&learned(), after, 60).await?;
+    as_set_export_policy(w).await
+}
+
+/// Router-a's aggregate flags with the named export policy.
+fn flags<'a>(name: &'a str, file: &'a str) -> Vec<&'a str> {
+    let mut f = redistribute();
+    f.extend([
+        "--aggregate-address",
+        AGGREGATE_PREFIX,
+        "--aggregate-as-set",
+        "--policy-name",
+        name,
+        "--policy-source-file",
+        file,
+        "--export-policy",
+        name,
+    ]);
+    f
+}
+
+/// #667: an export policy sees the AS_SET as `{ASN_B}`, not a flat `ASN_B`.
+/// Router-a's `as-set` aggregate carries `AS_SET {ASN_B}`; router-b drops it
+/// (own ASN in the path) only if router-a exported it, which is the signal.
+async fn as_set_export_policy(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let looped = "dropping bgp update: as_path already contains our own asn";
+    log("as-set export policy: router-b gets a second /24, router-a aggregates with as-set");
+    let learned_b = format!("learned route for {AGGREGATE_CONTRIBUTOR_B} into adj-rib-in");
+    let a_learned = a.count(&learned_b);
+    b.provision(&[
+        "--static-route",
+        AGGREGATE_CONTRIBUTOR_B,
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+        "--remove-static-route",
+        REDISTRIBUTE_PREFIX,
+    ])
+    .await?;
+    a.wait_new(&learned_b, a_learned, 30).await?;
+    let (positive, negative) = (
+        policy_file(
+            "set-segment-match",
+            &format!(
+                "if this.bgp.as_path.matches(\"^\\{{{ASN_B}\\}}$\"):\n    accept\nelse:\n    reject\n"
+            ),
+        )?,
+        policy_file(
+            "set-flat-match",
+            &format!("if this.bgp.as_path.matches(\"^{ASN_B}$\"):\n    accept\nelse:\n    reject\n"),
+        )?,
+    );
+
+    log("export policy matching the segment form `{ASN_B}` lets the aggregate out");
+    let loop_before = b.count(looped);
+    a.provision(&flags("set-segment-match", &positive)).await?;
+    b.wait_new(looped, loop_before, 60).await?;
+
+    log("export policy matching the flat form `ASN_B` must not match the set member");
+    let (est_a, est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    let loop_before = b.count(looped);
+    a.provision(&flags("set-flat-match", &negative)).await?;
+    reestablished(a, est_a).await?;
+    reestablished(b, est_b).await?;
+    log("waiting 6s to confirm the aggregate is not exported");
+    b.assert_quiet(looped, loop_before, 6).await?;
+
+    log("restoring the baseline");
+    a.provision(&redistribute()).await?;
+    let mut restore = redistribute();
+    restore.extend(["--remove-static-route", AGGREGATE_CONTRIBUTOR_B]);
+    b.provision(&restore).await
 }
 
 /// A policy on router-a's own `redistribute` rule: filtering must happen at the
