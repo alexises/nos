@@ -16,6 +16,12 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - `neigh`: the neighbour's MAC from an `rtnetlink` neighbour dump (usable states only), never written.
 - Wire types live in `nos_proto::bfd`.
 
+## UDP FFI
+
+- The `unsafe` libc calls of `socket.rs` live in `bfd-socket/` (`nos-bfd-socket`, a leaf crate like `nos-l2-socket`): `ifindex`, `set_int`, `recv_one` (source + TTL/hop limit cmsg), `recv_probe` (source + `IP_PKTINFO` destination), `send_from` (`IP_PKTINFO` source).
+- `nos-bfd` itself has no `unsafe`. New raw-libc code goes in `bfd-socket/`, which `.semgrepignore` exempts from the unsafe-usage rule.
+- Its tests run unprivileged on loopback and count towards coverage.
+
 ## Micro-BFD (RFC 7130)
 
 - `socket::MicroTx` is the session's `Tx`: an `nos_l2_socket::L2Socket` per member (ethertype by the peer's family, kernel-filtered to UDP 6784, own-unicast accepted) plus one on 0x8100 for tag-0 frames; two rx tasks feed `Demux::route_micro`, which takes the arrival member as part of the key (RFC 7130 section 2.2: Your Discriminator nonzero must also match the interface).

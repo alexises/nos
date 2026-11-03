@@ -26,6 +26,7 @@ socket2            = { workspace = true }
 libc               = { workspace = true }
 nix                = { workspace = true, features = ["net"] }
 nos-l2-socket      = { workspace = true }
+nos-bfd-socket     = { workspace = true }
 rtnetlink          = { workspace = true }
 netlink-packet-route = { workspace = true }
 ipnet              = { workspace = true }
