@@ -91,7 +91,97 @@ pub async fn mtu(w: &mut World) -> anyhow::Result<()> {
     let base = a.count(reset);
     a.provision(&["--clear-mtu"]).await?;
     a.wait_new(reset, base, 30).await?;
-    expect_eth0_mtu(a, 1500).await
+    expect_eth0_mtu(a, 1500).await?;
+    vlan_sub_link_mtu(a).await
+}
+
+/// #843: a VLAN sub-link follows its parent's MTU (parent raised first, so
+/// a sub-link created at 1500 reaches 9000), an override wins, clearing the
+/// override restores the parent's value, and lowering the parent brings the
+/// sub-link back down.
+async fn vlan_sub_link_mtu(a: &Router) -> anyhow::Result<()> {
+    let tag = SUBINTERFACE_TAG;
+    let sub = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--address",
+            SUBINTERFACE_ADDRESS,
+            "--subinterface-tag",
+            &tag.to_string(),
+            "--routing-table",
+            "rt1",
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B,
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    let applied = |mtu: u32| {
+        format!("applied sub-interface mtu interface=eth0 sub_interface=eth0.{tag} mtu={mtu}")
+    };
+    // Created at the parent's 1500.
+    let created = format!("created vlan sub-interface interface=eth0 sub_interface=eth0.{tag}");
+    let base = a.count(&created);
+    a.provision_flags(&sub(&[])).await?;
+    a.wait_new(&created, base, 30).await?;
+    expect_sub_mtu(a, 1500).await?;
+
+    // Parent raised first: the existing sub-link follows.
+    let (p9000, base) = (applied(MTU_VALUE), a.count(&applied(MTU_VALUE)));
+    a.provision_flags(&sub(&["--mtu", &MTU_VALUE.to_string()]))
+        .await?;
+    a.wait_new(&p9000, base, 30).await?;
+    expect_sub_mtu(a, MTU_VALUE).await?;
+
+    // An override below the parent wins.
+    let (p1400, base) = (applied(1400), a.count(&applied(1400)));
+    a.provision_flags(&sub(&["--subinterface-mtu", "1400"]))
+        .await?;
+    a.wait_new(&p1400, base, 30).await?;
+    expect_sub_mtu(a, 1400).await?;
+
+    // Clearing it follows the parent again.
+    let base = a.count(&p9000);
+    a.provision_flags(&sub(&["--clear-subinterface-mtu"]))
+        .await?;
+    a.wait_new(&p9000, base, 30).await?;
+    expect_sub_mtu(a, MTU_VALUE).await?;
+
+    // Lowering the parent: the kernel clamps the sub-link itself, so the
+    // driver logs the parent's change only.
+    let reset = "applied interface mtu interface=eth0 mtu=1500";
+    let base = a.count(reset);
+    a.provision_flags(&sub(&["--clear-mtu"])).await?;
+    a.wait_new(reset, base, 30).await?;
+    expect_sub_mtu(a, 1500).await?;
+
+    a.provision_flags(&sub(&["--delete-subinterface"])).await?;
+    a.wait(&format!(
+        "deleted vlan sub-interface interface=eth0 sub_interface=eth0.{tag}"
+    ))
+    .await
+}
+
+async fn expect_sub_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
+    let body = a
+        .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
+        .await?;
+    let status: serde_json::Value = serde_json::from_str(&body)?;
+    let tag = SUBINTERFACE_TAG;
+    let got = status["subinterfaces"]
+        .as_array()
+        .and_then(|v| v.iter().find(|s| s["tag"] == tag))
+        .map(|s| s["mtu"].clone());
+    if got != Some(want.into()) {
+        bail!("router-a: eth0 subinterface {tag} reports mtu {got:?}, want {want}");
+    }
+    log(format!("router-a: rest reports eth0.{tag} mtu {want}"));
+    Ok(())
 }
 
 async fn expect_eth0_mtu(a: &Router, want: u32) -> anyhow::Result<()> {

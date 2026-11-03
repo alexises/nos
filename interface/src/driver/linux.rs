@@ -200,7 +200,15 @@ enum TaggedMaster {
     Vrf {
         routing_table: Option<String>,
         addresses: Vec<InterfaceAddress>,
+        /// Per-subinterface MTU override; `None` follows the parent.
+        mtu: Option<u32>,
     },
+}
+
+/// A sub-link's wanted MTU: its override, else the parent's wanted MTU
+/// (`None` for a bond member with no `mtu`, which is left alone).
+fn sub_link_mtu(over: Option<u32>, parent: Option<u32>) -> Option<u32> {
+    over.or(parent)
 }
 
 /// Kernel device name for a loopback interface's routing table, mirroring
@@ -706,6 +714,7 @@ impl LinuxInterfaceDriver {
         interface: &str,
         physical_index: u32,
         desired: &[(u16, TaggedMaster)],
+        parent_mtu: Option<u32>,
         stp: &StpPorts,
     ) -> Result<(), DriverError> {
         let prefix = format!("{interface}.");
@@ -721,6 +730,20 @@ impl LinuxInterfaceDriver {
                 .execute()
                 .await?;
             info!(interface = %interface, "brought parent link up for vlan sub-interfaces");
+        }
+
+        // The kernel never lets a VLAN device exceed its lower device, so the
+        // parent is raised before any sub-link is created or resized.
+        if !desired.is_empty()
+            && let Some(parent) = self.find_link(interface).await?
+            && let Some(mtu) = parent_mtu.and_then(|want| mtu_change(&parent, want))
+        {
+            self.handle
+                .link()
+                .set(LinkUnspec::new_with_index(physical_index).mtu(mtu).build())
+                .execute()
+                .await?;
+            info!(interface = %interface, mtu, "set parent mtu before vlan sub-interfaces");
         }
 
         let mut links = self.handle.link().get().execute();
@@ -756,6 +779,25 @@ impl LinuxInterfaceDriver {
                     .ok_or_else(|| DriverError::LinkNotFoundAfterCreate(subname.clone()))?
             };
 
+            let over = match master {
+                TaggedMaster::Vrf { mtu, .. } => *mtu,
+                TaggedMaster::Bridge(_) => None,
+            };
+            if let Some(mtu) =
+                sub_link_mtu(over, parent_mtu).and_then(|want| mtu_change(&sub_link, want))
+            {
+                self.handle
+                    .link()
+                    .set(
+                        LinkUnspec::new_with_index(sub_link.header.index)
+                            .mtu(mtu)
+                            .build(),
+                    )
+                    .execute()
+                    .await?;
+                info!(interface = %interface, sub_interface = %subname, mtu, "applied sub-interface mtu");
+            }
+
             match master {
                 TaggedMaster::Bridge(domain) => {
                     let bridge_ifname =
@@ -772,6 +814,7 @@ impl LinuxInterfaceDriver {
                 TaggedMaster::Vrf {
                     routing_table,
                     addresses,
+                    ..
                 } => {
                     let vrf_ifname = match routing_table {
                         Some(table_name) => self.resolve_vrf_name(table_name).await,
@@ -844,6 +887,7 @@ impl LinuxInterfaceDriver {
         port_aggregate: Option<&str>,
         port_aggregate_active: bool,
         subinterfaces: &[SubinterfaceState],
+        parent_mtu: Option<u32>,
         stp: &StpPorts,
     ) -> Result<(), DriverError> {
         let index = link.header.index;
@@ -911,10 +955,11 @@ impl LinuxInterfaceDriver {
                 TaggedMaster::Vrf {
                     routing_table: s.routing_table.clone(),
                     addresses: s.addresses.clone(),
+                    mtu: s.mtu,
                 },
             )
         }));
-        self.reconcile_tagged_subinterfaces(name, index, &tagged, stp)
+        self.reconcile_tagged_subinterfaces(name, index, &tagged, parent_mtu, stp)
             .await?;
         Ok(())
     }
@@ -944,6 +989,11 @@ impl InterfaceDriver for LinuxInterfaceDriver {
     async fn apply(&self, desired: &InterfaceState) -> Result<(), DriverError> {
         let loopback_table = loopback_table_name(&desired.name);
 
+        // Unset means 1500, enforced — except on a bond member, whose MTU the
+        // bonding driver sets from its bond's.
+        let want = desired
+            .mtu
+            .or(desired.port_aggregate.is_none().then_some(DEFAULT_MTU));
         let link = if let Some(table_name) = loopback_table {
             let Some(table_id) = self.resolve_table_id(table_name).await else {
                 debug!(interface = %desired.name, table = %table_name, "table id not resolvable yet");
@@ -981,6 +1031,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
                 desired.port_aggregate.as_deref(),
                 desired.port_aggregate_active,
                 &desired.subinterfaces,
+                want,
                 &desired.stp,
             )
             .await?;
@@ -992,11 +1043,6 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         } else {
             link_set.up()
         };
-        // Unset means 1500, enforced — except on a bond member, whose MTU the
-        // bonding driver sets from its bond's.
-        let want = desired
-            .mtu
-            .or(desired.port_aggregate.is_none().then_some(DEFAULT_MTU));
         if let Some(mtu) = want.and_then(|want| mtu_change(&link, want)) {
             link_set = link_set.mtu(mtu);
             info!(interface = %desired.name, mtu, "applied interface mtu");
@@ -1037,8 +1083,14 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             debug!(interface = %name, "interface not present in netns, nothing to remove");
             return Ok(());
         };
-        self.reconcile_tagged_subinterfaces(name, link.header.index, &[], &StpPorts::default())
-            .await?;
+        self.reconcile_tagged_subinterfaces(
+            name,
+            link.header.index,
+            &[],
+            None,
+            &StpPorts::default(),
+        )
+        .await?;
         self.reconcile_addresses(name, link.header.index, &[])
             .await?;
         self.reconcile_master(name, &link, None, MasterKind::Vrf)
@@ -1156,6 +1208,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             None,
             true,
             &desired.subinterfaces,
+            Some(desired.mtu.unwrap_or(DEFAULT_MTU)),
             &desired.stp,
         )
         .await?;
@@ -1376,6 +1429,13 @@ mod tests {
         link.attributes.push(LinkAttribute::Mtu(9000));
         assert_eq!(mtu_change(&link, 1500), Some(1500));
         assert_eq!(mtu_change(&link, 9000), None);
+    }
+
+    #[test]
+    fn sub_link_mtu_prefers_the_override() {
+        assert_eq!(sub_link_mtu(Some(1400), Some(9000)), Some(1400));
+        assert_eq!(sub_link_mtu(None, Some(9000)), Some(9000));
+        assert_eq!(sub_link_mtu(None, None), None);
     }
 
     fn link_with(infos: Vec<LinkInfo>) -> LinkMessage {
@@ -1620,6 +1680,7 @@ mod tests {
             TaggedMaster::Vrf {
                 routing_table: None,
                 addresses: vec![],
+                mtu: None,
             },
         )];
         let index = driver.find_link("pa").await.unwrap().unwrap().header.index;
@@ -1633,7 +1694,7 @@ mod tests {
             ..Default::default()
         };
         driver
-            .reconcile_tagged_subinterfaces("pa", index, &desired, &held)
+            .reconcile_tagged_subinterfaces("pa", index, &desired, None, &held)
             .await
             .unwrap();
         assert!(!is_up("pa"), "{}", flags("pa"));
@@ -1641,7 +1702,7 @@ mod tests {
 
         // Otherwise the parent is raised, then the sub-link.
         driver
-            .reconcile_tagged_subinterfaces("pa", index, &desired, &StpPorts::default())
+            .reconcile_tagged_subinterfaces("pa", index, &desired, None, &StpPorts::default())
             .await
             .unwrap();
         assert!(is_up("pa"), "{}", flags("pa"));
