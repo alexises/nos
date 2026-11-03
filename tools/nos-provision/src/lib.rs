@@ -208,6 +208,15 @@ pub struct Args {
     #[arg(long)]
     pub clear_mtu: bool,
 
+    /// If set, overrides the MTU of `--interface`'s `--subinterface-tag`
+    /// sub-link (`SubinterfaceOp::SetMtu`).
+    #[arg(long)]
+    pub subinterface_mtu: Option<u32>,
+
+    /// Clears that override (`SubinterfaceOp::ClearMtu`).
+    #[arg(long)]
+    pub clear_subinterface_mtu: bool,
+
     #[arg(long, default_value = "rt1")]
     pub routing_table: String,
 
@@ -2435,6 +2444,19 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if args.clear_mtu {
         ops.push(ConfigOp::Interface(InterfaceOp::ClearMtu {
             name: link.clone(),
+        }));
+    }
+    if let Some(mtu) = args.subinterface_mtu {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetMtu {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+            mtu,
+        }));
+    }
+    if args.clear_subinterface_mtu {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::ClearMtu {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
         }));
     }
     if args.delete_subinterface {
@@ -4934,6 +4956,27 @@ mod tests {
                     metric: None,
                     metric_type: None,
                 },
+            }),
+        );
+    }
+
+    #[test]
+    fn subinterface_mtu_flags() {
+        let set = ops(&["--subinterface-tag", "100", "--subinterface-mtu", "1400"]).unwrap();
+        has(
+            &set,
+            &ConfigOp::Subinterface(SubinterfaceOp::SetMtu {
+                interface: "eth0".into(),
+                tag: 100,
+                mtu: 1400,
+            }),
+        );
+        let clear = ops(&["--subinterface-tag", "100", "--clear-subinterface-mtu"]).unwrap();
+        has(
+            &clear,
+            &ConfigOp::Subinterface(SubinterfaceOp::ClearMtu {
+                interface: "eth0".into(),
+                tag: 100,
             }),
         );
     }

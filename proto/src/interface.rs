@@ -27,9 +27,9 @@ pub struct InterfaceStatus {
     /// member of — same shape/role as `switching_profile`.
     pub port_aggregate: Option<String>,
     /// This interface's configured MTU, or `1500` (Linux's own default) if
-    /// unset — reflects desired config like every other field here, applies
-    /// uniformly to every one of `subinterfaces` (MTU is a physical-link
-    /// property, inherited by VLAN sub-links, not set per tag).
+    /// unset — reflects desired config like every other field here, is
+    /// the default for every one of `subinterfaces`, each of which may
+    /// override it (`SubinterfaceStatus.mtu`).
     pub mtu: u32,
     /// Subinterfaces (VLAN-tagged).
     pub subinterfaces: Vec<SubinterfaceStatus>,
@@ -60,6 +60,9 @@ pub struct SubinterfaceStatus {
     pub addresses: Vec<InterfaceAddress>,
     /// Routing table (VRF) the object is enslaved to, if any.
     pub routing_table: Option<String>,
+    /// Effective MTU of this sub-link: its own override if configured, else
+    /// the parent's `mtu`. Desired config, like `InterfaceStatus.mtu`.
+    pub mtu: u32,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this subinterface's own kernel device.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]

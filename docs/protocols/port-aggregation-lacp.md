@@ -103,7 +103,7 @@ Then, in the shell:
 ```
 router-a> show port-aggregate
 port-aggregate bond-lacp: mode Lacp, switching-profile unset, mtu 9000
-  subinterface 0: address [192.0.2.33/29], routing-table rt1
+  subinterface 0: address [192.0.2.33/29], routing-table rt1, mtu 9000
 ```
 
 To trunk the aggregate into broadcast domains instead, `set port-aggregate bond-lacp switching-profile sp1` (REST: `PUT …/port-aggregate/bond-lacp/switching-profile` with body `"sp1"`).
@@ -204,6 +204,7 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | redundancy-mode | `set port-aggregate <pa> redundancy-mode all-active\|single-active` / `set redundancy-mode …` | `port-aggregate/<pa>/redundancy-mode`, body `"AllActive"` or `"SingleActive"` | `all-active` (default) | `single-active` needs an `esi` | EVPN multi-homing mode, see EVPN | `show config` |
 | df-algorithm | `set port-aggregate <pa> df-algorithm modulo\|hrw` / `set df-algorithm …` | `port-aggregate/<pa>/df-algorithm`, body `"Modulo"` or `"Hrw"` | `modulo` (default) | `hrw` needs an `esi` | EVPN designated forwarder election algorithm, see EVPN | `show config` |
 | switching-profile | `set port-aggregate <pa> switching-profile <sp>` / `set switching-profile <sp>`; `delete … switching-profile` | `port-aggregate/<pa>/switching-profile` | name; default unset | profile exists; tags don't collide with the aggregate's subinterfaces | trunks the bond into the profile's broadcast domains | `show port-aggregate <pa>` |
+| subinterface mtu | `edit port-aggregate <pa> subinterface <tag>`, then `set mtu <n>`; `delete mtu` | `port-aggregate/<pa>/subinterface/<tag>/mtu` | 68-65535; follows the bond's MTU | not above the bond's MTU; not on tag 0 | per-VLAN override (kernel effect: #843) | `show port-aggregate <pa>` |
 | mtu | `set port-aggregate <pa> mtu <n>` / `set mtu <n>`; `delete … mtu` | `port-aggregate/<pa>/mtu` | 68-65535; default 1500, enforced | range | the bond's MTU, which the bond also sets on its members | `show port-aggregate <pa>` |
 | subinterface | `edit port-aggregate <pa> subinterface <tag>`, then `set address <cidr>` / `set routing-table <t>`; `delete port-aggregate <pa> subinterface <tag>` | `port-aggregate/<pa>/subinterface/<tag>`, body `{"tag":<n>,"addresses":[…],"routing_table":…}` | tag 0-4094, as on an interface | as on an interface | routed subinterfaces of the bond (tag 0 is the bond itself) | `show port-aggregate <pa>` |
 

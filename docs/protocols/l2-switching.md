@@ -55,7 +55,7 @@ router-a(trunk)> commit
 transaction 'trunk' committed
 router-a> show interface eth0
 interface eth0: address [none], routing-table unset, switching-profile sp1, mtu 1500
-  subinterface 0: address [10.50.0.2/24], routing-table rt1
+  subinterface 0: address [10.50.0.2/24], routing-table rt1, mtu 1500
 router-a> show config
 …
 broadcast domain bd1

@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::{bfd_reference_valid, stp_port_profile_reference_valid, unique_in};
 
-use super::interface::{switching_profile_reference_valid, valid_mtu, valid_subinterface_list};
+use super::interface::{
+    switching_profile_reference_valid, valid_mtu, valid_subinterface_list, valid_subinterface_mtus,
+};
 use super::{Config, EdgePort, StpMode, Subinterface, VlanTag};
 use nos_proto_derive::Cli;
 
@@ -317,6 +319,7 @@ fn port_aggregate_name_valid(name: &String, ctx: &Config) -> garde::Result {
 pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) -> garde::Result {
     // A redundancy mode is a property of the Ethernet Segment.
     for agg in aggregates {
+        valid_subinterface_mtus(&agg.subinterfaces, agg.mtu)?;
         if agg.redundancy_mode == EsRedundancy::SingleActive && agg.esi.is_none() {
             return Err(garde::Error::new(format!(
                 "port aggregate {} is single-active but has no esi",
@@ -573,9 +576,26 @@ mod tests {
     }
 
     #[test]
+    fn subinterface_mtu_above_bond_mtu_fails() {
+        let mut agg = aggregate("bond1");
+        agg.mtu = Some(9000);
+        agg.subinterfaces = vec![crate::schema::Subinterface {
+            tag: 100,
+            mtu: Some(9000),
+            ..Default::default()
+        }];
+        let cfg = config_with(vec![agg.clone()]);
+        cfg.validate_with(&cfg).unwrap();
+        agg.subinterfaces[0].mtu = Some(9001);
+        let cfg = config_with(vec![agg]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
     fn valid_subinterface_with_routing_table_passes() {
         let mut agg = aggregate("bond1");
         agg.subinterfaces = vec![crate::schema::Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -610,6 +630,7 @@ mod tests {
         a.bfd_peer = peer.map(|p| p.parse().unwrap());
         if let Some(addr) = addr {
             a.subinterfaces = vec![crate::schema::Subinterface {
+                mtu: None,
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,

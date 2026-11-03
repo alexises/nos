@@ -205,6 +205,8 @@ topics! {
     InterfacePortAggregate,
     /// `Interface.mtu` (also a port aggregate's)
     InterfaceMtu,
+    /// `Subinterface.mtu`
+    SubinterfaceMtu,
     /// `Interface.lldp_transmit`
     InterfaceLldpTransmit,
     /// `Interface.lldp_receive`

@@ -627,6 +627,7 @@ mod tests {
             subinterfaces: subs
                 .iter()
                 .map(|(tag, a, rt)| nos_proto::SubinterfaceStatus {
+                    mtu: 1500,
                     tag: *tag,
                     addresses: addrs(a),
                     routing_table: rt.map(String::from),

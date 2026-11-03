@@ -113,6 +113,22 @@ pub enum SubinterfaceOp {
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Overrides the MTU of the subinterface's VLAN sub-link.
+    SetMtu {
+        /// Name of the parent interface.
+        interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
+        tag: u16,
+        /// MTU in bytes.
+        mtu: u32,
+    },
+    /// Clears the MTU override so the sub-link follows its parent again.
+    ClearMtu {
+        /// Name of the parent interface.
+        interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
+        tag: u16,
+    },
     /// Deletes the subinterface and everything nested under it.
     Delete {
         /// Name of the parent interface.
@@ -215,6 +231,18 @@ impl SubinterfaceOp {
                 find_subinterface_mut(config, interface, *tag)?.bfd_unsolicited = None;
                 Ok(())
             }
+            SubinterfaceOp::SetMtu {
+                interface,
+                tag,
+                mtu,
+            } => {
+                ensure_subinterface_mut(config, interface, *tag)?.mtu = Some(*mtu);
+                Ok(())
+            }
+            SubinterfaceOp::ClearMtu { interface, tag } => {
+                find_subinterface_mut(config, interface, *tag)?.mtu = None;
+                Ok(())
+            }
             SubinterfaceOp::Delete { interface, tag } => {
                 let iface = find_interface_mut(config, interface)?;
                 let before = iface.subinterfaces.len();
@@ -278,6 +306,7 @@ fn ensure_subinterface_mut<'a>(
     let iface = find_interface_mut(config, interface)?;
     if !iface.subinterfaces.iter().any(|s| s.tag == tag) {
         iface.subinterfaces.push(Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -366,6 +395,7 @@ mod tests {
             interfaces: vec![interface(
                 "eth0",
                 vec![Subinterface {
+                    mtu: None,
                     acl_in: None,
                     acl_out: None,
                     flowspec: false,
@@ -523,6 +553,26 @@ mod tests {
     }
 
     #[test]
+    fn set_and_clear_mtu() {
+        let mut cfg = Config::default();
+        SubinterfaceOp::SetMtu {
+            interface: "eth0".to_string(),
+            tag: 100,
+            mtu: 9000,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].subinterfaces[0].mtu, Some(9000));
+        SubinterfaceOp::ClearMtu {
+            interface: "eth0".to_string(),
+            tag: 100,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].subinterfaces[0].mtu, None);
+    }
+
+    #[test]
     fn set_and_clear_ospf_profile() {
         let mut cfg = Config::default();
         SubinterfaceOp::SetOspfProfile {
@@ -589,6 +639,7 @@ mod tests {
                 "eth0",
                 vec![
                     Subinterface {
+                        mtu: None,
                         acl_in: None,
                         acl_out: None,
                         flowspec: false,
@@ -600,6 +651,7 @@ mod tests {
                         bfd_unsolicited: None,
                     },
                     Subinterface {
+                        mtu: None,
                         acl_in: None,
                         acl_out: None,
                         flowspec: false,

@@ -309,7 +309,7 @@ bgp instance r1:
   10.50.0.3 AS 65002 peer-group pg1 Established uptime 00:02:21 hold-time 90
 lab-1> show interface
 interface eth0: address [none], routing-table unset, switching-profile unset, mtu 1500
-  subinterface 0: address [10.50.0.2/24], routing-table rt1
+  subinterface 0: address [10.50.0.2/24], routing-table rt1, mtu 1500
 lab-1> show log nos-configd
 2026-09-28T18:51:42.627Z  INFO nos-configd nos_config::persistence: loaded config from disk (path=/var/lib/nos/configd/config.yaml)
 2026-09-28T18:51:42.704Z  INFO nos-configd nos_config::server: config IPC server listening (listen=unix:/run/nos/config.sock)

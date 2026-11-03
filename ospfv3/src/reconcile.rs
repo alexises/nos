@@ -1078,6 +1078,7 @@ mod tests {
     fn finds_subinterface_attachment() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -1134,6 +1135,7 @@ mod tests {
     fn subinterface_attach_points_finds_routing_table() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -1305,6 +1307,7 @@ mod tests {
             label: None,
         };
         let sub = |tag, addresses| Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,

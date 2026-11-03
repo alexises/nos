@@ -1032,8 +1032,11 @@ mod tests {
 
     #[test]
     fn a_dotted_key_is_never_a_literal_name() {
-        // No `mtu` on a subinterface: refused, not an interface `eth0.300`.
-        assert_eq!(parse("set interface eth0.300 mtu 9000", &[], &doc()), None);
+        // No `lldp transmit` on a subinterface: refused, not an interface `eth0.300`.
+        assert_eq!(
+            parse("set interface eth0.300 lldp transmit", &[], &doc()),
+            None
+        );
         let edit = parse("set interface eth0.300 address 10.0.0.1/24", &[], &doc()).unwrap();
         assert_eq!(edit.writes[0].0, at(&["interface", "eth0", "subinterface"]));
     }

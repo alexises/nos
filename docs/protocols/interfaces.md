@@ -45,8 +45,8 @@ router-a(vlan300)> commit
 transaction 'vlan300' committed
 router-a> show interface eth0
 interface eth0: address [none], routing-table unset, switching-profile unset, mtu 1500
-  subinterface 0: address [10.50.0.2/24], routing-table rt1
-  subinterface 300: address [192.0.2.1/24], routing-table rt1
+  subinterface 0: address [10.50.0.2/24], routing-table rt1, mtu 1500
+  subinterface 300: address [192.0.2.1/24], routing-table rt1, mtu 1500
 router-a> show route rt1
 10.50.0.0/24
   * via 10.50.0.2 [connected]
@@ -122,12 +122,16 @@ router-a(jumbo)> commit
 transaction 'jumbo' committed
 router-a> show interface eth0
 interface eth0: address [none], routing-table unset, switching-profile unset, mtu 9000
-  subinterface 0: address [10.50.0.2/24], routing-table rt1
+  subinterface 0: address [10.50.0.2/24], routing-table rt1, mtu 9000
 ```
 
 REST: `PUT $B/v1/transactions/jumbo/interface/eth0/mtu` with body `9000`, then commit.
 
-The MTU belongs to the link, so it is set on `eth0`, never on `eth0.300`; every subinterface uses the link's MTU. `set interface eth0.300 mtu …` is refused (`is not a valid edit here`: a subinterface has no `mtu`), and so is `set mtu` while in `edit interface eth0.300`.
+The MTU belongs to the link, so it is set on `eth0`; a VLAN subinterface follows it by default.
+
+- Override one VLAN sub-link with `set interface eth0.300 mtu 1400` (or `set mtu 1400` in `edit interface eth0.300`; REST: `PUT …/interface/eth0/subinterface/300/mtu`). `delete interface eth0.300 mtu` makes it follow the link again.
+- The override must not exceed the link's MTU (1500 when unset), and tag 0 refuses it (that subinterface is the link itself: set `mtu` on `eth0`). The commit is rejected otherwise, including when lowering the link's MTU below an existing override.
+- `show interface` and `GET /v1/interfaces/<name>` report each subinterface's effective `mtu` (override, else the link's). Applying it to the kernel sub-link is not done yet (#843).
 
 `delete interface eth0 mtu` (REST: `DELETE …/interface/eth0/mtu`) puts the link back to 1500.
 
@@ -165,7 +169,8 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 | Field | CLI | REST path | Type, range, default | Validation at commit | Effect | Check with |
 |---|---|---|---|---|---|---|
 | name | `edit interface <if>`; `delete interface <if>` | `interface/<if>` | string, 1-64 characters | unique; no `.` | NOS starts or stops managing this link | `show interface` |
-| mtu | `set interface <if> mtu <n>` / `set mtu <n>`; `delete interface <if> mtu` / `delete mtu` | `interface/<if>/mtu` | integer 68-65535; default 1500, enforced | range | sets the link's MTU, used by every subinterface; not on a port aggregate member, whose bond sets it | `show interface <if>` |
+| mtu | `set interface <if> mtu <n>` / `set mtu <n>`; `delete interface <if> mtu` / `delete mtu` | `interface/<if>/mtu` | integer 68-65535; default 1500, enforced | range | sets the link's MTU, the default for every subinterface; not on a port aggregate member, whose bond sets it | `show interface <if>` |
+| subinterface mtu | `set interface <if>.<tag> mtu <n>` / `set mtu <n>`; `delete interface <if>.<tag> mtu` | `interface/<if>/subinterface/<tag>/mtu` | integer 68-65535; default follows the link | range; not above the link's MTU; not on tag 0 | per-VLAN override (kernel effect: #843) | `show interface <if>` |
 | switching-profile | `set interface <if> switching-profile <sp>` / `set switching-profile <sp>`; `delete … switching-profile` | `interface/<if>/switching-profile` | name; default unset | profile exists; tags disjoint from subinterfaces | see [L2 switching](l2-switching.md) | `show interface <if>` |
 | port-aggregate | `set interface <if> port-aggregate <pa>` / `set port-aggregate <pa>`; `delete … port-aggregate` | `interface/<if>/port-aggregate` | name; default unset | aggregate exists; no subinterfaces or switching profile on the same interface | see [Port aggregation](port-aggregation-lacp.md) | `show lacp`, `show config` |
 | lldp transmit, lldp receive, lldp destination | `set interface <if> lldp …` | `interface/<if>/lldp-transmit`, `…/lldp-receive`, `…/lldp-destination` | see [LLDP](lldp.md#configuration-reference) | | | `show lldp neighbors` |

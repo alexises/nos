@@ -90,6 +90,22 @@ pub enum PortAggregateSubinterfaceOp {
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Overrides the MTU of the port-aggregate subinterface's VLAN sub-link.
+    SetMtu {
+        /// Name of the port aggregate.
+        port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
+        tag: u16,
+        /// MTU in bytes.
+        mtu: u32,
+    },
+    /// Clears the MTU override so the sub-link follows its parent again.
+    ClearMtu {
+        /// Name of the port aggregate.
+        port_aggregate: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
+        tag: u16,
+    },
     /// Deletes the port-aggregate subinterface and everything nested under it.
     Delete {
         /// Name of the port aggregate.
@@ -191,6 +207,21 @@ impl PortAggregateSubinterfaceOp {
                 find_subinterface_mut(config, port_aggregate, *tag)?.ospfv3_profile = None;
                 Ok(())
             }
+            PortAggregateSubinterfaceOp::SetMtu {
+                port_aggregate,
+                tag,
+                mtu,
+            } => {
+                ensure_subinterface_mut(config, port_aggregate, *tag)?.mtu = Some(*mtu);
+                Ok(())
+            }
+            PortAggregateSubinterfaceOp::ClearMtu {
+                port_aggregate,
+                tag,
+            } => {
+                find_subinterface_mut(config, port_aggregate, *tag)?.mtu = None;
+                Ok(())
+            }
             PortAggregateSubinterfaceOp::Delete {
                 port_aggregate,
                 tag,
@@ -247,6 +278,7 @@ fn ensure_subinterface_mut<'a>(
     let agg = find_aggregate_mut(config, port_aggregate)?;
     if !agg.subinterfaces.iter().any(|s| s.tag == tag) {
         agg.subinterfaces.push(Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -406,8 +438,32 @@ mod tests {
     }
 
     #[test]
+    fn set_and_clear_mtu() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1", Vec::new())],
+            ..Default::default()
+        };
+        PortAggregateSubinterfaceOp::SetMtu {
+            port_aggregate: "bond1".to_string(),
+            tag: 100,
+            mtu: 9000,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].subinterfaces[0].mtu, Some(9000));
+        PortAggregateSubinterfaceOp::ClearMtu {
+            port_aggregate: "bond1".to_string(),
+            tag: 100,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].subinterfaces[0].mtu, None);
+    }
+
+    #[test]
     fn set_and_clear_touch_only_the_tagged_subinterface() {
         let sub = |tag| Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -482,6 +538,7 @@ mod tests {
             port_aggregates: vec![aggregate(
                 "bond1",
                 vec![Subinterface {
+                    mtu: None,
                     acl_in: None,
                     acl_out: None,
                     flowspec: false,

@@ -55,6 +55,7 @@ fn status(
         subinterfaces: tags
             .iter()
             .map(|(tag, addresses)| SubinterfaceStatus {
+                mtu: 1500,
                 tag: *tag,
                 addresses: addresses.clone(),
                 routing_table: Some("rt1".into()),
