@@ -866,10 +866,10 @@ mod authz_tests {
             kernel: Arc::default(),
             driver: Arc::new(FailingDriver),
         };
-        let dirty = |ctx: &Context| {
-            let g = ctx.kernel.take_dirty_for_test();
-            g
-        };
+        let dirty = |ctx: &Context| ctx.kernel.take_dirty_for_test();
+        let d = FailingDriver;
+        assert!(d.teardown("t").await.is_ok());
+        assert_eq!((d.vrf_name("t").await, d.table_id("t").await), (None, None));
         let r = |p: &str| BgpRoute {
             prefix: p.parse().unwrap(),
             next_hops: vec!["10.0.0.2".parse().unwrap()],

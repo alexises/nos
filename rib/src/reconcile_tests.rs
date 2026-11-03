@@ -36,6 +36,7 @@ struct Rec {
     mpls: Mutex<Vec<MplsCall>>,
     fail_mpls: AtomicBool,
     fail_apply: AtomicBool,
+    fail_delta: AtomicBool,
     /// When set, `apply` signals `entered` then waits for `release` (#653).
     block_apply: AtomicBool,
     entered: tokio::sync::Notify,
@@ -81,6 +82,9 @@ impl RibDriver for Rec {
         changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError> {
         self.deltas.lock().unwrap().push(changes.clone());
+        if self.fail_delta.load(Ordering::SeqCst) {
+            return Err(err());
+        }
         Ok(())
     }
     async fn teardown(&self, _table: &str) -> Result<(), DriverError> {
@@ -694,6 +698,19 @@ async fn incremental_evpn_pushes_apply_deltas_and_sync_devices_only_on_remote_ch
     // A Full still resyncs the whole table.
     push(EvpnUpdate::Full(vec![route("10.2.0.0/24")])).await;
     assert_eq!(counts(), (applies + 1, l3 + 3, deltas + 4));
+    // A failed delta marks the table dirty (#653).
+    assert!(!e.kernel.take_dirty_for_test());
+    e.rec.fail_delta.store(true, Ordering::SeqCst);
+    push(EvpnUpdate::Add(route("10.3.0.0/24"))).await;
+    assert!(e.kernel.take_dirty_for_test());
+}
+
+/// A dirty notification with nothing dirty (already cleaned by a resync) does nothing.
+#[tokio::test]
+async fn a_spurious_dirty_notification_applies_nothing() {
+    let e = Env::ready(base_cfg());
+    assert!(!dirty_apply("rt1", &e.rib, &e.kernel, e.rec.as_ref()).await);
+    assert!(e.rec.applies.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
