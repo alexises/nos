@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use nos_proto::{
     BroadcastDomainStatus, Config, DiffScope, Event, InterfaceStatus, IpNet, PortAggregateStatus,
     RedistributeSource, RedistributeTarget, RedistributedRoute, ServiceRef,
 };
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, MutexGuard, Notify, RwLock};
 use tokio::time::sleep;
 use tracing::{debug, error, info, trace, warn};
 
@@ -39,6 +40,56 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// changes when that happens, so nothing else would ever retry it.
 const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Serialises every kernel write of this `nos-ribd` (#653). A producer
+/// (`server.rs`) or a resync holds the gate across "mutate the `Rib`, take
+/// the snapshot, call the driver", so a full `apply` built from an older
+/// snapshot can never land after a newer delta (nor two deltas interleave).
+/// Lock order, everywhere: the gate first, then the `Rib` lock. Queries never
+/// take it.
+///
+/// It also carries the dirty flag: a failed kernel write calls `mark_dirty`
+/// and `run` answers with a full `apply` at once, rather than waiting for the
+/// next `REAPPLY_INTERVAL` tick.
+#[derive(Default)]
+pub struct KernelGate {
+    lock: Mutex<()>,
+    dirty: AtomicBool,
+    notify: Notify,
+}
+
+/// Proof that the gate is held.
+pub type GateGuard<'a> = MutexGuard<'a, ()>;
+
+impl KernelGate {
+    pub async fn lock(&self) -> GateGuard<'_> {
+        self.lock.lock().await
+    }
+
+    /// A kernel write failed: the kernel may differ from the `Rib`.
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+
+    /// Reads and clears the flag, for tests.
+    #[cfg(test)]
+    pub(crate) fn take_dirty_for_test(&self) -> bool {
+        self.dirty.swap(false, Ordering::SeqCst)
+    }
+
+    async fn notified(&self) {
+        self.notify.notified().await;
+    }
+
+    fn take_dirty(&self, _held: &GateGuard<'_>) -> bool {
+        self.dirty.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// Minimum spacing of dirty-triggered full applies when the kernel keeps
+/// refusing; the `REAPPLY_INTERVAL` tick stays the floor.
+const DIRTY_RETRY: Duration = Duration::from_secs(1);
+
 /// Runs until `shutdown` fires. Subscribes to `RoutingTables` and
 /// `StaticRoutingInstances` diffs purely as an edge trigger: every
 /// `Event::Diff` received (including the first, synthesized one) causes a
@@ -66,6 +117,7 @@ pub async fn run(
     watchdog_socket: PathBuf,
     table: String,
     rib: Arc<RwLock<Rib>>,
+    kernel: Arc<KernelGate>,
     driver: Arc<dyn RibDriver>,
     redistribute_tx: watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: Vec<OspfFeed>,
@@ -102,7 +154,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
+                                resync(&config_socket, &watchdog_socket, &table, &rib, &kernel, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -116,11 +168,18 @@ pub async fn run(
                         },
                         r = bfd_changed.changed() => {
                             if r.is_ok() {
-                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
+                                resync(&config_socket, &watchdog_socket, &table, &rib, &kernel, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
                             }
                         }
                         _ = reapply.tick() => {
-                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
+                            resync(&config_socket, &watchdog_socket, &table, &rib, &kernel, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
+                        }
+                        () = kernel.notified() => {
+                            if dirty_apply(&table, &rib, &kernel, driver.as_ref()).await
+                                && wait_or_shutdown(DIRTY_RETRY, &mut shutdown).await
+                            {
+                                break;
+                            }
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -142,7 +201,10 @@ pub async fn run(
         }
     }
 
-    match driver.teardown(&table).await {
+    let gate = kernel.lock().await;
+    let torn = driver.teardown(&table).await;
+    drop(gate);
+    match torn {
         Ok(()) => debug!(table = %table, "tore down VRF/table on shutdown"),
         Err(e) => warn!(table = %table, error = %e, "failed to tear down VRF on shutdown"),
     }
@@ -155,6 +217,7 @@ async fn resync(
     watchdog_socket: &Path,
     table: &str,
     rib: &Arc<RwLock<Rib>>,
+    kernel: &KernelGate,
     driver: &dyn RibDriver,
     redistribute_tx: &watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: &[OspfFeed],
@@ -190,6 +253,9 @@ async fn resync(
             let connected = fetch_connected(watchdog_socket, &cfg, table).await;
             let l3 = resolve_l3vni(watchdog_socket, &cfg, table).await;
 
+            // Held until the kernel apply below: the static/connected rebuild
+            // and its snapshot must not be overtaken by a producer's delta.
+            let gate = kernel.lock().await;
             let mut guard = rib.write().await;
             guard.replace_source(RouteSource::Static, static_entries);
             match connected {
@@ -227,7 +293,8 @@ async fn resync(
             // Before the routes: the pop route gates the export, and a
             // labelled route needs the underlay `sync_mpls` records.
             vpn_export(&cfg, table, rib, driver, vpn).await;
-            apply_to_kernel(table, rib, driver).await;
+            apply_to_kernel(table, rib, kernel, &gate, driver).await;
+            drop(gate);
             let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
             for (to, tx) in ospf_redistribute_tx {
                 let _ = tx.send(compute_redistribute_target_ospf(&cfg, table, &routes, *to));
@@ -253,17 +320,49 @@ fn remote_lfa(cfg: &Config, table: &str) -> bool {
 
 /// Brings the kernel in line with `rib`: the L3 VNI devices and remote VTEPs
 /// first (`Evpn` routes leave through that bridge, and it gives our Router's
-/// MAC), then every best route. Shared with `server.rs`'s Type-5 push.
-pub(crate) async fn apply_to_kernel(table: &str, rib: &RwLock<Rib>, driver: &dyn RibDriver) {
-    sync_l3vni(table, rib, driver).await;
+/// MAC), then every best route. Shared with `server.rs`'s Type-5 push; the
+/// caller holds the gate. A failed apply marks the gate dirty.
+pub(crate) async fn apply_to_kernel(
+    table: &str,
+    rib: &RwLock<Rib>,
+    kernel: &KernelGate,
+    gate: &GateGuard<'_>,
+    driver: &dyn RibDriver,
+) {
+    sync_l3vni(table, rib, gate, driver).await;
     let routes = rib.read().await.best_routes_for_kernel();
     if let Err(e) = driver.apply(table, &routes).await {
         error!(table = %table, error = %e, "failed to apply routes to kernel");
+        kernel.mark_dirty();
     }
 }
 
-/// The L3 VNI half of `apply_to_kernel`: devices, remote VTEPs, our Router's MAC.
-pub(crate) async fn sync_l3vni(table: &str, rib: &RwLock<Rib>, driver: &dyn RibDriver) {
+/// A dirty-triggered full apply (from a fresh snapshot). `true` when it
+/// failed again, so the caller backs off.
+async fn dirty_apply(
+    table: &str,
+    rib: &RwLock<Rib>,
+    kernel: &KernelGate,
+    driver: &dyn RibDriver,
+) -> bool {
+    let gate = kernel.lock().await;
+    // Cleared before the snapshot: a failure of this very apply re-marks it.
+    if !kernel.take_dirty(&gate) {
+        return false;
+    }
+    info!(table = %table, "kernel write failed earlier, re-applying the whole table");
+    apply_to_kernel(table, rib, kernel, &gate, driver).await;
+    kernel.dirty.load(Ordering::SeqCst)
+}
+
+/// The L3 VNI half of `apply_to_kernel`: devices, remote VTEPs, our Router's
+/// MAC. The caller holds the gate.
+pub(crate) async fn sync_l3vni(
+    table: &str,
+    rib: &RwLock<Rib>,
+    _gate: &GateGuard<'_>,
+    driver: &dyn RibDriver,
+) {
     let (l3, remotes) = {
         let guard = rib.read().await;
         (guard.evpn.local.clone(), guard.evpn.remotes.clone())

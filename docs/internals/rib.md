@@ -105,3 +105,11 @@ A table with `RoutingTable.evpn.l3_vni` set is an RFC 9136/9135 §4.4.1 "interfa
 A `PushBgpRoutes` `Full` larger than one frame arrives as `FullPart`s plus a closing `Full` (`BgpRouteUpdate::frames`, see `docs/architecture/config-protocol.md`'s "Framing limit"): `server::FullStaging` holds the parts per connection and hands the assembled `Full` to `apply_bgp_route_update`, so the `Rib` and kernel only ever see the whole set. `PushVpnRoutes` likewise (`FullStaging.vpn`, #715: `vpn_info` and the `Vpn` candidates change only on the closing `Full`). `PushOspfRoutes` too (`FullStaging.ospf`, #726: the `Ospf` candidates and metrics change only on the closing `Full`, logged as `assembled chunked ospf route snapshot table=<t> routes=N parts=P`; the senders cut with `OspfRouteUpdate::frames` from #727). `PushEvpnRoutes` is staged the same way (`EvpnUpdate::absorb`, #720): one `refresh_evpn` and one `apply_to_kernel` per assembled `Full`; `Add`/`Remove` never reconcile the whole table.
 
 `table.bgp_instance` is deliberately never read by `build_from_config` — `Bgp`-sourced entries only ever arrive via `PushBgpRoutes`, never from config.
+
+## Kernel gate (#653)
+
+- Every kernel write of `nos-ribd` goes through `reconcile::KernelGate`, an async mutex: BGP/OSPF/VPN/EVPN pushes, the resync, `apply_to_kernel` and `teardown` hold it across "mutate the `Rib`, snapshot, call the driver".
+- Lock order is gate first, then the `Rib` lock. A new kernel-writing path takes the gate before `rib.write()`; `apply_to_kernel`/`sync_l3vni` take a `&GateGuard` so it compiles only with the gate held.
+- Never take the gate from a query path (`GetRoutesPage`, `Lookup`, ...): reads must not wait for netlink.
+- A push now waits for an in-flight full apply (a dump-diff on a big table); it queues on its connection, nothing is lost.
+- A failed `apply`/`apply_delta` calls `KernelGate::mark_dirty`; `reconcile::run` then does a full apply from a fresh snapshot, at most once per second while it keeps failing. The 10 s tick stays the floor.

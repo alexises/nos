@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     );
     info!(table = %args.table, peer = ?identity.peer(), "nos-ribd starting");
 
-    let listen_socket = args
+    let sock = args
         .listen_socket
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/rib-{}.sock", args.table)));
 
@@ -174,11 +174,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let rib = Arc::new(RwLock::new(Rib::new()));
+    let gate = Arc::new(reconcile::KernelGate::default());
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
         args.table.clone(),
         rib.clone(),
+        gate.clone(),
         driver.clone(),
         redistribute_tx,
         ospf_redistribute_tx,
@@ -188,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         bfd_up,
         shutdown_rx,
     ));
-    let server_task = server::start(&listen_socket, args.table.clone(), rib, driver, &identity)
+    let server_task = server::start(&sock, args.table.clone(), rib, gate, driver, &identity)
         .inspect_err(|e| {
             tracing::error!(table = %args.table, error = %e, "failed to start RIB IPC server");
         })
