@@ -1089,6 +1089,13 @@ mod tests {
     }
 
     #[test]
+    fn hash_in_regex_string_compiles() {
+        compile_src(
+            "if this.bgp.as_path.matches(\"^65001#\"): # c\n    accept\nelse:\n    reject\n",
+        );
+    }
+
+    #[test]
     fn bad_regex_and_bad_prepend_are_compile_errors() {
         assert!(compile_err(
             "if this.bgp.as_path.matches(\"(\"):\n    accept\nelse:\n    reject\n"

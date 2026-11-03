@@ -60,10 +60,7 @@ pub fn lex(src: &str) -> Result<Vec<SpannedToken>, CompileError> {
 
     for (line_idx, raw_line) in src.lines().enumerate() {
         let line = line_idx + 1;
-        let code = match raw_line.find('#') {
-            Some(i) => &raw_line[..i],
-            None => raw_line,
-        };
+        let code = &raw_line[..code_end(raw_line)];
         if code.trim().is_empty() {
             continue;
         }
@@ -113,6 +110,20 @@ pub fn lex(src: &str) -> Result<Vec<SpannedToken>, CompileError> {
         line: last_line,
     });
     Ok(tokens)
+}
+
+/// Byte index where the code on `line` ends: the first `#` outside a `"..."`
+/// literal (strings have no escapes, like `lex_line`), else the line's end.
+fn code_end(line: &str) -> usize {
+    let mut in_str = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_str = !in_str,
+            '#' if !in_str => return i,
+            _ => {}
+        }
+    }
+    line.len()
 }
 
 fn lex_line(line: &str, lineno: usize, out: &mut Vec<SpannedToken>) -> Result<(), CompileError> {
@@ -289,6 +300,28 @@ mod tests {
             tokens_of("# a comment\n\naccept # trailing\n"),
             vec![Token::Accept, Token::Newline, Token::Eof]
         );
+    }
+
+    #[test]
+    fn hash_inside_string_is_literal() {
+        let s = |t: &str| Token::Str(t.to_string());
+        assert_eq!(
+            tokens_of("\"^65001#\"\n"),
+            vec![s("^65001#"), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            tokens_of("\"a#b\" # note\n"),
+            vec![s("a#b"), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            tokens_of("\"#\"\n"),
+            vec![s("#"), Token::Newline, Token::Eof]
+        );
+        assert_eq!(
+            tokens_of("accept # \"quoted\" in comment\n"),
+            vec![Token::Accept, Token::Newline, Token::Eof]
+        );
+        assert!(lex("\"abc # x\n").is_err());
     }
 
     #[test]
