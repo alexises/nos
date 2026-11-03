@@ -71,6 +71,7 @@ async fn get_routes_returns_sorted_prefixes_with_ranked_candidates() {
         &path,
         "rt1".to_string(),
         rib,
+        Arc::default(),
         Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
@@ -107,6 +108,7 @@ async fn lookup_matches_longest_prefix() {
         &path,
         "rt1".to_string(),
         rib,
+        Arc::default(),
         Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
@@ -133,6 +135,7 @@ async fn lookup_with_no_covering_prefix_returns_no_match() {
         &path,
         "rt1".to_string(),
         rib,
+        Arc::default(),
         Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
@@ -228,6 +231,7 @@ async fn get_vrf_name_returns_the_drivers_answer() {
         &path,
         "rt1".to_string(),
         rib,
+        Arc::default(),
         driver,
         &shared().identity("ribd", "rt1"),
     )
@@ -250,6 +254,7 @@ async fn get_vrf_name_is_none_when_the_driver_has_no_vrf_yet() {
         &path,
         "rt1".to_string(),
         rib,
+        Arc::default(),
         driver,
         &shared().identity("ribd", "rt1"),
     )
@@ -272,6 +277,7 @@ async fn get_table_id_returns_the_drivers_answer() {
         &path,
         "rt1".to_string(),
         rib,
+        Arc::default(),
         driver,
         &shared().identity("ribd", "rt1"),
     )
@@ -294,6 +300,7 @@ async fn get_table_id_is_none_when_the_driver_has_no_id_yet() {
         &path,
         "rt1".to_string(),
         rib,
+        Arc::default(),
         driver,
         &shared().identity("ribd", "rt1"),
     )
@@ -362,6 +369,7 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
         &path,
         "rt1".to_string(),
         rib.clone(),
+        Arc::default(),
         driver.clone(),
         &shared().identity("ribd", "rt1"),
     )
@@ -415,6 +423,7 @@ async fn push_bgp_full_past_max_frame_is_chunked_and_applied_atomically() {
         &path,
         "rt1".to_string(),
         rib.clone(),
+        Arc::default(),
         driver.clone(),
         &shared().identity("ribd", "rt1"),
     )
@@ -486,6 +495,7 @@ async fn push_vpn_full_past_max_frame_is_chunked_and_applied_atomically() {
         &path,
         "rt1".to_string(),
         rib.clone(),
+        Arc::default(),
         driver.clone(),
         &shared().identity("ribd", "rt1"),
     )
@@ -567,6 +577,7 @@ async fn push_ospf_full_past_max_frame_is_chunked_and_applied_atomically() {
         &path,
         "rt1".to_string(),
         rib.clone(),
+        Arc::default(),
         driver.clone(),
         &shared().identity("ribd", "rt1"),
     )
@@ -634,6 +645,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
         &path,
         "rt1".to_string(),
         rib.clone(),
+        Arc::default(),
         driver.clone(),
         &shared().identity("ribd", "rt1"),
     )
@@ -708,6 +720,7 @@ async fn route_pushes_from_the_wrong_role_are_refused() {
         &path,
         "rt1".to_string(),
         rib.clone(),
+        Arc::default(),
         Arc::new(NoopRibDriver::default()),
         &shared().identity("ribd", "rt1"),
     )
@@ -761,6 +774,7 @@ fn gate_server() -> GateServer {
         &path,
         "rt1".to_string(),
         rib.clone(),
+        Arc::default(),
         driver.clone(),
         &shared().identity("ribd", "rt1"),
     )

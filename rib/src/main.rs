@@ -174,11 +174,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let rib = Arc::new(RwLock::new(Rib::new()));
+    let kernel = Arc::new(reconcile::KernelGate::default());
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
         args.table.clone(),
         rib.clone(),
+        kernel.clone(),
         driver.clone(),
         redistribute_tx,
         ospf_redistribute_tx,
@@ -188,11 +190,18 @@ async fn main() -> anyhow::Result<()> {
         bfd_up,
         shutdown_rx,
     ));
-    let server_task = server::start(&listen_socket, args.table.clone(), rib, driver, &identity)
-        .inspect_err(|e| {
-            tracing::error!(table = %args.table, error = %e, "failed to start RIB IPC server");
-        })
-        .context("starting RIB IPC server")?;
+    let server_task = server::start(
+        &listen_socket,
+        args.table.clone(),
+        rib,
+        kernel,
+        driver,
+        &identity,
+    )
+    .inspect_err(|e| {
+        tracing::error!(table = %args.table, error = %e, "failed to start RIB IPC server");
+    })
+    .context("starting RIB IPC server")?;
 
     wait_for_shutdown_signal()
         .await

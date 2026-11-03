@@ -36,6 +36,10 @@ struct Rec {
     mpls: Mutex<Vec<MplsCall>>,
     fail_mpls: AtomicBool,
     fail_apply: AtomicBool,
+    /// When set, `apply` signals `entered` then waits for `release` (#653).
+    block_apply: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
     fail_tunnel: AtomicBool,
     fail_l3: AtomicBool,
     fail_teardown: AtomicBool,
@@ -62,6 +66,10 @@ impl RibDriver for Rec {
         best: &HashMap<IpNet, RibEntry>,
     ) -> Result<(), DriverError> {
         self.applies.lock().unwrap().push(best.clone());
+        if self.block_apply.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
         if self.fail_apply.load(Ordering::SeqCst) {
             return Err(err());
         }
@@ -226,6 +234,7 @@ fn evpn_cfg(source: SourceAddress) -> Config {
 struct Env {
     fakes: Fakes,
     rib: Arc<RwLock<Rib>>,
+    kernel: Arc<KernelGate>,
     rec: Arc<Rec>,
     bgp_tx: watch::Sender<bgp_client::RedistributeTarget>,
     bgp_rx: watch::Receiver<bgp_client::RedistributeTarget>,
@@ -255,6 +264,7 @@ impl Env {
         Env {
             fakes: Fakes::start(which),
             rib: Arc::new(RwLock::new(Rib::new())),
+            kernel: Arc::default(),
             rec: Arc::new(Rec::default()),
             bgp_tx,
             bgp_rx,
@@ -302,6 +312,7 @@ impl Env {
             &self.fakes.watchdog_socket(),
             "rt1",
             &self.rib,
+            &self.kernel,
             self.rec.as_ref(),
             &self.bgp_tx,
             &self.ospf,
@@ -645,8 +656,9 @@ async fn incremental_evpn_pushes_apply_deltas_and_sync_devices_only_on_remote_ch
         esi: [0; 10],
         l3_vni: None,
     };
-    let push =
-        |u: EvpnUpdate| crate::server::apply_evpn_route_update("rt1", &e.rib, e.rec.as_ref(), u);
+    let push = |u: EvpnUpdate| {
+        crate::server::apply_evpn_route_update("rt1", &e.rib, &e.kernel, e.rec.as_ref(), u)
+    };
     let counts = || {
         (
             e.rec.applies.lock().unwrap().len(),
@@ -849,6 +861,7 @@ fn start(e: Env) -> Running {
         e.fakes.watchdog_socket(),
         "rt1".into(),
         e.rib.clone(),
+        e.kernel.clone(),
         e.rec.clone(),
         e.bgp_tx.clone(),
         e.ospf.clone(),
@@ -982,6 +995,7 @@ async fn run_stops_at_once_when_shutdown_is_already_set() {
         e.fakes.watchdog_socket(),
         "rt1".into(),
         e.rib.clone(),
+        e.kernel.clone(),
         rec.clone(),
         e.bgp_tx.clone(),
         e.ospf.clone(),
@@ -1005,4 +1019,85 @@ async fn wait_or_shutdown_cases() {
     let (tx, mut rx) = watch::channel(false);
     tx.send(false).unwrap();
     assert!(!wait_or_shutdown(Duration::from_secs(60), &mut rx).await);
+}
+
+// ------------------------------------------------- kernel gate (#653)
+
+fn bgp_add(prefix: &str) -> RibEntry {
+    RibEntry {
+        prefix: net(prefix),
+        next_hops: vec![("10.0.0.2".parse::<IpAddr>().unwrap(), None).into()],
+        source: RouteSource::Bgp,
+        backup: None,
+        backup_interface_id: None,
+        backup_tunnel: false,
+    }
+}
+
+/// A producer's delta that lands while a full apply is in the driver waits for
+/// it, so the delta is the last kernel write.
+#[tokio::test]
+async fn a_delta_waits_for_the_full_apply_in_flight() {
+    let e = Env::ready(base_cfg());
+    e.rib.write().await.upsert_and_diff(bgp_add("10.7.0.0/24"));
+    e.rec.block_apply.store(true, Ordering::SeqCst);
+    let (rib, kernel, rec) = (e.rib.clone(), e.kernel.clone(), e.rec.clone());
+    let full = tokio::spawn(async move {
+        let gate = kernel.lock().await;
+        apply_to_kernel("rt1", &rib, &kernel, &gate, rec.as_ref()).await;
+    });
+    e.rec.entered.notified().await;
+
+    // The withdraw arrives mid-apply.
+    let (rib, kernel, rec) = (e.rib.clone(), e.kernel.clone(), e.rec.clone());
+    let delta = tokio::spawn(async move {
+        let gate = kernel.lock().await;
+        rib.write()
+            .await
+            .remove_and_diff(&net("10.7.0.0/24"), RouteSource::Bgp);
+        let d = HashMap::from([(net("10.7.0.0/24"), None)]);
+        rec.apply_delta("rt1", &d).await.unwrap();
+        drop(gate);
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        e.rec.deltas.lock().unwrap().is_empty(),
+        "delta overtook the apply"
+    );
+    e.rec.release.notify_one();
+    full.await.unwrap();
+    delta.await.unwrap();
+    assert!(e
+        .rec
+        .last_apply()
+        .unwrap()
+        .contains_key(&net("10.7.0.0/24")));
+    assert_eq!(e.rec.deltas.lock().unwrap().len(), 1);
+}
+
+/// A failed write marks the table dirty and `run` re-applies at once.
+#[tokio::test(start_paused = true)]
+async fn a_failed_write_triggers_a_full_apply_without_the_tick() {
+    let r = start(Env::ready(base_cfg()));
+    until("first apply", || r.env.rec.last_apply().is_some()).await;
+    let applies = r.env.rec.applies.lock().unwrap().len();
+    r.env.kernel.mark_dirty();
+    until("dirty re-apply", || {
+        r.env.rec.applies.lock().unwrap().len() > applies
+    })
+    .await;
+    r.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_kernel_that_keeps_failing_is_retried_at_most_once_a_second() {
+    let e = Env::ready(base_cfg());
+    e.rec.fail_apply.store(true, Ordering::SeqCst);
+    let r = start(e);
+    until("first apply", || r.env.rec.last_apply().is_some()).await;
+    let before = r.env.rec.applies.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let n = r.env.rec.applies.lock().unwrap().len() - before;
+    assert!((1..=7).contains(&n), "{n} applies in 5 s");
+    r.stop().await;
 }

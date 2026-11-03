@@ -16,6 +16,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::driver::RibDriver;
 use crate::evpn::EvpnState;
+use crate::reconcile::KernelGate;
 use crate::rib::{BestPathChange, Rib, RibEntry, RouteSource};
 
 /// Shared, read-only context every connection dispatches against: the
@@ -25,6 +26,7 @@ use crate::rib::{BestPathChange, Rib, RibEntry, RouteSource};
 struct Context {
     table: String,
     rib: Arc<RwLock<Rib>>,
+    kernel: Arc<KernelGate>,
     driver: Arc<dyn RibDriver>,
 }
 
@@ -35,12 +37,18 @@ pub fn start(
     listen_socket: &Path,
     table: String,
     rib: Arc<RwLock<Rib>>,
+    kernel: Arc<KernelGate>,
     driver: Arc<dyn RibDriver>,
     identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
     let listener = identity.listen(listen_socket)?;
     info!(table = %table, socket = %listen_socket.display(), "RIB IPC server listening");
-    let ctx = Arc::new(Context { table, rib, driver });
+    let ctx = Arc::new(Context {
+        table,
+        rib,
+        kernel,
+        driver,
+    });
     Ok(tokio::spawn(accept_loop(listener, ctx)))
 }
 
@@ -301,7 +309,14 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             ctx.rib.read().await.count_source(RouteSource::Bgp),
         )),
         RibRequest::PushEvpnRoutes(update) => {
-            apply_evpn_route_update(&ctx.table, &ctx.rib, ctx.driver.as_ref(), update).await;
+            apply_evpn_route_update(
+                &ctx.table,
+                &ctx.rib,
+                &ctx.kernel,
+                ctx.driver.as_ref(),
+                update,
+            )
+            .await;
             None
         }
         RibRequest::GetEvpnIrb => Some(RibEvent::EvpnIrb(ctx.rib.read().await.evpn.irb())),
@@ -357,6 +372,7 @@ fn vpn_info(r: &VpnRoute) -> Vec<VpnRouteInfo> {
 /// table are untouched). A `Vpn` winner is installed as a labelled route;
 /// a changed label or PE resolution is a changed winner (`apply_delta`).
 async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
+    let gate = ctx.kernel.lock().await;
     let mut guard = ctx.rib.write().await;
     let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
     let mut full_replace = false;
@@ -402,7 +418,9 @@ async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
     };
     if let Err(e) = result {
         error!(table = %ctx.table, error = %e, "failed to apply vpn-pushed routes to kernel");
+        ctx.kernel.mark_dirty();
     }
+    drop(gate);
 }
 
 /// Applies one push of received Type-5 routes. `Full` keeps the raw set
@@ -413,9 +431,11 @@ async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
 pub(crate) async fn apply_evpn_route_update(
     table: &str,
     rib: &RwLock<Rib>,
+    kernel: &KernelGate,
     driver: &dyn RibDriver,
     update: EvpnUpdate,
 ) {
+    let gate = kernel.lock().await;
     let (key, route) = match update {
         EvpnUpdate::Full(routes) => {
             {
@@ -423,7 +443,7 @@ pub(crate) async fn apply_evpn_route_update(
                 guard.evpn.received = routes.into_iter().map(|r| (r.key.clone(), r)).collect();
                 guard.refresh_evpn();
             }
-            crate::reconcile::apply_to_kernel(table, rib, driver).await;
+            crate::reconcile::apply_to_kernel(table, rib, kernel, &gate, driver).await;
             return;
         }
         EvpnUpdate::Add(r) => (r.key.clone(), Some(r)),
@@ -444,7 +464,7 @@ pub(crate) async fn apply_evpn_route_update(
         return;
     };
     if remotes_changed || first_sync {
-        crate::reconcile::sync_l3vni(table, rib, driver).await;
+        crate::reconcile::sync_l3vni(table, rib, &gate, driver).await;
     }
     let delta = match change {
         BestPathChange::Unchanged => return,
@@ -452,9 +472,10 @@ pub(crate) async fn apply_evpn_route_update(
         BestPathChange::Removed => None,
     };
     let deltas = HashMap::from([(prefix, delta)]);
-    // On failure, wait for the next `Full` or the 10 s reconcile tick.
+    // On failure, `run` re-applies the whole table at once.
     if let Err(e) = driver.apply_delta(table, &deltas).await {
         error!(table = %table, error = %e, "failed to apply evpn route delta to kernel");
+        kernel.mark_dirty();
     }
 }
 
@@ -471,6 +492,7 @@ pub(crate) async fn apply_evpn_route_update(
 /// queue a delta applied directly via `apply_delta` — never a whole-table
 /// recompute or a fresh kernel dump for an incremental push.
 async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
+    let _gate = ctx.kernel.lock().await;
     let mut guard = ctx.rib.write().await;
     let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
     let mut full_replace = false;
@@ -532,6 +554,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
         info!(table = %ctx.table, prefixes = routes.len(), "applying bgp-pushed routes to kernel");
         if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
             error!(table = %ctx.table, error = %e, "failed to apply bgp-pushed routes to kernel");
+            ctx.kernel.mark_dirty();
         }
     } else {
         drop(guard);
@@ -539,6 +562,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
             info!(table = %ctx.table, changed = deltas.len(), "applying bgp route deltas to kernel");
             if let Err(e) = ctx.driver.apply_delta(&ctx.table, &deltas).await {
                 error!(table = %ctx.table, error = %e, "failed to apply bgp route deltas to kernel");
+                ctx.kernel.mark_dirty();
             }
         }
     }
@@ -550,6 +574,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
 /// touched prefix's winner and `apply_delta` just that), since the two
 /// writers only ever touch disjoint `RouteSource` candidates.
 async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
+    let _gate = ctx.kernel.lock().await;
     let mut guard = ctx.rib.write().await;
     let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
     let mut full_replace = false;
@@ -597,6 +622,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
         info!(table = %ctx.table, prefixes = routes.len(), "applying ospf-pushed routes to kernel");
         if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
             error!(table = %ctx.table, error = %e, "failed to apply ospf-pushed routes to kernel");
+            ctx.kernel.mark_dirty();
         }
     } else {
         drop(guard);
@@ -604,6 +630,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
             info!(table = %ctx.table, changed = deltas.len(), "applying ospf route deltas to kernel");
             if let Err(e) = ctx.driver.apply_delta(&ctx.table, &deltas).await {
                 error!(table = %ctx.table, error = %e, "failed to apply ospf route deltas to kernel");
+                ctx.kernel.mark_dirty();
             }
         }
     }
@@ -842,6 +869,7 @@ mod authz_tests {
         let ctx = Context {
             table: "red".to_string(),
             rib: Arc::new(RwLock::new(Rib::new())),
+            kernel: Arc::default(),
             driver: Arc::new(crate::driver::NoopRibDriver::default()),
         };
         let a = vpn_route("10.1.0.0/24", 100);
@@ -951,6 +979,7 @@ mod authz_tests {
         let ctx = Context {
             table: "t".to_string(),
             rib: Arc::new(RwLock::new(Rib::new())),
+            kernel: Arc::default(),
             driver: Arc::new(crate::driver::NoopRibDriver::default()),
         };
         assert!(matches!(
