@@ -783,6 +783,7 @@ accept
 EOF"#,
     );
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("EDITOR", &good) };
     let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
@@ -794,6 +795,7 @@ EOF"#,
     // A script that does not compile is discarded.
     let bad = editor(tools.path(), "bad", r#"echo 'this is not rpl' > "$1""#);
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("EDITOR", &bad) };
     let (_, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(
@@ -803,16 +805,19 @@ EOF"#,
 
     // An editor that fails, and one that cannot be started.
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("EDITOR", "false") };
     let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("EDITOR", "/nonexistent/editor") };
     let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
 
     // The transaction vanishes while the editor runs: nothing is applied.
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("EDITOR", &good) };
     let flaky = world(Wd::Resolves, Daemons::Populated, Configd::Healthy);
     let flaky_policy = configuration("flaky", &["policy-definition", "p1"], false);
@@ -821,13 +826,17 @@ EOF"#,
 
     // The fallbacks: no $EDITOR means $VISUAL, then nano (absent here: an error).
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::remove_var("EDITOR") };
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("VISUAL", "true") };
     let (_, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::remove_var("VISUAL") };
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("PATH", tools.path()) };
     let (mode, _) = run(&lab, policy, &["edit source"], leave_open).await;
     assert!(matches!(mode, Mode::Configuration { .. }));
@@ -929,6 +938,7 @@ async fn docs_are_fetched_on_a_miss_and_degrade_when_configd_is_down() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hostname_task_keeps_retrying_an_absent_configd() {
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir -- socket path that must not exist
     let missing = std::env::temp_dir().join("nos-345-no-such-configd.sock");
     let hostname = Arc::new(Mutex::new("nos".to_string()));
     let task = tokio::spawn(actions::subscribe_hostname_task(

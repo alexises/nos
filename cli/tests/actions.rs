@@ -327,6 +327,7 @@ async fn every_show_command_runs_against_its_daemon() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configuration_session_edits_commits_and_leaves() {
     // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::set_var("EDITOR", "true") };
     let lab = lab();
     let (mode, _) = run(

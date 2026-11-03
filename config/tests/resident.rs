@@ -26,16 +26,19 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let now = LIVE.fetch_add(l.size(), Relaxed) + l.size();
         PEAK.fetch_max(now, Relaxed);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- counting GlobalAlloc delegating to System
         unsafe { System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         LIVE.fetch_sub(l.size(), Relaxed);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- counting GlobalAlloc delegating to System
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
         LIVE.fetch_sub(l.size(), Relaxed);
         let now = LIVE.fetch_add(new, Relaxed) + new;
         PEAK.fetch_max(now, Relaxed);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- counting GlobalAlloc delegating to System
         unsafe { System.realloc(p, l, new) }
     }
 }
