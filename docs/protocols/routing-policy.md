@@ -163,7 +163,7 @@ bgp_instances[0].peer_groups[0].import_policy: referenced policy does not exist
 
 ### Structure
 
-A script is a list of statements, one per line. Blocks are marked by indentation, as in Python: an `if`, `elif` or `else` line ends with `:`, and the lines of its block are indented deeper than it. Indent with spaces; tabs are refused. `#` starts a comment that runs to the end of the line, and blank lines are ignored.
+A script is a list of statements, one per line. Blocks are marked by indentation, as in Python: an `if`, `elif` or `else` line ends with `:`, and the lines of its block are indented deeper than it. Indent with spaces; tabs are refused. `#` starts a comment that runs to the end of the line, except inside a `"..."` string literal, where it is an ordinary character. Blank lines are ignored.
 
 Every script must end in a decision on every path. The compiler checks this and refuses a script that could run off its end without reaching `accept` or `reject`. So a script ends either with `accept` or `reject`, or with an `if … else` whose every branch ends that way. An `if` without an `else` is fine anywhere before the last statement:
 
