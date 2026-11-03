@@ -39,7 +39,7 @@ pub struct BgpInstance {
 
     #[garde(
         dive,
-        custom(|groups, _ctx: &Config| bgp_peer_group::valid_peer_group_timers(groups))
+        custom(|groups, ctx: &Config| bgp_peer_group::valid_peer_group_timers(groups, ctx))
     )]
     #[cli(topic = BgpPeerGroup)]
     /// Session templates; their timers are validated together.

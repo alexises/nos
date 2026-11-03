@@ -66,6 +66,37 @@ pub fn compile(src: &str, symbols: &Symbols) -> Result<CompiledPolicy, CompileEr
     codegen::compile(&policy, symbols)
 }
 
+/// The next-hop literal a policy sets on EVERY path, if any: the last
+/// `set this.bgp.next_hop = <ip>` among the top-level statements before the
+/// first `if` (`= self` clears it). Syntax only (no symbols needed). Anything
+/// behind a condition is undecidable without path-sensitive prefix analysis
+/// and is deliberately not reported; the BGP runtime guard covers it.
+pub fn unconditional_next_hop(src: &str) -> Option<std::net::IpAddr> {
+    use ast::{ExprKind, Postfix, StmtKind};
+    let policy = parser::parse(&lexer::lex(src).ok()?).ok()?;
+    let mut found = None;
+    for stmt in &policy {
+        match &stmt.kind {
+            StmtKind::If { .. } | StmtKind::Accept | StmtKind::Reject => break,
+            StmtKind::Set(target, value) => {
+                let ExprKind::This(path) = &target.kind else {
+                    continue;
+                };
+                if !matches!(path.as_slice(), [Postfix::Field(a), Postfix::Field(b)] if a == "bgp" && b == "next_hop")
+                {
+                    continue;
+                }
+                found = match &value.kind {
+                    ExprKind::IpLit(ip) => Some(*ip),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 /// Parses a bare colon-separated community literal (`"65000:100"` ->
 /// `Some(vec![65000, 100])`), the exact grammar `parse_atom` accepts inline
 /// in a script for `.contains(..)`/`.add(..)`/`.remove(..)`. Returns `None`
@@ -116,6 +147,25 @@ pub const DENY_ALL_NAME: &str = "deny-all";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unconditional_next_hop_cases() {
+        let nh = |s: &str| unconditional_next_hop(s);
+        let v4 = Some("192.0.2.1".parse().unwrap());
+        assert_eq!(nh("set this.bgp.next_hop = 192.0.2.1\naccept\n"), v4);
+        assert_eq!(nh("set this.bgp.next_hop = self\naccept\n"), None);
+        assert_eq!(
+            nh("set this.bgp.next_hop = 192.0.2.1\nset this.bgp.next_hop = self\naccept\n"),
+            None
+        );
+        // Guarded, or after an `if`: not decidable, never reported.
+        assert_eq!(
+            nh("if this.bgp.local_pref == 1:\n    set this.bgp.next_hop = 192.0.2.1\n    accept\nelse:\n    reject\n"),
+            None
+        );
+        assert_eq!(nh("accept\n"), None);
+        assert_eq!(nh("not rpl !!"), None);
+    }
 
     #[test]
     fn accept_all_always_accepts() {

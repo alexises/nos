@@ -101,3 +101,33 @@ fn martian_table() {
     assert!(!m(addr("192.0.2.1"), Some(addr("192.0.2.2"))));
     assert!(m(addr("192.0.2.1"), Some(addr("192.0.2.1"))));
 }
+
+#[test]
+fn next_hop_family_rule() {
+    let ok = |p, nh, l: Option<&str>| next_hop_family_ok(prefix(p), addr(nh), l.map(addr));
+    assert!(ok("2001:db8::/32", "2001:db8::1", None));
+    assert!(!ok("2001:db8::/32", "192.0.2.1", Some("2001:db8::9")));
+    assert!(ok("198.51.100.0/24", "192.0.2.1", None));
+    // RFC 8950: v6 next hop for v4 only over a v6 session.
+    assert!(ok("198.51.100.0/24", "2001:db8::1", Some("2001:db8::9")));
+    assert!(!ok("198.51.100.0/24", "2001:db8::1", Some("10.0.0.9")));
+}
+
+#[test]
+fn import_policy_v4_next_hop_on_v6_route_is_ignored() {
+    let mut rib = rib_with_peer();
+    let policy = nos_rpl::compile(
+        "set this.bgp.next_hop = 192.0.2.99\naccept\n",
+        &nos_rpl::Symbols::EMPTY,
+    )
+    .unwrap();
+    rib.handle_update(
+        addr(PEER),
+        false,
+        v4("3.3.3.3"),
+        &mp_update("2001:db8::/32", "2001:db8::3"),
+        &policy,
+    );
+    let route = &rib.loc_rib[&prefix("2001:db8::/32")];
+    assert_eq!(route.next_hop, Some(addr("2001:db8::3")));
+}

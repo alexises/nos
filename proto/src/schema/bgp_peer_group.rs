@@ -944,7 +944,7 @@ fn valid_max_hops(max_hops: Option<u8>) -> garde::Result {
 /// than 0, the only combination that satisfies the inequality with
 /// `hold_time: Some(0)` is `keepalive_interval: None`, so hold-time-disables
 /// keepalives falls out of the one rule with no special case needed.
-pub(crate) fn valid_peer_group_timers(groups: &[BgpPeerGroup]) -> garde::Result {
+pub(crate) fn valid_peer_group_timers(groups: &[BgpPeerGroup], ctx: &Config) -> garde::Result {
     for group in groups {
         if let (Some(hold), Some(keepalive)) = (group.hold_time, group.keepalive_interval)
             && keepalive >= hold
@@ -960,6 +960,36 @@ pub(crate) fn valid_peer_group_timers(groups: &[BgpPeerGroup]) -> garde::Result 
             return Err(garde::Error::new(
                 "maximum-prefix is set for an address family the peer-group does not negotiate",
             ));
+        }
+        valid_next_hop_family(group, ctx)?;
+    }
+    Ok(())
+}
+
+/// An IPv6-unicast group whose import/export policy sets an IPv4 next-hop
+/// literal on every path would have it ignored (import) or the route dropped
+/// (export) for every IPv6 prefix: reject it. Guarded `set`s are not
+/// decidable here and fall to the runtime guard in `nos-bgpd`.
+fn valid_next_hop_family(group: &BgpPeerGroup, ctx: &Config) -> garde::Result {
+    if !group.address_families.contains(&AddressFamily::Ipv6Unicast) {
+        return Ok(());
+    }
+    for (dir, name) in [
+        ("import", &group.import_policy),
+        ("export", &group.export_policy),
+    ] {
+        let Some(def) = name
+            .as_ref()
+            .and_then(|n| ctx.policy_definitions.iter().find(|p| &p.name == n))
+        else {
+            continue;
+        };
+        if let Some(ip @ std::net::IpAddr::V4(_)) = nos_rpl::unconditional_next_hop(&def.source) {
+            return Err(garde::Error::new(format!(
+                "peer-group '{}' negotiates ipv6 but its {dir} policy sets next-hop {ip} (IPv4) on every route; \
+                 guard it with a prefix condition or use an IPv6 address",
+                group.name
+            )));
         }
     }
     Ok(())
@@ -1435,6 +1465,30 @@ mod tests {
             max_suppress: 1,
         };
         assert!(valid_damping(Some(&edge)).is_ok());
+    }
+
+    #[test]
+    fn unconditional_v4_next_hop_on_ipv6_group_is_rejected() {
+        let check = |src: &str, afs: Vec<AddressFamily>| {
+            let mut g = group("pg1", 65001, afs);
+            g.export_policy = Some("p".to_string());
+            let mut cfg = config_with(vec![instance_with_groups("r1", vec![g])]);
+            cfg.policy_definitions = vec![crate::schema::PolicyDefinition {
+                name: "p".to_string(),
+                source: src.to_string(),
+            }];
+            cfg.validate_with(&cfg).is_ok()
+        };
+        let dual = vec![AddressFamily::Ipv4Unicast, AddressFamily::Ipv6Unicast];
+        let bad = "set this.bgp.next_hop = 192.0.2.1\naccept\n";
+        assert!(!check(bad, dual.clone()));
+        assert!(check(bad, vec![AddressFamily::Ipv4Unicast]));
+        assert!(check(
+            "set this.bgp.next_hop = self\naccept\n",
+            dual.clone()
+        ));
+        let guarded = "if this.prefix in 198.51.100.0/24:\n    set this.bgp.next_hop = 192.0.2.1\n    accept\nelse:\n    accept\n";
+        assert!(check(guarded, dual));
     }
 
     #[test]
