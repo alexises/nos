@@ -48,13 +48,19 @@ pub struct PrefixList {
     pub entries: Vec<PrefixListEntry>,
 }
 
-/// A `range`, if set, may only narrow its own `cidr` — `min`/`max` must fall
+/// An entry's address must be its network address (no host bits), range or not
+/// (#669). A `range`, if set, may only narrow its own `cidr` — `min`/`max` must fall
 /// within `[cidr.prefix_len(), cidr.max_prefix_len()]` and `min <= max`.
 fn valid_entries(entries: &[PrefixListEntry]) -> garde::Result {
     if entries.is_empty() {
         return Err(garde::Error::new("must have at least one entry"));
     }
     for entry in entries {
+        if entry.cidr != entry.cidr.trunc() {
+            return Err(garde::Error::new(
+                "entry must not have host bits set (write the network address, e.g. 10.0.0.0/8)",
+            ));
+        }
         if let Some((min, max)) = entry.range
             && (min < entry.cidr.prefix_len() || min > max || max > entry.cidr.max_prefix_len())
         {
@@ -131,6 +137,20 @@ mod tests {
             vec![entry("10.0.0.0/8", Some((24, 40)))],
         )]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn host_bits_fail_for_exact_and_range_entries() {
+        for e in [
+            entry("192.168.1.0/16", None),
+            entry("192.168.1.0/16", Some((16, 24))),
+            entry("2001:db8::1/32", None),
+        ] {
+            let cfg = config_with(vec![list("BLOCKS", vec![e])]);
+            assert!(cfg.validate_with(&cfg).is_err());
+        }
+        let cfg = config_with(vec![list("BLOCKS", vec![entry("192.168.0.0/16", None)])]);
+        cfg.validate_with(&cfg).unwrap();
     }
 
     #[test]

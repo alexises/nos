@@ -265,7 +265,7 @@ edge-2(pl/prefix-list:customers)> show this
 prefix-list customers: entries [203.0.113.0/24, 198.51.100.0/22 upto 24, 2001:db8::/32 orlonger]
 ```
 
-`delete entry <prefix> [orlonger|upto <max>|range <min> <max>]` removes the matching entry. The absolute forms are `set prefix-list <name> entry …` and `delete prefix-list <name> entry …`, and `delete prefix-list <name>` removes the list. A prefix list needs at least one entry.
+`delete entry <prefix> [orlonger|upto <max>|range <min> <max>]` removes the matching entry. The absolute forms are `set prefix-list <name> entry …` and `delete prefix-list <name> entry …`, and `delete prefix-list <name>` removes the list. A prefix list needs at least one entry. Every entry, exact or range, must be a network address: `192.168.1.0/16` is rejected at commit (write `192.168.0.0/16`).
 
 Over REST, a prefix list is `{"name": …, "entries": [{"cidr": …, "range": [min, max] or null}]}`, and one entry is `…/prefix-list/<name>/entry/<prefix>` with the `/` encoded:
 
@@ -473,7 +473,7 @@ Created with `edit prefix-list <name>`; deleted with `delete prefix-list <name>`
 | Field | CLI (absolute / relative) | REST path and JSON | Type, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
 | name | `edit prefix-list <name>` | `prefix-list/<name>`, `"name"` | string | unique | Name used as `this.prefix in <name>` | `show config` |
-| entry | `set prefix-list <n> entry <prefix> [orlonger \| upto <max> \| range <min> <max>]` / `set entry …`; `delete prefix-list <n> entry …` / `delete entry …` | `…/entry/<prefix %2F-encoded>`, `{"cidr":"10.0.0.0/8","range":[8,24]}` (`range` `null` for exact) | IPv4 or IPv6 prefix; exact match by default | at least one entry; prefix length ≤ min ≤ max ≤ 32 or 128 | One prefix, or a range of prefix lengths inside it | `show this` in the list |
+| entry | `set prefix-list <n> entry <prefix> [orlonger \| upto <max> \| range <min> <max>]` / `set entry …`; `delete prefix-list <n> entry …` / `delete entry …` | `…/entry/<prefix %2F-encoded>`, `{"cidr":"10.0.0.0/8","range":[8,24]}` (`range` `null` for exact) | IPv4 or IPv6 prefix; exact match by default | at least one entry; no host bits in the prefix; prefix length ≤ min ≤ max ≤ 32 or 128 | One prefix, or a range of prefix lengths inside it | `show this` in the list |
 
 ### Community alias
 
