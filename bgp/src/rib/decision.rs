@@ -3,9 +3,9 @@
 //! calls. Moved verbatim out of `rib.rs`.
 
 use super::{
-    apply_verdict, family_of, message, policy_segments, to_policy_input, AddressFamily,
-    AdvertisedRoute, Arc, AsPath, HashMap, Instant, IpAddr, IpNet, Ipv4Addr, NextHopMode,
-    PeerOutbox, RibRoute, RouteOrigin, DEFAULT_LOCAL_PREF,
+    apply_verdict, family_of, message, next_hop_family_ok, policy_segments, to_policy_input,
+    warn_next_hop_family, AddressFamily, AdvertisedRoute, Arc, AsPath, HashMap, Instant, IpAddr,
+    IpNet, Ipv4Addr, NextHopMode, PeerOutbox, RibRoute, RouteOrigin, DEFAULT_LOCAL_PREF,
 };
 use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
 
@@ -373,7 +373,11 @@ pub(super) fn build_advertisement(
             flow.and_then(|(.., rd)| rd),
         ),
     );
-    let nh_edit = apply_verdict(&mut adjusted, verdict)?;
+    let nh_edit = apply_verdict(
+        &mut adjusted,
+        verdict,
+        flow.is_none().then_some((prefix, outbox.local_addr)),
+    )?;
     // RFC 9234 §5 egress, after policy so it cannot defeat it (unicast only).
     match (outbox.remote_role, adjusted.otc) {
         _ if flow.is_some() => {}
@@ -419,6 +423,12 @@ pub(super) fn build_advertisement(
             best.next_hop.or(outbox.local_addr)?
         }
     };
+    // A next hop of the wrong family (policy `self` fallback included) is
+    // never advertised: drop the route instead.
+    if flow.is_none() && !next_hop_family_ok(prefix, next_hop, outbox.local_addr) {
+        warn_next_hop_family(prefix, next_hop, "advertisement dropped");
+        return None;
+    }
 
     // `as_path` is only replaced (never mutated in place) by an RPL
     // `prepend`, so when the script didn't touch it it's still shared with whatever's stored in loc_rib/adj_rib_in at this

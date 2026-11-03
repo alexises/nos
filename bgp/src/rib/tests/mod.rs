@@ -341,7 +341,9 @@ fn gr_rib(gr: Option<PeerGr>) -> (BgpRib, IpAddr, mpsc::Receiver<OutboundUpdate>
     let peer = addr("10.0.0.1");
     rib.set_peer_gr(peer, gr);
     register_gr_peer(&mut rib, peer);
-    let observer = register_peer(&mut rib, addr("10.0.0.2"), false, addr("10.0.0.253"));
+    // A v6 session address: a v6 prefix needs a v6 next hop (#670), and
+    // v4 over it is RFC 8950.
+    let observer = register_peer(&mut rib, addr("10.0.0.2"), false, addr("2001:db8::fd"));
     for u in [
         ebgp_update(vec!["1.0.0.0/24", "2.0.0.0/24"], vec![65001], "10.0.0.1"),
         v6_update(vec!["2001:db8:1::/48"]),

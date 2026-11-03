@@ -16,7 +16,7 @@ fn resend_all_resends_loc_rib_filtered_to_one_family() {
         &mut rib,
         v6_peer,
         false,
-        addr("10.0.0.254"),
+        addr("2001:db8::fe"),
         [AddressFamily::Ipv6Unicast].into_iter().collect(),
     );
 

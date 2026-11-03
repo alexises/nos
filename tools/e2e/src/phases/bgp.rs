@@ -1390,6 +1390,32 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
     let w0 = a.count(&withdrawn);
     b.provision(&withdraw).await?;
     a.wait_new(&withdrawn, w0, 60).await?;
+
+    log("#670: an unconditional IPv4 next-hop literal on an ipv6 group is rejected at commit");
+    let err = a
+        .edit(|c| {
+            c.policy_definitions.push(nos_proto::PolicyDefinition {
+                name: "v4-next-hop".into(),
+                source: "set this.bgp.next_hop = 192.0.2.1\naccept\n".into(),
+            });
+            for g in c
+                .bgp_instances
+                .iter_mut()
+                .flat_map(|i| i.peer_groups.iter_mut())
+            {
+                g.address_families
+                    .push(nos_proto::AddressFamily::Ipv6Unicast);
+                g.export_policy = Some("v4-next-hop".into());
+            }
+            Ok(())
+        })
+        .await
+        .expect_err("commit must be rejected");
+    anyhow::ensure!(
+        format!("{err:#}").contains("IPv4"),
+        "unexpected rejection: {err:#}"
+    );
+
     // `ospf-lfa` puts the loopback back next and waits for a *new* install,
     // which never comes if the route is still up.
     a.wait_ospf_route_gone(OSPF_SPF_LOOPBACK_ADDRESS, 15).await

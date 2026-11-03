@@ -204,7 +204,38 @@ fn apply_policy(
         policy,
         &to_policy_input(prefix, &candidate, &segs, peer, rd),
     );
-    apply_verdict(&mut candidate, verdict).map(|_| candidate)
+    // VPN routes (`rd`) carry a next hop of either family; others are checked.
+    // ponytail: the session transport is unknown on import, so a v4 prefix is
+    // checked as if ENH were possible (v6 literal kept); `build_advertisement`
+    // re-checks against the real `local_addr`.
+    let check = rd
+        .is_none()
+        .then_some((prefix, Some(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))));
+    apply_verdict(&mut candidate, verdict, check).map(|_| candidate)
+}
+
+/// Whether a unicast `prefix` may carry next hop `nh`: v6 prefix needs a v6
+/// next hop; v4 needs v4, or v6 under RFC 8950 (`local_addr`, the session's
+/// own address, is v6).
+pub(super) fn next_hop_family_ok(prefix: IpNet, nh: IpAddr, local_addr: Option<IpAddr>) -> bool {
+    match prefix {
+        IpNet::V6(_) => nh.is_ipv6(),
+        IpNet::V4(_) => nh.is_ipv4() || local_addr.is_some_and(|l| l.is_ipv6()),
+    }
+}
+
+/// At most one next-hop family warning per `NH_FAMILY_WARN_EVERY`, process-wide.
+pub(super) fn warn_next_hop_family(prefix: IpNet, nh: IpAddr, what: &str) {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if last.is_some_and(|t| now.duration_since(t) < NH_FAMILY_WARN_EVERY) {
+        return;
+    }
+    *last = Some(now);
+    warn!(prefix = %prefix, next_hop = %nh, "next hop address family does not match the prefix: {what}");
 }
 
 /// Writes an accepting verdict's attribute rewrites back onto `route` and
@@ -212,7 +243,14 @@ fn apply_policy(
 /// (and `route` is untouched). An explicit next-hop address is stored on the
 /// route; `SelfAddress` only means something when advertising, so it is
 /// returned for `build_advertisement` and ignored on import.
-fn apply_verdict(route: &mut RibRoute, verdict: nos_rpl::Verdict) -> Option<nos_rpl::NextHopSet> {
+///
+/// `check` is the unicast `(prefix, session local address)` an explicit next
+/// hop must fit (`next_hop_family_ok`); a misfit is ignored with a warning.
+fn apply_verdict(
+    route: &mut RibRoute,
+    verdict: nos_rpl::Verdict,
+    check: Option<(IpNet, Option<IpAddr>)>,
+) -> Option<nos_rpl::NextHopSet> {
     let nos_rpl::Verdict::Accept {
         local_pref,
         med,
@@ -244,10 +282,17 @@ fn apply_verdict(route: &mut RibRoute, verdict: nos_rpl::Verdict) -> Option<nos_
             nos_rpl::Origin::Incomplete => message::Origin::Incomplete,
         };
     }
-    if let nos_rpl::NextHopSet::Addr(a) = edits.next_hop {
-        route.next_hop = Some(a);
+    let mut nh_edit = edits.next_hop;
+    if let nos_rpl::NextHopSet::Addr(a) = nh_edit {
+        match check {
+            Some((p, l)) if !next_hop_family_ok(p, a, l) => {
+                warn_next_hop_family(p, a, "set ignored");
+                nh_edit = nos_rpl::NextHopSet::Unchanged;
+            }
+            _ => route.next_hop = Some(a),
+        }
     }
-    Some(edits.next_hop)
+    Some(nh_edit)
 }
 
 fn family_index(prefix: IpNet) -> usize {
@@ -259,6 +304,8 @@ fn family_index(prefix: IpNet) -> usize {
 /// carries no wire attributes at all).
 const DEFAULT_LOCAL_PREF: u32 = 100;
 /// Minimum spacing of the per-peer "first AS is not the peer's" warning.
+/// Minimum spacing of the next-hop family warning.
+const NH_FAMILY_WARN_EVERY: Duration = Duration::from_secs(10);
 const FIRST_AS_WARN_EVERY: Duration = Duration::from_secs(10);
 
 fn family_of(net: IpNet) -> AddressFamily {
