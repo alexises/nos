@@ -105,6 +105,7 @@ fn parse(args: &[String]) -> Option<Parsed> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> io::Result<()> {
+    // nosemgrep: rust.lang.security.args.args -- stub parses its own flags
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((listen, vrp, key)) = parse(&args) else {
         eprintln!(

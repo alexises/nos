@@ -19,6 +19,7 @@ async fn child_role() {
 #[allow(clippy::disallowed_types, reason = "re-executes the built test binary")]
 fn spawned_task_panic_aborts_process() {
     let start = Instant::now();
+    // nosemgrep: rust.lang.security.current-exe.current-exe -- test re-execs its own binary
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["child_role", "--exact", "--nocapture"])
         .env("NOS_PANIC_CHILD", "1")
