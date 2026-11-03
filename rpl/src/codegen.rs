@@ -1096,6 +1096,14 @@ mod tests {
     }
 
     #[test]
+    fn escaped_quote_and_bad_escape_in_matches() {
+        compile_src("if this.bgp.as_path.matches(\"\\\"\"):\n    accept\nelse:\n    reject\n");
+        let err =
+            compile_err("if this.bgp.as_path.matches(\"\\q\"):\n    accept\nelse:\n    reject\n");
+        assert!(err.message.contains("unknown escape '\\q'"));
+    }
+
+    #[test]
     fn bad_regex_and_bad_prepend_are_compile_errors() {
         assert!(compile_err(
             "if this.bgp.as_path.matches(\"(\"):\n    accept\nelse:\n    reject\n"
