@@ -71,6 +71,12 @@ impl KernelGate {
         self.notify.notify_one();
     }
 
+    /// Reads and clears the flag, for tests.
+    #[cfg(test)]
+    pub(crate) fn take_dirty_for_test(&self) -> bool {
+        self.dirty.swap(false, Ordering::SeqCst)
+    }
+
     async fn notified(&self) {
         self.notify.notified().await;
     }

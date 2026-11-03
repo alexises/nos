@@ -827,6 +827,77 @@ mod authz_tests {
         }
     }
 
+    /// Every kernel write fails.
+    struct FailingDriver;
+
+    #[async_trait::async_trait]
+    impl RibDriver for FailingDriver {
+        async fn apply(
+            &self,
+            _: &str,
+            _: &HashMap<IpNet, RibEntry>,
+        ) -> Result<(), crate::driver::DriverError> {
+            Err(crate::driver::DriverError::Other("boom".into()))
+        }
+        async fn apply_delta(
+            &self,
+            _: &str,
+            _: &HashMap<IpNet, Option<RibEntry>>,
+        ) -> Result<(), crate::driver::DriverError> {
+            Err(crate::driver::DriverError::Other("boom".into()))
+        }
+        async fn teardown(&self, _: &str) -> Result<(), crate::driver::DriverError> {
+            Ok(())
+        }
+        async fn vrf_name(&self, _: &str) -> Option<String> {
+            None
+        }
+        async fn table_id(&self, _: &str) -> Option<u32> {
+            None
+        }
+    }
+
+    /// #653: a failed full apply or delta, from any producer, marks the gate dirty.
+    #[tokio::test]
+    async fn a_failed_kernel_write_marks_the_gate_dirty() {
+        let ctx = Context {
+            table: "t".to_string(),
+            rib: Arc::new(RwLock::new(Rib::new())),
+            kernel: Arc::default(),
+            driver: Arc::new(FailingDriver),
+        };
+        let dirty = |ctx: &Context| {
+            let g = ctx.kernel.take_dirty_for_test();
+            g
+        };
+        let r = |p: &str| BgpRoute {
+            prefix: p.parse().unwrap(),
+            next_hops: vec!["10.0.0.2".parse().unwrap()],
+            backup_next_hop: None,
+        };
+        apply_bgp_route_update(&ctx, vec![BgpRouteUpdate::Add(r("10.1.0.0/24"))]).await;
+        assert!(dirty(&ctx));
+        apply_bgp_route_update(&ctx, vec![BgpRouteUpdate::Full(vec![])]).await;
+        assert!(dirty(&ctx));
+        let o = OspfRoute {
+            prefix: "10.2.0.0/24".parse().unwrap(),
+            next_hops: vec![],
+            metric: 1,
+            discard: true,
+            backup_next_hop: None,
+            backup_tunnel: None,
+            backup_interface_id: None,
+        };
+        apply_ospf_route_update(&ctx, vec![OspfRouteUpdate::Add(o)]).await;
+        assert!(dirty(&ctx));
+        apply_ospf_route_update(&ctx, vec![OspfRouteUpdate::Full(vec![])]).await;
+        assert!(dirty(&ctx));
+        apply_vpn_route_update(&ctx, vec![VpnRouteUpdate::Add(vpn_route("10.3.0.0/24", 1))]).await;
+        assert!(dirty(&ctx));
+        apply_vpn_route_update(&ctx, vec![VpnRouteUpdate::Full(vec![])]).await;
+        assert!(dirty(&ctx));
+    }
+
     fn vpn_path(rd: &str, label: u32) -> nos_proto::VpnPath {
         nos_proto::VpnPath {
             pe_next_hop: "192.0.2.3".parse().unwrap(),
