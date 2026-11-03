@@ -157,6 +157,7 @@ fn status(name: &str, mtu: u32, subs: Vec<SubinterfaceStatus>) -> InterfaceStatu
 
 fn sub_status(tag: u16, addrs: &[&str], ll: Option<&str>) -> SubinterfaceStatus {
     SubinterfaceStatus {
+        mtu: 1500,
         tag,
         addresses: addrs.iter().map(|a| addr(a)).collect(),
         routing_table: Some("rt1".into()),

@@ -681,3 +681,26 @@ fn flowspec_flag() {
         .join("\n");
     assert!(shown.contains("flowspec"), "{shown}");
 }
+
+/// #842: a subinterface's MTU override is set like any field.
+#[test]
+fn subinterface_mtu() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let edit = config_grammar::parse("set interface eth0 subinterface 100 mtu 9000", &[], &doc)
+        .expect("set mtu");
+    for (path, value) in edit.writes {
+        config_path::set_at(&mut doc, &path, value, edit.position.as_ref()).unwrap();
+    }
+    let cfg: Config = serde_json::from_value(doc.clone()).unwrap();
+    let eth0 = cfg.interfaces.iter().find(|i| i.name == "eth0").unwrap();
+    assert!(eth0
+        .subinterfaces
+        .iter()
+        .any(|s| s.tag == 100 && s.mtu == Some(9000)));
+    let shown = nos_proto::cli::render::render_root(&doc)
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(shown.contains("mtu 9000"), "{shown}");
+}

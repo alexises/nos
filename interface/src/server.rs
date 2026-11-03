@@ -322,23 +322,30 @@ async fn apply_pushed(ctx: &Context, updated: Vec<InterfaceState>) {
     }
 }
 
+/// Effective sub-link MTU: the override, else the parent's.
+fn sub_status(s: crate::state::SubinterfaceState, parent_mtu: u32) -> SubinterfaceStatus {
+    SubinterfaceStatus {
+        tag: s.tag,
+        addresses: s.addresses,
+        routing_table: s.routing_table,
+        mtu: s.mtu.unwrap_or(parent_mtu),
+        link_local_address: s.link_local_address,
+    }
+}
+
 fn to_status(iface: InterfaceState) -> InterfaceStatus {
+    let mtu = iface.mtu.unwrap_or(crate::driver::DEFAULT_MTU);
     InterfaceStatus {
         name: iface.name,
         addresses: iface.addresses,
         routing_table: iface.routing_table,
         switching_profile: iface.switching_profile,
         port_aggregate: iface.port_aggregate,
-        mtu: iface.mtu.unwrap_or(crate::driver::DEFAULT_MTU),
+        mtu,
         subinterfaces: iface
             .subinterfaces
             .into_iter()
-            .map(|s| SubinterfaceStatus {
-                tag: s.tag,
-                addresses: s.addresses,
-                routing_table: s.routing_table,
-                link_local_address: s.link_local_address,
-            })
+            .map(|s| sub_status(s, mtu))
             .collect(),
         // A loopback interface's own flat L3 config has no live link-local
         // Hello exchange to source (see `InterfaceState`'s doc comment) —
@@ -359,24 +366,39 @@ fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
 }
 
 fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
+    let mtu = agg.mtu.unwrap_or(crate::driver::DEFAULT_MTU);
     PortAggregateStatus {
         name: agg.name,
         mode: agg.mode,
         switching_profile: agg.switching_profile,
-        mtu: agg.mtu.unwrap_or(crate::driver::DEFAULT_MTU),
+        mtu,
         subinterfaces: agg
             .subinterfaces
             .into_iter()
-            .map(|s| SubinterfaceStatus {
-                tag: s.tag,
-                addresses: s.addresses,
-                routing_table: s.routing_table,
-                link_local_address: s.link_local_address,
-            })
+            .map(|s| sub_status(s, mtu))
             .collect(),
         link_local_address: agg.link_local_address,
         bond_name: agg.bond_name,
         err_disabled: agg.stp.err_disabled,
+    }
+}
+
+#[cfg(test)]
+mod mtu_tests {
+    use super::*;
+    use crate::state::SubinterfaceState;
+
+    #[test]
+    fn sub_status_mtu_is_override_else_parent() {
+        let sub = |mtu| SubinterfaceState {
+            tag: 100,
+            addresses: Vec::new(),
+            routing_table: None,
+            mtu,
+            link_local_address: None,
+        };
+        assert_eq!(sub_status(sub(None), 9000).mtu, 9000);
+        assert_eq!(sub_status(sub(Some(1400)), 9000).mtu, 1400);
     }
 }
 

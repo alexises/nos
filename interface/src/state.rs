@@ -18,6 +18,8 @@ pub struct SubinterfaceState {
     pub tag: u16,
     pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
+    /// Configured per-subinterface MTU override; `None` follows the parent.
+    pub mtu: Option<u32>,
     /// This subinterface's own kernel device's observed IPv6 link-local
     /// address — see `nos_proto::SubinterfaceStatus.link_local_address`'s
     /// doc comment. Queried via `driver.link_local_address` after `apply`,
@@ -641,6 +643,7 @@ async fn build_subinterfaces(
             tag: s.tag,
             addresses: s.addresses.clone(),
             routing_table: s.routing_table.clone(),
+            mtu: s.mtu,
             link_local_address: driver.link_local_address(&kernel_interface).await,
         });
     }
@@ -821,6 +824,7 @@ mod tests {
         };
         let mut iface = interface("eth0");
         iface.subinterfaces = vec![nos_proto::Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -844,6 +848,7 @@ mod tests {
     async fn build_from_config_maps_tagged_subinterface_untouched() {
         let mut iface = interface("eth0");
         iface.subinterfaces = vec![nos_proto::Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,

@@ -37,8 +37,8 @@ pub fn render_subinterface_status(status: &SubinterfaceStatus) -> String {
     };
     let routing_table = status.routing_table.as_deref().unwrap_or("unset");
     format!(
-        "subinterface {}: address [{addresses}], routing-table {routing_table}",
-        status.tag
+        "subinterface {}: address [{addresses}], routing-table {routing_table}, mtu {}",
+        status.tag, status.mtu
     )
 }
 
@@ -3045,6 +3045,7 @@ mod tests {
 
     fn sub_status(tag: u16, addresses: Vec<InterfaceAddress>) -> SubinterfaceStatus {
         SubinterfaceStatus {
+            mtu: 1500,
             tag,
             addresses,
             routing_table: (tag == 0).then(|| "rt1".to_string()),
@@ -3075,8 +3076,8 @@ mod tests {
             out.lines().take(3).collect::<Vec<_>>(),
             [
                 "interface eth0: address [10.9.0.1/32], routing-table unset, switching-profile trunk, mtu 1500",
-                "  subinterface 0: address [10.0.0.1/24], routing-table rt1",
-                "  subinterface 5: address [none], routing-table unset",
+                "  subinterface 0: address [10.0.0.1/24], routing-table rt1, mtu 1500",
+                "  subinterface 5: address [none], routing-table unset, mtu 1500",
             ]
         );
         let agg = PortAggregateStatus {
@@ -3092,7 +3093,7 @@ mod tests {
         assert_eq!(
             render_port_aggregate_statuses(std::slice::from_ref(&agg)),
             "port-aggregate bond1: mode Xor, switching-profile unset, mtu 9000\n  \
-             subinterface 0: address [none], routing-table rt1"
+             subinterface 0: address [none], routing-table rt1, mtu 1500"
         );
         let held = PortAggregateStatus {
             err_disabled: true,

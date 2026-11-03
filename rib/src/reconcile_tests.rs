@@ -144,6 +144,7 @@ fn if_status(name: &str, flat: &[&str], tag0: &[&str]) -> InterfaceStatus {
             vec![]
         } else {
             vec![SubinterfaceStatus {
+                mtu: 1500,
                 tag: 0,
                 addresses: tag0.iter().map(|a| addr(a, None)).collect(),
                 routing_table: Some("rt1".into()),

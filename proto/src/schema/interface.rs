@@ -92,6 +92,15 @@ pub struct Subinterface {
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profile: Option<String>,
 
+    /// Overrides the MTU of this VLAN sub-link, in bytes. `None` follows the
+    /// parent's MTU. Must not exceed the parent's effective MTU and is
+    /// rejected on tag 0 (the physical link itself) — see
+    /// `valid_subinterface_mtus`.
+    #[serde(default)]
+    #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
+    #[cli(topic = SubinterfaceMtu, words = "mtu")]
+    pub mtu: Option<u32>,
+
     /// RFC 9468: names a `BfdProfile` for the passive sessions created by
     /// unsolicited BFD Control packets (Your Discriminator 0) on this
     /// subinterface. Requires `routing_table` on the same subinterface: the
@@ -182,6 +191,35 @@ fn valid_subinterface_ospf_profile_requires_routing_table(
 pub(crate) fn valid_subinterface_list(subinterfaces: &[Subinterface]) -> garde::Result {
     unique_subinterface_tags(subinterfaces)?;
     valid_subinterface_ospf_profile_requires_routing_table(subinterfaces)?;
+    Ok(())
+}
+
+/// Effective MTU of a link with no explicit `mtu` (Linux's default).
+pub(crate) const DEFAULT_MTU: u32 = 1500;
+
+/// A subinterface `mtu` override must be on a real VLAN (tag != 0) and not
+/// exceed the parent's effective MTU (`mtu`, else 1500): the kernel refuses a
+/// VLAN MTU above its lower device. Also catches lowering the parent below an
+/// existing override. `pub(crate)` since `PortAggregate` reuses it.
+pub(crate) fn valid_subinterface_mtus(
+    subinterfaces: &[Subinterface],
+    parent_mtu: Option<u32>,
+) -> garde::Result {
+    let parent = parent_mtu.unwrap_or(DEFAULT_MTU);
+    for sub in subinterfaces {
+        let Some(m) = sub.mtu else { continue };
+        if sub.tag == 0 {
+            return Err(garde::Error::new(
+                "mtu cannot be set on the untagged subinterface (tag 0): set the parent's mtu",
+            ));
+        }
+        if m > parent {
+            return Err(garde::Error::new(format!(
+                "subinterface {} mtu {m} exceeds the parent's mtu {parent}",
+                sub.tag
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -307,8 +345,8 @@ pub struct Interface {
     /// The link's MTU, in bytes. A link-layer property of the physical (or
     /// loopback) interface itself — unlike `addresses`/`routing_table`, it's
     /// not part of the loopback/physical addressing split (see
-    /// `valid_addressing_split`): a VLAN `Subinterface` has no `mtu` of its
-    /// own and always inherits this value. `None` leaves whatever MTU the
+    /// `valid_addressing_split`): a VLAN `Subinterface` follows this
+    /// value unless it sets its own (smaller) `mtu`. `None` leaves whatever MTU the
     /// kernel link already has untouched (`nos-interfaced`'s Linux driver
     /// never resets it to a default) rather than forcing 1500.
     #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
@@ -542,6 +580,9 @@ fn valid_lldp_physical_only(interfaces: &[Interface]) -> garde::Result {
 /// checks above — see each for details.
 pub(crate) fn valid_interfaces(interfaces: &[Interface], ctx: &Config) -> garde::Result {
     valid_addressing_split(interfaces)?;
+    for iface in interfaces {
+        valid_subinterface_mtus(&iface.subinterfaces, iface.mtu)?;
+    }
     valid_subinterface_and_switching_profile_tags(interfaces, ctx)?;
     valid_port_aggregate_membership(interfaces)?;
     valid_lldp_physical_only(interfaces)?;
@@ -589,6 +630,7 @@ mod tests {
     fn physical_with_l3(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         let mut iface = interface(name, &[], None);
         iface.subinterfaces = vec![Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -628,6 +670,30 @@ mod tests {
             routing_tables: tables,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn subinterface_mtu_override_rules() {
+        let with = |parent: Option<u32>, tag: u16, mtu: Option<u32>| {
+            let mut iface = physical_with_l3("eth0", &[], None);
+            iface.mtu = parent;
+            iface.subinterfaces = vec![Subinterface {
+                tag,
+                mtu,
+                ..Default::default()
+            }];
+            let cfg = config_with(vec![iface], vec![]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(with(None, 100, None), "no override");
+        assert!(with(Some(9000), 100, Some(9000)), "equal to parent");
+        assert!(with(None, 100, Some(1400)), "below default parent");
+        assert!(!with(None, 100, Some(9000)), "above default 1500 parent");
+        assert!(!with(Some(9000), 100, Some(9001)), "above parent");
+        assert!(!with(Some(9000), 0, Some(1500)), "tag 0 rejected");
+        assert!(!with(Some(9000), 100, Some(10)), "below 68");
+        // Lowering the parent below an existing override is rejected too.
+        assert!(!with(Some(1400), 100, Some(1500)));
     }
 
     #[test]
@@ -767,6 +833,7 @@ mod tests {
     fn duplicate_address_different_label_still_conflicts() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -794,6 +861,7 @@ mod tests {
     fn loopback_with_subinterfaces_fails() {
         let mut iface = interface("loopback-rt1", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -828,6 +896,7 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                mtu: None,
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
@@ -839,6 +908,7 @@ mod tests {
                 ospf_profile: None,
             },
             Subinterface {
+                mtu: None,
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
@@ -858,6 +928,7 @@ mod tests {
     fn subinterface_tag_4095_fails() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            mtu: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -877,6 +948,7 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                mtu: None,
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
@@ -888,6 +960,7 @@ mod tests {
                 ospf_profile: None,
             },
             Subinterface {
+                mtu: None,
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,

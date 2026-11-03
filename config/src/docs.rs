@@ -821,14 +821,24 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Remove an interface's port-aggregate association.",
             ),
         ),
+        Topic::SubinterfaceMtu => (
+            "Override a VLAN subinterface's MTU.",
+            concat!(
+                "Sets the MTU (in bytes, 68-65535) of this subinterface's VLAN sub-link, \
+             overriding the parent's MTU that it follows by default. Must not exceed the \
+             parent interface's or port aggregate's MTU (1500 if unset), and is rejected on \
+             tag 0, which is the physical link itself; both checked at commit time.",
+                " ",
+                "Clear the override: `delete` makes the sub-link follow the parent again.",
+            ),
+        ),
         Topic::InterfaceMtu => (
             "Set an interface's MTU.",
             concat!(
                 "Sets the MTU (in bytes, 68-65535) on a physical or loopback interface — a \
-             link-layer property of the interface itself, applying uniformly to every one of \
-             its subinterfaces (a VLAN sub-link has no MTU of its own, unlike addresses/\
-             routing-table), so set it on the parent interface or port aggregate, not \
-             inside a subinterface. Unset means 1500, enforced on the link.",
+             link-layer property of the interface itself, followed by every one of its \
+             subinterfaces unless one sets its own smaller `mtu`. Unset means 1500, \
+             enforced on the link.",
                 " ",
                 "Clear an interface's MTU: `delete` puts the link back to 1500.",
             ),
