@@ -201,6 +201,8 @@ struct Port {
     /// LACPDUs dropped since the last accepted one (warned once per burst).
     rx_dropped: u64,
     churn: Churn,
+    /// Whether the last LACPDU's Partner block described us (recordPDU).
+    partner_view_matches: bool,
 }
 
 impl Port {
@@ -240,6 +242,7 @@ impl Port {
             rx_limiter: TxLimiter::new(Instant::now(), MAX_RX_PER_WINDOW),
             rx_dropped: 0,
             churn,
+            partner_view_matches: true,
         };
         port.report();
         port
@@ -403,7 +406,45 @@ impl Port {
             self.rx_dropped = 0;
         }
         let before = (self.receive_state, self.mux_state, self.partner);
-        self.partner = Some(pdu.actor);
+        // update_Selected: a changed partner identity deselects the port at
+        // once (mux leaves Collecting/Distributing); selection re-runs from
+        // the fresh observation.
+        if self
+            .partner
+            .is_some_and(|old| partner_identity(&old) != partner_identity(&pdu.actor))
+        {
+            let (ms, a) = mux_machine::step(
+                self.mux_state,
+                mux_machine::Event::PartnerStateChanged {
+                    synchronized: false,
+                    collecting: false,
+                },
+            );
+            self.mux_state = ms;
+            apply_mux_action(a, &mut self.wait_while_deadline);
+        }
+        // recordPDU match; an Individual partner has no tuple to match.
+        let ours = actor_info(
+            &self.config,
+            self.number,
+            actor_state_byte(
+                self.receive_state,
+                self.mux_state,
+                self.config.rate,
+                self.config.actor_active,
+            ),
+        );
+        let matched = !pdu.actor.has_state(state_bit::AGGREGATION)
+            || partner_matches_actor(&pdu.partner, &ours);
+        if self.partner_view_matches && !matched {
+            info!(interface = %self.config.interface, partner_system = ?pdu.actor.system, "lacp partner view mismatch");
+        }
+        self.partner_view_matches = matched;
+        let mut recorded = pdu.actor;
+        if !matched {
+            recorded.state &= !state_bit::SYNCHRONIZATION;
+        }
+        self.partner = Some(recorded);
         let (rs, action) = receive_machine::step(
             self.receive_state,
             receive_machine::Event::LacpduReceived {
@@ -415,8 +456,8 @@ impl Port {
         let (ms, mux_action) = mux_machine::step(
             self.mux_state,
             mux_machine::Event::PartnerStateChanged {
-                synchronized: pdu.actor.has_state(state_bit::SYNCHRONIZATION),
-                collecting: pdu.actor.has_state(state_bit::COLLECTING),
+                synchronized: matched && pdu.actor.has_state(state_bit::SYNCHRONIZATION),
+                collecting: matched && pdu.actor.has_state(state_bit::COLLECTING),
             },
         );
         self.mux_state = ms;
@@ -429,6 +470,7 @@ impl Port {
                 receive_state = ?self.receive_state,
                 mux_state = ?self.mux_state,
                 partner_system = ?pdu.actor.system,
+                partner_view_matches = matched,
                 "lacp lacpdu received"
             );
         }
@@ -640,6 +682,46 @@ fn actor_state_byte(
     state
 }
 
+/// Our Actor information block: shared by the PDU we send and by
+/// [`partner_matches_actor`], so they cannot drift.
+fn actor_info(config: &LinkConfig, port_number: u16, state: u8) -> PortInfo {
+    PortInfo {
+        system_priority: config.actor_system_priority,
+        system: config.actor_system_id,
+        key: config.actor_key,
+        port_priority: config.actor_port_priority,
+        port: port_number,
+        state,
+    }
+}
+
+/// 802.1AX §6.4.9 recordPDU "match": does the partner's view of us (the
+/// Partner block of its LACPDU) describe our current Actor identity? Same
+/// fields as Linux `bond_3ad.c` `__record_pdu`/`__choose_matched`: port,
+/// port priority, system, system priority, key and the Aggregation bit.
+fn partner_matches_actor(pdu_partner: &PortInfo, our_actor: &PortInfo) -> bool {
+    pdu_partner.port == our_actor.port
+        && pdu_partner.port_priority == our_actor.port_priority
+        && pdu_partner.system == our_actor.system
+        && pdu_partner.system_priority == our_actor.system_priority
+        && pdu_partner.key == our_actor.key
+        && pdu_partner.has_state(state_bit::AGGREGATION)
+            == our_actor.has_state(state_bit::AGGREGATION)
+}
+
+/// §6.4.9 `update_Selected`: the identity fields whose change means the
+/// partner is no longer the one we selected against.
+fn partner_identity(p: &PortInfo) -> (u16, u16, [u8; 6], u16, u16, bool) {
+    (
+        p.port,
+        p.port_priority,
+        p.system,
+        p.system_priority,
+        p.key,
+        p.has_state(state_bit::AGGREGATION),
+    )
+}
+
 fn build_pdu(
     config: &LinkConfig,
     port_number: u16,
@@ -647,14 +729,11 @@ fn build_pdu(
     mux_state: MuxState,
     partner: Option<PortInfo>,
 ) -> Lacpdu {
-    let actor = PortInfo {
-        system_priority: config.actor_system_priority,
-        system: config.actor_system_id,
-        key: config.actor_key,
-        port_priority: config.actor_port_priority,
-        port: port_number,
-        state: actor_state_byte(receive_state, mux_state, config.rate, config.actor_active),
-    };
+    let actor = actor_info(
+        config,
+        port_number,
+        actor_state_byte(receive_state, mux_state, config.rate, config.actor_active),
+    );
     // No (or a given-up) partner: advertise 802.1AX's administrative default.
     let partner = partner.unwrap_or(PortInfo::ADMINISTRATIVE_DEFAULT);
     Lacpdu {

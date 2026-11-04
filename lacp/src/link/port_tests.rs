@@ -109,14 +109,27 @@ fn partner_info(state: u8) -> PortInfo {
 fn partner_frame(state: u8) -> Vec<u8> {
     encode(&Lacpdu {
         actor: partner_info(state),
-        partner: PortInfo {
-            system_priority: 0,
-            system: [0; 6],
-            key: 0,
-            port_priority: 0,
-            port: 0,
-            state: 0,
-        },
+        partner: our_view(),
+        collector_max_delay: 0,
+    })
+}
+
+/// The Partner block of a partner that has heard us: our rig actor identity.
+fn our_view() -> PortInfo {
+    PortInfo {
+        system_priority: 100,
+        system: [1; 6],
+        key: 7,
+        port_priority: 200,
+        port: 3,
+        state: state_bit::AGGREGATION,
+    }
+}
+
+fn frame_with_view(state: u8, view: PortInfo) -> Vec<u8> {
+    encode(&Lacpdu {
+        actor: partner_info(state),
+        partner: view,
         collector_max_delay: 0,
     })
 }
@@ -515,4 +528,130 @@ async fn lacpdus_beyond_the_rx_budget_are_dropped_and_refill_after_a_second() {
     r.port.on_frame(&partner_frame(sync), &r.sink);
     assert_eq!(r.port.rx_dropped, 0);
     assert_ne!(r.observed(), before);
+}
+
+const BOTH: u8 = ACTIVE_PARTNER | state_bit::SYNCHRONIZATION | state_bit::COLLECTING;
+
+fn distributing_rig() -> Rig {
+    let mut r = rig(true, LacpRate::Fast);
+    r.port.on_selection(true, &r.sink);
+    r.port.on_wait_while_expired(&r.sink);
+    r.port.on_frame(&partner_frame(BOTH), &r.sink);
+    r.port.on_frame(&partner_frame(BOTH), &r.sink);
+    assert_eq!(r.observed().mux_state, MuxState::Distributing);
+    r
+}
+
+#[test]
+fn a_stale_partner_view_never_advances_the_mux() {
+    let stale = [
+        PortInfo {
+            system: [2; 6],
+            ..our_view()
+        },
+        PortInfo {
+            system_priority: 1,
+            ..our_view()
+        },
+        PortInfo {
+            key: 8,
+            ..our_view()
+        },
+        PortInfo {
+            port_priority: 1,
+            ..our_view()
+        },
+        PortInfo {
+            port: 4,
+            ..our_view()
+        },
+        PortInfo {
+            state: 0,
+            ..our_view()
+        },
+    ];
+    for view in stale {
+        let mut r = rig(true, LacpRate::Fast);
+        r.port.on_selection(true, &r.sink);
+        r.port.on_wait_while_expired(&r.sink);
+        r.port.on_frame(&frame_with_view(BOTH, view), &r.sink);
+        let o = r.observed();
+        assert_eq!(o.mux_state, MuxState::Attached, "{view:?}");
+        assert!(!o.partner.unwrap().has_state(state_bit::SYNCHRONIZATION));
+    }
+    let mut r = rig(true, LacpRate::Fast);
+    r.port.on_selection(true, &r.sink);
+    r.port.on_wait_while_expired(&r.sink);
+    r.port.on_frame(&frame_with_view(BOTH, our_view()), &r.sink);
+    r.port.on_frame(&frame_with_view(BOTH, our_view()), &r.sink);
+    assert_eq!(r.observed().mux_state, MuxState::Distributing);
+}
+
+#[test]
+fn a_stale_view_mid_distributing_leaves_it() {
+    let mut r = distributing_rig();
+    r.refill();
+    r.port.on_frame(
+        &frame_with_view(
+            BOTH,
+            PortInfo {
+                system: [2; 6],
+                ..our_view()
+            },
+        ),
+        &r.sink,
+    );
+    assert_eq!(r.observed().mux_state, MuxState::Attached);
+    assert!(!r.port.partner_view_matches);
+}
+
+#[test]
+fn a_changed_partner_identity_deselects_the_port() {
+    let mut r = distributing_rig();
+    r.refill();
+    r.port.on_frame(&frame_with_view(BOTH, our_view()), &r.sink);
+    assert_eq!(
+        r.observed().mux_state,
+        MuxState::Distributing,
+        "same partner"
+    );
+    let mut new = partner_info(BOTH);
+    new.system = [8; 6];
+    let pdu = Lacpdu {
+        actor: new,
+        partner: our_view(),
+        collector_max_delay: 0,
+    };
+    r.port.on_frame(&encode(&pdu), &r.sink);
+    assert_eq!(r.observed().partner.unwrap().system, [8; 6]);
+    assert_ne!(r.observed().mux_state, MuxState::Distributing);
+}
+
+#[test]
+fn an_individual_partner_skips_the_match() {
+    let mut r = rig(true, LacpRate::Fast);
+    r.port.on_frame(
+        &frame_with_view(
+            state_bit::ACTIVITY,
+            PortInfo {
+                system: [2; 6],
+                ..our_view()
+            },
+        ),
+        &r.sink,
+    );
+    assert!(r.port.partner_view_matches);
+}
+
+#[test]
+fn matching_compares_the_key() {
+    let ours = our_view();
+    assert!(partner_matches_actor(&our_view(), &ours));
+    assert!(!partner_matches_actor(
+        &PortInfo {
+            key: 9,
+            ..our_view()
+        },
+        &ours
+    ));
 }
