@@ -163,7 +163,7 @@ bgp_instances[0].peer_groups[0].import_policy: referenced policy does not exist
 
 ### Structure
 
-A script is a list of statements, one per line. Blocks are marked by indentation, as in Python: an `if`, `elif` or `else` line ends with `:`, and the lines of its block are indented deeper than it. Indent with spaces; tabs are refused. `#` starts a comment that runs to the end of the line, except inside a `"..."` string literal, where it is an ordinary character. Blank lines are ignored.
+A script is a list of statements, one per line. Blocks are marked by indentation, as in Python: an `if`, `elif` or `else` line ends with `:`, and the lines of its block are indented deeper than it. Indent with spaces; tabs are refused. `#` starts a comment that runs to the end of the line, except inside a `"..."` string literal, where it is an ordinary character (an escaped quote `\"` does not end the literal). Blank lines are ignored.
 
 Every script must end in a decision on every path. The compiler checks this and refuses a script that could run off its end without reaching `accept` or `reject`. So a script ends either with `accept` or `reject`, or with an `if … else` whose every branch ends that way. An `if` without an `else` is fine anywhere before the last statement:
 
@@ -234,7 +234,7 @@ A list field (the AS path, the cluster list and the communities) cannot be used 
   - an extended community (RFC 4360) is `<type>:<subtype>:<value>`, with type and subtype 0 to 255 and a 48-bit value: `0:2:100`;
   - a large community (RFC 8092) is `<global>:<local1>:<local2>`, each 0 to 4294967295: `65001:1:1`.
 - Route targets, Sites of Origin and Route Distinguishers: `rt(65000:10000)`, `soo(65001:77)` and `rd(65001:1)`, with an AS number or an IPv4 address before the colon (`rt(192.0.2.1:7)`). `rt()` and `soo()` are extended communities (`.contains`, `.add`, `.remove` on `this.bgp.extended_communities`); `rd()` only compares with `this.bgp.rd`. They encode exactly as the configuration does (two-octet AS and 32-bit number, IPv4 address and 16-bit number, or four-octet AS and 16-bit number), so `rt(65000:10000)` is the raw `0:2:279172874250000`, which still works.
-- Strings in double quotes, used only as the regular expression of `.matches(…)`.
+- Strings in double quotes, used only as the regular expression of `.matches(…)`. `\"` is a literal quote and does not end the string; any other backslash sequence reaches the regex unchanged and must be a valid regex escape (`\\`, `\_`, `\{`, `\d`, `\w`, …), otherwise it is a compile error. Over REST/JSON, a script's `\"` is written `\\\"`.
 - `origin.igp`, `origin.egp`, `origin.incomplete`, `rpki.valid`, `rpki.invalid`, `rpki.not_found`, and `self` (only as a next hop).
 - A bare name refers to a prefix list, community alias or group, or AS-path list, depending on where it is used. A name that is not defined is a compile error.
 

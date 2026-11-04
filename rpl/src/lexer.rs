@@ -112,14 +112,53 @@ pub fn lex(src: &str) -> Result<Vec<SpannedToken>, CompileError> {
     Ok(tokens)
 }
 
-/// Byte index where the code on `line` ends: the first `#` outside a `"..."`
-/// literal (strings have no escapes, like `lex_line`), else the line's end.
-fn code_end(line: &str) -> usize {
-    let mut in_str = false;
-    for (i, c) in line.char_indices() {
+/// Scans a string literal body: `rest` starts just after the opening `"`.
+/// Returns the decoded text and the bytes consumed including the closing
+/// quote; `Ok(None)` = unterminated. `\"` decodes to `"`; every other legal
+/// backslash pair (`\` + ASCII punctuation, or a letter the `regex` crate
+/// accepts as an escape) is kept verbatim for the as-path regex; anything
+/// else is an error. Shared by `lex_line` and `code_end` so they can't drift.
+fn scan_string(rest: &str) -> Result<Option<(String, usize)>, String> {
+    let mut out = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((i, c)) = chars.next() {
         match c {
-            '"' => in_str = !in_str,
-            '#' if !in_str => return i,
+            '"' => return Ok(Some((out, i + 1))),
+            '\\' => match chars.next() {
+                None => return Ok(None),
+                Some((_, '"')) => out.push('"'),
+                Some((_, e)) if e.is_ascii_punctuation() || "dDwWsSbBAznrtfvaxuUpP".contains(e) => {
+                    out.push('\\');
+                    out.push(e);
+                }
+                Some((_, e)) => {
+                    return Err(format!(
+                        "unknown escape '\\{e}' in string literal (use \\\" for a quote; \
+                         other backslash sequences are regex escapes)"
+                    ))
+                }
+            },
+            _ => out.push(c),
+        }
+    }
+    Ok(None)
+}
+
+/// Byte index where the code on `line` ends: the first `#` outside a `"..."`
+/// literal (escapes as in `scan_string`), else the line's end. A bad or
+/// unterminated string returns the line's end so `lex_line` reports it.
+fn code_end(line: &str) -> usize {
+    let mut skip_to = 0;
+    for (j, c) in line.char_indices() {
+        if j < skip_to {
+            continue;
+        }
+        match c {
+            '"' => match scan_string(&line[j + 1..]) {
+                Ok(Some((_, n))) => skip_to = j + 1 + n,
+                _ => return line.len(),
+            },
+            '#' => return j,
             _ => {}
         }
     }
@@ -157,14 +196,16 @@ fn lex_line(line: &str, lineno: usize, out: &mut Vec<SpannedToken>) -> Result<()
             continue;
         }
         if c == '"' {
-            let Some(len) = line[i + 1..].find('"') else {
-                return Err(CompileError::new(lineno, "unterminated string literal"));
+            let (text, n) = match scan_string(&line[i + 1..]) {
+                Ok(Some(r)) => r,
+                Ok(None) => return Err(CompileError::new(lineno, "unterminated string literal")),
+                Err(msg) => return Err(CompileError::new(lineno, msg)),
             };
             out.push(SpannedToken {
-                token: Token::Str(line[i + 1..i + 1 + len].to_string()),
+                token: Token::Str(text),
                 line: lineno,
             });
-            i += len + 2;
+            i += 1 + n;
             continue;
         }
         if c.is_ascii_alphabetic() || c == '_' {
@@ -322,6 +363,51 @@ mod tests {
             vec![Token::Accept, Token::Newline, Token::Eof]
         );
         assert!(lex("\"abc # x\n").is_err());
+    }
+
+    fn str_tok(src: &str) -> Result<Token, String> {
+        lex(src)
+            .map(|v| v[0].token.clone())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn escaped_quote_decodes_and_keeps_regex_escapes() {
+        let s = |t: &str| Ok(Token::Str(t.to_string()));
+        assert_eq!(str_tok(r#""a\"b""#), s("a\"b"));
+        assert_eq!(str_tok(r#""\\""#), s(r"\\"));
+        assert_eq!(str_tok(r#""\\\"""#), s("\\\\\""));
+        assert_eq!(str_tok(r##""a\"#b" # note"##), s("a\"#b"));
+        for ok in [
+            r"^65001_",
+            r"\_65001\_",
+            "[_]",
+            r"^\{65001\}$",
+            r"\d+",
+            r"\\",
+        ] {
+            assert_eq!(str_tok(&format!("\"{ok}\"")), s(ok));
+        }
+    }
+
+    #[test]
+    fn bad_escapes_and_unterminated_are_errors() {
+        for bad in [r#""\q""#, r#""\ ""#, r#""\1""#, "\"\\é\""] {
+            let e = str_tok(bad).unwrap_err();
+            assert!(e.contains("unknown escape"), "{bad}: {e}");
+        }
+        for bad in [r#""\""#, r#""abc\"#] {
+            assert!(str_tok(bad).unwrap_err().contains("unterminated"), "{bad}");
+        }
+        let e = lex("accept\n\"\\q\"\n").unwrap_err();
+        assert_eq!(e.line, 2);
+    }
+
+    #[test]
+    fn code_end_skips_escaped_quotes() {
+        assert_eq!(code_end(r##""a\"#" # c"##), 7);
+        assert_eq!(code_end(r#""\\" # c"#), 5);
+        assert_eq!(code_end(r#""a\"#), 3);
     }
 
     #[test]
