@@ -5,21 +5,73 @@
 //! graph in the root `CLAUDE.md` still holds — no daemon gains a dependency
 //! on another daemon by using it.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::SinkExt;
 use nos_pki::{Identity, PeerId};
 use nos_proto::{IpcCodec, LogEntry, LogLevel, LogRequest, Role};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{watch, Notify};
 use tokio_util::codec::FramedWrite;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
 /// Bounded so a burst of events can never build unbounded memory while
-/// `nos-logd` is unreachable; a full channel means "drop the oldest queued
+/// `nos-logd` is unreachable; a full queue means "drop the oldest queued
 /// entry, never block the caller emitting a `tracing` event."
 const CHANNEL_CAPACITY: usize = 1024;
+
+/// Bounded drop-oldest queue shared by the layer and the forwarding task.
+#[derive(Default)]
+struct Queue {
+    entries: Mutex<VecDeque<LogEntry>>,
+    notify: Notify,
+}
+
+impl Queue {
+    /// Never blocks (the lock is held only for the push/pop); evicts the
+    /// oldest entry when full so the newest (e.g. a panic line) survives.
+    fn push(&self, entry: LogEntry) {
+        let mut q = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if q.len() >= CHANNEL_CAPACITY {
+            q.pop_front();
+        }
+        q.push_back(entry);
+        drop(q);
+        self.notify.notify_one();
+    }
+
+    fn pop(&self) -> Option<LogEntry> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
+    async fn recv(&self) -> LogEntry {
+        loop {
+            if let Some(e) = self.pop() {
+                return e;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
+/// The installed layer's queue, so the panic hook can wait for it to drain.
+static QUEUE: OnceLock<Arc<Queue>> = OnceLock::new();
 
 /// Fixed reconnect delay, matching every other reconnect loop in this
 /// codebase (`watchdog_client::RETRY_DELAY`, `reconcile::RECONNECT_DELAY`).
@@ -30,7 +82,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// this is purely additive, stdout logging is unaffected.
 pub struct ForwardingLayer {
     source: String,
-    tx: mpsc::Sender<LogEntry>,
+    queue: Arc<Queue>,
 }
 
 impl ForwardingLayer {
@@ -43,11 +95,12 @@ impl ForwardingLayer {
         identity: Identity,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        tokio::spawn(run(log_socket, identity, rx, shutdown));
+        let queue = Arc::new(Queue::default());
+        let _ = QUEUE.set(queue.clone());
+        tokio::spawn(run(log_socket, identity, queue.clone(), shutdown));
         Self {
             source: source.into(),
-            tx,
+            queue,
         }
     }
 }
@@ -64,9 +117,9 @@ impl<S: tracing::Subscriber> Layer<S> for ForwardingLayer {
             message: visitor.message.unwrap_or_default(),
             fields: visitor.fields,
         };
-        // Non-blocking: a full channel drops this entry rather than
+        // Non-blocking: a full queue drops the oldest entry rather than
         // stalling whatever code just emitted a tracing event.
-        let _ = self.tx.try_send(entry);
+        self.queue.push(entry);
     }
 }
 
@@ -105,13 +158,13 @@ fn to_level(level: tracing::Level) -> LogLevel {
 
 /// Owns the connection to `nos-logd` for this process's whole lifetime:
 /// connects (retrying on a fixed delay, like every other reconnect loop in
-/// this codebase), then forwards every entry from `rx` as `LogRequest::Push`
+/// this codebase), then forwards every entry from `queue` as `LogRequest::Push`
 /// until the connection breaks, at which point it reconnects. No reply is
 /// ever read — `Push` gets none (see `nos_proto::log`).
 async fn run(
     log_socket: PathBuf,
     identity: Identity,
-    mut rx: mpsc::Receiver<LogEntry>,
+    queue: Arc<Queue>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let logd = PeerId::new(Role::Logd.as_str(), "");
@@ -125,11 +178,9 @@ async fn run(
         let mut writer = FramedWrite::new(stream, IpcCodec::<LogRequest>::default());
         loop {
             let entry = tokio::select! {
-                entry = rx.recv() => entry,
+                entry = queue.recv() => entry,
                 _ = shutdown.changed() => return,
             };
-            // A dropped sender means the process is exiting.
-            let Some(entry) = entry else { return };
             if writer.send(LogRequest::Push(entry)).await.is_err() {
                 break;
             }
@@ -174,9 +225,18 @@ fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         tracing::error!("{}", panic_message(info));
-        // ponytail: fixed sleep, the layer's channel is try_send so delivery
-        // is best-effort; a synchronous flush API if this proves lossy.
-        std::thread::sleep(Duration::from_millis(200));
+        // ponytail: wait (<=200 ms) for the queue to empty; empty does not
+        // mean the bytes are on the wire, and on a current_thread runtime
+        // this sleep blocks the forwarder itself. A synchronous flush API
+        // if this proves lossy.
+        if let Some(q) = QUEUE.get() {
+            for _ in 0..40 {
+                if q.is_empty() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         std::process::abort();
     }));
 }
@@ -212,5 +272,63 @@ mod panic_tests {
         let seen = seen.lock().unwrap();
         assert!(seen[0].contains("panic at ") && seen[0].contains(": static"));
         assert!(seen[1].contains(": owned 1"));
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn entry(msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 0,
+            level: LogLevel::Info,
+            source: "t".into(),
+            target: "t".into(),
+            message: msg.into(),
+            fields: vec![],
+        }
+    }
+
+    fn drain_last(q: &Queue) -> Option<LogEntry> {
+        let mut last = None;
+        while let Some(e) = q.pop() {
+            last = Some(e);
+        }
+        last
+    }
+
+    #[test]
+    fn overflow_evicts_oldest_and_keeps_newest() {
+        let q = Queue::default();
+        for i in 0..=CHANNEL_CAPACITY {
+            q.push(entry(&i.to_string()));
+        }
+        assert_eq!(q.pop().unwrap().message, "1");
+        assert_eq!(
+            drain_last(&q).unwrap().message,
+            CHANNEL_CAPACITY.to_string()
+        );
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn panic_line_survives_a_full_queue() {
+        let q = Queue::default();
+        for _ in 0..CHANNEL_CAPACITY {
+            q.push(entry("noise"));
+        }
+        q.push(entry("panic at x"));
+        assert_eq!(drain_last(&q).unwrap().message, "panic at x");
+    }
+
+    #[tokio::test]
+    async fn recv_wakes_on_push() {
+        let q = Arc::new(Queue::default());
+        let q2 = q.clone();
+        let h = tokio::spawn(async move { q2.recv().await.message });
+        tokio::task::yield_now().await;
+        q.push(entry("hi"));
+        assert_eq!(h.await.unwrap(), "hi");
     }
 }
