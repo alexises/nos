@@ -294,15 +294,6 @@ impl<D: Driver> Engine<D> {
             .any(|at| at.acl.as_ref().is_some_and(|a| a.logs()))
     }
 
-    /// Clean stop (SIGINT): every entry, then its chains.
-    pub fn shutdown(&mut self) {
-        let keys: Vec<Key> = self.installed.keys().cloned().collect();
-        for key in keys {
-            self.detach(&key);
-        }
-        self.clear_flowspec();
-    }
-
     /// The chains every (device, direction) points at, for tests and logs.
     pub fn live(&self) -> BTreeMap<Key, u32> {
         self.installed
@@ -316,8 +307,10 @@ impl<D: Driver> Engine<D> {
 /// take the same lock, so a read never sees a chain a pass is replacing.
 pub type Shared<D> = Arc<Mutex<Engine<D>>>;
 
-/// Runs passes on every plan or link change until `shutdown`, then removes
-/// everything it installed. With `log` (the Linux driver), the first pass
+/// Runs passes on every plan or link change until `shutdown`. Stopping leaves
+/// every filter enforcing (fail closed, #663): the next start adopts them. An
+/// input channel closing (its feeder task died) is an error, so the process
+/// exits non-zero and the watchdog restarts it. With `log` (the Linux driver), the first pass
 /// that installs a `log` rule starts the [`logger`] thread.
 pub async fn run<D: Driver>(
     engine: Shared<D>,
@@ -325,7 +318,7 @@ pub async fn run<D: Driver>(
     mut links_rx: watch::Receiver<LinkTable>,
     mut shutdown: watch::Receiver<bool>,
     mut log: bool,
-) {
+) -> anyhow::Result<()> {
     loop {
         let plan = plan_rx.borrow_and_update().clone();
         let links = links_rx.borrow_and_update().clone();
@@ -340,15 +333,13 @@ pub async fn run<D: Driver>(
             }
         }
         tokio::select! {
-            r = plan_rx.changed() => if r.is_err() { break },
-            r = links_rx.changed() => if r.is_err() { break },
+            r = plan_rx.changed() => if r.is_err() { anyhow::bail!("plan feed closed") },
+            r = links_rx.changed() => if r.is_err() { anyhow::bail!("link feed closed") },
             _ = shutdown.changed() => break,
         }
     }
-    tokio::task::spawn_blocking(move || engine.lock().unwrap().shutdown())
-        .await
-        .expect("acl shutdown panicked");
-    info!("acl engine stopped");
+    info!("acl engine stopped, filters left in place");
+    Ok(())
 }
 
 #[path = "engine_flowspec.rs"]

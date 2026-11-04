@@ -115,12 +115,25 @@ async fn serve<D: Driver>(
         .flowspec_file
         .clone()
         .map(|p| tokio::spawn(flowspec_file::run(p, engine.clone(), shutdown_rx.clone())));
-    let engine_task = tokio::spawn(engine::run(engine, plan_rx, links_rx, shutdown_rx, log));
+    let mut engine_task = tokio::spawn(engine::run(engine, plan_rx, links_rx, shutdown_rx, log));
 
-    wait_for_shutdown_signal()
-        .await
-        .context("waiting for shutdown signal")?;
-    info!("shutdown signal received");
+    // The engine only ends on its own when a feeder task died: exit non-zero
+    // so the watchdog restarts us (filters keep enforcing meanwhile, #663).
+    tokio::select! {
+        r = wait_for_shutdown_signal() => {
+            r.context("waiting for shutdown signal")?;
+            info!("shutdown signal received");
+        }
+        r = &mut engine_task => {
+            tracing::error!("acl engine ended without a shutdown signal");
+            server_task.abort();
+            return match r {
+                Ok(Ok(())) => Err(anyhow::anyhow!("engine ended unexpectedly")),
+                Ok(Err(e)) => Err(e.context("engine failed")),
+                Err(e) => Err(anyhow::Error::new(e).context("engine panicked")),
+            };
+        }
+    }
     let _ = shutdown_tx.send(true);
     let tasks = [("reconcile", reconcile_task), ("link_client", link_task)];
     for (name, task) in tasks
@@ -131,7 +144,7 @@ async fn serve<D: Driver>(
             warn!(error = %e, task = name, "task ended abnormally");
         }
     }
-    // It removes every filter before the process exits.
+    // The filters stay enforcing after the process exits.
     if let Err(e) = engine_task.await {
         warn!(error = %e, task = "engine", "task ended abnormally");
     }

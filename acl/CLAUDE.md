@@ -30,7 +30,7 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 
 ## Rules that bite
 
-- Fail closed: a crash leaves filters enforcing; on start the first link snapshot is swept (chain-0 dump per device and hook) and what a previous run left is adopted, then replaced or detached. A refused install flushes the idle chain and keeps the old one live; retried on the next pass.
+- Fail closed: a crash or a clean stop (SIGINT/SIGTERM) leaves filters and flowspec rules enforcing (#663); a closed plan/link feed makes the process exit non-zero so the watchdog restarts it; on start the first link snapshot is swept (chain-0 dump per device and hook) and what a previous run left is adopted, then replaced or detached. A refused install flushes the idle chain and keeps the old one live; retried on the next pass.
 - An attach point whose device is absent logs `acl pending interface= direction= acl= reason="absent"` once and applies when the link shows up. A device that disappears is dropped without driver calls (its qdisc went with it).
 - The untagged (tag 0) subinterface is its parent's device: the commit refuses both setting one direction (`schema::acl::one_per_device`).
 - `log`: `sample` (group `ACL_PSAMPLE_GROUP`, one packet in `SAMPLE_RATE` = 100, `LOG_TRUNC`) then `gact`, one cookie (#699: the verdict counters stay exact, log lines are statistical; a rate gate with a twin filter was refused by the kernel with `EEXIST`). Flowspec S uses the same `sample_kind` and keeps its cookie on the action after the sample. `LinuxDriver::install` refuses a `log` ACL when psample cannot pass the cookie (`check_log`, owner decision L2); egress samples carry `out` = device, ingress `in` = device and `out` = 0.
@@ -38,6 +38,6 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 
 ## Tests
 
-- Unit: compile shapes, plan resolution, engine with `NoopDriver` (attach, A/B alternation, pending device, sweep, refused install, shutdown), request bytes via `nos-tc` types.
+- Unit: compile shapes, plan resolution, engine with `NoopDriver` (attach, A/B alternation, pending device, sweep, refused install, filters survive shutdown, closed feed is fatal), request bytes via `nos-tc` types.
 - Kernel: `unshare -Urn cargo test -p nos-acl --test kernel -- --ignored` (`tc` as the oracle; a foreign prio-1 filter survives).
 - e2e: `cargo run -p nos-e2e -- acl` (group `drivers`): attach, `?before=` drops BGP, `?after=` restores it, detach, `show acl` counters after the drop, `acl log` lines once `d-bgp` logs (router-b floods 800 SYNs: sampling is 1 in 100), packed `EDGE2`.

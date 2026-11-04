@@ -230,20 +230,6 @@ impl<D: Driver> Engine<D> {
         }
     }
 
-    /// Clean stop: every band priority this run holds goes.
-    pub(super) fn clear_flowspec(&mut self) {
-        self.fs.sets.clear();
-        let devices: Vec<(String, u32)> = self
-            .fs
-            .devices
-            .iter()
-            .map(|(n, d)| (n.clone(), d.ifindex))
-            .collect();
-        for (dev, ifindex) in devices {
-            self.apply_device(&dev, ifindex, &[]);
-        }
-    }
-
     /// Every rule of every instance, with its state and counters summed over
     /// the devices it is installed on. A device whose dump fails is skipped.
     pub fn show_flowspec(&mut self) -> Vec<FlowspecRuleStatus> {

@@ -13,6 +13,7 @@ use crate::router::{log, Router};
 use crate::world::World;
 
 const ESTABLISHED: &str = "bgp session established";
+const STARTING: &str = "nos-acld starting";
 const ENDED: &str = "bgp session ended";
 /// `wait_new` counts its own pattern, so each compile has its full line.
 /// The optimiser (#542) decides the numbers, all deterministic:
@@ -256,6 +257,24 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(COMPILED_2, compiled, 30).await?;
     a.wait_new(ENDED, ended, 60).await?;
     check_counters(a).await?;
+
+    log("step 2a (#663): nos-acld stops and restarts: the drop keeps holding");
+    let (started, detached, est, compiled) = (
+        a.count(STARTING),
+        a.count(DETACHED),
+        a.count(ESTABLISHED),
+        a.count(COMPILED_2),
+    );
+    w.dock
+        .signal_process("router-a", "nos-acld", "-INT")
+        .await?;
+    a.wait_new(STARTING, started, 60).await?;
+    a.wait_new(COMPILED_2, compiled, 30).await?;
+    a.assert_quiet(ESTABLISHED, est, 20).await?;
+    anyhow::ensure!(
+        a.count(DETACHED) == detached,
+        "stopping nos-acld detached a filter"
+    );
 
     log("step 2b: d-bgp logs: router-b's retries show as acl log lines");
     let (compiled, logged) = (a.count(COMPILED_2), a.count(LOGGED));

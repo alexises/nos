@@ -297,21 +297,8 @@ fn an_acl_without_a_compile_leaves_the_device_alone() {
     assert_eq!(e.live().len(), 1);
 }
 
-#[test]
-fn shutdown_removes_everything() {
-    let mut e = Engine::new(NoopDriver::default());
-    let l = links(&[link("eth0", 4, None)]);
-    e.sync(
-        &plan(&compiled(1), &[(eth("eth0"), In), (eth("eth0"), Out)]),
-        &l,
-    );
-    take(&mut e);
-    e.shutdown();
-    assert_eq!(take(&mut e), [Call::Detach(4, In), Call::Detach(4, Out)]);
-}
-
 #[tokio::test]
-async fn run_applies_changes_and_cleans_up_on_shutdown() {
+async fn run_applies_changes_and_leaves_filters_on_shutdown() {
     let (plan_tx, plan_rx) = watch::channel(None);
     let (links_tx, links_rx) = watch::channel(LinkTable::default());
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -323,23 +310,38 @@ async fn run_applies_changes_and_cleans_up_on_shutdown() {
     links_tx.send(links(&[link("eth0", 4, None)])).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     stop_tx.send(true).unwrap();
-    task.await.unwrap();
+    task.await.unwrap().unwrap();
     let e = engine.lock().unwrap();
     let calls = &e.driver().calls;
     assert!(calls.contains(&Call::Switch(4, In, A)), "{calls:?}");
-    assert_eq!(calls.last(), Some(&Call::Detach(4, In)));
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::Detach(..))),
+        "{calls:?}"
+    );
+    assert_eq!(e.live().len(), 1);
 }
 
 #[tokio::test]
-async fn run_stops_when_its_inputs_close() {
+async fn run_fails_when_its_inputs_close() {
     let (plan_tx, plan_rx) = watch::channel(None);
-    let (_links_tx, links_rx) = watch::channel(LinkTable::default());
+    let (links_tx, links_rx) = watch::channel(LinkTable::default());
     let (_stop_tx, stop_rx) = watch::channel(false);
     let engine = Arc::new(Mutex::new(Engine::new(NoopDriver::default())));
-    let task = tokio::spawn(run(engine.clone(), plan_rx, links_rx, stop_rx, false));
+    let task = tokio::spawn(run(
+        engine.clone(),
+        plan_rx,
+        links_rx.clone(),
+        stop_rx,
+        false,
+    ));
     drop(plan_tx);
-    task.await.unwrap();
+    assert!(task.await.unwrap().is_err());
     assert_eq!(engine.lock().unwrap().driver().calls, NONE);
+    let (_p, plan_rx) = watch::channel(None);
+    let (_s, stop_rx) = watch::channel(false);
+    let task = tokio::spawn(run(engine, plan_rx, links_rx, stop_rx, false));
+    drop(links_tx);
+    assert!(task.await.unwrap().is_err());
 }
 
 fn counts(e: &mut Engine<NoopDriver>, ifindex: u32, dir: Direction, c: &[(u32, u64)]) {
