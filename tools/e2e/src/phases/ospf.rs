@@ -2383,6 +2383,85 @@ pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     b.wait(&last).await
 }
 
+/// #853, self-contained: `nos-ospfv3d --router-lsa-max-links=1` (test-only)
+/// splits router-a's Router-LSA, which carries two links (the `eth0.0`
+/// point-to-point and the bridge's transit link, both `Full` with router-b),
+/// into fragments with Link State IDs router-id and 0.0.0.1. Router-a lists
+/// both over REST; router-b installs fragment 1 and still holds the routes
+/// behind both links. Which link sits in which fragment is HashMap order, so
+/// only the aggregate is asserted.
+pub async fn ospfv3_router_lsa_split(w: &mut World) -> anyhow::Result<()> {
+    w.up(&["--ospfv3d-arg=--router-lsa-max-links=1"]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let a_flags = |mut f: Vec<String>, svi4, svi6| {
+        f.extend(ospfv3_broadcast_with_l2(svi4, svi6));
+        f
+    };
+    let a_split = a.count("ospfv3 router-lsa split");
+    let installed = either_form(0x2001, LSA_TYPE_E_ROUTER, |t| {
+        format!(
+            "ospfv3 lsa installed.*lsa_type={t} .*link_state_id=0.0.0.1.*advertising_router={OSPFV3_ROUTER_ID}"
+        )
+    });
+    a.provision_flags(&with_base(
+        A,
+        a_flags(
+            ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+            OSPF_BROADCAST_ADDRESS_A,
+            OSPFV3_BROADCAST_ADDRESS_A,
+        ),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        a_flags(
+            ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+            OSPF_BROADCAST_ADDRESS_B,
+            OSPFV3_BROADCAST_ADDRESS_B,
+        ),
+    ))
+    .await?;
+    let link = format!("link=broadcast-domain:{BD}");
+    for (x, peer) in [(a, OSPFV3_ROUTER_ID_B), (b, OSPFV3_ROUTER_ID)] {
+        x.wait(&format!(
+            "ospfv3 neighbor reached full link=eth0.0 neighbor={peer}"
+        ))
+        .await?;
+        x.wait(&format!(
+            "ospfv3 neighbor reached full {link} neighbor={peer}"
+        ))
+        .await?;
+    }
+    a.wait_new("ospfv3 router-lsa split", a_split, 60).await?;
+    b.wait(&installed).await?;
+
+    // Router-a's own database: both fragments, advertised by itself.
+    let mut ids = Vec::new();
+    for _ in 0..30 {
+        let body = a
+            .rest_expect(Method::GET, "/v1/ospfv3/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        ids = report[0]["result"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("ospfv3 database has no result: {body}"))?
+            .iter()
+            .filter(|r| {
+                r["advertising_router"] == OSPFV3_ROUTER_ID
+                    && r["age"].as_u64().is_none_or(|age| age < 3600)
+                    && matches!(r["lsa_type"].as_u64(), Some(0x2001 | 0xA021))
+            })
+            .filter_map(|r| r["link_state_id"].as_str().map(str::to_string))
+            .collect();
+        if ids.iter().any(|i| i == OSPFV3_ROUTER_ID) && ids.iter().any(|i| i == "0.0.0.1") {
+            log(format!("router-a holds router-lsa fragments {ids:?}"));
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("router-a never listed router-lsa fragments {OSPFV3_ROUTER_ID} and 0.0.0.1: {ids:?}")
+}
+
 /// RFC 7166: matching HMAC-SHA-256 trailer keys on both routers' eth0.0
 /// profile reach/stay Full with real per-packet digest checks; a mismatched
 /// key on router-a logs a real verification failure on router-b and blocks a
