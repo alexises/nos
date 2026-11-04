@@ -206,6 +206,26 @@ fn a_partner_lacpdu_makes_the_port_current_and_is_answered_once() {
 }
 
 #[test]
+fn unsupported_versions_are_counted_and_v1_v2_are_not() {
+    let mut r = rig(true, LacpRate::Slow);
+    let mut v3 = partner_frame(ACTIVE_PARTNER);
+    v3[1] = 3;
+    r.port.on_frame(&v3, &r.sink);
+    assert_eq!(r.observed().unsupported_version_pdus, 1);
+    assert!(r.observed().partner.is_none(), "a v3 PDU is not processed");
+    // Other decode errors are not counted.
+    r.port.on_frame(&[1, 2, 3], &r.sink);
+    assert_eq!(r.observed().unsupported_version_pdus, 1);
+    // v2 (longer) is processed like v1 and not counted.
+    let mut v2 = partner_frame(ACTIVE_PARTNER);
+    v2[1] = 2;
+    v2.extend_from_slice(&[0x04, 0x06, 0x80, 0xc2, 0, 1]);
+    r.port.on_frame(&v2, &r.sink);
+    assert_eq!(r.observed().unsupported_version_pdus, 1);
+    assert!(r.observed().partner.is_some());
+}
+
+#[test]
 fn the_mux_walks_to_distributing_with_the_partner() {
     let mut r = rig(true, LacpRate::Slow);
     r.port.on_selection(true, &r.sink);
@@ -367,6 +387,7 @@ fn observation_predicates_follow_the_partner_and_churn() {
         partner: None,
         actor_churn: ChurnState::NoChurn,
         partner_churn: ChurnState::NoChurn,
+        unsupported_version_pdus: 0,
     };
     assert!(o.current() && !o.is_churned() && !o.partner_individual());
     o.partner = Some(partner_info(state_bit::ACTIVITY));

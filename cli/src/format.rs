@@ -163,7 +163,7 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
         ""
     };
     format!(
-        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}, port priority {}{partner_priority}, mode {mode}{individual}",
+        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}, port priority {}{partner_priority}, mode {mode}{individual}, unsupported-version PDUs {}",
         port.interface,
         port.actor_port_number,
         yes_no(port.selected),
@@ -175,6 +175,7 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
             (true, true) => "actor+partner",
         },
         port.actor_port_priority,
+        port.unsupported_version_pdus,
     )
 }
 
@@ -2910,6 +2911,7 @@ mod tests {
                     actor_churn: false,
                     partner_churn: false,
                     individual: false,
+                    unsupported_version_pdus: 0,
                 },
                 nos_proto::LacpPortStatus {
                     interface: "eth2".to_string(),
@@ -2928,6 +2930,7 @@ mod tests {
                     actor_churn: false,
                     partner_churn: true,
                     individual: true,
+                    unsupported_version_pdus: 3,
                 },
             ],
         };
@@ -2936,8 +2939,8 @@ mod tests {
             "lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast, system priority 100"
         ));
         assert!(out.contains("  min-links 2: not met, bond emptied"));
-        assert!(out.contains("churn partner, port priority 32768, mode active, individual (partner not aggregatable)"), "{out}");
-        assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes, churn none, port priority 50, partner priority 200/60, mode passive"));
+        assert!(out.contains("churn partner, port priority 32768, mode active, individual (partner not aggregatable), unsupported-version PDUs 3"), "{out}");
+        assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes, churn none, port priority 50, partner priority 200/60, mode passive, unsupported-version PDUs 0"));
         assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none (defaulted), selected no, synchronized no, churn partner"));
     }
 
@@ -3129,6 +3132,7 @@ mod tests {
             actor_churn,
             partner_churn,
             individual: false,
+            unsupported_version_pdus: 0,
         };
         for (p, want) in [
             (

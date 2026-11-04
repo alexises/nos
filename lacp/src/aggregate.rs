@@ -246,6 +246,7 @@ impl AggregateManager {
                     partner_port_priority: Some(pd.port_priority),
                     selected: selected_txs.get(interface).is_some_and(|tx| *tx.borrow()),
                     individual: obs.partner_individual(),
+                    unsupported_version_pdus: obs.unsupported_version_pdus,
                     synchronized: obs
                         .partner
                         .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
@@ -544,6 +545,7 @@ mod tests {
             partner: None,
             actor_churn: ChurnState::NoChurn,
             partner_churn: ChurnState::NoChurn,
+            unsupported_version_pdus: 0,
         }
     }
 

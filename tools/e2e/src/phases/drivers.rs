@@ -407,6 +407,35 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
 
+    // #688: a version-2 LACPDU (longer than 110 bytes, extra TLVs) must reach
+    // the Receive machine; a version-3 one is dropped and only counted.
+    log("router-a accepts an injected v2 LACPDU and counts a v3 one on eth1");
+    let v2_seen = "lacp lacpdu received interface=eth1 .*partner_system=\\[2, 0, 0, 0, 10, 2\\]";
+    let v2_base = a.count(v2_seen);
+    let unsupported_before = lacp_port(a, "eth1").await?["unsupported_version_pdus"]
+        .as_u64()
+        .context("unsupported_version_pdus missing from GET /v1/lacp")?;
+    w.dock
+        .in_netns(
+            PYTHON_HELPER_IMAGE,
+            "router-b",
+            &["python3", "-c", include_str!("lacpdu.py")],
+        )
+        .await?;
+    a.wait_new(v2_seen, v2_base, 15).await?;
+    let unsupported_after = lacp_port(a, "eth1").await?["unsupported_version_pdus"]
+        .as_u64()
+        .context("unsupported_version_pdus missing from GET /v1/lacp")?;
+    anyhow::ensure!(
+        unsupported_after == unsupported_before + 1,
+        "v3 LACPDU should add exactly one: {unsupported_before} -> {unsupported_after}"
+    );
+    anyhow::ensure!(
+        a.count("lacp lacpdu received interface=eth1 .*partner_system=\\[2, 0, 0, 0, 10, 3\\]")
+            == 0,
+        "the v3 LACPDU must not reach the Receive machine"
+    );
+
     // Withdraw eth2 from router-b's aggregate (its veth stays up): router-a's
     // nos-lacpd must detect the silence via its real Receive Machine timeout
     // and nos-interfaced must release eth2 — proving the enslavement is
