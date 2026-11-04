@@ -2842,6 +2842,12 @@
           "synchronized": {
             "description": "The partner's advertised Synchronization bit on its most recent\nLACPDU.",
             "type": "boolean"
+          },
+          "unsupported_version_pdus": {
+            "description": "LACPDUs dropped because their Version byte was neither 1 nor 2. In\nmemory only: restarts at 0 with the port's link task. Last field:\npostcard is positional (daemons and CLI ship together).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -2855,7 +2861,8 @@
           "synchronized",
           "actor_churn",
           "partner_churn",
-          "individual"
+          "individual",
+          "unsupported_version_pdus"
         ],
         "type": "object"
       },

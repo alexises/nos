@@ -58,6 +58,9 @@ pub struct PortObservation {
     pub partner: Option<PortInfo>,
     pub actor_churn: ChurnState,
     pub partner_churn: ChurnState,
+    /// LACPDUs dropped for a Version byte other than 1 or 2 since this link
+    /// task started (in memory only).
+    pub unsupported_version_pdus: u64,
 }
 
 impl PortObservation {
@@ -200,6 +203,8 @@ struct Port {
     rx_limiter: TxLimiter,
     /// LACPDUs dropped since the last accepted one (warned once per burst).
     rx_dropped: u64,
+    /// LACPDUs with an unsupported Version byte (`show lacp`).
+    unsupported_version_pdus: u64,
     churn: Churn,
     /// Whether the last LACPDU's Partner block described us (recordPDU).
     partner_view_matches: bool,
@@ -241,6 +246,7 @@ impl Port {
             marker_limiter: TxLimiter::new(Instant::now(), MAX_MARKER_PER_WINDOW),
             rx_limiter: TxLimiter::new(Instant::now(), MAX_RX_PER_WINDOW),
             rx_dropped: 0,
+            unsupported_version_pdus: 0,
             churn,
             partner_view_matches: true,
         };
@@ -268,6 +274,7 @@ impl Port {
             self.mux_state,
             self.partner,
             &self.churn,
+            self.unsupported_version_pdus,
         );
     }
 
@@ -390,10 +397,11 @@ impl Port {
             }
             return;
         }
-        let Ok(pdu) = packet::decode(bytes) else {
-            return;
-        };
+        let decoded = packet::decode(bytes);
         // Dropped before touching any machine: a flood costs one decode.
+        if decoded.is_err() && !matches!(decoded, Err(packet::PacketError::UnsupportedVersion(_))) {
+            return;
+        }
         if !self.rx_limiter.try_take(Instant::now()) {
             self.rx_dropped += 1;
             if self.rx_dropped == 1 {
@@ -405,6 +413,13 @@ impl Port {
             debug!(interface = %self.config.interface, dropped = self.rx_dropped, "lacp receive rate limit burst over");
             self.rx_dropped = 0;
         }
+        let Ok(pdu) = decoded else {
+            // Silent in the log (flood vector); counted, and rate-limited
+            // above so a flood cannot spin selection.
+            self.unsupported_version_pdus += 1;
+            self.report();
+            return;
+        };
         let before = (self.receive_state, self.mux_state, self.partner);
         // update_Selected: a changed partner identity deselects the port at
         // once (mux leaves Collecting/Distributing); selection re-runs from
@@ -534,6 +549,7 @@ fn report(
     mux_state: MuxState,
     partner: Option<PortInfo>,
     churn: &Churn,
+    unsupported_version_pdus: u64,
 ) {
     let observation = PortObservation {
         receive_state,
@@ -542,6 +558,7 @@ fn report(
         partner,
         actor_churn: churn.actor,
         partner_churn: churn.partner,
+        unsupported_version_pdus,
     };
     let mut observations = observations.lock().unwrap();
     // Only signal on a real change: `aggregate.rs` reacts to every
@@ -899,6 +916,7 @@ mod tests {
                 MuxState::Detached,
                 None,
                 &Churn::new("eth1", Duration::from_secs(60)),
+                0,
             );
         };
 

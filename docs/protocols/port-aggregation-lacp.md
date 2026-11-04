@@ -44,8 +44,8 @@ The same on router-b. Once both ends have negotiated:
 ```
 router-a> show lacp
 lacp bond-lacp: system 02:47:33:45:65:f2, key 1, rate fast, system priority 32768
-  eth1: port 17, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 4, selected yes, synchronized yes, churn none, port priority 32768, partner priority 32768/32768
-  eth2: port 18, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 5, selected yes, synchronized yes, churn none, port priority 32768, partner priority 32768/32768
+  eth1: port 17, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 4, selected yes, synchronized yes, churn none, port priority 32768, partner priority 32768/32768, mode active, unsupported-version PDUs 0
+  eth2: port 18, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 5, selected yes, synchronized yes, churn none, port priority 32768, partner priority 32768/32768, mode active, unsupported-version PDUs 0
 router-a> show port-aggregate
 port-aggregate bond-lacp: mode Lacp, switching-profile unset, mtu 1500
 ```
@@ -175,6 +175,11 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 - `show lacp` ends that member's line with `individual (partner not aggregatable)`; `GET /v1/lacp` has `"individual": true`.
 - NOS itself never declares a link Individual: only configured members run LACP.
 - An Individual member stays out of the bond while the partner keeps it so, and joins as soon as the partner sets the bit again. Check the partner's configuration (for example a link it considers half duplex).
+
+**LACPDU versions.** NOS accepts version 1 and version 2 (802.1AX-2014) LACPDUs, so a LACPv2 partner bundles; it still sends version 1.
+
+- Any other Version byte is dropped without a log line and counted: `show lacp` ends each member's line with `unsupported-version PDUs <n>`; `GET /v1/lacp` has `"unsupported_version_pdus"`.
+- A count that keeps growing means the partner sends a version other than 1 or 2: check its LACP configuration. The count restarts at 0 when the member's link task restarts (member re-added, `nos-lacpd` restart).
 
 **EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, `redundancy-mode` chooses all-active or single-active forwarding for it, and `df-algorithm` the designated forwarder election. They are documented with EVPN.
 

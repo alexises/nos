@@ -1,9 +1,10 @@
 //! Hand-rolled LACPDU encode/decode — IEEE 802.1AX-2014 §6.4.2.3 (Figure
 //! 6-2). Pure, no I/O, no `nos-proto` dependency, mirroring `ospf::packet`'s
-//! shape. A LACPDU's body is always exactly [`LACPDU_LEN`] bytes: fixed-size
+//! shape. A version-1 LACPDU is exactly [`LACPDU_LEN`] bytes: fixed-size
 //! Actor/Partner/Collector Information TLVs plus a Terminator TLV and
-//! trailing reserved padding — no variable-length fields, so there is
-//! nothing a parsing crate would buy over hand-rolled offsets.
+//! trailing reserved padding. A version-2 LACPDU (802.1AX-2014) carries more
+//! TLVs after those, so `decode` takes anything at least that long and reads
+//! only the fixed v1 offsets — nothing a parsing crate would buy.
 
 const SUBTYPE_LACP: u8 = 0x01;
 const VERSION_NUMBER: u8 = 0x01;
@@ -16,10 +17,9 @@ const TLV_TYPE_COLLECTOR: u8 = 0x03;
 const ACTOR_PARTNER_INFO_LEN: u8 = 20;
 const COLLECTOR_INFO_LEN: u8 = 16;
 
-/// The LACPDU body's fixed on-wire length (Subtype through the trailing
-/// Reserved field, 802.1AX Figure 6-2) — never anything else, so a decode
-/// whose input is a different length is rejected outright rather than
-/// partially parsed.
+/// The LACPDU body's minimum on-wire length (Subtype through the trailing
+/// Reserved field, 802.1AX Figure 6-2): what we send, and the least `decode`
+/// accepts (a version-2 PDU is longer, its extra TLVs are ignored).
 pub const LACPDU_LEN: usize = 110;
 
 const SUBTYPE_MARKER: u8 = 0x02;
@@ -124,10 +124,12 @@ pub struct Lacpdu {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PacketError {
-    #[error("LACPDU has wrong length: expected {LACPDU_LEN}, got {0}")]
+    #[error("LACPDU too short: expected at least {LACPDU_LEN}, got {0}")]
     WrongLength(usize),
     #[error("not an LACP slow-protocol frame (subtype {0:#04x})")]
     WrongSubtype(u8),
+    #[error("unsupported LACPDU version {0}")]
+    UnsupportedVersion(u8),
 }
 
 fn encode_port_info(buf: &mut Vec<u8>, tlv_type: u8, info: &PortInfo) {
@@ -179,15 +181,17 @@ fn decode_port_info(buf: &[u8]) -> PortInfo {
 /// sends this same fixed layout, and rejecting on cosmetic mismatches would
 /// only make interop worse, not safer.
 pub fn decode(data: &[u8]) -> Result<Lacpdu, PacketError> {
-    if data.len() != LACPDU_LEN {
+    if data.len() < LACPDU_LEN {
         return Err(PacketError::WrongLength(data.len()));
     }
     if data[0] != SUBTYPE_LACP {
         return Err(PacketError::WrongSubtype(data[0]));
     }
-    // data[1] is the version number — not validated: 802.1AX requires an
-    // implementation compliant with a later revision to still interoperate
-    // with 802.1AX-2014's fixed TLV layout, which is all this decodes.
+    // Version 2 only appends TLVs after the v1 layout, so 1 and 2 decode
+    // identically; anything else is dropped (and counted by the caller).
+    if !matches!(data[1], 1 | 2) {
+        return Err(PacketError::UnsupportedVersion(data[1]));
+    }
     // Layout (802.1AX Figure 6-2): Subtype(1) + Version(1) = 2, then each
     // TLV is `type(1) + length(1) + content`. Actor TLV content starts at
     // offset 4 (18 content bytes, its own trailing 3-byte reserved field
@@ -231,9 +235,40 @@ mod tests {
         assert_eq!(decode(&encoded).unwrap(), pdu);
     }
 
+    fn sample_pdu() -> Lacpdu {
+        Lacpdu {
+            actor: sample_info(),
+            partner: sample_info(),
+            collector_max_delay: 0,
+        }
+    }
+
     #[test]
-    fn wrong_length_is_rejected() {
+    fn short_is_rejected() {
         assert_eq!(decode(&[0u8; 50]), Err(PacketError::WrongLength(50)));
+        let v1 = encode(&sample_pdu());
+        assert_eq!(decode(&v1[..109]), Err(PacketError::WrongLength(109)));
+    }
+
+    #[test]
+    fn version_2_with_trailing_tlvs_decodes() {
+        let pdu = sample_pdu();
+        let mut v2 = encode(&pdu);
+        v2[1] = 2;
+        assert_eq!(decode(&v2).unwrap(), pdu);
+        v2.extend_from_slice(&[0x04, 0x06, 0x80, 0xc2, 0, 1]); // e.g. Port Algorithm TLV
+        assert_eq!(decode(&v2).unwrap(), pdu);
+        v2.resize(1500, 0xa5);
+        assert_eq!(decode(&v2).unwrap(), pdu);
+    }
+
+    #[test]
+    fn other_versions_are_rejected() {
+        for v in [0u8, 3, 255] {
+            let mut b = encode(&sample_pdu());
+            b[1] = v;
+            assert_eq!(decode(&b), Err(PacketError::UnsupportedVersion(v)));
+        }
     }
 
     #[test]

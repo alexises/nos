@@ -89,6 +89,10 @@ pub struct LacpPortStatus {
     /// treats this link as an Individual (non-aggregatable) one, so the port
     /// is never selected into the bond.
     pub individual: bool,
+    /// LACPDUs dropped because their Version byte was neither 1 nor 2. In
+    /// memory only: restarts at 0 with the port's link task. Last field:
+    /// postcard is positional (daemons and CLI ship together).
+    pub unsupported_version_pdus: u64,
 }
 
 /// One `PortAggregate`'s LACP engine state, for `show lacp [<name>]`.

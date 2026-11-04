@@ -33,6 +33,7 @@ fn sample() -> PortAggregateLacpSummary {
             actor_churn: false,
             partner_churn: false,
             individual: false,
+            unsupported_version_pdus: 0,
         }],
     }
 }
