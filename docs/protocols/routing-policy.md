@@ -126,7 +126,7 @@ To review policies:
 
 Inside a policy (after `edit policy-definition <name>`), four commands work on its script:
 
-- `edit source` opens the script in a text editor: `$EDITOR`, or `$VISUAL`, or `nano` if neither is set. When you save and quit, the shell compiles the new script. If it compiles, it replaces the old one in the transaction; if not, the shell prints the error and discards the edit, so the transaction keeps the previous version:
+- `edit source` opens the script in a text editor: `$EDITOR`, or `$VISUAL`, or `vim` if neither is set; the value may carry arguments (`EDITOR="emacsclient -t"`). When you save and quit, the shell compiles the new script. If it compiles, it replaces the old one in the transaction; if not, the shell prints the error and discards the edit, so the transaction keeps the previous version:
 
   ```
   policy did not compile, edit discarded: line 1: policy does not terminate on every path: end with accept/reject, or an 'if' with an 'else' where every branch terminates

@@ -80,6 +80,7 @@ time                = "0.3"
 
 # test dependencies
 tempfile    = "3"
+shlex       = "2"
 proptest    = "1"
 insta       = "1"
 
