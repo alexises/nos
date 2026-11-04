@@ -222,6 +222,27 @@ async fn send_full(
     (status, etag, json)
 }
 
+/// Status of a request carrying the given headers.
+async fn send_headers(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    headers: &[(header::HeaderName, &str)],
+) -> StatusCode {
+    let mut req = HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .extension(PeerUser(Some(USER.to_string()), Some("live".to_string())));
+    for (n, v) in headers {
+        req = req.header(n, *v);
+    }
+    app.clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
 fn bgp_instance(name: &str, asn: u32) -> Value {
     serde_json::to_value(BgpInstance {
         name: name.to_string(),
@@ -595,13 +616,6 @@ async fn etag_if_match_and_if_none_match_on_transactions() {
         (s, etag.as_deref(), v),
         (StatusCode::OK, Some("\"3\""), json!("h3"))
     );
-    assert_eq!(
-        with(Method::GET, tx, None, header::IF_NONE_MATCH, "W/\"3\"")
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
-
     // A subsection DELETE and a commit honour it too; a refused commit keeps
     // the transaction, and a subsection DELETE's 204 carries the new tag.
     send(
@@ -676,6 +690,80 @@ async fn etag_if_match_and_if_none_match_on_transactions() {
     )
     .await;
     assert_eq!((s, etag), (StatusCode::NO_CONTENT, None));
+}
+
+/// RFC 9110 §13.1: entity-tag lists, weak vs strong comparison, `If-Match` on
+/// GET, and `If-Match` on a missing transaction.
+#[tokio::test]
+async fn etag_lists_weak_tags_and_missing_transaction() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    let tx = "/v1/transactions/t7";
+    let host = "/v1/transactions/t7/hostname";
+    send(app, Method::POST, "/v1/transactions/t7?base=blank", None).await;
+
+    // If-None-Match: lists and weak tags (weak comparison); malformed is 400.
+    for (raw, want) in [
+        ("W/\"0\"", StatusCode::NOT_MODIFIED),
+        ("W/\"0\", \"4\"", StatusCode::NOT_MODIFIED),
+        ("\"1\", \"abc\"", StatusCode::OK),
+        ("0", StatusCode::BAD_REQUEST),
+    ] {
+        let st = send_headers(app, Method::GET, tx, &[(header::IF_NONE_MATCH, raw)]).await;
+        assert_eq!(st, want, "{raw}");
+    }
+    // If-Match on GET: strong comparison, evaluated before If-None-Match.
+    for (m, none_match, want) in [
+        ("\"1\", \"0\"", None, StatusCode::OK),
+        ("W/\"0\"", None, StatusCode::PRECONDITION_FAILED),
+        ("\"abc\"", None, StatusCode::PRECONDITION_FAILED),
+        ("\"2\"", Some("\"0\""), StatusCode::PRECONDITION_FAILED),
+        ("\"0\"", Some("\"0\""), StatusCode::NOT_MODIFIED),
+    ] {
+        let mut hs = vec![(header::IF_MATCH, m)];
+        hs.extend(none_match.map(|n| (header::IF_NONE_MATCH, n)));
+        let st = send_headers(app, Method::GET, tx, &hs).await;
+        assert_eq!(st, want, "{m} / {none_match:?}");
+    }
+
+    // A list `If-Match` PUT passes when any strong entry is current; a weak one never does.
+    let put = |m: &'static str| async move {
+        send_full(
+            app,
+            Method::PUT,
+            host,
+            Some(json!("h")),
+            Some(USER),
+            Some((header::IF_MATCH, m)),
+        )
+        .await
+    };
+    let (st, etag, _) = put("\"7\", \"0\"").await;
+    assert_eq!((st, etag.as_deref()), (StatusCode::OK, Some("\"1\"")));
+    let (st, etag, _) = put("W/\"1\"").await;
+    assert_eq!((st, etag), (StatusCode::PRECONDITION_FAILED, None));
+
+    // Any `If-Match` on a missing transaction is 412; without it, still 404.
+    let gone = "/v1/transactions/nope/hostname";
+    for m in ["*", "\"1\""] {
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
+            let body = (method == Method::PUT).then(|| json!("x"));
+            let (st, ..) = send_full(
+                app,
+                method,
+                gone,
+                body,
+                Some(USER),
+                Some((header::IF_MATCH, m)),
+            )
+            .await;
+            assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        }
+    }
+    assert_eq!(
+        send(app, Method::GET, gone, None).await.0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]

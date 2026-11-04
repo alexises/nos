@@ -282,8 +282,10 @@ Measured on the lab router: 20k static routes in one batched edit plus commit to
 
 Every response that describes a transaction carries its generation as a strong `ETag`, such as `"1"`. This applies to open, `GET`, a successful `PUT`, and a subsection `DELETE`. The generation is per transaction, not per path: any edit to the transaction changes it.
 
-- Send **`If-Match: "<n>"`** on `PUT`, `DELETE` or `POST …/commit` to make the request conditional. If the transaction has been edited since you read generation `n`, the request is refused with **412** and nothing changes. A refused commit leaves the transaction open.
-- Send **`If-None-Match: "<n>"`** on `GET` to get **304 Not Modified**, with no body, while the transaction is still at generation `n`.
+- Send **`If-Match: "<n>"`** on `PUT`, `DELETE`, `POST …/commit` or `GET` to make the request conditional. If the transaction has been edited since you read generation `n`, the request is refused with **412** and nothing changes. A refused commit leaves the transaction open.
+- `If-Match` takes `*` or a comma-separated list (`"1", "3"`); it passes if any tag is the current generation. It uses strong comparison, so a weak tag (`W/"3"`) never matches. An opaque tag such as `"abc"` is valid and simply never matches (412). A missing transaction is 412 under any `If-Match`, 404 without one.
+- Send **`If-None-Match: "<n>"`** on `GET` to get **304 Not Modified**, with no body, while the transaction is still at generation `n`. It takes `*` or a list and uses weak comparison, so `W/"1"` matches `"1"`.
+- On `GET`, `If-Match` is checked first, then `If-None-Match`.
 - Both are optional. Without them, the last write wins, which is also how the shell behaves.
 
 ```sh
@@ -297,7 +299,7 @@ $ $C -i -X PUT -H 'Content-Type: application/json' -H 'If-Match: "0"' -d '"edge-
 HTTP/2 412
 content-type: application/problem+json
 
-{"type":"about:blank","title":"Precondition Failed","status":412,"detail":"precondition failed: transaction generation is 1, not 0"}
+{"type":"about:blank","title":"Precondition Failed","status":412,"detail":"precondition failed: transaction generation is 1, not one of [0]"}
 $ $C -i -H 'If-None-Match: "1"' $B/v1/transactions/doc1/hostname
 HTTP/2 304
 etag: "1"
@@ -348,11 +350,11 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 
 `title` is the HTTP reason phrase and `detail` says what went wrong. These are the status codes used:
 
-- `400 Bad Request`: a malformed body, CSR or `If-Match` value, or a body that does not fit the schema at that path.
+- `400 Bad Request`: a malformed body, CSR or `If-Match`/`If-None-Match` syntax (unquoted, unterminated), or a body that does not fit the schema at that path.
 - `401 Unauthorized`: no client certificate, or its user no longer exists. On `/v1/login`: wrong user or password.
 - `404 Not Found`: no such transaction, config path, route, interface, peer, and so on.
 - `405 Method Not Allowed`: the path exists, but not with this method. The `Allow` header lists what does.
-- `412 Precondition Failed`: `If-Match` did not match the transaction's generation.
+- `412 Precondition Failed`: `If-Match` did not match the transaction's generation, or named a transaction that does not exist.
 - `422 Unprocessable Entity`: validation refused the commit. The transaction stays open.
 - `429 Too Many Requests`: too many failed logins for this user, or 32 transactions already open. See `Retry-After`.
 - `502 Bad Gateway`: the router answered with something unexpected.

@@ -59,7 +59,7 @@ pub enum Request {
         /// Transaction name.
         name: String,
         /// Only act if the transaction is at this revision.
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
         /// As on `OpenTransaction`.
         actor: Option<String>,
     },
@@ -69,7 +69,7 @@ pub enum Request {
         /// Transaction name.
         name: String,
         /// Only act if the transaction is at this revision.
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
     },
     /// One-shot: fetch the daemon-authored documentation for one operation
     /// (see `nos_proto::docs::CommandDoc`), so any client can show
@@ -122,7 +122,7 @@ pub enum Request {
         /// Value to set; `None` clears the node.
         value: Option<String>,
         /// Only act if the transaction is at this revision.
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
         /// Where to insert (or move) the list element `path` names; `None`
         /// replaces in place / appends. Postcard wire change (#539): every
         /// consumer must pass it.
@@ -160,7 +160,7 @@ pub enum Request {
         /// Value to set; `None` clears the node.
         value: Option<String>,
         /// Only act if the transaction is at this revision.
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
         /// As on `SetTransactionPath`.
         position: Option<crate::config_path::ListPosition>,
     },

@@ -2889,7 +2889,8 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
 
 /// RFC 9110 §8.8/§13.1 on the transaction endpoints, against the real daemon:
 /// a strong `ETag` on every reply, a stale `If-Match` refused with 412 and
-/// nothing changed, the current one accepted, `If-None-Match` → 304.
+/// nothing changed, the current one (alone or in a list) accepted,
+/// `If-None-Match` → 304 (lists, weak tags), `If-Match` on GET and on a missing transaction → 412.
 async fn rest_etag(a: &Router) -> anyhow::Result<()> {
     let tx = format!("/v1/transactions/{REST_TX}");
     let host = format!("{tx}/hostname");
@@ -2936,13 +2937,13 @@ async fn rest_etag(a: &Router) -> anyhow::Result<()> {
     if body != format!("\"{orig_hostname}\"") {
         bail!("router-a: hostname changed by a refused PUT: {body}");
     }
-    // The current one: accepted, and the reply's tag moves on.
+    // The current one (in a list): accepted, and the reply's tag moves on.
     let (etag, _) = a
         .rest_expect_full(
             Method::PUT,
             &host,
             Some("\"etag-host\""),
-            Some(("if-match", &opened)),
+            Some(("if-match", &format!("{stale}, {opened}"))),
             200,
         )
         .await?;
@@ -3002,6 +3003,37 @@ async fn rest_etag(a: &Router) -> anyhow::Result<()> {
         )
         .await?;
     expect_body(&body, "\"etag-host\"")?;
+    // Lists and weak tags (weak comparison) on If-None-Match.
+    a.rest_expect_full(
+        Method::GET,
+        &tx,
+        None,
+        Some(("if-none-match", &format!("{stale}, W/{current}"))),
+        304,
+    )
+    .await?;
+    // If-Match on GET is strong and wins over If-None-Match; a weak tag never matches.
+    for m in [stale.to_string(), format!("W/{current}")] {
+        a.rest_expect_full(Method::GET, &tx, None, Some(("if-match", &m)), 412)
+            .await?;
+    }
+    // Any If-Match on a missing transaction is 412 (no current representation).
+    a.rest_expect_full(
+        Method::PUT,
+        "/v1/transactions/etag-absent/hostname",
+        Some("\"x\""),
+        Some(("if-match", "*")),
+        412,
+    )
+    .await?;
+    a.rest_expect_full(
+        Method::PUT,
+        "/v1/transactions/etag-absent/hostname",
+        Some("\"x\""),
+        None,
+        404,
+    )
+    .await?;
 
     // Commit: stale → 412 and the transaction stays open; current → 200.
     a.rest_expect_full(

@@ -64,13 +64,16 @@ impl Transaction {
         }
     }
 
-    /// RFC 9110 §13.1.1: `Some(g)` must equal the current generation.
-    fn check(&self, if_match: Option<u64>) -> Result<(), ConfigError> {
+    /// RFC 9110 §13.1.1: `Some(list)` must contain the current generation
+    /// (an empty list never does); `None` is unconditional.
+    fn check(&self, if_match: Option<&[u64]>) -> Result<(), ConfigError> {
         match if_match {
-            Some(expected) if expected != self.generation => Err(ConfigError::PreconditionFailed {
-                expected,
-                actual: self.generation,
-            }),
+            Some(expected) if !expected.contains(&self.generation) => {
+                Err(ConfigError::PreconditionFailed {
+                    expected: expected.to_vec(),
+                    actual: self.generation,
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -423,7 +426,7 @@ impl ConfigStore {
         name: &str,
         path: &[String],
         value: Option<&str>,
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
         position: Option<ListPosition>,
     ) -> Result<TransactionSnapshot, ConfigError> {
         self.edit_path(name, path, value, if_match, position, |t, n| {
@@ -440,7 +443,7 @@ impl ConfigStore {
         name: &str,
         path: &[String],
         value: Option<&str>,
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
         position: Option<ListPosition>,
     ) -> Result<PathEdit, ConfigError> {
         let set = value.is_some();
@@ -465,7 +468,7 @@ impl ConfigStore {
         name: &str,
         path: &[String],
         value: Option<&str>,
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
         position: Option<ListPosition>,
         reply: impl FnOnce(&Transaction, &str) -> R,
     ) -> Result<R, ConfigError> {
@@ -473,7 +476,7 @@ impl ConfigStore {
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
-        txn.check(if_match)?;
+        txn.check(if_match.as_deref())?;
         txn.last_used = Instant::now();
         let json = value.map(serde_json::from_str).transpose()?;
         let running = self.running_snapshot().await;
@@ -501,13 +504,13 @@ impl ConfigStore {
     async fn checkout(
         &self,
         name: &str,
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
     ) -> Result<(Arc<Config>, u64), ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
-        txn.check(if_match)?;
+        txn.check(if_match.as_deref())?;
         txn.last_used = Instant::now();
         Ok((Arc::clone(&txn.config), txn.generation))
     }
@@ -550,7 +553,7 @@ impl ConfigStore {
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
-        txn.check(Some(generation))?;
+        txn.check(Some(&[generation]))?;
         match edit {
             Edit::Whole(config) => txn.config = Arc::new(*config),
             Edit::Users(users) => Arc::make_mut(&mut txn.config).users = users,
@@ -577,13 +580,13 @@ impl ConfigStore {
     pub async fn commit_transaction(
         &self,
         name: &str,
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
     ) -> Result<Vec<String>, ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
-        txn.check(if_match)?;
+        txn.check(if_match.as_deref())?;
         // Pass the config itself as the validation context (cross-reference checks).
         txn.config.validate_with(&txn.config)?;
         check_syslog_trust_anchors(&txn.config)?;
@@ -675,12 +678,12 @@ impl ConfigStore {
     pub async fn discard_transaction(
         &self,
         name: &str,
-        if_match: Option<u64>,
+        if_match: Option<Vec<u64>>,
     ) -> Result<(), ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         txs.get(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?
-            .check(if_match)?;
+            .check(if_match.as_deref())?;
         txs.remove(name);
         debug!(transaction = %name, "discarded transaction");
         Ok(())
@@ -1326,7 +1329,7 @@ mod tests {
         );
         // A matching precondition passes and bumps; `None` is unconditional.
         let snap = store
-            .set_transaction_path("t", &segs("hostname"), Some("\"h1\""), Some(1), None)
+            .set_transaction_path("t", &segs("hostname"), Some("\"h1\""), Some(vec![1]), None)
             .await
             .unwrap();
         assert_eq!(snap.generation, 2);
@@ -1337,18 +1340,20 @@ mod tests {
         assert_eq!(snap.generation, 3);
 
         // Stale: refused, nothing changed, the transaction stays.
-        let stale = Some(2);
+        let stale = Some(vec![2]);
         assert!(matches!(
             store
-                .set_transaction_path("t", &segs("hostname"), Some("\"h3\""), stale, None)
+                .set_transaction_path("t", &segs("hostname"), Some("\"h3\""), stale.clone(), None)
                 .await,
-            Err(ConfigError::PreconditionFailed {
-                expected: 2,
-                actual: 3
-            })
+            Err(ConfigError::PreconditionFailed { ref expected, actual: 3 }) if expected == &[2]
+        ));
+        // An empty list never matches (a list with the current entry does: see discard below).
+        assert!(matches!(
+            store.commit_transaction("t", Some(vec![])).await,
+            Err(ConfigError::PreconditionFailed { .. })
         ));
         assert!(matches!(
-            store.commit_transaction("t", stale).await,
+            store.commit_transaction("t", stale.clone()).await,
             Err(ConfigError::PreconditionFailed { .. })
         ));
         assert!(matches!(
@@ -1363,7 +1368,10 @@ mod tests {
         );
 
         // Current: discard goes through.
-        store.discard_transaction("t", Some(3)).await.unwrap();
+        store
+            .discard_transaction("t", Some(vec![2, 3]))
+            .await
+            .unwrap();
         assert!(matches!(
             store.get_transaction("t").await,
             Err(ConfigError::TransactionNotFound(_))
@@ -2011,12 +2019,12 @@ mod tests {
         assert_eq!(after.generation, before.generation);
         // A stale generation is still refused.
         let err = store
-            .set_transaction_path("u", &segs("hostname"), Some("\"y\""), Some(0), None)
+            .set_transaction_path("u", &segs("hostname"), Some("\"y\""), Some(vec![0]), None)
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::PreconditionFailed { .. }));
         let g = store
-            .edit_transaction_path("u", &segs("hostname"), Some("\"y\""), Some(2), None)
+            .edit_transaction_path("u", &segs("hostname"), Some("\"y\""), Some(vec![2]), None)
             .await
             .unwrap();
         assert_eq!((g.generation, g.dirty), (3, true));

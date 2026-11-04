@@ -784,7 +784,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             name: "t1".to_string(),
             path: vec!["hostname".to_string()],
             value: Some("\"h1\"".to_string()),
-            if_match: Some(0),
+            if_match: Some(vec![0]),
             position: None,
         })
         .await
@@ -799,13 +799,13 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             name: "t1".to_string(),
             path: vec!["hostname".to_string()],
             value: Some("\"h2\"".to_string()),
-            if_match: Some(0),
+            if_match: Some(vec![0]),
             position: None,
         },
         Request::CommitTransaction {
             actor: None,
             name: "t1".to_string(),
-            if_match: Some(0),
+            if_match: Some(vec![0]),
         },
     ] {
         writer.send(req).await.unwrap();
@@ -857,7 +857,7 @@ async fn edit_transaction_path_over_ipc_replies_with_the_subsection_only() {
     let body = serde_json::to_value(instance("r1", 65000)).unwrap();
 
     writer
-        .send(edit(Some(body.to_string()), Some(0)))
+        .send(edit(Some(body.to_string()), Some(vec![0])))
         .await
         .unwrap();
     match next_event(&mut reader).await {
@@ -869,13 +869,13 @@ async fn edit_transaction_path_over_ipc_replies_with_the_subsection_only() {
         other => panic!("expected TransactionEdit, got {other:?}"),
     }
     // A stale generation: 412-style error, nothing changed.
-    writer.send(edit(None, Some(0))).await.unwrap();
+    writer.send(edit(None, Some(vec![0]))).await.unwrap();
     match next_event(&mut reader).await {
         Event::Error(msg) => assert!(msg.starts_with("precondition failed"), "{msg}"),
         other => panic!("expected Error event, got {other:?}"),
     }
     // A remove carries no subsection.
-    writer.send(edit(None, Some(1))).await.unwrap();
+    writer.send(edit(None, Some(vec![1]))).await.unwrap();
     match next_event(&mut reader).await {
         Event::TransactionEdit {
             generation: 2,

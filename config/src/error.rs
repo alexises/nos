@@ -18,8 +18,8 @@ pub enum ConfigError {
     TransactionNotFound(String),
     /// An `if_match` precondition (RFC 9110 §13.1.1) named a generation the
     /// transaction has moved past. `nos-restd` keys on the message prefix.
-    #[error("precondition failed: transaction generation is {actual}, not {expected}")]
-    PreconditionFailed { expected: u64, actual: u64 },
+    #[error("precondition failed: transaction generation is {actual}, not one of {expected:?}")]
+    PreconditionFailed { expected: Vec<u64>, actual: u64 },
     #[error("invalid transaction name: use 1-64 characters of letters, digits, '.', '_' or '-'")]
     InvalidTransactionName,
     #[error("too many transactions: {0} are open; commit or discard one first")]
