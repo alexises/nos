@@ -372,7 +372,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     cmd!(["edit" "source"],
         Doc::Local {
             summary: "Edit the current policy's RPL source in $EDITOR.",
-            detail: "Opens $EDITOR (else $VISUAL, else nano) on the current \
+            detail: "Opens $EDITOR (else $VISUAL, else vim; the value may carry arguments) on the current \
                      policy-definition's source. On save, the edited source is compiled against \
                      the transaction and applied only if it compiles; otherwise it is \
                      discarded.",

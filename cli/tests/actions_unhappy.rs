@@ -824,7 +824,33 @@ EOF"#,
     let (mode, _) = run(&flaky, flaky_policy.clone(), &["edit source"], leave_open).await;
     assert_eq!(mode, flaky_policy);
 
-    // The fallbacks: no $EDITOR means $VISUAL, then nano (absent here: an error).
+    // An editor value with arguments: the argument precedes the file path.
+    let argv = tools.path().join("argv");
+    let rec = editor(
+        tools.path(),
+        "rec",
+        &format!(
+            r#"echo "$1" > {a}; echo "$2" >> {a}; echo 'accept' > "$2""#,
+            a = argv.display()
+        ),
+    );
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
+    unsafe { std::env::set_var("EDITOR", format!("{rec} --flag")) };
+    let _ = run(&lab, policy.clone(), &["edit source"], leave_open).await;
+    let rec_out = std::fs::read_to_string(&argv).unwrap();
+    assert!(rec_out.starts_with("--flag\n/"), "{rec_out}");
+
+    // An unparsable value discards the edit without running anything.
+    std::fs::remove_file(&argv).unwrap();
+    // SAFETY: test-only env mutation; these tests run in one serial test body.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
+    unsafe { std::env::set_var("EDITOR", format!("{rec} \"unbalanced")) };
+    let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
+    assert!(matches!(mode, Mode::Configuration { .. }));
+    assert!(!argv.exists());
+
+    // The fallbacks: no $EDITOR means $VISUAL, then vim (absent here: an error).
     // SAFETY: test-only env mutation; these tests run in one serial test body.
     // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
     unsafe { std::env::remove_var("EDITOR") };
