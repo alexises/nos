@@ -1,18 +1,20 @@
 # nos-ospf-common — logic shared by OSPFv2 and OSPFv3
 
-Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS dependencies (not even `nos-proto`), no I/O; the only external crate is `tokio` with the `sync` feature, for `Lsdb`'s `Notify`.
+Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS dependencies (not even `nos-proto`), no I/O except the `drouters` socket-option helper; external crates are `tokio` (`sync`, for `Lsdb`s `Notify`) and `socket2` (for `drouters`).
 
 ## Modules
 
 - `neighbor`, `election`: RFC 2328 §10.5 neighbor FSM and §9.4 DR/BDR election (identical in RFC 5340).
 - `ratelimit`: `WarnLimiter` (token bucket for peer-triggerable `warn!`s) and `MAX_NEIGHBORS_PER_LINK`.
 - `bfd`: `bfd_wanted`, the neighbor-state rule for which neighbors get a BFD session.
+- `drouters`: `AllDRouters` (idempotent AllDRouters join/leave on a `socket2::Socket`; `Iface` implies the family), `wants_all_drouters`, `ALL_D_ROUTERS_V4/V6`.
 - `lsa`: the `LsaHeader` and `Lsa` traits, `MAX_AGE`, and the RFC 2328 §13.1 `is_newer` ordering (a provided method of `LsaHeader`).
 - `lsdb`: the generic `Lsdb<L: Lsa>` store, `InstallOutcome`, `MIN_LS_ARRIVAL`, `MAX_AGE_HOLD_TICKS`.
 - `exchange`: the RFC 2328 §10.6-10.8 DBD exchange (`Dbd<H>`, `AdjacencyData<L>`, `Action<L>`, `Params`, `on_dbd_received`), LSR/LSU handling (`on_lsr_received`, `on_lsu_received`, `Stores`, `Scope`), the §13.5 delayed-ack queue (`take_pending_acks`), `on_lsack_received`, `mtu_based_max_headers`/`mtu_acceptable`.
 
 ## Rules
 
+- **`drouters` owns only the idempotent join/leave** (EADDRINUSE/EADDRNOTAVAIL on join and EADDRNOTAVAIL on leave mean already-in-state); deciding when (election outcome, link type) stays in the daemons.
 - **Traits carry identity only.** `LsaHeader` exposes key, sequence, age, checksum, length and advertising router; `Lsa` exposes its header. Bodies, scope (area/link/AS), type numbering and wire codecs stay in the daemons.
 - **No family-wide trait.** Where v2 and v3 differ, the shared function takes a per-call closure or a plain argument; never add a `Family` trait.
 - **The key is an associated type** (`LsaHeader::Key`): v2's `lsa_type` is a `u8`, v3's a `u16`. `advertising_router()` is on the header so `age_and_evict` can apply the RFC 3623/5187 grace `hold` set without bounds on `Key`.
