@@ -132,23 +132,57 @@ impl PartialOrd for HeapEntry {
 /// link's own Interface ID, encoded via `lsa::interface_id_key`.
 type LinkLocalAddresses = HashMap<(Ipv4Addr, Ipv4Addr), Ipv6Addr>;
 
+/// One merged Router-LSA body per advertising router.
+type Routers = HashMap<Ipv4Addr, RouterLsaBody>;
+
+/// Folds the several Router-/E-Router-LSAs one router may originate
+/// (fragments differ by Link State ID, RFC 5340 §A.4.3 / RFC 8362) into one
+/// body: links concatenated in `(lsa_type, link_state_id)` order with exact
+/// duplicates dropped, flags OR-ed, options from the lowest Link State ID
+/// (E-Router-LSA wins a tie).
+fn merge_router_fragments(mut parts: Vec<(u16, Ipv4Addr, &RouterLsaBody)>) -> RouterLsaBody {
+    parts.sort_by_key(|&(t, id, _)| (t, u32::from(id)));
+    let options = parts
+        .iter()
+        .min_by_key(|&&(t, id, _)| (u32::from(id), std::cmp::Reverse(t)))
+        .map_or(0, |f| f.2.options);
+    let mut links: Vec<lsa::RouterLsaLink> = Vec::new();
+    let mut flags = 0;
+    for (_, _, b) in parts {
+        flags |= b.flags;
+        for l in &b.links {
+            if !links.contains(l) {
+                links.push(*l);
+            }
+        }
+    }
+    RouterLsaBody {
+        flags,
+        options,
+        links,
+    }
+}
+
 /// Builds the lookup maps every pass needs: routers/networks by id (as
 /// `ospf::spf`'s own `routers_and_networks` does), plus every installed
 /// Link-LSA's own link-local address.
 fn routers_networks_links(
     lsas: &[std::sync::Arc<Lsa>],
 ) -> (
-    HashMap<Ipv4Addr, &RouterLsaBody>,
+    Routers,
     HashMap<Ipv4Addr, &NetworkLsaBody>,
     LinkLocalAddresses,
 ) {
-    let mut routers = HashMap::new();
+    let mut fragments: HashMap<Ipv4Addr, Vec<(u16, Ipv4Addr, &RouterLsaBody)>> = HashMap::new();
     let mut networks = HashMap::new();
     let mut links = HashMap::new();
     for l in lsas {
         match &l.body {
             LsaBody::Router(r) => {
-                routers.insert(l.header.advertising_router, r);
+                fragments
+                    .entry(l.header.advertising_router)
+                    .or_default()
+                    .push((l.header.lsa_type, l.header.link_state_id, r));
             }
             LsaBody::Network(n) => {
                 networks.insert(l.header.link_state_id, n);
@@ -167,6 +201,10 @@ fn routers_networks_links(
             | LsaBody::Opaque(_) => {}
         }
     }
+    let routers = fragments
+        .into_iter()
+        .map(|(id, f)| (id, merge_router_fragments(f)))
+        .collect();
     (routers, networks, links)
 }
 
@@ -318,7 +356,7 @@ struct Alternate {
 /// `ospf::spf::alternates`.
 fn alternates(
     root: Ipv4Addr,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
     links: &LinkLocalAddresses,
 ) -> Vec<Alternate> {
@@ -394,7 +432,7 @@ fn pick_backup<'a>(
 
 fn run_dijkstra(
     root: Ipv4Addr,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
     links: Option<&LinkLocalAddresses>,
 ) -> (HashMap<Vertex, u32>, HashMap<Vertex, NextHop>) {
@@ -452,7 +490,7 @@ fn run_dijkstra(
 /// module doc comment.
 fn neighbors(
     vertex: Vertex,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
 ) -> Vec<(Vertex, u32)> {
     match vertex {
@@ -490,7 +528,7 @@ fn derive_next_hop(
     parent: Vertex,
     child: Vertex,
     root: Ipv4Addr,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     links: &LinkLocalAddresses,
     next_hop: &HashMap<Vertex, NextHop>,
 ) -> Option<NextHop> {
@@ -524,7 +562,7 @@ fn derive_next_hop(
 /// unconditionally since every non-first-hop call site only reads the
 /// address half.
 fn p2p_next_hop(
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     links: &LinkLocalAddresses,
     parent_router: Ipv4Addr,
     child_router: Ipv4Addr,
@@ -543,7 +581,7 @@ fn p2p_next_hop(
 /// `root_attached_to_network`'s own lookup, which now delegates here.
 fn root_network_interface_id(
     root: Ipv4Addr,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     network_id: Ipv4Addr,
 ) -> Option<u32> {
     let network_key = lsa::key_to_interface_id(network_id);
@@ -559,7 +597,7 @@ fn root_network_interface_id(
 /// entry pointing back at this network (matched by `neighbor_interface_id
 /// == network_id`) and read that entry's own `interface_id`.
 fn network_next_hop(
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     links: &LinkLocalAddresses,
     network_id: Ipv4Addr,
     child_router: Ipv4Addr,
@@ -574,11 +612,7 @@ fn network_next_hop(
         .copied()
 }
 
-fn root_attached_to_network(
-    root: Ipv4Addr,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
-    network_id: Ipv4Addr,
-) -> bool {
+fn root_attached_to_network(root: Ipv4Addr, routers: &Routers, network_id: Ipv4Addr) -> bool {
     root_network_interface_id(root, routers, network_id).is_some()
 }
 
@@ -590,7 +624,7 @@ fn root_attached_to_network(
 /// case `ospf::spf::root_advertises_stub` also guards).
 fn collect_prefix_routes(
     root: Ipv4Addr,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     prefix_lsas: &[&IntraAreaPrefixLsaBody],
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, NextHop>,
@@ -720,7 +754,7 @@ fn collect_inter_area_route(
 /// the vertex the path leaves through, for LFA.
 fn asbr_distance(
     graph: &Reach,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     inter_area_routers: &[(Ipv4Addr, &InterAreaRouterLsaBody)],
     asbr: Ipv4Addr,
 ) -> Option<((u32, Ipv6Addr, u32), Ipv4Addr)> {
@@ -745,7 +779,7 @@ fn asbr_distance(
 /// LSA's own metric. Our own (`asbr == root`) never routes.
 fn collect_external_route(
     graph: &Reach,
-    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    routers: &Routers,
     inter_area_routers: &[(Ipv4Addr, &InterAreaRouterLsaBody)],
     asbr: Ipv4Addr,
     e: &AsExternalLsaBody,
@@ -1441,5 +1475,151 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].metric, 2);
         assert_eq!(routes[0].next_hop, "fe80::4".parse::<Ipv6Addr>().unwrap());
+    }
+
+    fn fragment(
+        adv: Ipv4Addr,
+        lsid: u32,
+        lsa_type: u16,
+        flags: u8,
+        options: u32,
+        links: Vec<RouterLsaLink>,
+    ) -> Arc<Lsa> {
+        Arc::new(Lsa {
+            header: header(lsa_type, Ipv4Addr::from(lsid), adv),
+            body: LsaBody::Router(RouterLsaBody {
+                flags,
+                options,
+                links,
+            }),
+        })
+    }
+
+    /// r1(root) split over two fragments, reaching r2 and r3 (each with a prefix).
+    fn split_root() -> Vec<Arc<Lsa>> {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        vec![
+            fragment(r1, 0, LSA_TYPE_ROUTER, 0, 0, vec![p2p(r2, 1, 1, 1)]),
+            fragment(r1, 1, LSA_TYPE_ROUTER, 0, 0, vec![p2p(r3, 2, 1, 1)]),
+            router_lsa(r2, vec![p2p(r1, 1, 1, 1)]),
+            router_lsa(r3, vec![p2p(r1, 1, 2, 1)]),
+            link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+            link_lsa(r3, 1, "fe80::3".parse().unwrap()),
+            router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+            router_prefix_lsa(r3, vec![("2001:db8:3::/64".parse().unwrap(), 1)]),
+        ]
+    }
+
+    fn sorted(mut v: Vec<RouteEntry>) -> Vec<RouteEntry> {
+        v.sort_by_key(|r| r.prefix);
+        v
+    }
+
+    #[test]
+    fn split_router_lsa_reaches_both_neighbors_in_any_order() {
+        let lsas = split_root();
+        let routes = sorted(compute(router_id(1), &lsas));
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(routes[0].interface_id, 1);
+        assert_eq!(routes[1].next_hop, "fe80::3".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(routes[1].interface_id, 2);
+        let mut rev = lsas.clone();
+        rev.reverse();
+        assert_eq!(sorted(compute(router_id(1), &rev)), routes);
+    }
+
+    #[test]
+    fn asbr_flag_on_later_fragment_still_counts() {
+        let (r1, r2) = (router_id(1), router_id(2));
+        let lsas = vec![
+            router_lsa(r1, vec![p2p(r2, 1, 1, 1)]),
+            fragment(r2, 0, LSA_TYPE_ROUTER, 0, 0x13, vec![p2p(r1, 1, 1, 1)]),
+            fragment(r2, 1, LSA_TYPE_ROUTER, lsa::ROUTER_FLAG_E, 0x99, vec![]),
+        ];
+        let view = intra_area_routes(r1, &lsas);
+        assert_eq!(view.asbrs, vec![(r2, 1, 0x13)]);
+    }
+
+    #[test]
+    fn legacy_and_e_router_overlap_adds_no_duplicate_edge() {
+        let (r1, r2) = (router_id(1), router_id(2));
+        let lsas = vec![
+            fragment(r1, 0, LSA_TYPE_ROUTER, 0, 0, vec![p2p(r2, 1, 1, 1)]),
+            fragment(r1, 0, LSA_TYPE_E_ROUTER, 0, 0, vec![p2p(r2, 1, 1, 1)]),
+            router_lsa(r2, vec![p2p(r1, 1, 1, 1)]),
+            link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+            router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+        ];
+        let routes = compute(router_id(1), &lsas);
+        assert_eq!(routes.len(), 1);
+        let (merged, _, _) = routers_networks_links(&lsas);
+        assert_eq!(merged[&r1].links.len(), 1);
+    }
+
+    #[test]
+    fn transit_link_only_in_second_fragment() {
+        let (r1, r2) = (router_id(1), router_id(2));
+        let lsas = vec![
+            fragment(r1, 0, LSA_TYPE_ROUTER, 0, 0, vec![]),
+            fragment(r1, 1, LSA_TYPE_ROUTER, 0, 0, vec![transit(5, 1, r2, 1)]),
+            router_lsa(r2, vec![transit(5, 7, r2, 1)]),
+            network_lsa(5, r2, vec![r2, r1]),
+            link_lsa(r2, 7, "fe80::2".parse().unwrap()),
+            router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+        ];
+        let routes = compute(r1, &lsas);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+    }
+
+    #[test]
+    fn merge_flags_or_options_lowest_lsid_links_dedup_by_full_identity() {
+        let (a, b) = (
+            RouterLsaBody {
+                flags: 1,
+                options: 0xA,
+                links: vec![p2p(router_id(2), 1, 1, 1)],
+            },
+            RouterLsaBody {
+                flags: 2,
+                options: 0xB,
+                links: vec![p2p(router_id(2), 1, 1, 1), p2p(router_id(2), 1, 1, 9)],
+            },
+        );
+        let m = merge_router_fragments(vec![
+            (LSA_TYPE_ROUTER, Ipv4Addr::from(1), &b),
+            (LSA_TYPE_ROUTER, Ipv4Addr::from(0), &a),
+        ]);
+        assert_eq!((m.flags, m.options), (3, 0xA));
+        assert_eq!(m.links.len(), 2, "same link, other metric, is kept");
+    }
+
+    #[test]
+    fn tie_at_lowest_lsid_takes_e_router_options_in_any_order() {
+        let (l, e) = (
+            RouterLsaBody {
+                flags: 0,
+                options: 1,
+                links: vec![],
+            },
+            RouterLsaBody {
+                flags: 0,
+                options: 2,
+                links: vec![],
+            },
+        );
+        for frags in [
+            vec![
+                (LSA_TYPE_ROUTER, Ipv4Addr::from(0), &l),
+                (LSA_TYPE_E_ROUTER, Ipv4Addr::from(0), &e),
+            ],
+            vec![
+                (LSA_TYPE_E_ROUTER, Ipv4Addr::from(0), &e),
+                (LSA_TYPE_ROUTER, Ipv4Addr::from(0), &l),
+            ],
+        ] {
+            assert_eq!(merge_router_fragments(frags).options, 2);
+        }
     }
 }
