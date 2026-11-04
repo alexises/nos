@@ -7,7 +7,7 @@ use tokio_util::codec::FramedRead;
 use tracing_subscriber::layer::SubscriberExt;
 
 /// The layer is installed before `nos-logd` listens: the first connect fails,
-/// the entries wait in the channel, and the retry delivers them in order with
+/// the entries wait in the queue, and the retry delivers them in order with
 /// their level, target, message and fields.
 #[tokio::test]
 async fn queued_events_reach_logd_once_it_listens() {
@@ -54,7 +54,8 @@ async fn queued_events_reach_logd_once_it_listens() {
             LogLevel::Error
         ]
     );
-    // The subscriber (and so the layer's sender) is gone: the task has exited.
+    // The task exits on shutdown only (the queue has no sender to drop).
+    shutdown_tx.send(true).unwrap();
     shutdown_tx.closed().await;
 }
 
