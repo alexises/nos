@@ -24,6 +24,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Graceful restart** (RFC 5187): same shape as v2 minus the IP-address TLV (`lsa::LSA_TYPE_GRACE` `0x000B`); only SIGTERM announces; nothing is aged on shutdown, the restarter resyncs cold.
 - **DBD pagination**: `exchange::mtu_based_max_headers(LinkConfig.mtu)` (IPv6 40 + OSPFv3 16 + DBD 12 header bytes); `Ospfv3Profile.mtu` overrides the interface MTU (`reconcile::resolve_effective_mtu`); `--dbd-max-headers` is test-only.
 - **LSU/LSR/LSAck split** (#807): every send goes through `link::{lsu,lsr,lsack}_packets` (`chunk_by_budget`, budget `mtu - 40 - 16 - 4 - trailer`, oversize LSA alone), one packet (own trailer sequence) per chunk; a new send site must use them.
+- **Router-LSA split** (#853): originate side cuts links per area by the smallest-MTU budget (fragment IDs router-id, 0.0.0.1, ...); receive side unions all fragments; test-only `--router-lsa-max-links`.
 - **Route push**: chunked like v2's (`rib_push_client::push`, test-only `--push-chunk`, #727).
 - **Redistribution**: `Ospfv3Request::RedistributeRoutes` is `ribd`'s only (`server::allowed`); `reconcile::resolve_redistribute_policy` is a `ponytail:` copy of v2's.
 - **Receive hardening** (#394): non-link-local sources are dropped in `link::run`; same neighbor cap and `warn_limited!` as v2.

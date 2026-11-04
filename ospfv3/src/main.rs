@@ -59,6 +59,11 @@ struct Args {
     /// cannot reach a supervised daemon); never a config field.
     #[arg(long, hide = true)]
     push_chunk: Option<usize>,
+
+    /// Cap on links per Router-LSA fragment (`ospfv3-router-lsa-split` e2e).
+    /// Test-only, via `--ospfv3d-arg`; never a config field.
+    #[arg(long, hide = true)]
+    router_lsa_max_links: Option<usize>,
 }
 
 #[tokio::main]
@@ -93,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
     links.set_originate_lsinfinity(args.originate_lsinfinity);
+    links.set_router_lsa_max_links(args.router_lsa_max_links);
     let (link_tx, link_rx) = watch::channel(nos_ospfv3::link_client::LinkTable::default());
     let link_task = tokio::spawn(nos_ospfv3::link_client::run(
         args.watchdog_socket.clone(),
@@ -185,5 +191,14 @@ mod tests {
             Args::try_parse_from(["nos-ospfv3d", "--instance", "o1", "--originate-lsinfinity"])
                 .unwrap();
         assert!(on.originate_lsinfinity);
+        let cap = Args::try_parse_from([
+            "nos-ospfv3d",
+            "--instance",
+            "o1",
+            "--router-lsa-max-links",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(cap.router_lsa_max_links, Some(2));
     }
 }

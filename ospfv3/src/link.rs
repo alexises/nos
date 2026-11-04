@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -991,14 +991,41 @@ fn finish_neighbor_event(
 /// MTU minus IPv6 (40), the `OSPFv3` header (16), the LSU LSA count (4; slack
 /// for LSR/LSAck) and the RFC 7166 trailer when the link is authenticated.
 fn split_budget(cfg: &LinkConfig) -> usize {
-    usize::from(cfg.mtu).saturating_sub(
-        40 + 16
-            + 4
-            + cfg
-                .auth
-                .as_ref()
-                .map_or(0, packet::TrailerAuth::trailer_len),
-    )
+    lsa_budget(cfg.mtu, trailer_len(cfg), 0)
+}
+
+fn trailer_len(cfg: &LinkConfig) -> usize {
+    cfg.auth
+        .as_ref()
+        .map_or(0, packet::TrailerAuth::trailer_len)
+}
+
+/// `split_budget` for a bare `mtu`/`trailer`, with `extra` more bytes of
+/// overhead subtracted (a Router-LSA's 20-byte header plus 4 of flags/options).
+fn lsa_budget(mtu: u16, trailer: usize, extra: usize) -> usize {
+    usize::from(mtu).saturating_sub(40 + 16 + 4 + extra + trailer)
+}
+
+/// Router-LSA links per fragment: each fragment must fit one packet on the
+/// area's smallest-MTU link (an LSA floods on every link of the area). Never
+/// splits a link (an over-budget one stays alone). `max_links` caps a
+/// fragment (test-only). Always at least one, possibly empty, fragment.
+fn split_router_links(
+    links: &[RouterLsaLink],
+    budget: usize,
+    max_links: Option<usize>,
+) -> Vec<Vec<RouterLsaLink>> {
+    let mut out: Vec<Vec<RouterLsaLink>> = Vec::new();
+    for chunk in nos_ospf_common::exchange::chunk_by_budget(links, budget, |_| 16) {
+        match max_links {
+            Some(m) => out.extend(chunk.chunks(m.max(1)).map(<[_]>::to_vec)),
+            None => out.push(chunk.to_vec()),
+        }
+    }
+    if out.is_empty() {
+        out.push(Vec::new());
+    }
+    out
 }
 
 /// Cuts `items` to the link MTU and encodes each chunk as its own packet (the
@@ -1619,6 +1646,9 @@ pub struct LinkManager {
     /// Inter-Area-Router and AS-External LSA at `LSInfinity`, so the e2e can
     /// prove a receiver never installs one.
     originate_lsinfinity: AtomicBool,
+    /// Test-only (`--router-lsa-max-links`): cap links per Router-LSA fragment
+    /// so the e2e splits a small router; `0` = unset.
+    router_lsa_max_links: AtomicUsize,
     /// RFC 5187 grace period (seconds) to announce on a planned restart;
     /// `0` = graceful restart off.
     grace_period: AtomicU16,
@@ -1753,6 +1783,12 @@ impl LinkManager {
         self.originate_lsinfinity.store(on, Ordering::Relaxed);
     }
 
+    /// Test-only: see the `router_lsa_max_links` field.
+    pub fn set_router_lsa_max_links(&self, max: Option<usize>) {
+        self.router_lsa_max_links
+            .store(max.unwrap_or(0), Ordering::Relaxed);
+    }
+
     pub fn new(age_multiplier: u16, dbd_max_headers: Option<usize>) -> Arc<Self> {
         Self::with_opener(
             age_multiplier,
@@ -1799,6 +1835,7 @@ impl LinkManager {
             dbd_max_headers,
             extended_lsa: AtomicBool::new(false),
             originate_lsinfinity: AtomicBool::new(false),
+            router_lsa_max_links: AtomicUsize::new(0),
             grace_period: AtomicU16::new(0),
             bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
@@ -2008,18 +2045,48 @@ impl LinkManager {
             let mut lsdb = lsdb.lock().await;
             let done = done.areas.entry(area_id).or_default();
 
-            let router_links = router_lsa_links(local_router_id, &links);
-            done.insert(install_self_originated(
-                &mut lsdb,
-                local_router_id,
-                types.router,
-                local_router_id,
-                LsaBody::Router(RouterLsaBody {
-                    flags,
-                    options: OWN_OPTIONS,
-                    links: router_links,
-                }),
-            ));
+            // Smallest MTU of the area: the LSA floods on every link of it.
+            let budget =
+                links
+                    .iter()
+                    .map(|(c, _)| usize::from(c.mtu))
+                    .min()
+                    .map_or(usize::MAX, |mtu| {
+                        let trailer = links.iter().map(|(c, _)| trailer_len(c)).max().unwrap_or(0);
+                        lsa_budget(u16::try_from(mtu).unwrap_or(u16::MAX), trailer, 20 + 4)
+                    });
+            let max_links = match self.router_lsa_max_links.load(Ordering::Relaxed) {
+                0 => None,
+                m => Some(m),
+            };
+            let fragments = split_router_links(
+                &router_lsa_links(local_router_id, &links),
+                budget,
+                max_links,
+            );
+            if fragments.len() > 1 {
+                info!(area = %area_id, fragments = fragments.len(), "ospfv3 router-lsa split");
+            }
+            for (i, router_links) in fragments.into_iter().enumerate() {
+                // Fragment 0 keeps the router id; 1, 2, ... follow (RFC 5340
+                // §4.4.3.2). `lsids` only allocates prefix/external IDs.
+                let id = if i == 0 {
+                    local_router_id
+                } else {
+                    Ipv4Addr::from(u32::try_from(i).unwrap_or(u32::MAX))
+                };
+                done.insert(install_self_originated(
+                    &mut lsdb,
+                    local_router_id,
+                    types.router,
+                    id,
+                    LsaBody::Router(RouterLsaBody {
+                        flags,
+                        options: OWN_OPTIONS,
+                        links: router_links,
+                    }),
+                ));
+            }
 
             for (cfg, status) in &links {
                 if cfg.network_type != NetworkType::Broadcast
@@ -3031,6 +3098,52 @@ pub(crate) mod tests {
         assert_eq!(split_budget(&cfg), 8);
         cfg.mtu = 10;
         assert_eq!(split_budget(&cfg), 0);
+    }
+
+    fn rl(n: u32) -> RouterLsaLink {
+        RouterLsaLink {
+            link_type: LINK_TYPE_POINT_TO_POINT,
+            metric: 1,
+            interface_id: n,
+            neighbor_interface_id: n,
+            neighbor_router_id: Ipv4Addr::from(n),
+        }
+    }
+
+    #[test]
+    fn split_router_links_cuts_by_budget_and_cap() {
+        let links: Vec<_> = (1..=5).map(rl).collect();
+        let ids = |v: &[Vec<RouterLsaLink>]| -> Vec<Vec<u32>> {
+            v.iter()
+                .map(|c| c.iter().map(|l| l.interface_id).collect())
+                .collect()
+        };
+        // Budget for two links: ceil(5/2) chunks, in order.
+        assert_eq!(
+            ids(&split_router_links(&links, 32, None)),
+            [vec![1, 2], vec![3, 4], vec![5]]
+        );
+        // Everything fits: one chunk; the cap alone also splits.
+        assert_eq!(ids(&split_router_links(&links, 1000, None)).len(), 1);
+        assert_eq!(
+            ids(&split_router_links(&links, 1000, Some(2))),
+            [vec![1, 2], vec![3, 4], vec![5]]
+        );
+        assert_eq!(ids(&split_router_links(&links, 32, Some(1))).len(), 5);
+        // A link over budget stays whole, alone.
+        assert_eq!(
+            ids(&split_router_links(&links[..2], 4, None)),
+            [vec![1], vec![2]]
+        );
+        // No links: still one (empty) fragment 0.
+        assert_eq!(split_router_links(&[], 32, None), [Vec::new()]);
+    }
+
+    #[test]
+    fn lsa_budget_subtracts_lsa_header_and_trailer() {
+        assert_eq!(lsa_budget(1500, 0, 24), 1500 - 60 - 24);
+        assert_eq!(lsa_budget(1500, 48, 24), 1500 - 60 - 24 - 48);
+        assert_eq!(lsa_budget(50, 0, 24), 0);
     }
 
     #[test]
@@ -4424,6 +4537,87 @@ pub(crate) mod tests {
             OspfNeighborState::Down
         );
         a.shutdown().await;
+    }
+
+    /// a with `peers` point-to-point links, each to its own router on its own
+    /// segment; `max_links` splits a's Router-LSA. Returns (a, peers).
+    async fn star(
+        wire: &Arc<wire::Wire>,
+        peers: u8,
+        max_links: usize,
+        extended: bool,
+    ) -> (Arc<LinkManager>, Vec<Arc<LinkManager>>) {
+        let a = router(wire);
+        a.set_router_lsa_max_links(Some(max_links));
+        a.set_extended_lsa(extended);
+        let seg = |n: u8, k: u8| LinkConfig {
+            prefix: format!("2001:db8:{k}::{n}/64").parse().unwrap(),
+            ..wired_link(n, NetworkType::PointToPoint)
+        };
+        let mut a_links = Vec::new();
+        let mut bs = Vec::new();
+        for k in 1..=peers {
+            // a's side uses n = 100 + k, the peer n = 10 + k.
+            a_links.push(seg(100 + k, k));
+            let b = router(wire);
+            b.set_extended_lsa(extended);
+            b.reconcile(vec![seg(10 + k, k)], loopback(10 + k), id(10 + k))
+                .await;
+            bs.push(b);
+        }
+        a.reconcile(a_links, loopback(1), id(1)).await;
+        settle(60).await;
+        (a, bs)
+    }
+
+    /// Link State IDs of `of`'s live Router-LSAs of `ty` advertised by `adv`.
+    async fn live_router_fragments(of: &LinkManager, ty: u16, adv: Ipv4Addr) -> Vec<Ipv4Addr> {
+        let mut ids: Vec<_> = of
+            .database_summaries()
+            .await
+            .into_iter()
+            .filter(|h| h.lsa_type == ty && h.advertising_router == adv && h.age < lsa::MAX_AGE)
+            .map(|h| h.link_state_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// #853: 5 links, 2 per fragment -> 3 Router-LSAs (router id, 0.0.0.1,
+    /// 0.0.0.2); a peer installs all of them and routes to every far
+    /// loopback; shrinking the link set ages fragments 1 and 2.
+    #[tokio::test(start_paused = true)]
+    async fn router_lsa_splits_into_fragments_and_surplus_is_flushed() {
+        for (extended, ty) in [
+            (false, lsa::LSA_TYPE_ROUTER),
+            (true, lsa::LSA_TYPE_E_ROUTER),
+        ] {
+            let wire = Arc::new(wire::Wire::default());
+            let (a, bs) = star(&wire, 5, 2, extended).await;
+            let mut want = vec![id(1), Ipv4Addr::new(0, 0, 0, 1), Ipv4Addr::new(0, 0, 0, 2)];
+            want.sort();
+            assert_eq!(live_router_fragments(&a, ty, id(1)).await, want);
+            // A peer holds every fragment and reaches every other peer's loopback.
+            assert_eq!(live_router_fragments(&bs[0], ty, id(1)).await, want);
+            let routes = bs[0].compute_routes().await;
+            for k in 12..=15u8 {
+                let p: Ipv6Net = format!("2001:db8:ff::{k}/128").parse().unwrap();
+                assert!(routes.iter().any(|r| r.prefix == p), "{k}: {routes:?}");
+            }
+
+            // Down to one link: fragments 1 and 2 are flushed, 0 stays live.
+            a.reconcile(
+                vec![LinkConfig {
+                    prefix: "2001:db8:1::101/64".parse().unwrap(),
+                    ..wired_link(101, NetworkType::PointToPoint)
+                }],
+                loopback(1),
+                id(1),
+            )
+            .await;
+            settle(10).await;
+            assert_eq!(live_router_fragments(&a, ty, id(1)).await, [id(1)]);
+        }
     }
 
     /// The Router-LSA `of` holds for `router` in `area`, if any.
