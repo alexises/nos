@@ -8512,7 +8512,7 @@
             }
           },
           {
-            "description": "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; refused (412) unless it still matches",
+            "description": "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -8567,7 +8567,19 @@
             }
           },
           {
-            "description": "RFC 9110 §13.1.2: `*` or the `ETag` of an earlier reply; 304 if it still matches",
+            "description": "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); 412 unless one matches, or if the transaction does not exist",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "RFC 9110 §13.1.2: `*` or a list of `ETag`s (weak comparison); 304 if one still matches",
             "in": "header",
             "name": "If-None-Match",
             "required": false,
@@ -8602,6 +8614,16 @@
               }
             },
             "description": "no such transaction or config path"
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "If-Match did not match, or the transaction does not exist"
           }
         },
         "summary": "The whole in-progress config",
@@ -8682,7 +8704,7 @@
             }
           },
           {
-            "description": "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; the edit is refused (412) unless it still matches",
+            "description": "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -30695,7 +30717,7 @@
             }
           },
           {
-            "description": "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; refused (412) unless it still matches",
+            "description": "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist",
             "in": "header",
             "name": "If-Match",
             "required": false,
