@@ -523,6 +523,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         bail!("router-b never saw router-a's changed system priority on Distributing ports");
     }
 
+    lacp_system_id_change(a, b, &both).await?;
     lacp_passive(a, b, &both).await?;
     lacp_min_links(w, &both).await?;
 
@@ -536,6 +537,53 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     b.wait(&deleted).await?;
 
     w.unlink_veths().await;
+    Ok(())
+}
+
+/// #657: three live `lacp-system-id` changes on router-a against the real
+/// Linux peer. Router-b's bond still describes the old id until it hears
+/// router-a's first LACPDU, so a stale Partner block can reach router-a; it
+/// must never advance a mux (race-dependent whether one arrives at all: the
+/// mismatch line is only logged, the unit tests carry the guarantee).
+async fn lacp_system_id_change(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
+    for n in 1..=3u8 {
+        let new = format!("02:00:00:00:00:a{n}");
+        log(format!("changing router-a's lacp-system-id to {new}"));
+        let advanced = "lacp lacpdu received.*mux_state=\\(Collecting\\|Distributing\\).*partner_view_matches=false";
+        let base = a.count(advanced);
+        let matched_base = ["eth1", "eth2"].map(|i| {
+            a.count(&format!(
+                "lacp lacpdu received interface={i} .*partner_view_matches=true"
+            ))
+        });
+        let mismatch = "lacp partner view mismatch";
+        let mismatch_base = a.count(mismatch);
+        let mut flags = lacp_flags(&["--lacp-rate", "fast"]);
+        flags.extend(strings(both));
+        flags.extend(strings(&["--lacp-system-id", &new]));
+        a.provision(&flags).await?;
+        let id = serde_json::json!([2, 0, 0, 0, 0, 0xa0 + n]);
+        let sees_a = |p: &serde_json::Value| {
+            p["partner_system_id"] == id && p["mux_state"] == "Distributing"
+        };
+        wait_lacp_ports(b, "router-b sees router-a's new system id", sees_a).await?;
+        wait_lacp_ports(a, "router-a Distributing", |p| {
+            p["mux_state"] == "Distributing"
+        })
+        .await?;
+        for (iface, base) in ["eth1", "eth2"].into_iter().zip(matched_base) {
+            a.wait_new(
+                &format!("lacp lacpdu received interface={iface} .*partner_view_matches=true"),
+                base,
+                30,
+            )
+            .await?;
+        }
+        a.assert_quiet(advanced, base, 1).await?;
+        if a.count(mismatch) > mismatch_base {
+            log("a stale partner view was seen and ignored");
+        }
+    }
     Ok(())
 }
 
