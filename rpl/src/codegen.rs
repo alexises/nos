@@ -1098,8 +1098,8 @@ mod tests {
     #[test]
     fn escaped_quote_and_bad_escape_in_matches() {
         compile_src("if this.bgp.as_path.matches(\"\\\"\"):\n    accept\nelse:\n    reject\n");
-        let err =
-            compile_err("if this.bgp.as_path.matches(\"\\q\"):\n    accept\nelse:\n    reject\n");
+        let err = lex("if this.bgp.as_path.matches(\"\\q\"):\n    accept\nelse:\n    reject\n")
+            .unwrap_err();
         assert!(err.message.contains("unknown escape '\\q'"));
     }
 
