@@ -7,13 +7,16 @@ use nos_pki::Identity;
 use nos_proto::{DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Default location for the persisted log store — under `/var/lib/nos` (the
 /// `nos-data` volume) so recent history survives a `nos-logd` restart. Never
 /// read by any other process; other daemons and `nos-cli` only ever see
 /// entries over IPC.
 const DEFAULT_LOG_STORE_PATH: &str = "/var/lib/nos/logd/entries.jsonl";
+
+/// Budget, from the shutdown signal, for flushing the persist queue.
+const PERSIST_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
@@ -74,12 +77,14 @@ async fn main() -> anyhow::Result<()> {
     info!(entries = seed.len(), path = %args.log_store_path.display(), "loaded persisted log store");
 
     let (persist_tx, persist_rx) = mpsc::unbounded_channel();
+    let (drain_tx, drain_rx) = watch::channel(false);
     let store = LogStore::new(args.capacity, seed, persist_tx);
     let persistence_task = tokio::spawn(persistence::run(
         args.log_store_path.clone(),
         args.capacity,
         persist_rx,
         store.persist_queue_bytes(),
+        drain_rx,
     ));
 
     let server_task = server::start(&args.listen_socket, store.clone(), &identity)
@@ -96,17 +101,25 @@ async fn main() -> anyhow::Result<()> {
         .context("waiting for shutdown signal")?;
     info!("shutdown signal received");
 
-    // Every live connection (including each other daemon's long-lived Push
-    // connection) holds its own clone of `store`, so `persist_tx` never sees
-    // its last sender drop on a clean path — abort both tasks directly
-    // rather than trying to await a drain, matching `nos-ribd`/
-    // `nos-interfaced`'s own `server_task.abort()` shutdown, which makes the
-    // same no-perfect-drain tradeoff for their IPC servers.
+    // Stop accepting, then tell persistence to flush. Every live connection
+    // holds a `store` clone so `persist_tx` never drops: the persistence task
+    // closes its receiver itself on the trigger (#679). The trigger goes out
+    // before the syslog await, and the flush is bounded 5s from the signal
+    // (not stacked on the syslog grace), well inside the watchdog's 10s.
+    let deadline = tokio::time::Instant::now() + PERSIST_DRAIN_TIMEOUT;
+    server_task.abort();
+    let _ = drain_tx.send(true);
     // Syslog sinks close their TCP connections cleanly before the exit.
     let _ = shutdown_tx.send(true);
     let _ = syslog_task.await;
-    server_task.abort();
-    persistence_task.abort();
+    let mut persistence_task = persistence_task;
+    if tokio::time::timeout_at(deadline, &mut persistence_task)
+        .await
+        .is_err()
+    {
+        warn!("log persistence flush timed out, dropping queued entries");
+        persistence_task.abort();
+    }
 
     info!("shutting down");
     Ok(())

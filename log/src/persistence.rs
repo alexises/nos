@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use nos_proto::LogEntry;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::store::{entry_size, MAX_MEMORY_BYTES};
@@ -65,9 +65,14 @@ fn load_recent_with(path: &Path, capacity: usize, max_bytes: u64) -> Vec<LogEntr
         .collect()
 }
 
-/// Runs until `rx` closes (its sender drops on shutdown): appends every
-/// received entry as one JSON line to `path`, compacting back down to
-/// `capacity` lines once the file grows past `capacity * COMPACT_FACTOR`.
+/// Runs until `rx` closes or `drain` fires: appends every received entry as
+/// one JSON line to `path`, compacting back down to `capacity` lines once the
+/// file grows past `capacity * COMPACT_FACTOR`.
+///
+/// `drain` (#679) is how shutdown flushes: live connections each hold a
+/// `LogStore` clone, so the sender never drops. On the trigger, `run` closes
+/// `rx` itself (further `record` sends fail and refund the queue), writes
+/// what is already queued and returns.
 ///
 /// A failure to open or write the file disables persistence for the rest of
 /// this run (a warning is logged once) rather than crashing `nos-logd` —
@@ -80,6 +85,7 @@ pub async fn run(
     capacity: usize,
     mut rx: mpsc::UnboundedReceiver<LogEntry>,
     queued: Arc<AtomicUsize>,
+    mut drain: watch::Receiver<bool>,
 ) {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
         && let Err(e) = fs::create_dir_all(parent)
@@ -87,43 +93,77 @@ pub async fn run(
         warn!(error = %e, path = %parent.display(), "failed to create log store directory");
     }
 
-    let Ok(mut file) = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .inspect_err(|e| {
             warn!(error = %e, path = %path.display(), "failed to open log store file, persistence disabled");
         })
-    else {
-        // Drain the channel so senders (LogStore::record) never block on a
-        // full mpsc queue even though nothing is being persisted.
-        while let Some(entry) = rx.recv().await {
-            queued.fetch_sub(entry_size(&entry), Ordering::Relaxed);
+        .ok();
+    if file.is_some() {
+        info!(path = %path.display(), "log persistence started");
+    }
+    let mut sink = file.map(|file| Sink {
+        lines_since_compact: count_lines(&path).unwrap_or(0),
+        file,
+    });
+
+    // Without a file, entries are just discarded so senders never block on a
+    // full mpsc queue.
+    loop {
+        tokio::select! {
+            entry = rx.recv() => {
+                let Some(entry) = entry else { return };
+                handle(&mut sink, &path, capacity, &queued, &entry);
+            }
+            _ = drain.wait_for(|d| *d) => break,
         }
+    }
+    rx.close();
+    while let Some(entry) = rx.recv().await {
+        handle(&mut sink, &path, capacity, &queued, &entry);
+    }
+}
+
+struct Sink {
+    file: File,
+    lines_since_compact: usize,
+}
+
+/// Releases `entry`'s queue bytes and, if persistence is on, appends it
+/// (compacting when due).
+fn handle(
+    sink: &mut Option<Sink>,
+    path: &Path,
+    capacity: usize,
+    queued: &AtomicUsize,
+    entry: &LogEntry,
+) {
+    queued.fetch_sub(entry_size(entry), Ordering::Relaxed);
+    let Some(Sink {
+        file,
+        lines_since_compact,
+    }) = sink
+    else {
         return;
     };
-    info!(path = %path.display(), "log persistence started");
-    let mut lines_since_compact = count_lines(&path).unwrap_or(0);
+    match serde_json::to_string(entry) {
+        Ok(line) => match writeln!(file, "{line}") {
+            Ok(()) => *lines_since_compact += 1,
+            Err(e) => warn!(error = %e, "failed to append to log store file"),
+        },
+        Err(e) => warn!(error = %e, "failed to serialize log entry for persistence"),
+    }
 
-    while let Some(entry) = rx.recv().await {
-        queued.fetch_sub(entry_size(&entry), Ordering::Relaxed);
-        match serde_json::to_string(&entry) {
-            Ok(line) => match writeln!(file, "{line}") {
-                Ok(()) => lines_since_compact += 1,
-                Err(e) => warn!(error = %e, "failed to append to log store file"),
-            },
-            Err(e) => warn!(error = %e, "failed to serialize log entry for persistence"),
-        }
-
-        if lines_since_compact > capacity.saturating_mul(COMPACT_FACTOR) {
-            match compact(&path, capacity) {
-                Ok(new_file) => {
-                    file = new_file;
-                    lines_since_compact = capacity;
-                    debug!(path = %path.display(), capacity, "compacted log store file");
-                }
-                Err(e) => warn!(error = %e, "failed to compact log store file"),
+    if *lines_since_compact > capacity.saturating_mul(COMPACT_FACTOR) {
+        match compact(path, capacity) {
+            Ok(new_file) => {
+                *file = new_file;
+                *lines_since_compact = capacity;
+                debug!(path = %path.display(), capacity, "compacted log store file");
             }
+            Err(e) => warn!(error = %e, "failed to compact log store file"),
         }
     }
 }
@@ -190,7 +230,14 @@ mod tests {
         tx.send(entry("one")).unwrap();
         tx.send(entry("two")).unwrap();
         drop(tx);
-        run(path.clone(), 10, rx, Arc::default()).await;
+        run(
+            path.clone(),
+            10,
+            rx,
+            Arc::default(),
+            watch::channel(false).1,
+        )
+        .await;
 
         let loaded = load_recent(&path, 10);
         assert_eq!(
@@ -213,7 +260,7 @@ mod tests {
             tx.send(entry(&i.to_string())).unwrap();
         }
         drop(tx);
-        run(path.clone(), 1, rx, Arc::default()).await;
+        run(path.clone(), 1, rx, Arc::default(), watch::channel(false).1).await;
 
         let loaded = load_recent(&path, 10);
         assert_eq!(
@@ -223,6 +270,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["4"]
         );
+    }
+
+    /// #679: a live sender clone keeps the channel open (every connection
+    /// holds one), yet the drain trigger still flushes the queue and returns.
+    #[tokio::test]
+    async fn drain_flushes_queue_despite_live_sender() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("entries.jsonl");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (drain_tx, drain_rx) = watch::channel(false);
+        for i in 0..5 {
+            tx.send(entry(&i.to_string())).unwrap();
+        }
+        drain_tx.send(true).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(path.clone(), 10, rx, Arc::default(), drain_rx),
+        )
+        .await
+        .expect("run must return on drain");
+        assert_eq!(load_recent(&path, 10).len(), 5);
+        assert!(tx.send(entry("late")).is_err(), "channel closed by drain");
+    }
+
+    #[tokio::test]
+    async fn drain_returns_when_the_file_cannot_be_opened() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory path cannot be opened for append.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (drain_tx, drain_rx) = watch::channel(false);
+        tx.send(entry("x")).unwrap();
+        drain_tx.send(true).unwrap();
+        let queued = Arc::new(AtomicUsize::new(entry_size(&entry("x"))));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(tmp.path().to_path_buf(), 10, rx, queued.clone(), drain_rx),
+        )
+        .await
+        .expect("run must return on drain");
+        assert_eq!(queued.load(Ordering::Relaxed), 0);
+        drop(tx);
     }
 
     fn write_lines(path: &Path, n: usize) {
