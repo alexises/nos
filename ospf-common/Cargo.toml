@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+socket2 = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]

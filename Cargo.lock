@@ -2073,6 +2073,7 @@ name = "nos-ospf-common"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "socket2",
  "tokio",
 ]
 
