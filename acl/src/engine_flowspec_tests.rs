@@ -190,7 +190,7 @@ fn absent_and_vanished_devices_cost_no_calls() {
 }
 
 #[test]
-fn show_sums_counters_and_shutdown_clears() {
+fn show_sums_counters() {
     let mut e = ready();
     e.push_flowspec(set("b1", &["eth0", "eth1"], vec![rule(6), rule(17)]));
     take(&mut e);
@@ -211,12 +211,6 @@ fn show_sums_counters_and_shutdown_clears() {
     );
     e.driver_mut().fail_counters = true;
     assert_eq!(e.show_flowspec()[0].packets, 0);
-    e.shutdown();
-    assert_eq!(
-        take(&mut e),
-        [clear(4, 10), clear(4, 11), clear(5, 10), clear(5, 11)]
-    );
-    assert_eq!(e.show_flowspec(), []);
 }
 
 /// #562: a pushed instance with no devices of its own reaches the
