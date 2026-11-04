@@ -6,13 +6,17 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("validation failed:\n{0}")]
     Validation(#[from] garde::Report),
-    #[error("refusing to commit: it would remove every user and lock everyone out")]
+    // The `validation failed: ` prefix of the next five is load-bearing:
+    // `nos-restd`'s `ApiError::from_config` maps it to 422 (#675).
+    #[error("validation failed: it would remove every user and lock everyone out")]
     NoUsersLeft,
-    #[error("syslog server '{server}': tls trust-anchor is not a PEM certificate: {reason}")]
+    #[error("validation failed: syslog server '{server}': tls trust-anchor is not a PEM certificate: {reason}")]
     SyslogTrustAnchor { server: String, reason: String },
-    #[error("password hash upgrade refused: no such user, stale hash, or not a hash")]
+    #[error(
+        "validation failed: password hash upgrade refused: no such user, stale hash, or not a hash"
+    )]
     HashUpgradeRefused,
-    #[error("{0} was sent as the mask text '<hidden>' but has no earlier value to keep")]
+    #[error("validation failed: {0} was sent as the mask text '<hidden>' but has no earlier value to keep")]
     MaskedSecret(String),
     #[error("no transaction named '{0}'")]
     TransactionNotFound(String),
@@ -24,7 +28,7 @@ pub enum ConfigError {
     InvalidTransactionName,
     #[error("too many transactions: {0} are open; commit or discard one first")]
     TooManyTransactions(usize),
-    #[error("too many clear-text passwords in one edit (at most {0})")]
+    #[error("validation failed: too many clear-text passwords in one edit (at most {0})")]
     TooManyClearPasswords(usize),
     #[error("edit failed: {0}")]
     Op(#[from] nos_proto::OpError),
@@ -44,4 +48,27 @@ pub enum ConfigError {
     },
     #[error("failed to (de)serialize config: {0}")]
     Serialization(#[from] serde_norway::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `nos-restd` maps the `validation failed` prefix to 422 (#675): a reword
+    /// of a semantic refusal must keep it.
+    #[test]
+    fn semantic_refusals_keep_the_422_prefix() {
+        for e in [
+            ConfigError::NoUsersLeft,
+            ConfigError::SyslogTrustAnchor {
+                server: "s".into(),
+                reason: "r".into(),
+            },
+            ConfigError::HashUpgradeRefused,
+            ConfigError::MaskedSecret("user 'u'".into()),
+            ConfigError::TooManyClearPasswords(4),
+        ] {
+            assert!(e.to_string().starts_with("validation failed"), "{e}");
+        }
+    }
 }

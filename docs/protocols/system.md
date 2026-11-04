@@ -60,7 +60,7 @@ transaction 'users' committed
 - Changing a user's password also revokes that user's shell certificates: every shell they are logged in to must log in again. Their REST certificates are refused at their next request too: they must log in again with the new password.
 - A commit that would leave no user is refused, so you cannot lock yourself out:
   ```
-  error: nos-configd reported an error: refusing to commit: it would remove every user and lock everyone out
+  error: nos-configd reported an error: validation failed: it would remove every user and lock everyone out
   ```
 
 Over REST, a user is `{"name", "password"}`, and the password is hashed on the way in in the same way:

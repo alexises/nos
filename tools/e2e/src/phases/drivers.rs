@@ -3334,7 +3334,7 @@ async fn rest_secrets(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<
         Method::PUT,
         &format!("{tx}/admin/key/ghost"),
         Some(r#"{"label":"ghost","secret":"<hidden>"}"#),
-        400,
+        422,
     )
     .await?;
     a.rest_expect(Method::DELETE, &tx, None, 204).await?;
@@ -3392,6 +3392,18 @@ async fn rest_secrets(dock: &crate::docker::Dock, a: &Router) -> anyhow::Result<
 async fn rest_destructive(w: &mut World) -> anyhow::Result<()> {
     w.start(R, None, &[]).await?;
     let r = w.get(R)?;
+    // A commit that deletes every user is a semantic refusal: 422 (#675), not
+    // 400, and the transaction stays open.
+    let tx = format!("/v1/transactions/{REST_TX}");
+    r.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    r.rest_expect(Method::DELETE, &format!("{tx}/user"), None, 204)
+        .await?;
+    r.rest_expect(Method::POST, &format!("{tx}/commit"), None, 422)
+        .await?;
+    r.rest_expect(Method::GET, &tx, None, 200).await?;
+    r.rest_expect(Method::DELETE, &tx, None, 204).await?;
+    log("router-r: committing a config with no users is 422 and keeps the transaction");
     r.provision(&[
         "--rest-api-address",
         REST_ABSENT_ADDRESS,

@@ -355,7 +355,10 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 - `404 Not Found`: no such transaction, config path, route, interface, peer, and so on.
 - `405 Method Not Allowed`: the path exists, but not with this method. The `Allow` header lists what does.
 - `412 Precondition Failed`: `If-Match` did not match the transaction's generation, or named a transaction that does not exist.
-- `422 Unprocessable Entity`: validation refused the commit. The transaction stays open.
+- `422 Unprocessable Entity`: validation refused the commit or the edit. The transaction stays open. Besides schema validation, three refusals map here:
+  - a commit that would remove every user;
+  - a commit with a syslog `tls trust-anchor` that is not a PEM certificate;
+  - a `<hidden>` secret with no earlier value to keep, or more than 4 clear-text passwords in one edit (the `PUT`).
 - `429 Too Many Requests`: too many failed logins for this user, or 32 transactions already open. See `Retry-After`.
 - `502 Bad Gateway`: the router answered with something unexpected.
 - `503 Service Unavailable`: a service the request needs is not running, or users cannot be checked right now.

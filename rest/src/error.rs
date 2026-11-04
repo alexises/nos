@@ -218,6 +218,20 @@ mod tests {
         assert!(matches!(e, ApiError::TooManyRequests { .. }));
     }
 
+    #[test]
+    fn semantic_refusals_are_422() {
+        for e in [
+            nos_config::error::ConfigError::NoUsersLeft,
+            nos_config::error::ConfigError::MaskedSecret("user 'u'".into()),
+            nos_config::error::ConfigError::TooManyClearPasswords(4),
+        ] {
+            assert!(matches!(
+                ApiError::from_config(e.to_string()),
+                ApiError::Unprocessable(_)
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn backend_errors_are_generic() {
         let (s, b) = body(ApiError::Unavailable(
