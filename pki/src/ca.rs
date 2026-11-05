@@ -350,8 +350,10 @@ impl std::fmt::Debug for Bundle {
     }
 }
 
-/// A bundle is a few KB; anything near this is a corrupt or hostile stream.
-const MAX_FRAME: usize = 1 << 20;
+/// A bundle is a few KB plus the CRL, which grows ~39 bytes per revoked serial
+/// (entries drop only when the certificate expires): 16 MiB holds ~430k. A
+/// larger frame is a corrupt stream (#677).
+const MAX_FRAME: usize = 16 << 20;
 
 /// Bundles are a few KB; a part that overflows `u32` is a bug, not an input.
 fn len_u32(n: usize) -> [u8; 4] {

@@ -30,3 +30,11 @@ How `nos-pki` is built, moved from `pki/CLAUDE.md` (#264) so the always-loaded f
 ## Delivery (full text)
 
 - **Delivery**: `Bundle` (`ca`, `cert`, `key`, `crl`, DER) has a length-prefixed frame encoding. The watchdog writes one to each child's **piped stdin** at spawn, another every `--pki-rotate-every`, and the current leaf again with the new CRL whenever the CRL changes; `Identity::from_stdin` reads the first and applies the rest from a plain `std::thread` (a blocked tokio stdin read would stall runtime shutdown). The key never touches argv, the environment or disk. There is **no plaintext fallback** — no identity, no daemon.
+
+## Identity frame size and a broken pipe (#677)
+
+- A `Bundle` frame is `ca + cert + key + crl`; only the CRL grows, about 39 bytes per revoked serial, and entries leave it only when the certificate expires.
+- `MAX_FRAME` (`ca.rs`) is 16 MiB, about 430k serials. The old 1 MiB cap held about 26k, reachable by a few hours of logins; reading a bigger frame costs the child up to 16 MiB of allocation, acceptable since the writer is the trusted watchdog.
+- After an oversize or short frame the stdin stream is desynchronised and cannot resume, so a read error on the rotation thread logs `identity pipe broke, exiting ...` and calls `exit(1)`: the supervisor respawns the daemon with a fresh identity. A clean EOF stays a quiet stop, and a bundle that merely fails to apply is only a warning.
+- `nos-e2e pki-crl` builds a ~1.2 MB CRL with `nos-provision --login-burst`.
+- Known follow-up: the whole CRL is re-sent in every bundle (#858).

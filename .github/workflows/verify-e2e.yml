@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [base, drivers, rpl, ospf-suite, multi, pki-suite]
+        group: [base, drivers, rpl, ospf-suite, multi, pki-suite, pki-crl]
     env:
       # Keep the containers on failure so the step below can read them.
       VERIFY_E2E_KEEP: "1"
