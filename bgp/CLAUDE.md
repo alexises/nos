@@ -25,10 +25,10 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 
 ## Session authentication
 
-- Socket-level only: `fsm.rs` never sees it. MD5 or TCP-AO, mutually exclusive (one per socket); raw `setsockopt` lives in `nos-tcp-auth`, `nos-bgp` only calls its safe wrappers. Keys are admin labels (#508): `ResolvedAuth::resolve(&BgpAuth, &Config)` (peers and `rpki::resolve_auths`), subscribed with `DiffScope::Admin`, so a rotation restarts the peer (`diff_peers`) except what `session::ao_delta` expresses.
+- Socket-level only: `fsm.rs` never sees it. MD5 or TCP-AO, mutually exclusive (one per socket); `setsockopt` lives in `nos-tcp-auth`. Keys are admin labels (#508): `ResolvedAuth::resolve(&BgpAuth, &Config)`, subscribed with `DiffScope::Admin`, so a rotation restarts the peer except what `session::ao_delta` expresses.
 - The listener is shared: keys are installed per peer address (`applied_auth`, `sync_listener_auth`; `spawn_listeners` primes them).
 - `tcp::apply_auth(on_listener)` strips `set_current`/`set_rnext` for a socket in `LISTEN` (`TCP_AO_ADD_KEY` returns `EINVAL` otherwise); the active side keeps them.
-- Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; `ao_delta` returns `None` (restart) for MD5, a changed kept key or a reused RecvID, else an Established session gets `FsmCommand::UpdateAo` (only rnext reaches a live socket, errors such as `EBUSY` reset). Rules: internals page.
+- Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; `ao_delta` returns `None` (restart) for MD5, a changed kept key or a reused RecvID, else an Established session gets `FsmCommand::UpdateAo` (errors such as `EBUSY` reset).
 
 ## GTSM / `max-hops`
 
@@ -49,7 +49,7 @@ All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; t
 
 ## Malformed UPDATE (RFC 7606)
 
-`parse_update` resets the session only for framing errors; a bad attribute value or missing mandatory attribute is treat-as-withdraw, rewritten there (NLRI -> `withdrawn_routes`, `mp_reach` -> `mp_unreach`, `attributes = None`), so `BgpRib::handle_update` needs no special case.
+`parse_update` resets only for framing errors; a bad attribute value or missing mandatory attribute is treat-as-withdraw, rewritten there (NLRI -> `withdrawn_routes`, `mp_reach` -> `mp_unreach`, `attributes = None`), so `BgpRib::handle_update` needs no special case.
 
 ## Damping
 
@@ -69,11 +69,15 @@ Counters (`path_counts`) change only in `put_path`/`take_path`, the sole Adj-RIB
 
 ## Route refresh
 
-Route Refresh (2) and Enhanced (70) are always advertised. The RFC 7313 stale deadline is one per family, scoped to the session (`stale_until`). Peer requests pass `RefreshLimiter` (burst 2, 1/10s, per session); internal refreshes bypass it. `send_route_refresh` sends nothing without the peer's capability.
+Route Refresh (2) and Enhanced (70) are always advertised. The RFC 7313 stale deadline is one per family, per session. Peer requests pass `RefreshLimiter` (2, then 1/10s); internal ones bypass. `send_route_refresh` sends nothing without the peer's capability.
+
+## Soft reconfiguration inbound (#859)
+
+`rib/retain.rs` keeps pre-policy copies; `remove_path` drops them. `Reapply` (`diff_peers`) applies policy/flag-only changes in place; `session/reeval.rs` re-evaluates in chunks.
 
 ## RPKI
 
-Runs inside `nos-bgpd` (owner decision on #17). `BgpRib::set_vrps` re-validates in place; only peers whose import policy `reads_validation_state()` are route-refreshed, 5s after the first change of a burst. RFC 8097 wire order (0 valid, 1 not-found, 2 invalid) differs from `nos_rpl::ValidationState`'s discriminants.
+Runs inside `nos-bgpd` (#17). `BgpRib::set_vrps` re-validates in place; peers whose import policy `reads_validation_state()` are route-refreshed (re-evaluated if retained), 5s after a burst. RFC 8097 wire order (0 valid, 1 not-found, 2 invalid) differs from `nos_rpl::ValidationState`'s discriminants.
 
 ## Graceful restart (#12)
 

@@ -246,13 +246,21 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                 }
             }
             BgpRequest::SendRouteRefresh { peer } => {
-                let event = if sessions
-                    .send_command(peer, FsmCommand::SendRouteRefresh)
-                    .await
-                {
-                    BgpEvent::RouteRefreshSent
-                } else {
-                    BgpEvent::PeerNotFound
+                let event = match sessions.soft_in_local(peer).await {
+                    Some(Ok(families)) => BgpEvent::SoftInReevaluated { families },
+                    Some(Err(why)) => {
+                        BgpEvent::Error(format!("re-evaluation superseded/aborted: {why}"))
+                    }
+                    None => {
+                        if sessions
+                            .send_command(peer, FsmCommand::SendRouteRefresh)
+                            .await
+                        {
+                            BgpEvent::RouteRefreshSent
+                        } else {
+                            BgpEvent::PeerNotFound
+                        }
+                    }
                 };
                 if writer.send(event).await.is_err() {
                     break;

@@ -277,6 +277,15 @@ pub enum BgpPeerGroupOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// `soft_reconfiguration_inbound` on/off.
+    SetSoftReconfigurationInbound {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
     /// Clears the route reflector client of the BGP peer group so it reverts to the default.
     ClearRouteReflectorClient {
         /// Name of the BGP instance owning the target.
@@ -489,6 +498,14 @@ impl BgpPeerGroupOp {
     /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
+            BgpPeerGroupOp::SetSoftReconfigurationInbound {
+                instance,
+                name,
+                enabled,
+            } => {
+                find_group_mut(config, instance, name)?.soft_reconfiguration_inbound = *enabled;
+                Ok(())
+            }
             BgpPeerGroupOp::Ensure { .. }
             | BgpPeerGroupOp::SetMaximumPrefix { .. }
             | BgpPeerGroupOp::ClearMaximumPrefix { .. }
@@ -596,6 +613,7 @@ impl BgpPeerGroupOp {
                         shutdown: None,
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                         announce_rpki_state: false,
+                        soft_reconfiguration_inbound: false,
                         local_as: None,
                         add_path: None,
                         add_path_send_count: None,
@@ -1096,6 +1114,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            soft_reconfiguration_inbound: false,
             local_as: None,
             add_path: None,
             add_path_send_count: None,
@@ -1128,6 +1147,24 @@ mod tests {
         assert_eq!(inst.peer_groups[0].hold_time, None);
         assert_eq!(inst.peer_groups[0].keepalive_interval, None);
         assert_eq!(inst.peer_groups[0].connect_retry_time, None);
+    }
+
+    #[test]
+    fn set_soft_reconfiguration_inbound_toggles_the_flag() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        for enabled in [true, false] {
+            BgpPeerGroupOp::SetSoftReconfigurationInbound {
+                instance: "r1".to_string(),
+                name: "pg1".to_string(),
+                enabled,
+            }
+            .apply(&mut cfg)
+            .unwrap();
+            assert_eq!(
+                cfg.bgp_instances[0].peer_groups[0].soft_reconfiguration_inbound,
+                enabled
+            );
+        }
     }
 
     #[test]

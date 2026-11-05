@@ -311,7 +311,7 @@ The usual safe pattern for a script is: open the transaction and note its `ETag`
 
 Some requests change live state without touching configuration:
 
-`POST /v1/bgp/{instance}/peer/{peer}/soft-in` asks a peer to resend its routes (an RFC 2918 route refresh), like `clear bgp <instance> <peer> soft-in` in the shell. It answers `404` if the peer is not configured or its session is not Established, and `503` if the instance is not running.
+`POST /v1/bgp/{instance}/peer/{peer}/soft-in` asks a peer to resend its routes (an RFC 2918 route refresh), like `clear bgp <instance> <peer> soft-in` in the shell. It answers `404` if the peer is not configured or its session is not Established, and `503` if the instance is not running or a local re-evaluation was superseded or aborted. For a peer-group with soft reconfiguration inbound nothing is sent: the reply is `"route_refresh":"none"` with a `reevaluated` list (`family`, `retained`, `accepted`).
 
 ```sh
 $ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/soft-in

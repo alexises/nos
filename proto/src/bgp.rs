@@ -687,6 +687,69 @@ pub enum BgpEvent {
         /// Pass back as `after`; `None` when this was the last page.
         next: Option<VpnRouteCursor>,
     },
+    /// Reply to `SendRouteRefresh` for a peer with soft reconfiguration
+    /// inbound: the import policy was re-evaluated locally against the
+    /// retained routes (no Route Refresh sent). One entry per family with
+    /// retention enabled, in `ReevalFamily` order.
+    SoftInReevaluated {
+        /// Per-family counts of the finished pass.
+        families: Vec<FamilyReeval>,
+    },
+}
+
+/// Address family of a soft-reconfiguration re-evaluation. Variants are only
+/// ever appended (postcard is positional); all are defined up front so the
+/// later EVPN/Flowspec/VPN retention (#866) never changes the wire.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ReevalFamily {
+    /// IPv4 unicast.
+    Ipv4Unicast,
+    /// IPv6 unicast.
+    Ipv6Unicast,
+    /// L2VPN EVPN.
+    L2vpnEvpn,
+    /// IPv4 Flowspec.
+    Ipv4Flowspec,
+    /// IPv6 Flowspec.
+    Ipv6Flowspec,
+    /// `VPNv4`.
+    Vpnv4,
+    /// `VPNv6`.
+    Vpnv6,
+}
+
+impl ReevalFamily {
+    /// Kebab-case name, as in log lines and the REST reply.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ipv4Unicast => "ipv4-unicast",
+            Self::Ipv6Unicast => "ipv6-unicast",
+            Self::L2vpnEvpn => "l2vpn-evpn",
+            Self::Ipv4Flowspec => "ipv4-flowspec",
+            Self::Ipv6Flowspec => "ipv6-flowspec",
+            Self::Vpnv4 => "vpnv4",
+            Self::Vpnv6 => "vpnv6",
+        }
+    }
+}
+
+impl std::fmt::Display for ReevalFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One family's result of a soft-reconfiguration re-evaluation.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyReeval {
+    /// The family.
+    pub family: ReevalFamily,
+    /// Routes held pre-policy for the peer in this family.
+    pub retained: u32,
+    /// Of those, how many the import policy accepts.
+    pub accepted: u32,
 }
 
 #[cfg(test)]
@@ -712,6 +775,13 @@ mod tests {
 
     fn routes(n: u32) -> Vec<RedistributedRoute> {
         (0..n).map(route).collect()
+    }
+
+    #[test]
+    fn reeval_family_names_are_kebab_case() {
+        assert_eq!(ReevalFamily::Ipv4Unicast.to_string(), "ipv4-unicast");
+        assert_eq!(ReevalFamily::Vpnv6.to_string(), "vpnv6");
+        assert!(ReevalFamily::Ipv4Unicast < ReevalFamily::Ipv6Unicast);
     }
 
     #[test]

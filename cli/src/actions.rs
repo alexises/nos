@@ -1355,8 +1355,21 @@ async fn clear_bgp(
     {
         Ok(Some(bgp_socket)) if soft_in => {
             match bgp_client::send_route_refresh(&bgp_socket, peer).await {
-                Ok(true) => println!("route refresh requested for {peer}"),
-                Ok(false) => eprintln!("error: no established session with {peer} on '{instance}'"),
+                Ok(bgp_client::SoftIn::RefreshSent) => {
+                    println!("route refresh requested for {peer}");
+                }
+                Ok(bgp_client::SoftIn::Reevaluated(families)) => {
+                    println!("re-evaluated import policy for {peer}:");
+                    for f in families {
+                        println!(
+                            "  {}: {} retained, {} accepted",
+                            f.family, f.retained, f.accepted
+                        );
+                    }
+                }
+                Ok(bgp_client::SoftIn::NotFound) => {
+                    eprintln!("error: no established session with {peer} on '{instance}'");
+                }
                 Err(e) => eprintln!("error: {e}"),
             }
         }

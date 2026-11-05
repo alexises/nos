@@ -675,6 +675,15 @@ pub struct BgpPeerGroup {
     #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
     #[cli(topic = BgpPeerGroupFlowspecExportPolicy)]
     pub flowspec_export_policy: Option<String>,
+
+    /// Keep every route received from this group's peers before import
+    /// policy, so a policy change is re-evaluated locally without a session
+    /// reset or Route Refresh. Costs roughly one extra copy of the peer's
+    /// Adj-RIB-In.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupSoftReconfigurationInbound)]
+    pub soft_reconfiguration_inbound: bool,
 }
 
 /// Knobs of the Flowspec validation procedure (RFC 8955 §6 as updated by
@@ -1049,6 +1058,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            soft_reconfiguration_inbound: false,
             local_as: None,
             add_path: None,
             add_path_send_count: None,

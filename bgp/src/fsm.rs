@@ -42,6 +42,20 @@ use crate::status::{PeerState, PeerStatus};
 const AFI_IPV4: u16 = 1;
 const AFI_IPV6: u16 = 2;
 
+/// Holds the peer down and queues the RFC 4486 Cease. Callers check
+/// `max_prefix_held` first so only one Cease is ever queued.
+pub(crate) fn trip_max_prefix(
+    slot: &PeerSlot,
+    family: AddressFamily,
+    limit: nos_proto::BgpPrefixLimit,
+) {
+    slot.trip_max_prefix(limit.restart_interval);
+    slot.send_command(FsmCommand::Cease {
+        subcode: CeaseSubcode::MaximumPrefixesReached,
+        data: message::encode_max_prefix_data(afi_of(family), safi_of(family), limit.limit),
+    });
+}
+
 fn afi_of(family: AddressFamily) -> u16 {
     match family {
         AddressFamily::Ipv4Unicast | AddressFamily::Ipv4Flowspec | AddressFamily::Vpnv4Unicast => {
@@ -421,6 +435,8 @@ enum Action {
         add_path: [AddPathDir; 2],
         four_octet_as: bool,
         extended_message: bool,
+        route_refresh: bool,
+        enhanced_refresh: bool,
         gr: Option<PeerGr>,
         role: Option<nos_proto::BgpRole>,
     },
@@ -478,6 +494,8 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 add_path: remote.add_path,
                 four_octet_as: remote.four_octet_as,
                 extended_message: remote.extended_message,
+                route_refresh: remote.route_refresh,
+                enhanced_refresh: remote.enhanced_refresh,
                 gr: remote.gr,
                 role: remote.role,
             }],
@@ -715,7 +733,7 @@ async fn classify_inbound(
                     remote_is_ibgp,
                     remote.bgp_id,
                     &update,
-                    &peer.import_policy,
+                    &slot.import_policy(),
                 );
                 // RFC 4486 §4: over a hard limit, hold the peer down and have
                 // the command arm send the Cease. Once only: UPDATEs read
@@ -724,15 +742,7 @@ async fn classify_inbound(
                 if let Some((family, limit, _)) = rib.check_max_prefix(peer.remote_address)
                     && !slot.max_prefix_held()
                 {
-                    slot.trip_max_prefix(limit.restart_interval);
-                    slot.send_command(FsmCommand::Cease {
-                        subcode: CeaseSubcode::MaximumPrefixesReached,
-                        data: message::encode_max_prefix_data(
-                            afi_of(family),
-                            safi_of(family),
-                            limit.limit,
-                        ),
-                    });
+                    trip_max_prefix(slot, family, limit);
                 }
             } else {
                 return Some(Event::UnexpectedUpdate);
@@ -838,6 +848,7 @@ async fn resend_loc_rib(
         }
         message::REFRESH_EORR if remote.enhanced_refresh => {
             rib.end_refresh_in(peer.remote_address, family);
+            rib.retention_eorr(peer.remote_address, family);
             refresh.stale_until.remove(&family);
             debug!(peer = %peer.remote_address, afi = rr.afi, "bgp: received EoRR");
         }
@@ -1309,6 +1320,8 @@ async fn report_established(
         add_path,
         four_octet_as,
         extended_message,
+        route_refresh,
+        enhanced_refresh,
         gr: remote_gr,
         role: negotiated_role,
     } = action
@@ -1406,6 +1419,12 @@ async fn report_established(
     let mut rib = bgp_rib.lock().await;
     rib.set_peer_gr(peer.remote_address, gr_negotiated);
     rib.set_peer_damping(peer.remote_address, peer.damping);
+    rib.set_peer_soft_reconfig(peer.remote_address, slot.soft_reconfig());
+    slot.set_refresh_caps(*route_refresh, *enhanced_refresh);
+    info!(
+        peer = %peer.remote_address, route_refresh = *route_refresh,
+        enhanced_refresh = *enhanced_refresh, "route refresh capability"
+    );
     rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
     rib.set_peer_asn(peer.remote_address, *remote_asn);
     rib.set_peer_evpn_import_policy(
@@ -1717,6 +1736,9 @@ pub async fn run(
     };
 
     if registered {
+        // Only the session that reported Established owns the caps: a
+        // collision loser ending must not clear the winner's.
+        slot.set_refresh_caps(false, false);
         let kind = disconnect_kind(&outcome, cx.n_exchanged(&state));
         bgp_rib
             .lock()

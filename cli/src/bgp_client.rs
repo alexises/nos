@@ -208,16 +208,27 @@ pub async fn clear_peer(bgp_socket: &Path, peer: IpAddr) -> Result<bool, BgpClie
     }
 }
 
-/// Asks `peer`'s live session to send it an RFC 2918 `ROUTE_REFRESH`.
-/// `Ok(true)` if a live `Established` session for `peer` was found and the
-/// command was delivered; `Ok(false)` if there's nothing to refresh right
-/// now (peer not configured, or no `Established` session).
-pub async fn send_route_refresh(bgp_socket: &Path, peer: IpAddr) -> Result<bool, BgpClientError> {
+/// What `clear bgp ... soft-in` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SoftIn {
+    /// An RFC 2918 `ROUTE_REFRESH` was delivered to the live session.
+    RefreshSent,
+    /// The peer-group keeps its received routes: the import policy was
+    /// re-evaluated locally (per-family counts), nothing was sent.
+    Reevaluated(Vec<nos_proto::FamilyReeval>),
+    /// Peer not configured, or no `Established` session.
+    NotFound,
+}
+
+/// Re-evaluates `peer`'s import policy over its retained routes, or else asks
+/// its live session to send an RFC 2918 `ROUTE_REFRESH`.
+pub async fn send_route_refresh(bgp_socket: &Path, peer: IpAddr) -> Result<SoftIn, BgpClientError> {
     let (mut reader, mut writer) = connect(bgp_socket).await?;
     writer.send(BgpRequest::SendRouteRefresh { peer }).await?;
     match reader.next().await {
-        Some(Ok(BgpEvent::RouteRefreshSent)) => Ok(true),
-        Some(Ok(BgpEvent::PeerNotFound)) => Ok(false),
+        Some(Ok(BgpEvent::RouteRefreshSent)) => Ok(SoftIn::RefreshSent),
+        Some(Ok(BgpEvent::SoftInReevaluated { families })) => Ok(SoftIn::Reevaluated(families)),
+        Some(Ok(BgpEvent::PeerNotFound)) => Ok(SoftIn::NotFound),
         Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
         Some(Err(e)) => Err(BgpClientError::Io(e)),
         None => Err(BgpClientError::ConnectionClosed),

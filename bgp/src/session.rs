@@ -17,6 +17,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+mod reeval;
+
 use crate::collision::{FsmCommand, PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
 use crate::gr::Disconnect;
@@ -123,6 +125,8 @@ pub struct ResolvedPeer {
     pub maximum_prefix: nos_proto::BgpMaximumPrefix,
     /// The peer-group's RFC 8097 `announce_rpki_state` (see `BgpRib::set_peer_rpki_state`).
     pub announce_rpki_state: bool,
+    /// The peer-group's `soft_reconfiguration_inbound` (see `BgpRib::set_peer_soft_reconfig`).
+    pub soft_reconfiguration_inbound: bool,
     /// The peer-group's vendor `local-as` (see `BgpRib::set_peer_local_as`).
     pub local_as: Option<nos_proto::BgpLocalAs>,
     /// The peer-group's `enforce_first_as` with its default (on) applied; a
@@ -614,10 +618,16 @@ impl SessionManager {
                     refresh_at = None;
                     let slots: Vec<Arc<PeerSlot>> = self.peers.read().await.values().cloned().collect();
                     for slot in slots {
-                        if slot.peer.import_policy.reads_validation_state()
-                            && slot.is_established().await
-                            && slot.send_command(FsmCommand::SendRouteRefresh)
+                        if !slot.import_policy().reads_validation_state()
+                            || !slot.is_established().await
                         {
+                            continue;
+                        }
+                        // Retained routes are re-evaluated locally; others
+                        // need the peer to re-send.
+                        if slot.soft_reconfig() {
+                            self.start_reeval(slot, true, None);
+                        } else if slot.send_command(FsmCommand::SendRouteRefresh) {
                             info!(
                                 instance = %self.instance, peer = %slot.peer.remote_address,
                                 "rpki change: requesting route refresh"
@@ -1272,7 +1282,32 @@ impl SessionManager {
             .iter()
             .map(|(addr, t)| (*addr, t.peer.clone()))
             .collect();
-        let (to_stop, to_spawn, to_update) = diff_peers(&current, &desired);
+        let (mut to_stop, mut to_spawn, to_update, to_reapply) = diff_peers(&current, &desired);
+
+        // Policy/flag-only changes that can't be applied in place restart.
+        let mut reapply = Vec::new();
+        for (peer, kind) in to_reapply {
+            let slot = self.peers.read().await.get(&peer.remote_address).cloned();
+            let established = match &slot {
+                Some(s) => s.is_established().await,
+                None => false,
+            };
+            match slot {
+                // Enabling needs the peer to re-send; without Route Refresh
+                // only a new session retains everything.
+                Some(s)
+                    if !(kind == Reapply::Enable
+                        && established
+                        && !s.route_refresh_negotiated()) =>
+                {
+                    reapply.push((peer, kind, s, established));
+                }
+                _ => {
+                    to_stop.push(peer.remote_address);
+                    to_spawn.push(peer);
+                }
+            }
+        }
 
         self.sync_listener_auth(&to_stop, &to_spawn, &to_update)
             .await;
@@ -1294,6 +1329,35 @@ impl SessionManager {
             }
             if let Some(task) = tasks.get_mut(&peer.remote_address) {
                 task.peer = peer;
+            }
+        }
+
+        for (peer, kind, slot, established) in reapply {
+            let addr = peer.remote_address;
+            slot.set_import_policy(peer.import_policy.clone());
+            slot.set_soft_reconfig(peer.soft_reconfiguration_inbound);
+            if let Some(task) = tasks.get_mut(&addr) {
+                task.peer = peer;
+            }
+            if !established {
+                continue; // the next session retains from its first UPDATE
+            }
+            match kind {
+                Reapply::Policy => self.start_reeval(slot, true, None),
+                Reapply::Enable => {
+                    self.bgp_rib
+                        .lock()
+                        .await
+                        .enable_soft_reconfig_live(addr, slot.enhanced_refresh_negotiated());
+                    slot.send_command(FsmCommand::SendRouteRefresh);
+                }
+                Reapply::Disable => {
+                    self.bgp_rib
+                        .lock()
+                        .await
+                        .set_peer_soft_reconfig(addr, false);
+                    info!(peer = %addr, "soft reconfiguration: retention disabled, memory freed");
+                }
             }
         }
 
@@ -1560,6 +1624,14 @@ async fn reset_status_if_not_established(slot: &PeerSlot) {
     }
 }
 
+/// `diff_peers`' result: to stop, to spawn, AO key updates, in-place reapplies.
+type PeerDiff = (
+    Vec<IpAddr>,
+    Vec<ResolvedPeer>,
+    Vec<(ResolvedPeer, AoDelta)>,
+    Vec<(ResolvedPeer, Reapply)>,
+);
+
 /// Diffs `current` (what's running) against `desired` (what config wants):
 /// peers no longer desired, or whose fields changed, are stopped (and, if
 /// still desired with new fields, respawned); newly desired peers are
@@ -1569,10 +1641,11 @@ async fn reset_status_if_not_established(slot: &PeerSlot) {
 fn diff_peers(
     current: &HashMap<IpAddr, ResolvedPeer>,
     desired: &HashMap<IpAddr, ResolvedPeer>,
-) -> (Vec<IpAddr>, Vec<ResolvedPeer>, Vec<(ResolvedPeer, AoDelta)>) {
+) -> PeerDiff {
     let mut to_stop = Vec::new();
     let mut to_spawn = Vec::new();
     let mut to_update = Vec::new();
+    let mut to_reapply = Vec::new();
 
     for (addr, running) in current {
         match desired.get(addr) {
@@ -1590,6 +1663,8 @@ fn diff_peers(
                     });
                 if let Some(delta) = delta {
                     to_update.push((wanted.clone(), delta));
+                } else if let Some(kind) = reapply_kind(running, wanted) {
+                    to_reapply.push((wanted.clone(), kind));
                 } else {
                     to_stop.push(*addr);
                     to_spawn.push(wanted.clone());
@@ -1604,7 +1679,45 @@ fn diff_peers(
         }
     }
 
-    (to_stop, to_spawn, to_update)
+    (to_stop, to_spawn, to_update, to_reapply)
+}
+
+/// How a peer whose only differences are `import_policy` and
+/// `soft_reconfiguration_inbound` is updated without a restart (#859).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reapply {
+    /// Flag on before and after: re-evaluate the retained routes.
+    Policy,
+    /// Flag off to on: retain from now, ask the peer to re-send.
+    Enable,
+    /// Flag on to off with the policy unchanged: free the retention.
+    Disable,
+}
+
+/// `None`: restart. Anything else changing, a policy change without the
+/// flag, or a policy change on a peer carrying non-unicast families (their
+/// retention is #866) all restart.
+fn reapply_kind(running: &ResolvedPeer, wanted: &ResolvedPeer) -> Option<Reapply> {
+    let mut same = running.clone();
+    same.import_policy.clone_from(&wanted.import_policy);
+    same.soft_reconfiguration_inbound = wanted.soft_reconfiguration_inbound;
+    if same != *wanted {
+        return None;
+    }
+    let policy_changed = running.import_policy != wanted.import_policy;
+    let unicast_only = wanted
+        .address_families
+        .iter()
+        .all(|f| matches!(f, AddressFamily::Ipv4Unicast | AddressFamily::Ipv6Unicast));
+    match (
+        running.soft_reconfiguration_inbound,
+        wanted.soft_reconfiguration_inbound,
+    ) {
+        (true, true) if policy_changed && unicast_only => Some(Reapply::Policy),
+        (false, true) => Some(Reapply::Enable),
+        (true, false) if !policy_changed => Some(Reapply::Disable),
+        _ => None,
+    }
 }
 
 /// One peer's outbound side: while the VRF is resolved, attempts a connect
@@ -2040,6 +2153,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            soft_reconfiguration_inbound: false,
             local_as: None,
             add_path: None,
             add_path_send_count: None,
@@ -2141,7 +2255,7 @@ mod tests {
     fn new_peer_is_spawned() {
         let current = HashMap::new();
         let desired = HashMap::from([("10.0.0.1".parse().unwrap(), peer("10.0.0.1"))]);
-        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, [] as [IpAddr; 0]);
         assert_eq!(to_spawn, vec![peer("10.0.0.1")]);
     }
@@ -2151,7 +2265,7 @@ mod tests {
         let addr: IpAddr = "10.0.0.1".parse().unwrap();
         let current = HashMap::from([(addr, peer("10.0.0.1"))]);
         let desired = HashMap::new();
-        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, []);
     }
@@ -2161,7 +2275,7 @@ mod tests {
         let addr: IpAddr = "10.0.0.1".parse().unwrap();
         let current = HashMap::from([(addr, peer("10.0.0.1"))]);
         let desired = HashMap::from([(addr, peer("10.0.0.1"))]);
-        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, [] as [IpAddr; 0]);
         assert_eq!(to_spawn, []);
     }
@@ -2173,7 +2287,7 @@ mod tests {
         let mut changed = peer("10.0.0.1");
         changed.source_address = Some("10.0.0.9".parse().unwrap());
         let desired = HashMap::from([(addr, changed.clone())]);
-        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![changed]);
     }
@@ -2185,7 +2299,7 @@ mod tests {
         let mut changed = peer("10.0.0.1");
         changed.remote_as = 65001;
         let desired = HashMap::from([(addr, changed.clone())]);
-        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![changed]);
     }
@@ -2197,7 +2311,7 @@ mod tests {
         let mut changed = peer("10.0.0.1");
         changed.auth = Some(ResolvedAuth::Md5("secret".to_string()));
         let desired = HashMap::from([(addr, changed.clone())]);
-        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![changed]);
     }
@@ -2296,7 +2410,7 @@ mod tests {
         });
         let current = HashMap::from([(addr, running.clone())]);
         let desired = HashMap::from([(addr, wanted.clone())]);
-        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![wanted.clone()]);
         assert_eq!(
@@ -2412,7 +2526,7 @@ mod tests {
             ao(2, "b", false, true),
         ]));
         let (current, desired) = (map_of(&a), map_of(&b));
-        let (stop, spawn, update) = diff_peers(&current, &desired);
+        let (stop, spawn, update, _) = diff_peers(&current, &desired);
         assert!(stop.is_empty() && spawn.is_empty());
         assert_eq!(update.len(), 1);
         assert_eq!(update[0].0, b);
@@ -2429,10 +2543,76 @@ mod tests {
             ao(2, "b", false, true),
         ]));
         b.remote_as += 1;
-        let (stop, spawn, update) = diff_peers(&map_of(&a), &map_of(&b));
+        let (stop, spawn, update, _) = diff_peers(&map_of(&a), &map_of(&b));
         assert_eq!(stop.len(), 1);
         assert_eq!(spawn.len(), 1);
         assert_eq!(update.len(), 0);
+    }
+
+    fn reapply(a: &ResolvedPeer, b: &ResolvedPeer) -> (bool, Option<Reapply>) {
+        let (stop, spawn, _, re) = diff_peers(&map_of(a), &map_of(b));
+        let restarted = !stop.is_empty() && !spawn.is_empty();
+        assert!(restarted || re.len() == 1 || (stop.is_empty() && spawn.is_empty()));
+        (restarted, re.first().map(|r| r.1))
+    }
+
+    fn flagged(on: bool, deny: bool) -> ResolvedPeer {
+        let mut p = peer("10.0.0.1");
+        p.address_families = vec![AddressFamily::Ipv4Unicast];
+        p.soft_reconfiguration_inbound = on;
+        if deny {
+            p.import_policy = Arc::new(nos_rpl::DENY_ALL.clone());
+        }
+        p
+    }
+
+    #[test]
+    fn diff_peers_policy_change_with_the_flag_is_reapplied_in_place() {
+        assert_eq!(
+            reapply(&flagged(true, false), &flagged(true, true)),
+            (false, Some(Reapply::Policy))
+        );
+    }
+
+    #[test]
+    fn diff_peers_policy_change_without_the_flag_restarts() {
+        assert_eq!(
+            reapply(&flagged(false, false), &flagged(false, true)),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn diff_peers_policy_change_plus_another_field_restarts() {
+        let mut b = flagged(true, true);
+        b.remote_as += 1;
+        assert_eq!(reapply(&flagged(true, false), &b), (true, None));
+    }
+
+    #[test]
+    fn diff_peers_policy_change_on_a_non_unicast_peer_restarts_until_866() {
+        let (mut a, mut b) = (flagged(true, false), flagged(true, true));
+        a.address_families.push(AddressFamily::L2vpnEvpn);
+        b.address_families.push(AddressFamily::L2vpnEvpn);
+        assert_eq!(reapply(&a, &b), (true, None));
+    }
+
+    #[test]
+    fn diff_peers_flag_toggles_are_in_place() {
+        assert_eq!(
+            reapply(&flagged(false, false), &flagged(true, false)),
+            (false, Some(Reapply::Enable))
+        );
+        assert_eq!(
+            reapply(&flagged(true, false), &flagged(false, false)),
+            (false, Some(Reapply::Disable))
+        );
+        // Dropping the flag together with a policy change loses the retained
+        // routes the old policy rejected: restart.
+        assert_eq!(
+            reapply(&flagged(true, false), &flagged(false, true)),
+            (true, None)
+        );
     }
 
     fn map_of(p: &ResolvedPeer) -> HashMap<IpAddr, ResolvedPeer> {

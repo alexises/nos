@@ -17,13 +17,30 @@ pub struct SoftInResult {
     instance: String,
     #[schema(value_type = String)]
     peer: IpAddr,
-    /// Always `"sent"`: the ROUTE-REFRESH was delivered to the live session.
+    /// `"sent"`: a ROUTE-REFRESH was delivered to the live session. `"none"`:
+    /// the peer-group keeps its received routes (soft reconfiguration
+    /// inbound), so the import policy was re-evaluated locally and nothing
+    /// was sent.
     route_refresh: &'static str,
+    /// Per-family result of the local re-evaluation; absent when a
+    /// ROUTE-REFRESH was sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reevaluated: Option<Vec<FamilyReevaluated>>,
 }
 
-/// `clear bgp <instance> <peer> soft-in`: ask the peer's live session to send
-/// a ROUTE-REFRESH (RFC 2918), so it re-advertises its routes through the
-/// current import policy.
+#[derive(Serialize, ToSchema)]
+pub struct FamilyReevaluated {
+    /// Kebab-case family, e.g. `ipv4-unicast`.
+    family: String,
+    /// Routes held before import policy.
+    retained: u32,
+    /// Of those, how many the import policy accepts.
+    accepted: u32,
+}
+
+/// `clear bgp <instance> <peer> soft-in`: re-evaluate the import policy over
+/// the routes kept by soft reconfiguration inbound, or else ask the peer's
+/// live session to send a ROUTE-REFRESH (RFC 2918).
 #[utoipa::path(
     post, path = "/v1/bgp/{instance}/peer/{peer}/soft-in", tag = "clear",
     summary = "Soft-reset a BGP peer inbound (ROUTE-REFRESH)",
@@ -34,7 +51,7 @@ pub struct SoftInResult {
     responses(
         (status = 200, body = SoftInResult),
         (status = 404, body = ErrorBody, description = "peer not configured, or no Established session with it"),
-        (status = 503, body = ErrorBody, description = "that instance's nos-bgpd is not running")
+        (status = 503, body = ErrorBody, description = "that instance's nos-bgpd is not running, or the local re-evaluation was superseded or aborted")
     )
 )]
 pub async fn bgp_soft_in(
@@ -52,7 +69,24 @@ pub async fn bgp_soft_in(
             instance,
             peer,
             route_refresh: "sent",
+            reevaluated: None,
         })),
+        BgpEvent::SoftInReevaluated { families } => Ok(Json(SoftInResult {
+            instance,
+            peer,
+            route_refresh: "none",
+            reevaluated: Some(
+                families
+                    .into_iter()
+                    .map(|f| FamilyReevaluated {
+                        family: f.family.to_string(),
+                        retained: f.retained,
+                        accepted: f.accepted,
+                    })
+                    .collect(),
+            ),
+        })),
+        BgpEvent::Error(why) => Err(ApiError::Unavailable(why)),
         BgpEvent::PeerNotFound => Err(ApiError::NotFound(format!(
             "no Established session with {peer} in bgp instance '{instance}'"
         ))),
@@ -66,7 +100,6 @@ pub async fn bgp_soft_in(
         | BgpEvent::EvpnRoutesPage { .. }
         | BgpEvent::FlowspecRoutesPage { .. }
         | BgpEvent::VpnRoutesPage { .. }
-        | BgpEvent::Error(_)
         | BgpEvent::RpkiSummary(_)) => Err(unexpected("nos-bgpd", &other)),
     }
 }
@@ -120,12 +153,13 @@ pub async fn bgp_clear_peer(
         | BgpEvent::FlowspecRoutes(_)
         | BgpEvent::VpnRoutes(_)
         | BgpEvent::RouteRefreshSent
+        | BgpEvent::SoftInReevaluated { .. }
+        | BgpEvent::Error(_)
         | BgpEvent::Routes(_)
         | BgpEvent::RoutesPage { .. }
         | BgpEvent::EvpnRoutesPage { .. }
         | BgpEvent::FlowspecRoutesPage { .. }
         | BgpEvent::VpnRoutesPage { .. }
-        | BgpEvent::Error(_)
         | BgpEvent::RpkiSummary(_)) => Err(unexpected("nos-bgpd", &other)),
     }
 }

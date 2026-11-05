@@ -563,6 +563,8 @@ topics! {
     SwitchingProfileMemberStpPriority,
     /// `Interface.flowspec` (also `Subinterface`/`PortAggregate`)
     InterfaceFlowspec,
+    /// `BgpPeerGroup.soft_reconfiguration_inbound`
+    BgpPeerGroupSoftReconfigurationInbound,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

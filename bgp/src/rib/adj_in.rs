@@ -296,8 +296,13 @@ pub(super) fn learn_prefix(
     (prefix, id): (IpNet, u32),
     candidate: RibRoute,
     import_policy: &CompiledPolicy,
+    retain: Option<&mut super::retain::RetainSlot<'_>>,
 ) {
     let (from, _) = peer;
+    // Soft reconfiguration inbound: keep the pre-policy candidate.
+    if let Some(r) = retain {
+        put_path(r.table, r.counts, prefix, id, candidate.clone());
+    }
     match apply_policy(prefix, candidate, import_policy, Some(peer), None) {
         Some(mut route) => {
             if let Some(old) = get_path(table, prefix, id) {
@@ -597,6 +602,7 @@ impl BgpRib {
     /// The accept half of `handle_update`: builds the candidate route from
     /// `rx.attrs` and learns every announced prefix through the import
     /// policy (#425).
+    #[allow(clippy::too_many_lines, reason = "one linear pass per received family")]
     fn learn_announced(
         &mut self,
         rx: &Received<'_>,
@@ -618,6 +624,7 @@ impl BgpRib {
         let mut flow_keys: Vec<FlowspecKey> = Vec::new();
         let table = self.adj_rib_in.entry(from).or_default();
         let counts = self.path_counts.entry(from).or_default();
+        let mut retain = self.retained.slot(from);
         // This UPDATE adds at most this many entries — reserving
         // once lets the per-peer table grow in fewer, larger steps
         // on the way up to a full table, instead of rehashing on
@@ -684,6 +691,7 @@ impl BgpRib {
                 (IpNet::V4(*prefix), path_id_at(&update.nlri_path_ids, i)),
                 candidate,
                 import_policy,
+                retain.as_mut(),
             );
         }
         for mp in &update.mp_reach {
@@ -702,6 +710,7 @@ impl BgpRib {
                     (*prefix, path_id_at(&mp.nlri_path_ids, i)),
                     candidate,
                     import_policy,
+                    retain.as_mut(),
                 );
             }
             if !mp.evpn.is_empty() {
@@ -804,6 +813,8 @@ impl BgpRib {
     /// Removes path `id` of `prefix` from `peer`'s Adj-RIB-In, keeping the
     /// path counters in step.
     pub(super) fn remove_path(&mut self, peer: IpAddr, prefix: IpNet, id: u32) -> Option<RibRoute> {
+        // The pre-policy copy goes with the path, even one policy rejected.
+        self.retained.take(peer, prefix, id);
         take_path(
             self.adj_rib_in.get_mut(&peer)?,
             self.path_counts.entry(peer).or_default(),

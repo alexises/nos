@@ -54,6 +54,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        soft_reconfiguration_inbound: false,
         local_as: None,
         add_path: None,
         add_path_send_count: None,
@@ -528,4 +529,72 @@ async fn rpki_validation_follows_the_cache() {
     // Removing the caches empties the VRP set.
     b.apply_with(vec![peer(A, B, 65001)], &[]).await;
     assert_eq!(b.manager.rpki_summaries().await, []);
+}
+
+/// Soft reconfiguration inbound (#859): B keeps what A sends before import
+/// policy, so loosening B's policy re-admits the route with no new session;
+/// enabling the flag on a live session asks A for a Route Refresh instead of
+/// restarting; `soft-in` re-evaluates locally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn soft_reconfiguration_inbound_applies_policy_changes_in_place() {
+    let (a, b, _) = routers();
+    let unicast = |p: ResolvedPeer| ResolvedPeer {
+        address_families: vec![AddressFamily::Ipv4Unicast],
+        ..p
+    };
+    let b_peer = |flag: bool, accept: bool| {
+        let mut p = unicast(peer(A, B, 65001));
+        p.soft_reconfiguration_inbound = flag;
+        if !accept {
+            p.import_policy = Arc::new(nos_rpl::DENY_ALL.clone());
+        }
+        p
+    };
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
+            prefix: "198.51.100.0/24".parse().unwrap(),
+            gateway: "10.0.0.9".parse().unwrap(),
+        }]))
+        .await;
+    a.apply(vec![unicast(peer(B, A, 65002))]).await;
+    b.apply(vec![b_peer(false, false)]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    // Nothing to re-evaluate without the flag: soft-in is a Route Refresh.
+    assert!(b.manager.soft_in_local(IpAddr::V4(A)).await.is_none());
+    let accepted = || async { b.manager.peer_summaries().await[0].accepted_prefixes };
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    // Enable in place: no restart, and A's refresh reply is retained.
+    b.apply(vec![b_peer(true, false)]).await;
+    let retained = || async {
+        match b.manager.soft_in_local(IpAddr::V4(A)).await {
+            Some(Ok(f)) => f[0].retained,
+            other => panic!("{other:?}"),
+        }
+    };
+    eventually("b retains a's route", || async { retained().await == 1 }).await;
+    assert_eq!(accepted().await, Some([0, 0, 0]));
+
+    // Loosen the policy: re-admitted from the retained copy, same session.
+    b.apply(vec![b_peer(true, true)]).await;
+    eventually("b re-admits", || async {
+        accepted().await == Some([1, 0, 0])
+    })
+    .await;
+    assert!(
+        b.manager.peer_summaries().await[0].uptime_secs >= Some(1),
+        "the session must not have restarted"
+    );
+    let Some(Ok(f)) = b.manager.soft_in_local(IpAddr::V4(A)).await else {
+        panic!("soft-in must re-evaluate locally")
+    };
+    assert_eq!((f[0].retained, f[0].accepted), (1, 1));
+
+    // Disabling frees the retention, again without a restart.
+    b.apply(vec![b_peer(false, true)]).await;
+    assert!(b.manager.soft_in_local(IpAddr::V4(A)).await.is_none());
+    assert_eq!(accepted().await, Some([1, 0, 0]));
+    assert!(b.manager.peer_summaries().await[0].uptime_secs >= Some(1));
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
 }

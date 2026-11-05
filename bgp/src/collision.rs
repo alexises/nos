@@ -174,6 +174,28 @@ pub struct PeerSlot {
     /// `active_connect_loop` must not redial during the Cease grace, or the
     /// fresh session ends in a bare abort instead of the Cease (#444, #455).
     stopping: std::sync::atomic::AtomicBool,
+    /// `peer.import_policy`, but replaceable: a policy change on a peer with
+    /// soft reconfiguration inbound is applied in place (#859), so the live
+    /// session and every new one read the current policy from here.
+    import_policy: std::sync::Mutex<Arc<nos_rpl::CompiledPolicy>>,
+    /// `peer.soft_reconfiguration_inbound`, replaceable for the same reason.
+    soft_reconfig: std::sync::atomic::AtomicBool,
+    /// What the established session negotiated: bit 0 RFC 2918 Route Refresh,
+    /// bit 1 RFC 7313 Enhanced Route Refresh; 0 outside `Established`.
+    refresh_caps: std::sync::atomic::AtomicU8,
+    /// The running re-evaluation pass, if any (see `reeval_begin`).
+    reeval: std::sync::Mutex<ReevalState>,
+}
+
+/// Answer to a `soft-in` waiting on a pass: the per-family counts, or why it
+/// ended early (`superseded`, `disconnected`, ...).
+pub type ReevalResult = Result<Vec<nos_proto::FamilyReeval>, String>;
+
+#[derive(Default)]
+struct ReevalState {
+    generation: u64,
+    running: bool,
+    waiters: Vec<tokio::sync::oneshot::Sender<ReevalResult>>,
 }
 
 impl PeerSlot {
@@ -182,7 +204,6 @@ impl PeerSlot {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             auth: std::sync::Mutex::new(peer.auth.clone()),
-            peer,
             state: Mutex::new(CollisionState::default()),
             status,
             command_tx,
@@ -190,6 +211,11 @@ impl PeerSlot {
             passive_task: Mutex::new(None),
             max_prefix_hold: std::sync::Mutex::new(None),
             stopping: std::sync::atomic::AtomicBool::new(false),
+            import_policy: std::sync::Mutex::new(peer.import_policy.clone()),
+            soft_reconfig: std::sync::atomic::AtomicBool::new(peer.soft_reconfiguration_inbound),
+            refresh_caps: std::sync::atomic::AtomicU8::new(0),
+            reeval: std::sync::Mutex::new(ReevalState::default()),
+            peer,
         })
     }
 
@@ -216,6 +242,94 @@ impl PeerSlot {
             .auth
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = auth;
+    }
+
+    /// The peer's current import policy (see the `import_policy` field).
+    pub fn import_policy(&self) -> Arc<nos_rpl::CompiledPolicy> {
+        self.import_policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set_import_policy(&self, policy: Arc<nos_rpl::CompiledPolicy>) {
+        *self
+            .import_policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+    }
+
+    pub fn soft_reconfig(&self) -> bool {
+        self.soft_reconfig
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_soft_reconfig(&self, on: bool) {
+        self.soft_reconfig
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn route_refresh_negotiated(&self) -> bool {
+        self.refresh_caps.load(std::sync::atomic::Ordering::Relaxed) & 1 != 0
+    }
+
+    pub fn enhanced_refresh_negotiated(&self) -> bool {
+        self.refresh_caps.load(std::sync::atomic::Ordering::Relaxed) & 2 != 0
+    }
+
+    pub fn set_refresh_caps(&self, route_refresh: bool, enhanced: bool) {
+        self.refresh_caps.store(
+            u8::from(route_refresh) | (u8::from(enhanced) << 1),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn reeval_state(&self) -> std::sync::MutexGuard<'_, ReevalState> {
+        self.reeval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Registers a re-evaluation pass. `supersede` (a policy change or flag
+    /// enable) starts a new generation and answers the old waiters
+    /// `superseded`; otherwise (`soft-in`) a running pass is joined: the
+    /// waiter is queued and `None` returned. `Some(generation)`: the caller
+    /// must run the pass.
+    pub fn reeval_begin(
+        &self,
+        supersede: bool,
+        waiter: Option<tokio::sync::oneshot::Sender<ReevalResult>>,
+    ) -> Option<u64> {
+        let mut st = self.reeval_state();
+        if supersede {
+            st.generation += 1;
+            for w in std::mem::take(&mut st.waiters) {
+                let _ = w.send(Err("superseded".into()));
+            }
+        } else if st.running {
+            st.waiters.extend(waiter);
+            return None;
+        }
+        st.running = true;
+        st.waiters.extend(waiter);
+        Some(st.generation)
+    }
+
+    /// Whether pass `generation` is still the current one.
+    pub fn reeval_current(&self, generation: u64) -> bool {
+        self.reeval_state().generation == generation
+    }
+
+    /// Ends pass `generation`, answering its waiters; a no-op if superseded.
+    pub fn reeval_finish(&self, generation: u64, result: &ReevalResult) {
+        let mut st = self.reeval_state();
+        if st.generation != generation {
+            return;
+        }
+        st.running = false;
+        for w in std::mem::take(&mut st.waiters) {
+            let _ = w.send(result.clone());
+        }
     }
 
     /// Records the task running this peer's passively-accepted session,
@@ -571,6 +685,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            soft_reconfiguration_inbound: false,
             local_as: None,
             add_path: None,
             add_path_send_count: None,
@@ -850,5 +965,29 @@ mod tests {
 
         slot.clear(Role::Passive).await;
         assert!(!slot.is_established().await);
+    }
+
+    #[tokio::test]
+    async fn concurrent_soft_ins_share_one_pass_and_a_policy_change_supersedes_it() {
+        use tokio::sync::oneshot::channel;
+        let slot = peer_slot();
+        let (t1, mut r1) = channel();
+        let (t2, mut r2) = channel();
+        let generation = slot.reeval_begin(false, Some(t1)).expect("first starts");
+        assert_eq!(slot.reeval_begin(false, Some(t2)), None, "second joins");
+        slot.reeval_finish(generation, &Ok(Vec::new()));
+        assert_eq!(r1.try_recv().unwrap(), Ok(Vec::new()));
+        assert_eq!(r2.try_recv().unwrap(), Ok(Vec::new()));
+
+        let (t3, mut r3) = channel();
+        let old = slot.reeval_begin(false, Some(t3)).unwrap();
+        let newer = slot.reeval_begin(true, None).unwrap();
+        assert!(!slot.reeval_current(old) && slot.reeval_current(newer));
+        assert_eq!(r3.try_recv().unwrap(), Err("superseded".to_string()));
+        slot.reeval_finish(old, &Ok(Vec::new())); // a stale finish is a no-op
+        let (t4, mut r4) = channel();
+        assert_eq!(slot.reeval_begin(false, Some(t4)), None, "still running");
+        slot.reeval_finish(newer, &Err("disabled".into()));
+        assert_eq!(r4.try_recv().unwrap(), Err("disabled".to_string()));
     }
 }

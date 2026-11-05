@@ -107,6 +107,7 @@ mod flowspec_out;
 mod flowspec_validate;
 mod gr;
 mod outbox;
+mod retain;
 mod shared;
 mod vpn_import;
 mod vpn_out;
@@ -115,6 +116,7 @@ pub use flowspec_out::AdvertisedFlowspec;
 #[cfg(test)]
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
+pub use retain::{ChunkOutcome, ReevalPass, REEVAL_CHUNK};
 pub use shared::{RibGuard, SharedRib};
 pub use vpn_import::{SooSkip, VpnImport, VpnImportPath, VpnImports};
 pub use vpn_out::AdvertisedVpn;
@@ -656,6 +658,8 @@ pub struct BgpRib {
     /// step at every mutation (`put_path`/`take_path`) so the RFC 4486
     /// maximum-prefix check is O(1) per UPDATE, not a table scan.
     path_counts: HashMap<IpAddr, PathCounts>,
+    /// Pre-policy copies for peer-groups with soft reconfiguration inbound.
+    retained: retain::Retained,
     /// Each peer's maximum-prefix limits (`set_peer_max_prefix`), and the
     /// `(peer, family)` pairs already warned about for a `warning_only` limit,
     /// so the warning is logged once per crossing.
@@ -825,6 +829,7 @@ impl BgpRib {
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
+            retained: retain::Retained::default(),
             path_counts: HashMap::new(),
             max_prefix: HashMap::new(),
             max_prefix_warned: HashSet::new(),
@@ -1457,6 +1462,9 @@ impl BgpRib {
         if let Some(deferral) = self.deferral.as_mut() {
             deferral.disconnected(peer, kind == Disconnect::Hard);
         }
+        // Retention never outlives a session; after a GR restart it refills
+        // from the peer's re-announcements only (#859).
+        self.retained.drop_peer(peer);
         let outbox = self.peer_outboxes.remove(&peer);
         if outbox.is_none() && kind != Disconnect::Hard && self.gr_deadline.contains_key(&peer) {
             return;

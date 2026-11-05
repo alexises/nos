@@ -305,6 +305,7 @@ fn resolved_peer(addr: &str, shutdown: bool) -> ResolvedPeer {
         shutdown: shutdown.then_some(BgpShutdown { message: None }),
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        soft_reconfiguration_inbound: false,
         local_as: None,
         add_path: None,
         add_path_send_count: None,

@@ -59,6 +59,7 @@ fn rpeer() -> ResolvedPeer {
         shutdown: None,
         maximum_prefix: BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        soft_reconfiguration_inbound: false,
         local_as: None,
         add_path: None,
         add_path_send_count: None,
