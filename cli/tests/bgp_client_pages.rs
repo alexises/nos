@@ -52,6 +52,8 @@ async fn evpn_routes_are_walked_page_by_page() {
             route: s.into(),
             next_hop: peer(),
             extended_communities: vec![],
+            local_pref: 100,
+            communities: vec![],
         };
         match after {
             None => BgpEvent::EvpnRoutesPage {

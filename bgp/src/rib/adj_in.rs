@@ -3,9 +3,9 @@
 
 use super::{
     apply_policy, debug, family_index, info, message, otc_leak, ov_state, warn, AddressFamily, Arc,
-    BgpRib, CompiledPolicy, Damping, EvpnNlri, EvpnRoute, FlowspecKey, FlowspecRoute, HashMap,
-    HashSet, Instant, IpAddr, IpNet, Ipv4Addr, MacMobility, RibRoute, RouteOrigin, SmallVec,
-    UpdateMessage, CHANGE_PENALTY, DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
+    BgpRib, CompiledPolicy, Damping, EvpnNlri, EvpnRoute, FlowspecKey, FlowspecRoute, GsKnobs,
+    HashMap, HashSet, Instant, IpAddr, IpNet, Ipv4Addr, MacMobility, RibRoute, RouteOrigin,
+    SmallVec, UpdateMessage, CHANGE_PENALTY, DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
 };
 use crate::as_path::SegKind;
 use nos_proto::BgpRole::{Peer, Provider, RouteServer};
@@ -71,6 +71,7 @@ pub(super) fn evpn_rejected(
 /// `(VNI, MAC)` as an RFC 7432 §15 mobility candidate. A route the peer's
 /// EVPN import policy (`ctx`: policy, peer AS, iBGP flag; `None` accepts
 /// all) rejects is treated as a withdrawal and never reaches mobility.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn learn_evpn(
     table: &mut HashMap<EvpnNlri, EvpnRoute>,
     mac_mobility: &mut MacMobility,
@@ -79,13 +80,24 @@ pub(super) fn learn_evpn(
     extended_communities: &[u64],
     pmsi: Option<message::Pmsi>,
     ctx: Option<(&CompiledPolicy, u32, bool)>,
+    communities: &[u32],
+    gs: Option<GsKnobs>,
 ) {
+    // RFC 8326, eBGP only (`gs` is `None` for iBGP/confed), before policy.
+    let mut communities = communities.to_vec();
+    let local_pref = if gs.is_some_and(|g| g.apply(&mut communities)) {
+        0
+    } else {
+        DEFAULT_LOCAL_PREF
+    };
     for nlri in &mp.evpn {
         let route = EvpnRoute {
             nlri: nlri.clone(),
             next_hop: mp.next_hop,
             pmsi_vni: pmsi.map(|p| p.vni),
             extended_communities: extended_communities.to_vec(),
+            communities: communities.clone(),
+            local_pref,
         };
         if let Some((policy, peer_as, ibgp)) = ctx
             && evpn_rejected(policy, &route, from, peer_as, ibgp)
@@ -102,7 +114,7 @@ pub(super) fn learn_evpn(
             mac_mobility.candidate(vni, mac, mp.next_hop, esi, seq, sticky, Instant::now());
         }
         if table.insert(nlri.route_key(), route.clone()) != Some(route) {
-            info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, "evpn route learned");
+            info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, local_pref, communities = %format_args!("[{}]", nos_proto::bgp::fmt_communities(&communities)), "evpn route learned");
         }
     }
 }
@@ -656,13 +668,7 @@ impl BgpRib {
         let mut local_pref = received_local_pref(attrs.local_pref, remote_is_ibgp || from_confed);
         if !remote_is_ibgp && !from_confed {
             let gs = self.gs_peers.get(&from).copied().unwrap_or_default();
-            let tagged = communities.contains(&crate::message::COMMUNITY_GRACEFUL_SHUTDOWN);
-            // §4.2 initiator: tag what we receive too, and demote it.
-            if gs.send && !tagged {
-                communities.push(crate::message::COMMUNITY_GRACEFUL_SHUTDOWN);
-            }
-            // §4.1 receiver.
-            if gs.send || (tagged && !gs.receive_off) {
+            if gs.apply(&mut communities) {
                 local_pref = 0;
             }
         }
@@ -740,6 +746,9 @@ impl BgpRib {
                     self.evpn_import
                         .get(&from)
                         .map(|p| (p.as_ref(), peer_as, remote_is_ibgp)),
+                    &attrs.communities,
+                    (!remote_is_ibgp && !from_confed)
+                        .then(|| self.gs_peers.get(&from).copied().unwrap_or_default()),
                 );
                 evpn_recheck.extend(
                     mp.evpn

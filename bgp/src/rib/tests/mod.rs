@@ -15,6 +15,7 @@ mod aggregate;
 mod confed;
 mod decision;
 mod evpn;
+mod evpn_gs;
 mod evpn_import;
 mod first_as;
 mod flowspec;

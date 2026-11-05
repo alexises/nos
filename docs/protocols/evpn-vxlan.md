@@ -208,6 +208,8 @@ bgp instance r1:
   from 10.50.0.2 next-hop 10.50.0.2 [3]:[65001:100]:[0]:[10.50.0.2] [RT:65000:10100 encap:8]
 ```
 
+`show bgp evpn` also prints `local-pref <n> communities [<names>]` per route; a PE announcing RFC 8326 GRACEFUL_SHUTDOWN shows `local-pref 0 communities [graceful-shutdown]` and loses to a PE on the same ESI that does not.
+
 Here router-b (with `address 203.0.113.2/24` and both rules on its own `bd100`) has learned router-a's SVI: its MAC, and its address as a neighbour entry.
 
 A remote route is used only if it carries one of the domain's import route targets, names the domain's VNI and does not come from the router itself; the others appear in `show bgp evpn` but not in `show fdb`. Over REST these are `GET /v1/bgp/evpn` and `GET /v1/fdb/{domain}`:

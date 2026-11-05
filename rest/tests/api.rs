@@ -2281,6 +2281,8 @@ async fn bgp_evpn_and_flowspec_are_paged_per_instance_with_an_opaque_cursor() {
                 route: after.as_ref().map_or("first", |_| "second").into(),
                 next_hop: peer,
                 extended_communities: vec![limit.to_string()],
+                local_pref: 0,
+                communities: vec![0xFFFF_0000],
             }],
             next: after.is_none().then(|| EvpnRouteCursor {
                 peer,

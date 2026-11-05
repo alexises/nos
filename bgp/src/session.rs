@@ -904,6 +904,8 @@ impl SessionManager {
                         .iter()
                         .map(|&c| crate::evpn::format_ext_community(c))
                         .collect(),
+                    local_pref: route.local_pref,
+                    communities: route.communities.clone(),
                 })
             },
             nos_proto::page::wire_len,

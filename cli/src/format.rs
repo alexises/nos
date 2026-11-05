@@ -1235,11 +1235,13 @@ pub fn render_bgp_evpn_lines(routes: &[EvpnRouteSummary]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "  from {} next-hop {} {} [{}]",
+                "  from {} next-hop {} {} [{}] local-pref {} communities [{}]",
                 r.peer,
                 r.next_hop,
                 r.route,
-                r.extended_communities.join(" ")
+                r.extended_communities.join(" "),
+                r.local_pref,
+                nos_proto::bgp::fmt_communities(&r.communities)
             )
         })
         .collect::<Vec<_>>()
@@ -2421,10 +2423,12 @@ mod tests {
             route: "[3]:[65000:1]:[0]:[192.0.2.1]".to_string(),
             next_hop: "192.0.2.1".parse().unwrap(),
             extended_communities: vec!["RT:65000:10000".to_string(), "encap:8".to_string()],
+            local_pref: 0,
+            communities: vec![0xFFFF_0000, 0xFDE9_0064],
         };
         assert_eq!(
             render_bgp_evpn("r1", &[route]),
-            "bgp instance r1:\n  from 10.0.0.2 next-hop 192.0.2.1 [3]:[65000:1]:[0]:[192.0.2.1] [RT:65000:10000 encap:8]"
+            "bgp instance r1:\n  from 10.0.0.2 next-hop 192.0.2.1 [3]:[65000:1]:[0]:[192.0.2.1] [RT:65000:10000 encap:8] local-pref 0 communities [graceful-shutdown 65001:100]"
         );
     }
 

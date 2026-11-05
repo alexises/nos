@@ -377,6 +377,11 @@ pub struct EvpnRoute {
     /// Raw 8-byte extended communities (Route Targets, Encapsulation, MAC
     /// Mobility, ...), exactly as received.
     pub extended_communities: Vec<u64>,
+    /// Standard communities, after RFC 8326 tagging.
+    pub communities: Vec<u32>,
+    /// `DEFAULT_LOCAL_PREF`, or 0 when RFC 8326 demoted it; ranks copies at
+    /// push time (`evpn_push_snapshot`).
+    pub local_pref: u32,
 }
 
 /// One received VPN-IPv4/IPv6 path (RFC 4364) — `Adj-RIB-In` content, after

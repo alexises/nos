@@ -5267,6 +5267,75 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a's {L3_TABLE} does not list {L3_GOBGP_HOST}/32 as an evpn route");
     }
 
+    // RFC 8326 on EVPN (#874): GoBGP announces one MAC+IP and one Type-5
+    // prefix under two RDs, one plain and one with GRACEFUL_SHUTDOWN. A
+    // single next hop means the Type-2 winner is not observable on the VTEP,
+    // so this asserts the stored LOCAL_PREF/communities (log + show) and, for
+    // Type-5, that a lone tagged route is still pushed.
+    log("graceful shutdown on evpn: tagged copies are learned at local-pref 0");
+    let (gmac, gip, gprefix) = ("aa:bb:cc:00:00:0a", "192.0.2.20", "198.18.10.0/24");
+    let (plain_rd, tagged_rd) = ("65010:7", "65010:8");
+    let (plain5, tagged5) = ("65010:57", "65010:58");
+    let gs_learned = |t: u8, rd: &str, lp: u32, c: &str| {
+        format!("evpn route learned peer={IP_G} route_type={t} route=.*{rd}.* local_pref={lp} communities=\\[{c}\\]")
+    };
+    for (rd, tag) in [(plain_rd, false), (tagged_rd, true)] {
+        let mut args = vec![
+            "global", "rib", "add", "-a", "evpn", "macadv", gmac, gip, "etag", "0", "label",
+            "10100", "rd", rd, "rt", rt, "encap", "vxlan",
+        ];
+        if tag {
+            args.extend(["community", "65535:0"]);
+        }
+        gobgp(w, &args).await?;
+    }
+    a.wait(&gs_learned(2, plain_rd, 100, "")).await?;
+    a.wait(&gs_learned(2, tagged_rd, 0, EVPN_GS_NAME)).await?;
+    let body = show().await?;
+    // 4294901760 = 65535:0 packed; the REST wire carries the number.
+    if !body.contains("\"local_pref\":0") || !body.contains("4294901760") {
+        bail!("show bgp evpn does not carry the demoted local_pref and community: {body}");
+    }
+    let l3vni = L3_VNI.to_string();
+    for (rd, tag) in [(tagged5, true), (plain5, false)] {
+        let mut args = vec![
+            "global",
+            "rib",
+            "add",
+            "-a",
+            "evpn",
+            "prefix",
+            gprefix,
+            "gw",
+            "0.0.0.0",
+            "etag",
+            "0",
+            "label",
+            &l3vni,
+            "rd",
+            rd,
+            "rt",
+            L3_GOBGP_RT,
+            "encap",
+            "vxlan",
+            "router-mac",
+            L3_GOBGP_RMAC,
+        ];
+        if tag {
+            args.extend(["community", "65535:0"]);
+        }
+        gobgp(w, &args).await?;
+        if tag {
+            // Alone, the demoted route is still the only path: it is pushed.
+            a.wait(&gs_learned(5, rd, 0, EVPN_GS_NAME)).await?;
+            a.wait(&format!(
+                "added route prefix={gprefix} gateway={IP_G} next_hops=1 .*source=Some(Evpn)"
+            ))
+            .await?;
+        }
+    }
+    a.wait(&gs_learned(5, plain5, 100, "")).await?;
+
     log("removing the speaker: its remaining routes must go with the session");
     let base = a.count(&withdrawn(3));
     w.dock.container_remove("router-g").await;
