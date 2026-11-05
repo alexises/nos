@@ -1078,7 +1078,9 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
                 };
                 format!(" backup {tunnel}{b}")
             });
-            let via = if candidate.discard {
+            let via = if candidate.blackhole {
+                "discard (blackhole)".to_string()
+            } else if candidate.discard {
                 "discard".to_string()
             } else {
                 // A `Vpn` hop shows its own PE, RD and labels.
@@ -1930,11 +1932,34 @@ mod tests {
                 backup_tunnel: false,
                 mpls_labels: vec![],
                 vpn: vec![],
+                blackhole: false,
             }],
         }];
         assert_eq!(
             render_prefix_routes(&routes),
             "203.0.113.120/29\n  * discard [ospf]"
+        );
+    }
+
+    #[test]
+    fn bgp_blackhole_renders_as_blackhole() {
+        let routes = [PrefixRoutes {
+            prefix: "198.51.100.7/32".parse().unwrap(),
+            candidates: vec![nos_proto::RouteEntry {
+                gateways: vec![],
+                source: nos_proto::RouteSourceKind::Bgp,
+                backup: None,
+                discard: true,
+                evpn: None,
+                backup_tunnel: false,
+                mpls_labels: vec![],
+                vpn: vec![],
+                blackhole: true,
+            }],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "198.51.100.7/32\n  * discard (blackhole) [bgp]"
         );
     }
 
@@ -1955,6 +1980,7 @@ mod tests {
                 backup_tunnel: false,
                 mpls_labels: vec![],
                 vpn: vec![],
+                blackhole: false,
             }],
         }];
         assert_eq!(
@@ -1979,6 +2005,7 @@ mod tests {
                     pe_next_hop: "192.0.2.3".parse().unwrap(),
                     rd: "65001:1".to_string(),
                 }],
+                blackhole: false,
             }],
         }];
         assert_eq!(
@@ -2006,6 +2033,7 @@ mod tests {
                 backup_tunnel: false,
                 mpls_labels: vec![vec![100], vec![200]],
                 vpn: vec![info("65001:1"), info("65001:2")],
+                blackhole: false,
             }],
         }];
         assert_eq!(
@@ -2028,6 +2056,7 @@ mod tests {
                 backup_tunnel: false,
                 mpls_labels: vec![],
                 vpn: vec![],
+                blackhole: false,
             }],
         }];
         assert_eq!(
@@ -2049,6 +2078,7 @@ mod tests {
                 backup_tunnel: true,
                 mpls_labels: vec![],
                 vpn: vec![],
+                blackhole: false,
             }],
         }];
         assert_eq!(

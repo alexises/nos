@@ -6,6 +6,8 @@ of re-auditing the codebase. Update this file as items are implemented.
 
 ## Implemented
 
+- **Blackhole community (RFC 7999, #861)**: per eBGP peer-group opt-in, prefix-list
+  authorised, NO_EXPORT added, installed as a discard route by `nos-ribd`.
 - **Transport/FSM**: VRF-scoped TCP, active+passive per RFC 4271, states
   `OpenSent`/`OpenConfirm`/`Established` (Idle/Connect/Active live in the
   retry loop, not as FSM states). OPEN validation, hold-timer reset,

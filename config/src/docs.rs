@@ -1660,6 +1660,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Honour the community again.",
             ),
         ),
+        Topic::BgpPeerGroupBlackhole => (
+            "Honour the RFC 7999 BLACKHOLE community (65535:666) from this peer-group, within a prefix-list.",
+            concat!(
+                "WARNING: the route still goes through the import policy, and the default is \
+             deny-all, so the policy must accept it (for example `this.bgp.communities` contains \
+             65535:666 and `this.prefix in <list>`) or nothing happens. A unicast route carrying \
+             65535:666 whose prefix matches the prefix-list is tagged NO_EXPORT and, when best, \
+             installed as a discard route by the RIB; the prefix-list uses the normal `range` \
+             rules, so write `10.0.0.0/8 upto 32` to cover host routes. Any other route stays \
+             ordinary. RPKI state does not block it. eBGP peer-groups only, and the prefix-list \
+             must exist, both checked at commit time.",
+                " ",
+                "Stop honouring the community; discard routes are removed.",
+            ),
+        ),
         Topic::BfdProfile => (
             "Create or delete a BFD profile.",
             "A named set of BFD (RFC 5880) session parameters. BGP peer-groups, OSPF and OSPFv3 profiles and static routes reference it with `bfd <name>`. `edit` creates it with defaults (300 ms intervals, multiplier 3, minimum TTL 254) if missing; `delete` removes it, and the commit is refused while anything still references it. No BFD daemon exists yet, so a reference has no effect.",

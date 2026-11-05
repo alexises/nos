@@ -685,6 +685,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            blackhole: None,
             soft_reconfiguration_inbound: false,
             local_as: None,
             add_path: None,

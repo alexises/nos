@@ -667,6 +667,24 @@ How to drain a router for maintenance:
 2. Wait until the neighbours have converged on other paths (`show bgp routes` on them shows LOCAL_PREF 0 on this router's paths; for EVPN, `show bgp evpn` shows `local-pref 0 communities [graceful-shutdown]`).
 3. `set bgp instance r1 peer-group upstream shutdown maintenance` and commit.
 
+#### Blackhole community (RFC 7999)
+
+> **Warning:** a blackholed route still goes through the peer-group's import policy, and the default import policy is `deny-all`. Without a policy that accepts it, nothing is blackholed.
+
+- Opt in per eBGP peer-group: `set bgp instance r1 peer-group customer blackhole prefix-list CUSTOMER`. An iBGP group, or a prefix-list that does not exist, is refused at commit.
+- A unicast route from that group is a blackhole when it carries `BLACKHOLE` (`65535:666`) and its prefix matches the prefix-list. The list is the authorisation and uses the normal `range` rules, so to accept host routes inside a customer block write `10.0.0.0/8 upto 32`; a plain entry matches only that exact prefix.
+- A blackhole gets `NO_EXPORT` added (so it is not passed on to eBGP peers, see well-known communities above) and competes in the normal decision process, with no LOCAL_PREF change. If it is best, `nos-bgpd` pushes it to `nos-ribd` as a discard route and the kernel gets an `RTN_BLACKHOLE` route.
+- A tagged route that is not covered, or from a group without `blackhole`, is an ordinary route (the community means nothing special). RPKI state does not stop a blackhole by itself, but the import policy can test it.
+- `show route` marks the installed route `discard (blackhole)`; an OSPF area-range discard shows plain `discard`. A BGP discard never resolves the next hop of another route, and competes with connected/static routes for the same prefix by the usual source preference.
+- Changing the group's `blackhole` setting or editing the prefix-list restarts the group's sessions.
+
+An import policy that accepts it:
+
+```
+if this.bgp.communities contains 65535:666 and this.prefix in CUSTOMER
+    accept
+```
+
 ### MD5 authentication (RFC 2385)
 
 Authentication keys are not typed into the peer-group: they live in the admin keystore under a label, and the peer-group names the label. To authenticate a peer-group:

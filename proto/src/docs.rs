@@ -569,6 +569,8 @@ topics! {
     BgpPeerGroupGracefulShutdown,
     /// `BgpPeerGroup.graceful_shutdown_receive_disabled`
     BgpPeerGroupGracefulShutdownReceiveDisabled,
+    /// `BgpPeerGroup.blackhole`
+    BgpPeerGroupBlackhole,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

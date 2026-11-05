@@ -1930,6 +1930,90 @@ pub async fn shutdown(w: &mut World) -> anyhow::Result<()> {
     reestablished(b, est_b).await
 }
 
+/// RFC 7999 (#861): router-a tags two /32s with BLACKHOLE; router-b's
+/// `blackhole` prefix-list covers only one, which `nos-ribd` installs as a
+/// discard (`RTN_BLACKHOLE`) route. The other stays an ordinary route, and
+/// dropping the config turns the discard back into a normal route.
+/// (NO_EXPORT on the stored route is proven by the unit tests: the lab
+/// has no third eBGP peer in this phase.)
+pub async fn blackhole(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let discard = |p: &str| format!("added route prefix={p} .*discard=true");
+    let (est_a, est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    let before = b.count(&discard(BLACKHOLE_COVERED));
+    let before_other = b.count(&discard(BLACKHOLE_UNCOVERED));
+    let file = policy_file(
+        "tag-blackhole",
+        "this.bgp.communities.add(65535:666)\naccept\n",
+    )?;
+    a.provision(&[
+        "--static-route",
+        BLACKHOLE_COVERED,
+        "--static-route",
+        BLACKHOLE_UNCOVERED,
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+        "--policy-name",
+        "tag-blackhole",
+        "--policy-source-file",
+        &file,
+        "--export-policy",
+        "tag-blackhole",
+    ])
+    .await?;
+    b.provision(&[
+        "--blackhole-prefix-list",
+        "bh",
+        "--blackhole-prefix",
+        BLACKHOLE_NET,
+    ])
+    .await?;
+    reestablished(a, est_a).await?;
+    reestablished(b, est_b).await?;
+
+    log("router-b installs the covered /32 as a discard route");
+    b.wait_new(&discard(BLACKHOLE_COVERED), before, 60).await?;
+    // The uncovered one is learned (as an ordinary route) but never a discard.
+    b.wait(&format!(
+        "learned route for {BLACKHOLE_UNCOVERED} into adj-rib-in"
+    ))
+    .await?;
+    b.assert_quiet(&discard(BLACKHOLE_UNCOVERED), before_other, 10)
+        .await?;
+    // `show rib` over REST names it a BGP blackhole.
+    let rib = b
+        .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
+        .await?;
+    anyhow::ensure!(
+        rib.contains("\"blackhole\":true"),
+        "show rib does not report blackhole: {rib}"
+    );
+
+    log("router-b drops the blackhole config: the discard becomes an ordinary route");
+    // The kernel slot flips from blackhole to the peer's gateway in place
+    // (`replaced=true`), so the proof is the ordinary route, not a removal.
+    let ordinary = format!(
+        "added route prefix={BLACKHOLE_COVERED} gateway={IP_A} .*source=Some(Bgp) backup=false discard=false"
+    );
+    let before_ordinary = b.count(&ordinary);
+    b.provision(&["--clear-blackhole"]).await?;
+    b.wait_new(&ordinary, before_ordinary, 60).await?;
+
+    log("restoring the baseline");
+    a.provision(&[
+        "--remove-static-route",
+        BLACKHOLE_COVERED,
+        "--remove-static-route",
+        BLACKHOLE_UNCOVERED,
+    ])
+    .await?;
+    Ok(())
+}
+
 /// An export policy tagging the prefix with an RFC 1997 community that must
 /// survive encoding, the real session, and decoding into router-b's loc-rib.
 pub async fn communities(w: &mut World) -> anyhow::Result<()> {

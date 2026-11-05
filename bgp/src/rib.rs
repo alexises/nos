@@ -464,6 +464,22 @@ pub struct RibRoute {
     pub received_ov: Option<nos_rpl::ValidationState>,
 }
 
+/// RFC 7999: `communities` carry BLACKHOLE and `prefix` is inside the peer's
+/// blackhole prefix-list (normal prefix-list `range` rules).
+pub(crate) fn blackhole_applies(
+    list: &[nos_rpl::PrefixListEntry],
+    prefix: IpNet,
+    communities: &[u32],
+) -> bool {
+    communities.contains(&message::COMMUNITY_BLACKHOLE)
+        && list.iter().any(|e| match e.range {
+            None => prefix == e.cidr,
+            Some((min, max)) => {
+                e.cidr.contains(&prefix) && (min..=max).contains(&prefix.prefix_len())
+            }
+        })
+}
+
 /// RFC 8097 §2: a state signalled by the peer applies only "in the absence
 /// of validation state set based on local data".
 fn ov_state(
@@ -654,6 +670,9 @@ pub struct BgpRib {
     first_as_warned: HashMap<IpAddr, (Instant, u64)>,
     /// iBGP peers exchanging RFC 8097 states (`set_peer_rpki_state`).
     rpki_state_peers: HashSet<IpAddr>,
+    /// RFC 7999 blackhole prefix-lists per peer (`set_peer_blackhole`); a peer
+    /// not in it honours nothing.
+    blackhole_peers: HashMap<IpAddr, Arc<Vec<nos_rpl::PrefixListEntry>>>,
     /// RFC 8326 knobs per peer (`set_graceful_shutdown`); a peer not in it has both off.
     gs_peers: HashMap<IpAddr, GsKnobs>,
     /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
@@ -836,6 +855,7 @@ impl BgpRib {
             role_peers: HashMap::new(),
             first_as_peers: HashSet::new(),
             first_as_warned: HashMap::new(),
+            blackhole_peers: HashMap::new(),
             rpki_state_peers: HashSet::new(),
             gs_peers: HashMap::new(),
             local_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1028,6 +1048,31 @@ impl BgpRib {
         }
     }
 
+    /// Records `peer`'s RFC 7999 blackhole prefix-list (`None`: ordinary
+    /// community). Call before `peer_established`, like `set_peer_rpki_state`.
+    pub fn set_peer_blackhole(
+        &mut self,
+        peer: IpAddr,
+        list: Option<Arc<Vec<nos_rpl::PrefixListEntry>>>,
+    ) {
+        match list {
+            Some(l) => self.blackhole_peers.insert(peer, l),
+            None => self.blackhole_peers.remove(&peer),
+        };
+    }
+
+    /// Whether `route` for `prefix` is an RFC 7999 blackhole: learned from a
+    /// peer with a blackhole prefix-list that covers `prefix`, and tagged
+    /// BLACKHOLE.
+    fn is_blackhole(&self, prefix: IpNet, route: &RibRoute) -> bool {
+        let RouteOrigin::Peer(peer) = route.origin else {
+            return false;
+        };
+        self.blackhole_peers
+            .get(&peer)
+            .is_some_and(|l| blackhole_applies(l, prefix, &route.communities))
+    }
+
     /// At most one first-AS warning per peer per `FIRST_AS_WARN_EVERY`: the
     /// count suppressed since the last one, or `None` to stay quiet.
     fn first_as_warn_due(&mut self, peer: IpAddr) -> Option<u64> {
@@ -1193,12 +1238,15 @@ impl BgpRib {
             .iter()
             .filter_map(|(prefix, route)| {
                 route.next_hop.map(|next_hop| {
+                    if self.is_blackhole(*prefix, route) {
+                        return (*prefix, (vec![], None, true));
+                    }
                     let hops = self
                         .multipaths
                         .get(prefix)
                         .cloned()
                         .unwrap_or_else(|| vec![next_hop]);
-                    (*prefix, (hops, self.backups.get(prefix).copied()))
+                    (*prefix, (hops, self.backups.get(prefix).copied(), false))
                 })
             })
             .collect();

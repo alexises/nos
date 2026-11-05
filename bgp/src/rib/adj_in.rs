@@ -309,6 +309,7 @@ pub(super) fn learn_prefix(
     candidate: RibRoute,
     import_policy: &CompiledPolicy,
     retain: Option<&mut super::retain::RetainSlot<'_>>,
+    blackhole: Option<&[nos_rpl::PrefixListEntry]>,
 ) {
     let (from, _) = peer;
     // Soft reconfiguration inbound: keep the pre-policy candidate.
@@ -317,6 +318,14 @@ pub(super) fn learn_prefix(
     }
     match apply_policy(prefix, candidate, import_policy, Some(peer), None) {
         Some(mut route) => {
+            // RFC 7999 §3.2: the receiver adds NO_EXPORT to an accepted blackhole.
+            if blackhole.is_some_and(|l| super::blackhole_applies(l, prefix, &route.communities))
+                && !route
+                    .communities
+                    .contains(&crate::message::COMMUNITY_NO_EXPORT)
+            {
+                route.communities.push(crate::message::COMMUNITY_NO_EXPORT);
+            }
             if let Some(old) = get_path(table, prefix, id) {
                 // An RPKI state change alone is no flap (#17).
                 let same = RibRoute {
@@ -638,6 +647,7 @@ impl BgpRib {
         let table = self.adj_rib_in.entry(from).or_default();
         let counts = self.path_counts.entry(from).or_default();
         let mut retain = self.retained.slot(from);
+        let blackhole = self.blackhole_peers.get(&from).cloned();
         // This UPDATE adds at most this many entries — reserving
         // once lets the per-peer table grow in fewer, larger steps
         // on the way up to a full table, instead of rehashing on
@@ -714,6 +724,7 @@ impl BgpRib {
                 candidate,
                 import_policy,
                 retain.as_mut(),
+                blackhole.as_deref().map(Vec::as_slice),
             );
         }
         for mp in &update.mp_reach {
@@ -733,6 +744,7 @@ impl BgpRib {
                     candidate,
                     import_policy,
                     retain.as_mut(),
+                    blackhole.as_deref().map(Vec::as_slice),
                 );
             }
             if !mp.evpn.is_empty() {

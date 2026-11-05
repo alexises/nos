@@ -66,6 +66,7 @@ fn prefix_routes() -> PrefixRoutes {
             backup_tunnel: false,
             mpls_labels: vec![],
             vpn: vec![],
+            blackhole: false,
         }],
     }
 }

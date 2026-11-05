@@ -127,6 +127,9 @@ pub struct ResolvedPeer {
     pub announce_rpki_state: bool,
     /// The peer-group's `soft_reconfiguration_inbound` (see `BgpRib::set_peer_soft_reconfig`).
     pub soft_reconfiguration_inbound: bool,
+    /// The peer-group's RFC 7999 blackhole prefix-list, resolved to its entries
+    /// (`BgpRib::set_peer_blackhole`); an edit of the list restarts the session.
+    pub blackhole: Option<Arc<Vec<nos_rpl::PrefixListEntry>>>,
     /// The peer-group's vendor `local-as` (see `BgpRib::set_peer_local_as`).
     pub local_as: Option<nos_proto::BgpLocalAs>,
     /// The peer-group's `enforce_first_as` with its default (on) applied; a
@@ -2172,6 +2175,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            blackhole: None,
             soft_reconfiguration_inbound: false,
             local_as: None,
             add_path: None,

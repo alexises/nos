@@ -441,6 +441,19 @@ pub struct Args {
     #[arg(long)]
     pub damping_max_suppress: Option<u32>,
 
+    /// If set, enables `--peer-group`'s RFC 7999 blackhole handling
+    /// (`BgpPeerGroupOp::SetBlackhole`) with this prefix-list; with
+    /// `--blackhole-prefix` the list is (re)created covering host routes
+    /// (`/32`) inside that prefix.
+    #[arg(long)]
+    pub blackhole_prefix_list: Option<String>,
+    #[arg(long, requires = "blackhole_prefix_list")]
+    pub blackhole_prefix: Option<nos_proto::IpNet>,
+
+    /// Disables `--peer-group`'s blackhole handling (`BgpPeerGroupOp::ClearBlackhole`).
+    #[arg(long)]
+    pub clear_blackhole: bool,
+
     /// Disables `--peer-group`'s flap damping (`BgpPeerGroupOp::ClearDamping`).
     #[arg(long)]
     pub clear_damping: bool,
@@ -2999,6 +3012,31 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 suppress: args.damping_suppress.unwrap_or(d.suppress),
                 max_suppress: args.damping_max_suppress.unwrap_or(d.max_suppress),
             },
+        }));
+    }
+    if let Some(list) = &args.blackhole_prefix_list {
+        if let Some(cidr) = args.blackhole_prefix {
+            ops.push(ConfigOp::PrefixList(nos_proto::PrefixListOp::Ensure {
+                name: list.clone(),
+            }));
+            ops.push(ConfigOp::PrefixList(nos_proto::PrefixListOp::AddEntry {
+                name: list.clone(),
+                entry: nos_proto::PrefixListEntry {
+                    cidr,
+                    range: Some((32, 32)),
+                },
+            }));
+        }
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetBlackhole {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            prefix_list: list.clone(),
+        }));
+    }
+    if args.clear_blackhole {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearBlackhole {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
         }));
     }
     if let Some(asn) = args.local_as {
