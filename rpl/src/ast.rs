@@ -65,7 +65,7 @@ pub enum ExtKind {
 pub enum ExprKind {
     /// Integer literal.
     IntLit(i64),
-    /// `"^65001_"` — only valid as the argument to `.matches(..)`.
+    /// `"^65001_"` — only valid as the argument to `.matches(..)` / `.remove_matching(..)`.
     StrLit(String),
     /// Prefix literal (`10.0.0.0/8`).
     PrefixLit(IpNet),
@@ -130,6 +130,9 @@ pub enum StmtKind {
     /// `this.bgp.communities.remove(65000:100)` — removes one value, if
     /// present, from a settable community-list field.
     CommunityRemove(Expr, Expr),
+    /// `this.bgp.communities.remove_matching("^65000:")` — removes every
+    /// value whose rendered text matches the regex (target, string literal).
+    CommunityRemoveMatching(Expr, Expr),
     /// `this.bgp.as_path.prepend(65000[, 3])` — the args are the ASN and an
     /// optional repeat count.
     AsPathPrepend(Expr, Vec<Expr>),

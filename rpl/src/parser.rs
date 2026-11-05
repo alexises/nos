@@ -116,7 +116,7 @@ impl Parser<'_> {
         let Some(Postfix::Call(name, mut args)) = segments.pop() else {
             return Err(CompileError::new(
                 line,
-                "expected a statement: 'set ... = ...' or 'this.<field>.add(..)'/'.remove(..)'/'.clear()'",
+                "expected a statement: 'set ... = ...' or 'this.<field>.add(..)'/'.remove(..)'/'.remove_matching(..)'/'.clear()'",
             ));
         };
         let target = Expr {
@@ -126,6 +126,7 @@ impl Parser<'_> {
         let kind = match (name.as_str(), args.len()) {
             ("add", 1) => StmtKind::CommunityAdd(target, args.remove(0)),
             ("remove", 1) => StmtKind::CommunityRemove(target, args.remove(0)),
+            ("remove_matching", 1) => StmtKind::CommunityRemoveMatching(target, args.remove(0)),
             ("clear", 0) => StmtKind::CommunityClear(target),
             ("prepend", 1 | 2) => StmtKind::AsPathPrepend(target, args),
             _ => {
@@ -536,6 +537,15 @@ mod tests {
             panic!("expected <");
         };
         assert_eq!(rhs.kind, ExprKind::IntLit(100));
+    }
+
+    #[test]
+    fn community_remove_matching_parses() {
+        let policy = parse_src("this.bgp.communities.remove_matching(\"^65000:\")\naccept\n");
+        assert!(matches!(
+            policy[0].kind,
+            StmtKind::CommunityRemoveMatching(..)
+        ));
     }
 
     #[test]

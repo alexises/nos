@@ -181,11 +181,17 @@ fn render_path(flat: &[u32], segments: &[Segment], added: usize) -> String {
 impl AsPathRegexes {
     /// Compiles each pattern; an invalid regex is the error string.
     pub fn new(patterns: &[&str]) -> Result<Self, String> {
+        Self::new_for("as-path", patterns)
+    }
+
+    /// [`Self::new`] for another text kind (`"community"`): only the error
+    /// text differs.
+    pub fn new_for(kind: &str, patterns: &[&str]) -> Result<Self, String> {
         patterns
             .iter()
             .map(|p| {
                 regex::Regex::new(&expand_underscore(p))
-                    .map_err(|e| format!("invalid as-path regex '{p}': {e}"))
+                    .map_err(|e| format!("invalid {kind} regex '{p}': {e}"))
             })
             .collect::<Result<_, _>>()
             .map(Self)
@@ -238,6 +244,11 @@ pub enum Op {
     /// `this.bgp.as_path.matches(..)` / `this.bgp.as_path in LIST` — true if
     /// any regex matches the current path.
     AsPathMatches(AsPathRegexes),
+    /// Pushes whether any value of the community list matches (rendered as
+    /// decimal `AA:NN` / `type:subtype:value` / `ga:ld1:ld2`).
+    CommunityMatches(FieldId, AsPathRegexes),
+    /// Removes every community value whose rendered text matches.
+    CommunityRemoveMatching(FieldId, AsPathRegexes),
     /// `this.bgp.as_path.prepend(asn, count)`.
     AsPathPrepend(u32, u8),
     /// `this.bgp.<field> == <ip literal>` on an optional-address field:
@@ -484,11 +495,8 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 _ => unreachable!("check.rs rejects ListContainsIp for {id:?}"),
             })),
             Op::ListContainsCommunity(id, val) => push!(Value::Bool(lists.has(*id, val))),
-            Op::AsPathMatches(re) => {
-                let added = lists.as_path.len().saturating_sub(input.bgp.as_path.len());
-                let text = render_path(&lists.as_path, input.bgp.as_path_segments, added);
-                push!(Value::Bool(re.is_match(&text)));
-            }
+            Op::AsPathMatches(re) => push!(Value::Bool(as_path_matches(re, input, &lists))),
+            Op::CommunityMatches(id, re) => push!(Value::Bool(lists.matches(*id, re))),
             Op::AsPathPrepend(asn, count) => {
                 lists
                     .as_path
@@ -570,6 +578,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             }
             Op::CommunityAdd(id, val) => lists.add(*id, val),
             Op::CommunityRemove(id, val) => lists.remove(*id, val),
+            Op::CommunityRemoveMatching(id, re) => lists.remove_matching(*id, re),
             Op::CommunityClear(id) => lists.clear(*id),
             Op::Accept => {
                 return Verdict::Accept {
@@ -657,6 +666,37 @@ impl Lists<'_> {
         }
     }
 
+    /// `Op::CommunityMatches`.
+    fn matches(&self, id: FieldId, re: &AsPathRegexes) -> bool {
+        match id {
+            FieldId::BgpCommunities => self.std.iter().any(|c| re.is_match(&render_std(*c))),
+            FieldId::BgpExtCommunities => self.ext.iter().any(|c| re.is_match(&render_ext(*c))),
+            FieldId::BgpLargeCommunities => {
+                self.large.iter().any(|c| re.is_match(&render_large(*c)))
+            }
+            _ => unreachable!("codegen.rs rejects CommunityMatches for {id:?}"),
+        }
+    }
+
+    /// `Op::CommunityRemoveMatching`; an immutable pass first so a script
+    /// that removes nothing never clones the list.
+    fn remove_matching(&mut self, id: FieldId, re: &AsPathRegexes) {
+        if !self.matches(id, re) {
+            return;
+        }
+        match id {
+            FieldId::BgpCommunities => self.std.to_mut().retain(|c| !re.is_match(&render_std(*c))),
+            FieldId::BgpExtCommunities => {
+                self.ext.to_mut().retain(|c| !re.is_match(&render_ext(*c)));
+            }
+            FieldId::BgpLargeCommunities => self
+                .large
+                .to_mut()
+                .retain(|c| !re.is_match(&render_large(*c))),
+            _ => unreachable!("codegen.rs rejects CommunityRemoveMatching for {id:?}"),
+        }
+    }
+
     /// `Op::CommunityClear`.
     fn clear(&mut self, id: FieldId) {
         match id {
@@ -666,6 +706,29 @@ impl Lists<'_> {
             _ => unreachable!("check.rs/codegen.rs reject CommunityClear for {id:?}"),
         }
     }
+}
+
+/// `Op::AsPathMatches`, split out of `run` for length.
+fn as_path_matches(re: &AsPathRegexes, input: &Input, lists: &Lists) -> bool {
+    let added = lists.as_path.len().saturating_sub(input.bgp.as_path.len());
+    re.is_match(&render_path(
+        &lists.as_path,
+        input.bgp.as_path_segments,
+        added,
+    ))
+}
+
+/// Community text a regex sees: the same decimal syntax as the literals.
+fn render_std(c: u32) -> String {
+    format!("{}:{}", c >> 16, c & 0xffff)
+}
+
+fn render_ext(c: u64) -> String {
+    format!("{}:{}:{}", c >> 56, (c >> 48) & 0xff, c & ((1 << 48) - 1))
+}
+
+fn render_large((ga, l1, l2): (u32, u32, u32)) -> String {
+    format!("{ga}:{l1}:{l2}")
 }
 
 /// `Op::FieldLen`, split out of `run` for length.

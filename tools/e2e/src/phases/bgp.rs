@@ -1731,7 +1731,7 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
         "tag-redistribute-with-community",
         // The prepend lands behind router-a's own ASN (added on export).
         &format!(
-            "this.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\nthis.bgp.as_path.prepend({PREPEND_ASN}, 2)\nset this.bgp.med = {MED}\naccept\n"
+            "this.bgp.communities.add({STRIP_AA}:7)\nthis.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\nthis.bgp.communities.remove_matching(\"^{STRIP_AA}:\")\nthis.bgp.as_path.prepend({PREPEND_ASN}, 2)\nset this.bgp.med = {MED}\naccept\n"
         ),
     )?;
     let mut flags = redistribute();
@@ -1777,6 +1777,12 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     .await?;
     // An export-policy MED reaches an eBGP peer (RFC 4271 §5.1.4, #120).
     b.wait(&format!("{} .*med=Some({MED})", loc_rib())).await?;
+    // `remove_matching("^<STRIP_AA>:")` stripped the other tag before encoding
+    // (the wait above closes the bracket, so it is the only survivor).
+    anyhow::ensure!(
+        b.count(&format!("{} .*communities=.*{STRIP_PACKED}", loc_rib())) == 0,
+        "router-b saw the community stripped by remove_matching"
+    );
     Ok(())
 }
 

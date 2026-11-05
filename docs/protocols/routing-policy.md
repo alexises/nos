@@ -188,6 +188,7 @@ A statement after `accept` or `reject` in the same block can never run, and is r
   - A `set` that breaks the rule is ignored (the route keeps its next hop) and a rate-limited warning `next hop address family does not match the prefix` is logged. An export whose final next hop (including the `self` fallback) breaks it is dropped, not advertised.
   - At commit, a peer-group that negotiates `ipv6` and whose import or export policy sets an IPv4 literal on every route (a `set` before any `if`) is rejected. Guard the `set` with an `if this.prefix in <prefix-list>` condition, or use `self` (RPL has no IPv6 address literal). Guarded `set`s are not checked at commit, only at run time.
 - `this.bgp.as_path.prepend(<asn>)` or `this.bgp.as_path.prepend(<asn>, <count>)` adds an AS number to the front of the AS path, 1 to 16 times.
+- `this.bgp.communities.remove_matching("<regex>")` removes every community whose text matches the regex (see [Match communities with a regex](#match-communities-with-a-regex)).
 - `this.bgp.communities.add(<value>)` and `.remove(<value>)` add or remove one community; `.clear()` removes them all. The same three work on `this.bgp.extended_communities` and `this.bgp.large_communities`. `<value>` can be a literal, a community alias or a community group (see [below](#community-aliases-and-groups)); for a group, every member is added or removed. Adding a value that is already there does nothing.
 
 Changes are visible to the rest of the script: after `set this.bgp.local_pref = 200`, `this.bgp.local_pref` reads 200.
@@ -208,7 +209,7 @@ Every field starts with `this.`. The prefix and the BGP attributes are:
 - `this.bgp.router_id`: the BGP identifier of the peer the route came from. Compare with `==` or `!=` against an address.
 - `this.bgp.originator_id`: the `ORIGINATOR_ID` of a reflected route (RFC 4456). Compare with `==` or `!=`.
 - `this.bgp.cluster_list`: the `CLUSTER_LIST`, a list of IPv4 addresses. Read it with `.length` and `.contains(<address>)`.
-- `this.bgp.communities`, `this.bgp.extended_communities`, `this.bgp.large_communities`: the three kinds of communities. Read them with `.length` and `.contains(<value>)`; change them with `.add`, `.remove` and `.clear`.
+- `this.bgp.communities`, `this.bgp.extended_communities`, `this.bgp.large_communities`: the three kinds of communities. Read them with `.length`, `.contains(<value>)` and `.matches("<regex>")`; change them with `.add`, `.remove`, `.remove_matching("<regex>")` and `.clear`.
 - `this.bgp.rd`: the Route Distinguisher of a VPN route (RFC 4364), absent on other routes. Compare it with `==` or `!=` against `rd(<asn>:<nn>)` or `rd(<a.b.c.d>:<nn>)`; read-only. An absent RD is never equal to anything.
 - `this.bgp.validation_state`: the route's RPKI origin validation state (RFC 6811), `rpki.valid`, `rpki.invalid` or `rpki.not_found`. Compare with `==` or `!=`; read-only. It is `rpki.not_found` unless the instance has an RPKI cache (see [RPKI origin validation](bgp.md#rpki-origin-validation-rfc-6811-rfc-8210)).
 
@@ -445,6 +446,22 @@ accept
 ```
 
 `internal_tags` is the community group defined in [Community aliases and groups](#community-aliases-and-groups). A name used in a script must be one word of letters, digits and `_`: a script would read `internal-tags` as `internal - tags`. Hyphens are fine in names that only the configuration refers to, such as a policy's own name or an alias that is only used as a group member.
+
+### Strip customer-set communities at the edge
+
+```
+this.bgp.communities.remove_matching("^65000:")
+accept
+```
+
+### Match communities with a regex
+
+- `this.bgp.communities.matches("<regex>")` is true when any community matches; `.remove_matching("<regex>")` removes the ones that do. Both work on all three community kinds and take exactly one string literal (use `or` for several patterns). `.remove_matching` on any other field is a compile error.
+- Each community is matched as its decimal text, the same syntax as the literals: `65000:100` (standard), `0:2:100` (extended, `type:subtype:value`) and `65000:1:2` (large).
+- The pattern may match anywhere unless anchored with `^` and `$`; the syntax is that of the Rust `regex` crate. Prefer `^65000:` (any value of AS 65000) or `^65000:[0-9]+$`.
+- `_` is expanded as in AS-path regexes. A community is one token with no spaces or braces, so `_` only matches at the very start or end of its text: `_65000:` equals `^65000:`, `:100_` equals `:100$`, `_65000:100_` is an exact match, and `_65000:_` never matches. `_` is not a field separator.
+- `matches` sees the script's own earlier `.add`/`.remove`.
+- A script whose `.remove_matching` matches nothing leaves the route's communities unchanged.
 
 ## Configuration reference
 
