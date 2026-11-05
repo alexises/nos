@@ -75,6 +75,15 @@ impl LinkSocket {
         }
     }
 
+    /// Join/leave `FF02::6` (see `run_election`); whether membership changed.
+    fn set_all_drouters(&self, ifindex: u32, want: bool) -> std::io::Result<bool> {
+        match self {
+            Self::Os(s) => s.set_all_drouters(ifindex, want),
+            #[cfg(test)]
+            Self::Mem(p) => p.set_all_drouters(want),
+        }
+    }
+
     async fn recv_packet(&self) -> std::io::Result<(Ipv6Addr, Vec<u8>)> {
         match self {
             Self::Os(s) => s.recv_packet().await,
@@ -398,7 +407,7 @@ pub async fn run(
                                 match pkt {
                                     OspfPacket::Hello(hello) => {
                                         let left_waiting = handle_hello(
-                                            &cfg, local_router_id, &status, source, &hello,
+                                            &socket, &cfg, local_router_id, &status, source, &hello,
                                             &mut p2p_dead_deadline, waiting, &mut warn_limiter,
                                         );
                                         if left_waiting {
@@ -453,13 +462,13 @@ pub async fn run(
                 }
                 sweep_dead_neighbors(&cfg, &status);
                 if !waiting {
-                    run_election(&cfg, local_router_id, &status);
+                    run_election(&socket, &cfg, local_router_id, &status);
                     advance_adjacencies(&socket, &cfg, local_router_id, &status);
                 }
             }
             () = tokio::time::sleep_until(wait_deadline), if waiting => {
                 waiting = false;
-                run_election(&cfg, local_router_id, &status);
+                run_election(&socket, &cfg, local_router_id, &status);
                 advance_adjacencies(&socket, &cfg, local_router_id, &status);
             }
             Some(grace_period) = grace_rx.recv() => {
@@ -571,6 +580,7 @@ macro_rules! warn_limited {
 /// Hello (needed for SPF next-hop derivation, see `NeighborInfo`).
 #[allow(clippy::too_many_arguments)]
 fn handle_hello(
+    socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
@@ -668,11 +678,11 @@ fn handle_hello(
             false
         }
         NetworkType::Broadcast if waiting && hello.designated_router == hello.router_id => {
-            run_election(cfg, local_router_id, status);
+            run_election(socket, cfg, local_router_id, status);
             true
         }
         NetworkType::Broadcast if !waiting => {
-            run_election(cfg, local_router_id, status);
+            run_election(socket, cfg, local_router_id, status);
             false
         }
         NetworkType::Broadcast => false,
@@ -1498,7 +1508,12 @@ fn send_grace_lsas(
     }
 }
 
-fn run_election(cfg: &LinkConfig, local_router_id: Ipv4Addr, status: &StatusHandle) {
+fn run_election(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+) {
     let snapshot = status.borrow().clone();
     let self_candidate = election::Candidate {
         router_id: local_router_id,
@@ -1577,6 +1592,25 @@ fn run_election(cfg: &LinkConfig, local_router_id: Ipv4Addr, status: &StatusHand
         s.bdr = result.bdr;
         s.interface_state = new_interface_state;
     });
+
+    // RFC 5340 §A.1: only the DR and BDR listen on AllDRouters (FF02::6).
+    let want = nos_ospf_common::drouters::wants_all_drouters(
+        matches!(
+            new_interface_state,
+            InterfaceState::Dr | InterfaceState::Backup
+        ),
+        cfg.network_type == NetworkType::PointToPoint,
+    );
+    match socket.set_all_drouters(cfg.interface_id, want) {
+        Ok(true) => {
+            info!(link = %cfg.attach_point, joined = want, "ospfv3 all-drouters membership changed");
+        }
+        Ok(false) => {}
+        // Membership did not change, so the next election pass retries.
+        Err(e) => {
+            warn!(link = %cfg.attach_point, error = %e, "ospfv3 all-drouters membership update failed");
+        }
+    }
 }
 
 struct LinkEntry {
@@ -3225,6 +3259,7 @@ pub(crate) mod tests {
         };
         let mut send = |n: u32| {
             handle_hello(
+                &mem_socket(&cfg),
                 &cfg,
                 Ipv4Addr::new(1, 1, 1, 1),
                 &status,
@@ -4177,6 +4212,7 @@ pub(crate) mod tests {
         ] {
             let status = grace_status(grace);
             handle_hello(
+                &mem_socket(&cfg),
                 &cfg,
                 me,
                 &status,
@@ -4268,6 +4304,10 @@ pub(crate) mod tests {
             pub cut: Mutex<HashSet<Ipv6Addr>>,
             /// Addresses whose Hellos (type byte 1) alone are dropped.
             pub drop_hellos: Mutex<HashSet<Ipv6Addr>>,
+            /// Per port address: is `FF02::6` currently joined.
+            pub drouters: Mutex<std::collections::HashMap<Ipv6Addr, bool>>,
+            /// Makes every `FF02::6` join/leave fail.
+            pub fail_drouters: std::sync::atomic::AtomicBool,
         }
 
         impl Wire {
@@ -4313,6 +4353,14 @@ pub(crate) mod tests {
         }
 
         impl Port {
+            pub fn set_all_drouters(&self, want: bool) -> std::io::Result<bool> {
+                if self.wire.fail_drouters.load(Ordering::Relaxed) {
+                    return Err(std::io::Error::other("injected"));
+                }
+                let prev = self.wire.drouters.lock().unwrap().insert(self.addr, want);
+                Ok(prev.unwrap_or(false) != want)
+            }
+
             pub fn send(&self, dest: Option<Ipv6Addr>, payload: &[u8]) {
                 if self.wire.cut.lock().unwrap().contains(&self.addr)
                     || (payload[1] == 1
@@ -4343,6 +4391,20 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    fn mem_socket(cfg: &LinkConfig) -> LinkSocket {
+        Arc::new(wire::Wire::default()).opener()(cfg).unwrap()
+    }
+
+    fn joined(wire: &wire::Wire, n: u8) -> bool {
+        let addr: Ipv6Addr = format!("fe80::{n}").parse().unwrap();
+        wire.drouters
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn router(wire: &Arc<wire::Wire>) -> Arc<LinkManager> {
@@ -4774,6 +4836,61 @@ pub(crate) mod tests {
         }
     }
 
+    /// #854: `FF02::6` is joined exactly while DR/Backup, idempotently, and a
+    /// failed update is retried on the next pass.
+    #[test]
+    fn all_drouters_follows_the_election_role() {
+        let wire = Arc::new(wire::Wire::default());
+        let mut cfg = wired_link(1, NetworkType::Broadcast);
+        let socket = wire.opener()(&cfg).unwrap();
+        let me = id(1);
+        let status = watch::channel(LinkStatus::new(NetworkType::Broadcast)).0;
+
+        wire.fail_drouters.store(true, Ordering::Relaxed);
+        run_election(&socket, &cfg, me, &status);
+        assert_eq!(status.borrow().interface_state, InterfaceState::Dr);
+        assert!(!joined(&wire, 1), "failed join leaves it not joined");
+        wire.fail_drouters.store(false, Ordering::Relaxed);
+        run_election(&socket, &cfg, me, &status);
+        assert!(joined(&wire, 1), "retried on the next pass");
+        assert!(!socket.set_all_drouters(1, true).unwrap(), "idempotent");
+
+        // Two higher-priority neighbours take DR and BDR: demoted, left.
+        for (n, declares_dr) in [(2u8, true), (3, false)] {
+            let mut info = neighbor_info(
+                NeighborState::TwoWay,
+                format!("fe80::{n}").parse().unwrap(),
+                4,
+            );
+            info.priority = 100 + n;
+            info.declared_dr = if declares_dr {
+                id(n)
+            } else {
+                Ipv4Addr::UNSPECIFIED
+            };
+            info.declared_bdr = if declares_dr {
+                Ipv4Addr::UNSPECIFIED
+            } else {
+                id(n)
+            };
+            status.send_modify(|s| {
+                s.neighbors.insert(id(n), info);
+            });
+        }
+        run_election(&socket, &cfg, me, &status);
+        assert_eq!(status.borrow().interface_state, InterfaceState::DrOther);
+        assert!(!joined(&wire, 1));
+
+        // Never on point-to-point, whatever the role.
+        cfg.network_type = NetworkType::PointToPoint;
+        let p2p = Arc::new(wire::Wire::default());
+        let socket = p2p.opener()(&cfg).unwrap();
+        let status = watch::channel(LinkStatus::new(NetworkType::PointToPoint)).0;
+        run_election(&socket, &cfg, me, &status);
+        assert_eq!(status.borrow().interface_state, InterfaceState::Dr);
+        assert!(!joined(&p2p, 1));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn broadcast_segment_elects_dr_and_bdr() {
         let wire = Arc::new(wire::Wire::default());
@@ -4788,6 +4905,11 @@ pub(crate) mod tests {
             .await;
         }
         settle(120).await;
+        // Only the DR (4) and BDR (3) listen on FF02::6.
+        assert_eq!(
+            [1, 2, 3, 4].map(|n| joined(&wire, n)),
+            [false, false, true, true]
+        );
         let one = segment[0].neighbor_summaries().await;
         assert_eq!(one.len(), 3, "{one:?}");
         for n in &one {

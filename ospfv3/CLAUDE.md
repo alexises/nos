@@ -32,3 +32,4 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Not built**: stub areas/NSSA, area ranges, virtual links, RFC 5838 multi-AF, RFC 8362 sparse mode; list in `docs/protocols/ospfv3.md`.
 - `reconcile_tests.rs` (#343) drives `resync`/`run` against `nos-test-support`'s fakes and a real `LinkManager` over `link::tests::wire`; attach points use `nostst0`, a device no host has, so an ungated link exercises the "not present yet" branch. The `cfg(test)` getters on `LinkManager` (`loopback_prefixes`, `bfd_wanted`, ...) are its read side.
 - Verify kernel, IPC or wire changes with the matching `nos-e2e` phase (`ospfv3*`, `docs/e2e-phases.md`); `link::tests::abr_and_asbr_reach_across_areas` runs three routers over two areas on the in-memory wire.
+- **AllDRouters** (#854): `run_election` joins/leaves `ff02::6` (DR/Backup only, never p2p) via `OspfSocket::set_all_drouters`; logged on change, `ospfv3-dr` e2e asserts it.
