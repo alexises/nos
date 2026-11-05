@@ -457,6 +457,26 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
         "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_C}"
     ))
     .await?;
+    // #855: the DR (b) and BDR (a) join 224.0.0.6. The DROther (c) may join
+    // transiently (its wait timer can end before it hears a Hello, so it
+    // briefly elects itself DR), but must leave once demoted and stay out.
+    for r in [a, b] {
+        r.wait(&format!(
+            "ospf all-drouters membership changed {link} joined=true"
+        ))
+        .await?;
+    }
+    c.wait(&format!(
+        "ospf all-drouters membership changed {link} joined=false"
+    ))
+    .await?;
+    let joins = c.count("ospf all-drouters membership changed.*joined=true");
+    c.assert_quiet(
+        "ospf all-drouters membership changed.*joined=true",
+        joins,
+        10,
+    )
+    .await?;
     // #139: router-c's eth0.0 subnet is connected in rt1 but not in OSPF, so
     // router-a/b advertise it to c as a stub and c's SPF computes an OSPF
     // route for it. The connected route wins: nos-ribd must leave the prefix

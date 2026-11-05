@@ -19,6 +19,7 @@ use self::originate::local_subnet;
 use self::rx::{
     accept_crypto_sequence, advance_adjacencies, execute_actions, handle_dbd, handle_hello,
     handle_lsack, handle_lsr, handle_lsu, initial_crypto_seq, run_election, send_hello,
+    sync_all_drouters,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -83,6 +84,15 @@ impl LinkSocket {
                 p.send(Some(dest), payload);
                 Ok(())
             }
+        }
+    }
+
+    /// Join/leave 224.0.0.6 (see `sync_all_drouters`); whether membership changed.
+    fn set_all_drouters(&self, want: bool) -> std::io::Result<bool> {
+        match self {
+            Self::Os(s) => s.set_all_drouters(want),
+            #[cfg(test)]
+            Self::Mem(p) => p.set_all_drouters(want),
         }
     }
 
@@ -635,6 +645,9 @@ pub async fn run(
                                         if left_waiting {
                                             waiting = false;
                                         }
+                                        if is_broadcast && !waiting {
+                                            sync_all_drouters(&socket, &cfg, &status);
+                                        }
                                         advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
                                     }
                                     OspfPacket::Dbd(dbd) => {
@@ -690,12 +703,14 @@ pub async fn run(
                 sweep_dead_neighbors(&cfg, &status);
                 if is_broadcast && !waiting {
                     run_election(&cfg, local_router_id, &status);
+                    sync_all_drouters(&socket, &cfg, &status);
                     advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 }
             }
             () = tokio::time::sleep_until(wait_deadline), if waiting => {
                 waiting = false;
                 run_election(&cfg, local_router_id, &status);
+                sync_all_drouters(&socket, &cfg, &status);
                 advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
             }
             Some(command) = commands.recv() => match command {
