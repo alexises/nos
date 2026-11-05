@@ -109,13 +109,7 @@ async fn burst(cli: &Cli, n: usize) -> anyhow::Result<()> {
         .context("--login-password (or NOS_LOGIN_PASSWORD) is required")?;
     let (user, password) = (&user, &password);
     stream::iter((0..n).map(Ok))
-        .try_for_each_concurrent(BURST_IN_FLIGHT, |i| async move {
-            login_once(cli, user, password).await?;
-            if (i + 1) % 1000 == 0 {
-                eprintln!("{} logins done", i + 1);
-            }
-            anyhow::Ok(())
-        })
+        .try_for_each_concurrent(BURST_IN_FLIGHT, |_| login_once(cli, user, password))
         .await?;
     println!("burst complete logins={n}");
     Ok(())
