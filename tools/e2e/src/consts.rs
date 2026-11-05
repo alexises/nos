@@ -549,6 +549,10 @@ pub const PYTHON_HELPER_IMAGE: &str = "nos-verify-python-helper:local";
 pub const COMMUNITY_AA: u32 = 65001;
 pub const COMMUNITY_NN: u32 = 100;
 pub const COMMUNITY_PACKED: u32 = (COMMUNITY_AA << 16) | COMMUNITY_NN;
+/// `communities`: tagged on then stripped by `remove_matching("^<STRIP_AA>:")`,
+/// so it must never reach router-b.
+pub const STRIP_AA: u32 = 65002;
+pub const STRIP_PACKED: u32 = (STRIP_AA << 16) | 7;
 /// MED set by an export policy: router-a's in `communities`, router-b's in `route-server`.
 pub const MED: u32 = 4242;
 

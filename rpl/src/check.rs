@@ -30,6 +30,7 @@ fn stmt_terminates(stmt: &Stmt) -> bool {
         | StmtKind::AsPathPrepend(..)
         | StmtKind::CommunityAdd(..)
         | StmtKind::CommunityRemove(..)
+        | StmtKind::CommunityRemoveMatching(..)
         | StmtKind::CommunityClear(..) => false,
         StmtKind::If {
             branches,
@@ -120,6 +121,13 @@ mod tests {
     fn nested_if_all_branches_terminal_passes() {
         let src = "if this.prefix in 10.0.0.0/8:\n    if this.bgp.local_pref < 50:\n        reject\n    else:\n        accept\nelse:\n    reject\n";
         check_src(src).unwrap();
+    }
+
+    #[test]
+    fn remove_matching_is_not_terminal() {
+        let src = "this.bgp.communities.remove_matching(\"^65000:\")\n";
+        assert!(check_src(src).is_err());
+        check_src(&format!("{src}accept\n")).unwrap();
     }
 
     #[test]

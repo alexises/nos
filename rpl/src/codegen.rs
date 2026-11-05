@@ -169,6 +169,17 @@ impl Codegen<'_> {
                     self.emit(Op::CommunityRemove(info.id, val), 0);
                 }
             }
+            StmtKind::CommunityRemoveMatching(target, pattern) => {
+                let info = resolve_settable_field(target)?;
+                if !is_community_list(info.ty) {
+                    return Err(CompileError::new(
+                        target.line,
+                        "'.remove_matching(..)' is only valid on a community-list field",
+                    ));
+                }
+                let re = community_regex(pattern)?;
+                self.emit(Op::CommunityRemoveMatching(info.id, re), 0);
+            }
             StmtKind::CommunityClear(target) => {
                 let info = resolve_settable_field(target)?;
                 if !is_community_list(info.ty) {
@@ -448,19 +459,13 @@ impl Codegen<'_> {
             Postfix::Call(name, args)
                 if name == "matches" && info.id == schema::FieldId::BgpAsPath =>
             {
-                let [Expr {
-                    kind: ExprKind::StrLit(pattern),
-                    ..
-                }] = args.as_slice()
-                else {
-                    return Err(CompileError::new(
-                        line,
-                        "'.matches(..)' takes exactly one string literal",
-                    ));
-                };
-                let re = AsPathRegexes::new(&[pattern.as_str()])
-                    .map_err(|e| CompileError::new(line, e))?;
+                let re = str_lit_regex("as-path", args, line)?;
                 self.emit(Op::AsPathMatches(re), 1);
+                Ok(Ty::Bool)
+            }
+            Postfix::Call(name, args) if name == "matches" && is_community_list(info.ty) => {
+                let re = str_lit_regex("community", args, line)?;
+                self.emit(Op::CommunityMatches(info.id, re), 1);
                 Ok(Ty::Bool)
             }
             Postfix::Call(other, _) => Err(CompileError::new(
@@ -627,6 +632,33 @@ impl Codegen<'_> {
             format!("undefined community alias or group '{name}'"),
         ))
     }
+}
+
+/// The one string-literal argument of `.matches(..)`, compiled.
+fn str_lit_regex(kind: &str, args: &[Expr], line: usize) -> Result<AsPathRegexes, CompileError> {
+    let [Expr {
+        kind: ExprKind::StrLit(pattern),
+        ..
+    }] = args
+    else {
+        return Err(CompileError::new(
+            line,
+            "'.matches(..)' takes exactly one string literal",
+        ));
+    };
+    AsPathRegexes::new_for(kind, &[pattern.as_str()]).map_err(|e| CompileError::new(line, e))
+}
+
+/// `.remove_matching(..)`'s argument: exactly one string literal.
+fn community_regex(arg: &Expr) -> Result<AsPathRegexes, CompileError> {
+    let ExprKind::StrLit(pattern) = &arg.kind else {
+        return Err(CompileError::new(
+            arg.line,
+            "'.remove_matching(..)' takes exactly one string literal",
+        ));
+    };
+    AsPathRegexes::new_for("community", &[pattern.as_str()])
+        .map_err(|e| CompileError::new(arg.line, e))
 }
 
 fn is_community_list(ty: FieldType) -> bool {
@@ -1321,6 +1353,103 @@ mod tests {
                 edits: Edits::default(),
             }
         );
+    }
+
+    /// Runs `src` over one std community `65000:100` and `65001:7`, returning
+    /// whether `accept` was reached and the surviving std communities.
+    fn std_run(src: &str) -> Option<Vec<u32>> {
+        let policy = compile_src(src);
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        let input =
+            make_community_input(prefix, &[(65000 << 16) | 100, (65001 << 16) | 7], &[], &[]);
+        match vm::run(&policy, &input) {
+            Verdict::Accept { communities, .. } => Some(communities),
+            Verdict::Reject => None,
+        }
+    }
+
+    fn std_matches(pat: &str) -> bool {
+        let src =
+            format!("if this.bgp.communities.matches(\"{pat}\"):\n    accept\nelse:\n    reject\n");
+        std_run(&src).is_some()
+    }
+
+    #[test]
+    fn community_matches_underscore_semantics() {
+        assert!(std_matches("^65000:"));
+        assert!(std_matches("_65000:"));
+        assert!(std_matches(":100_"));
+        assert!(std_matches("_65000:100_"));
+        // No boundary in the middle of the token.
+        assert!(!std_matches("_65000:_"));
+        assert!(!std_matches("^65002:"));
+        assert!(!std_matches("^65000:101$"));
+        // `[_]` and `\_` are literal.
+        assert!(!std_matches("[_]"));
+        assert!(!std_matches("\\_"));
+    }
+
+    #[test]
+    fn community_remove_matching_strips_only_matches() {
+        assert_eq!(
+            std_run("this.bgp.communities.remove_matching(\"^65000:\")\naccept\n"),
+            Some(vec![(65001 << 16) | 7])
+        );
+        // No match: list untouched.
+        assert_eq!(
+            std_run("this.bgp.communities.remove_matching(\"^1:\")\naccept\n"),
+            Some(vec![(65000 << 16) | 100, (65001 << 16) | 7])
+        );
+        // Sees its own earlier add, and a later contains sees the removal.
+        let src = "this.bgp.communities.add(65000:9)\nthis.bgp.communities.remove_matching(\"^65000:\")\nif this.bgp.communities.contains(65000:9):\n    reject\naccept\n";
+        assert_eq!(std_run(src), Some(vec![(65001 << 16) | 7]));
+        // matches sees an earlier add.
+        let src = "this.bgp.communities.add(7:7)\nif this.bgp.communities.matches(\"^7:7$\"):\n    accept\nreject\n";
+        assert!(std_run(src).is_some());
+        // Still rejects after a removal.
+        assert_eq!(
+            std_run("this.bgp.communities.remove_matching(\"^65000:\")\nreject\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn community_matches_and_remove_matching_ext_and_large() {
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        // ext 0:2:100 and 1:2:200; large 65000:1:2 and 65001:1:2.
+        let ext = [(2u64 << 48) | 100, (1u64 << 56) | (2u64 << 48) | 200];
+        let large = [(65000, 1, 2), (65001, 1, 2)];
+        let input = make_community_input(prefix, &[], &ext, &large);
+        let policy = compile_src(
+            "this.bgp.extended_communities.remove_matching(\"^0:\")\nthis.bgp.large_communities.remove_matching(\"_65000:\")\nif this.bgp.extended_communities.matches(\"^1:2:200$\") and this.bgp.large_communities.matches(\"^65001:1:2$\"):\n    accept\nreject\n",
+        );
+        match vm::run(&policy, &input) {
+            Verdict::Accept {
+                extended_communities,
+                large_communities,
+                ..
+            } => {
+                assert_eq!(extended_communities, vec![ext[1]]);
+                assert_eq!(large_communities, vec![large[1]]);
+            }
+            Verdict::Reject => panic!("expected accept"),
+        }
+    }
+
+    #[test]
+    fn community_regex_errors() {
+        let err = compile_err("if this.bgp.communities.matches(\"(\"):\n    accept\nreject\n");
+        assert!(err.to_string().contains("invalid community regex"));
+        let err = compile_err("this.bgp.communities.remove_matching(\"(\")\naccept\n");
+        assert!(err.to_string().contains("invalid community regex"));
+        let err = compile_err("this.bgp.communities.remove_matching(65000:1)\naccept\n");
+        assert!(err.to_string().contains("exactly one string literal"));
+        let err = compile_err("this.bgp.as_path.remove_matching(\"1\")\naccept\n");
+        assert!(err.to_string().contains("community-list"));
+        let err = compile_err("if this.bgp.communities.matches(65000:1):\n    accept\nreject\n");
+        assert!(err.to_string().contains("exactly one string literal"));
+        let err = compile_err("if this.bgp.cluster_list.matches(\"1\"):\n    accept\nreject\n");
+        assert!(err.to_string().contains("unknown method"));
     }
 
     #[test]
