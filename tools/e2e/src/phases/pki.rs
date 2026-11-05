@@ -387,3 +387,72 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(snapshot, snapshots, 60).await?;
     a.wait_new("added route", kernel_routes, 60).await
 }
+
+/// A throwaway user for `pki_crl` (router-a only).
+const CRL_USER: &str = "crl-user";
+/// Logins `pki_crl` makes: 12% above the ~26.4k serials that filled the old
+/// 1 MiB identity frame (~39 bytes per CRL entry), so the CRL is ~1.17 MB.
+const CRL_BURST: usize = 30_000;
+/// The burst is one `docker exec` with no per-wait deadline; argon2id (two at
+/// a time in the broker) makes it 20-40 minutes.
+const CRL_BURST_DEADLINE_SECS: u64 = 45 * 60;
+
+/// #677: a CRL bigger than the old 1 MiB frame cap still reaches every daemon.
+/// 30,000 logins of one user, then a password change revokes all of them in
+/// one CRL; every child must apply it and keep reading its identity pipe
+/// (before the fix the first oversize frame silently ended rotation).
+pub async fn pki_crl(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    a.provision(&["--user", &format!("{CRL_USER}=first-password")])
+        .await?;
+    let revoked = format!("certificates revoked role=user name={CRL_USER} serials={CRL_BURST}");
+    let updated = "ipc crl updated entries=3[0-9][0-9][0-9][0-9]";
+    let (revocations, updates, broken) = (
+        a.count(&revoked),
+        a.count(updated),
+        a.count("identity pipe broke"),
+    );
+
+    log(format!("{CRL_BURST} logins as {CRL_USER} (slow: argon2id)"));
+    let started = std::time::Instant::now();
+    let count = CRL_BURST.to_string();
+    let auth = [
+        "--login-user",
+        CRL_USER,
+        "--login-password",
+        "first-password",
+        "--login-burst",
+        &count,
+    ];
+    let (code, out) = tokio::time::timeout(
+        std::time::Duration::from_secs(CRL_BURST_DEADLINE_SECS),
+        run_provision(w, &auth),
+    )
+    .await
+    .context("the login burst did not finish in time")??;
+    log(format!("burst took {}s", started.elapsed().as_secs()));
+    if code != 0 {
+        let tail: String = out.lines().rev().take(10).collect::<Vec<_>>().join("\n");
+        bail!("login burst failed: exit {code}: {tail}");
+    }
+
+    log("changing the password revokes every one of those certificates in one CRL");
+    let a = w.a()?;
+    a.provision(&["--user", &format!("{CRL_USER}=second-password")])
+        .await?;
+    a.wait_new(&revoked, revocations, 120).await?;
+    a.wait_new(updated, updates, 120).await?;
+    a.assert_quiet("identity pipe broke", broken, 60).await?;
+    a.established().await?;
+    let (status, _) = a.rest(Method::GET, "/v1/config", None).await?;
+    if status != 200 {
+        bail!("REST read after the large CRL answered {status}");
+    }
+
+    a.edit(|config| {
+        config.users.retain(|u| u.name != CRL_USER);
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}

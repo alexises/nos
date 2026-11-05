@@ -16,7 +16,7 @@ use futures::{SinkExt, StreamExt};
 use nos_pki::{Bundle, Identity};
 use nos_proto::{
     Event, IpcCodec, Request, Role, TransactionBase, WatchdogEvent, WatchdogRequest,
-    DEFAULT_PKI_CA, DEFAULT_WATCHDOG_SOCKET,
+    DEFAULT_PKI_CA, DEFAULT_WATCHDOG_SOCKET, LOGIN_BUSY,
 };
 use nos_provision::{bfd_paths, build_ops, Args};
 use std::path::PathBuf;
@@ -58,6 +58,61 @@ struct Cli {
     /// wrote instead.
     #[arg(long, conflicts_with = "pki_cert_out")]
     pki_cert_in: Option<PathBuf>,
+
+    /// Test fixture (`nos-e2e pki-crl`, #677): log in N times as
+    /// `--login-user`, discarding every certificate, then exit without
+    /// touching `nos-configd`. Each login is a certificate the watchdog must
+    /// list in the CRL when the user's password changes.
+    #[arg(long, requires = "login_user", conflicts_with_all = ["pki_cert_in", "pki_cert_out"])]
+    login_burst: Option<usize>,
+}
+
+/// Logins in flight at once: the broker verifies two passwords at a time
+/// (argon2id, 64 MiB each) and refuses with `LOGIN_BUSY` after 5s of queueing.
+const BURST_IN_FLIGHT: usize = 4;
+
+/// One login on a fresh connection and key; retries while the broker is busy.
+async fn login_once(cli: &Cli, user: &str, password: &str) -> anyhow::Result<()> {
+    loop {
+        let (csr, _key) = nos_pki::generate_csr()?;
+        let stream = nos_pki::connect(&cli.watchdog_socket, Role::Watchdog, "").await?;
+        let (r, w) = tokio::io::split(stream);
+        let mut reader = FramedRead::new(r, IpcCodec::<WatchdogEvent>::default());
+        let mut writer = FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default());
+        writer
+            .send(WatchdogRequest::Login {
+                user: user.to_string(),
+                password: password.to_string(),
+                csr_der: csr,
+            })
+            .await?;
+        match reader.next().await {
+            Some(Ok(WatchdogEvent::Issued { .. })) => return Ok(()),
+            Some(Ok(WatchdogEvent::Denied(m))) if m == LOGIN_BUSY => {}
+            other => bail!("burst login failed: {other:?}"),
+        }
+    }
+}
+
+async fn burst(cli: &Cli, n: usize) -> anyhow::Result<()> {
+    use futures::stream::{self, TryStreamExt};
+    let ca = std::fs::read(&cli.pki_ca)
+        .with_context(|| format!("reading the ipc trust anchor {}", cli.pki_ca.display()))?;
+    nos_pki::install(
+        Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?,
+    );
+    let user = cli.login_user.clone().context("--login-user is required")?;
+    let password = cli
+        .login_password
+        .clone()
+        .or_else(|| std::env::var("NOS_LOGIN_PASSWORD").ok())
+        .context("--login-password (or NOS_LOGIN_PASSWORD) is required")?;
+    let (user, password) = (&user, &password);
+    stream::iter((0..n).map(Ok))
+        .try_for_each_concurrent(BURST_IN_FLIGHT, |_| login_once(cli, user, password))
+        .await?;
+    println!("burst complete logins={n}");
+    Ok(())
 }
 
 /// Trades the password for a certificate and installs it as this process's
@@ -117,6 +172,9 @@ async fn log_in(cli: &Cli) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(n) = cli.login_burst {
+        return burst(&cli, n).await;
+    }
     let args = &cli.args;
     let config_socket = args
         .config_socket

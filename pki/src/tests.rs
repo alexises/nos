@@ -720,6 +720,53 @@ fn a_bundle_carries_its_crl_through_the_frame() {
     );
 }
 
+/// #677: a CRL of ~28k serials (> the old 1 MiB frame cap) still crosses the
+/// pipe; a frame past the 16 MiB cap is still refused.
+#[test]
+fn a_crl_over_one_mib_fits_a_frame_but_the_cap_holds() {
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
+    let mut b = ca
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    b.crl = vec![7u8; 28_000 * 39];
+    assert!(b.crl.len() > 1 << 20);
+    assert_eq!(
+        Bundle::read_from(&mut b.encode().as_slice()).unwrap(),
+        Some(b)
+    );
+    let over = u32::try_from((16 << 20) + 1).unwrap().to_le_bytes();
+    assert!(Bundle::read_from(&mut &over[..]).is_err());
+}
+
+/// #677: a frame that cannot be read ends the rotation loop through
+/// `on_broken` (the daemon exits); a clean EOF and a bad-but-in-sync bundle do
+/// not.
+#[test]
+fn a_broken_rotation_pipe_is_fatal_but_eof_and_a_bad_bundle_are_not() {
+    use std::cell::Cell;
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
+    let b = ca
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    let id = Identity::from_bundle(&b).unwrap();
+    let broken = Cell::new(0);
+    let run = |wire: &[u8]| {
+        crate::identity::rotate_from(&mut &wire[..], &id, |_| broken.set(broken.get() + 1));
+        broken.get()
+    };
+    assert_eq!(run(&b.encode()), 0, "a good rotation then EOF");
+    let foreign = Ca::new(KeyAlg::MlDsa65)
+        .unwrap()
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(run(&foreign.encode()), 0, "a bad bundle only warns");
+    assert_eq!(run(&u32::MAX.to_le_bytes()), 1, "an oversize frame");
+    assert_eq!(run(&[1, 0]), 1, "a truncated length is a clean EOF");
+    let mut short = 8u32.to_le_bytes().to_vec();
+    short.extend([0u8; 3]);
+    assert_eq!(run(&short), 2, "a truncated body");
+}
+
 /// Pins today's IPC and REST algorithms, so an edit to the `Syslog` arm (or
 /// the `allow_tls12` opt-in beside it) cannot leak into either.
 #[test]

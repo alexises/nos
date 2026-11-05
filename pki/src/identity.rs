@@ -32,7 +32,7 @@ use rustls::{RootCertStore, SignatureScheme};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use x509_parser::prelude::FromDer;
 use zeroize::Zeroizing;
 
@@ -435,23 +435,13 @@ impl Identity {
         std::thread::Builder::new()
             .name("nos-pki-rotate".into())
             .spawn(move || {
-                let mut stdin = std::io::stdin().lock();
-                loop {
-                    match Bundle::read_from(&mut stdin) {
-                        Ok(Some(b)) => match rotating.update(&b) {
-                            Ok(()) => info!(peer = ?rotating.peer(), "ipc identity rotated"),
-                            Err(e) => warn!(error = %e, "ignoring bad identity rotation"),
-                        },
-                        Ok(None) => {
-                            debug!("identity pipe closed, no further rotations");
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "identity pipe broke, no further rotations");
-                            break;
-                        }
-                    }
-                }
+                rotate_from(&mut std::io::stdin().lock(), &rotating, |e| {
+                    // The stream is desynchronised after a bad frame, so it
+                    // cannot be resumed: exit and let the supervisor respawn
+                    // this daemon with a fresh identity (#677).
+                    error!(error = %e, "identity pipe broke, exiting so the supervisor respawns this daemon");
+                    std::process::exit(1)
+                });
             })?;
         Ok(id)
     }
@@ -612,5 +602,32 @@ impl Incoming {
         stream.log_handshake("server");
         let peer = peer_of(&stream);
         Ok((stream, peer))
+    }
+}
+
+/// Applies every rotation frame from `r` to `id` until a clean EOF. A frame
+/// that fails to read (oversize, short, I/O) calls `on_broken` and ends the
+/// loop; a bundle that merely fails to apply is only a warning (the stream is
+/// still in sync).
+pub(crate) fn rotate_from(
+    r: &mut impl std::io::Read,
+    id: &Identity,
+    on_broken: impl Fn(io::Error),
+) {
+    loop {
+        match Bundle::read_from(r) {
+            Ok(Some(b)) => match id.update(&b) {
+                Ok(()) => info!(peer = ?id.peer(), "ipc identity rotated"),
+                Err(e) => warn!(error = %e, "ignoring bad identity rotation"),
+            },
+            Ok(None) => {
+                debug!("identity pipe closed, no further rotations");
+                return;
+            }
+            Err(e) => {
+                on_broken(e);
+                return;
+            }
+        }
     }
 }

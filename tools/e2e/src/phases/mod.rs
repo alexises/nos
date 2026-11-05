@@ -140,6 +140,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-router-lsa-split" => ospf::ospfv3_router_lsa_split(w).await,
         "ospf-remote-lfa" => ospf::ospf_remote_lfa(w).await,
         "pki" => pki::pki(w).await,
+        "pki-crl" => pki::pki_crl(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
         "logd-memory" => crate::logd_mem::phase(w).await,
         "config-mem" => crate::logd_mem::config_phase(w).await,
@@ -288,6 +289,8 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
         "pki-suite" => &["up", "established", "pki", "pki-rotation"],
+        // Slow (20-40 min, 30,000 logins): its own CI job, off the fast pki-suite (#677).
+        "pki-crl" => &["up", "established", "pki-crl"],
         // Not run by CI (minutes of runtime, memory thresholds are the flakiest
         // class): `cargo run -p nos-e2e -- logd-memory-lab` by hand (#756).
         "logd-memory-lab" => &["up", "established", "logd-memory"],
@@ -417,6 +420,7 @@ pub const ALL: &[&str] = &[
     "ospf-remote-lfa",
     "pki",
     "pki-rotation",
+    "pki-crl",
     "logd-memory",
     "config-mem",
 ];
@@ -429,13 +433,14 @@ mod tests {
 
     /// Add new groups here. (`run`'s match is not introspectable, so a name in
     /// `ALL` that `run` does not dispatch only fails when run: "unknown phase".)
-    const GROUPS: [&str; 8] = [
+    const GROUPS: [&str; 9] = [
         "base",
         "drivers",
         "rpl",
         "ospf-suite",
         "multi",
         "pki-suite",
+        "pki-crl",
         "logd-memory-lab",
         "config-memory-lab",
     ];

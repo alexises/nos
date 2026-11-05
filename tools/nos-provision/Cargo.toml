@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+nos-pki  = { workspace = true, features = ["testing"] }
 
 [lib]
 name = "nos_provision"
