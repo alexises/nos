@@ -39,6 +39,9 @@ pub const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
 /// to 224.0.0.5 on that interface's local address — one per OSPF link.
 pub struct OspfSocket {
     inner: AsyncFd<Socket>,
+    local_addr: Ipv4Addr,
+    /// 224.0.0.6 membership, driven by the election outcome (`link::rx::sync_all_drouters`).
+    drouters: nos_ospf_common::drouters::AllDRouters,
 }
 
 impl OspfSocket {
@@ -65,7 +68,18 @@ impl OspfSocket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,
+            local_addr,
+            drouters: nos_ospf_common::drouters::AllDRouters::default(),
         })
+    }
+
+    /// Join/leave 224.0.0.6 so membership equals `want`; whether it changed.
+    pub fn set_all_drouters(&self, want: bool) -> io::Result<bool> {
+        self.drouters.sync(
+            self.inner.get_ref(),
+            nos_ospf_common::drouters::Iface::V4(self.local_addr),
+            want,
+        )
     }
 
     /// A virtual link's socket (RFC 2328 §15): unicast only, so no multicast
@@ -81,6 +95,8 @@ impl OspfSocket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,
+            local_addr,
+            drouters: nos_ospf_common::drouters::AllDRouters::default(),
         })
     }
 

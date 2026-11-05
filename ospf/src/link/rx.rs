@@ -843,6 +843,28 @@ pub(super) fn execute_actions(
     }
 }
 
+/// RFC 2328 §8.2: only the DR and BDR listen on `AllDRouters` (224.0.0.6),
+/// never on a point-to-point link. Run after every election pass, so a failed
+/// join is retried (`sync` is idempotent and quiet when nothing changes).
+pub(super) fn sync_all_drouters(socket: &LinkSocket, cfg: &LinkConfig, status: &StatusHandle) {
+    let want = nos_ospf_common::drouters::wants_all_drouters(
+        matches!(
+            status.borrow().interface_state,
+            InterfaceState::Dr | InterfaceState::Backup
+        ),
+        cfg.network_type != NetworkType::Broadcast,
+    );
+    match socket.set_all_drouters(want) {
+        Ok(true) => {
+            info!(link = %cfg.attach_point, joined = want, "ospf all-drouters membership changed");
+        }
+        Ok(false) => {}
+        Err(e) => {
+            warn!(link = %cfg.attach_point, error = %e, "ospf all-drouters membership change failed");
+        }
+    }
+}
+
 /// Broadcast only. Runs RFC 2328 §9.4 election (`election::elect`) over
 /// every 2-Way-or-better neighbor, updates `status.dr`/`bdr`/
 /// `interface_state`, and logs exactly once per role transition.

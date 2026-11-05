@@ -10,6 +10,7 @@ use super::{
 
 mod adjacency;
 mod areas;
+mod drouters;
 mod grace;
 mod hello;
 mod lsa_origination;
@@ -204,6 +205,10 @@ pub mod wire {
         pub cut: Mutex<HashSet<Ipv4Addr>>,
         /// Addresses whose Hellos (type byte 1) alone are dropped.
         pub drop_hellos: Mutex<HashSet<Ipv4Addr>>,
+        /// Per port address: is 224.0.0.6 currently joined.
+        pub drouters: Mutex<std::collections::HashMap<Ipv4Addr, bool>>,
+        /// Makes every 224.0.0.6 join/leave fail.
+        pub fail_drouters: std::sync::atomic::AtomicBool,
     }
 
     impl Wire {
@@ -247,6 +252,18 @@ pub mod wire {
     }
 
     impl Port {
+        pub fn set_all_drouters(&self, want: bool) -> std::io::Result<bool> {
+            if self
+                .wire
+                .fail_drouters
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(std::io::Error::other("injected"));
+            }
+            let prev = self.wire.drouters.lock().unwrap().insert(self.addr, want);
+            Ok(prev.unwrap_or(false) != want)
+        }
+
         pub fn send(&self, dest: Option<Ipv4Addr>, payload: &[u8]) {
             if self.wire.cut.lock().unwrap().contains(&self.addr)
                 || (payload[1] == 1 && self.wire.drop_hellos.lock().unwrap().contains(&self.addr))
