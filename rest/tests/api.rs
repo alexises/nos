@@ -1639,7 +1639,7 @@ async fn secrets_never_leave_and_the_mask_round_trips() {
         Some(json!({"label": "ghost", "secret": "<hidden>"})),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

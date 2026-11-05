@@ -8783,6 +8783,16 @@
               }
             },
             "description": "body over 2 MiB: split the list across several lists"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "semantic refusal: a `<hidden>` secret with no earlier value, or too many clear-text passwords in one edit"
           }
         },
         "summary": "Set the whole config (or one subsection)",
@@ -30775,7 +30785,7 @@
                 }
               }
             },
-            "description": "validation failed; the transaction stays open"
+            "description": "validation failed, or the commit would remove every user or carry an invalid syslog trust-anchor; the transaction stays open"
           }
         },
         "summary": "Validate and commit",
