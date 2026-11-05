@@ -286,6 +286,24 @@ pub enum BgpPeerGroupOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// `graceful_shutdown` (RFC 8326 sender) on/off.
+    SetGracefulShutdown {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
+    /// `graceful_shutdown_receive_disabled` on/off (`true` ignores 65535:0).
+    SetGracefulShutdownReceiveDisabled {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+        /// `true` turns the receiver side off, `false` back on.
+        enabled: bool,
+    },
     /// Clears the route reflector client of the BGP peer group so it reverts to the default.
     ClearRouteReflectorClient {
         /// Name of the BGP instance owning the target.
@@ -498,6 +516,23 @@ impl BgpPeerGroupOp {
     /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
+            BgpPeerGroupOp::SetGracefulShutdown {
+                instance,
+                name,
+                enabled,
+            } => {
+                find_group_mut(config, instance, name)?.graceful_shutdown = *enabled;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetGracefulShutdownReceiveDisabled {
+                instance,
+                name,
+                enabled,
+            } => {
+                find_group_mut(config, instance, name)?.graceful_shutdown_receive_disabled =
+                    *enabled;
+                Ok(())
+            }
             BgpPeerGroupOp::SetSoftReconfigurationInbound {
                 instance,
                 name,
@@ -614,6 +649,8 @@ impl BgpPeerGroupOp {
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                         announce_rpki_state: false,
                         soft_reconfiguration_inbound: false,
+                        graceful_shutdown: false,
+                        graceful_shutdown_receive_disabled: false,
                         local_as: None,
                         add_path: None,
                         add_path_send_count: None,
@@ -1115,6 +1152,8 @@ mod tests {
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             soft_reconfiguration_inbound: false,
+            graceful_shutdown: false,
+            graceful_shutdown_receive_disabled: false,
             local_as: None,
             add_path: None,
             add_path_send_count: None,
@@ -1165,6 +1204,28 @@ mod tests {
                 enabled
             );
         }
+    }
+
+    #[test]
+    fn graceful_shutdown_ops_toggle_their_flags() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        let (instance, name) = ("r1".to_string(), "pg1".to_string());
+        BgpPeerGroupOp::SetGracefulShutdown {
+            instance: instance.clone(),
+            name: name.clone(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        BgpPeerGroupOp::SetGracefulShutdownReceiveDisabled {
+            instance,
+            name,
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let g = &cfg.bgp_instances[0].peer_groups[0];
+        assert!(g.graceful_shutdown && g.graceful_shutdown_receive_disabled);
     }
 
     #[test]

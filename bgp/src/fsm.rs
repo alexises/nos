@@ -1935,7 +1935,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 aggregator: None,
                 otc: None,
                 cluster_list: Vec::new(),
-                communities: Vec::new(),
+                communities: route.communities,
                 extended_communities: route.extended_communities,
                 large_communities: Vec::new(),
                 ipv6_extended_communities: Vec::new(),

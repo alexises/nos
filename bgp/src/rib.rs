@@ -108,6 +108,7 @@ mod flowspec_validate;
 mod gr;
 mod outbox;
 mod retain;
+pub use gr::GsKnobs;
 mod shared;
 mod vpn_import;
 mod vpn_out;
@@ -592,6 +593,9 @@ struct PeerOutbox {
     is_rs_client: bool,
     /// RFC 8097: attach the route's validation state (`set_peer_rpki_state`).
     announce_rpki_state: bool,
+    /// RFC 8326: tag every export on this eBGP session with 65535:0
+    /// (`BgpRib::set_graceful_shutdown`).
+    gs_send: bool,
     /// See `BgpRib::peer_asns`.
     remote_asn: u32,
     /// RFC 9234: the peer's role (the counterpart of the configured one).
@@ -645,6 +649,8 @@ pub struct BgpRib {
     first_as_warned: HashMap<IpAddr, (Instant, u64)>,
     /// iBGP peers exchanging RFC 8097 states (`set_peer_rpki_state`).
     rpki_state_peers: HashSet<IpAddr>,
+    /// RFC 8326 knobs per peer (`set_graceful_shutdown`); a peer not in it has both off.
+    gs_peers: HashMap<IpAddr, GsKnobs>,
     /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
     /// loop-prevention on receipt (`handle_update`).
     local_router_id: Ipv4Addr,
@@ -826,6 +832,7 @@ impl BgpRib {
             first_as_peers: HashSet::new(),
             first_as_warned: HashMap::new(),
             rpki_state_peers: HashSet::new(),
+            gs_peers: HashMap::new(),
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
@@ -1080,6 +1087,55 @@ impl BgpRib {
     /// unconfigured default.
     pub fn set_peer_add_path_send_count(&mut self, peer: IpAddr, count: Option<usize>) {
         self.add_path_counts.insert(peer, count);
+    }
+
+    /// Replaces every peer's RFC 8326 knobs (`BgpPeerGroup.graceful_shutdown*`,
+    /// applied live, outside `ResolvedPeer`). Returns the peers whose knobs
+    /// changed (with whether the sender side did); an established one needs
+    /// a Route Refresh (`SessionManager`). A sender change re-advertises here.
+    pub fn set_graceful_shutdown(
+        &mut self,
+        knobs: HashMap<IpAddr, GsKnobs>,
+    ) -> Vec<(IpAddr, bool)> {
+        let mut changed = Vec::new();
+        for peer in self
+            .gs_peers
+            .keys()
+            .chain(knobs.keys())
+            .collect::<HashSet<_>>()
+        {
+            let old = self.gs_peers.get(peer).copied().unwrap_or_default();
+            let new = knobs.get(peer).copied().unwrap_or_default();
+            if old != new {
+                changed.push((*peer, old.send != new.send));
+            }
+        }
+        let mut resend = Vec::new();
+        for (peer, send_changed) in &changed {
+            if *send_changed && let Some(o) = self.peer_outboxes.get_mut(peer) {
+                o.gs_send = knobs.get(peer).is_some_and(|k| k.send);
+                resend.push((*peer, o.negotiated_afs.clone()));
+            }
+        }
+        self.gs_peers = knobs;
+        // Re-advertise so the new tag (or its absence) goes out.
+        for (peer, families) in resend {
+            let mut vpn_done = false;
+            for family in families {
+                if family == AddressFamily::L2vpnEvpn {
+                    self.announce_evpn_to(peer);
+                } else if crate::fsm::is_vpn(family) {
+                    // Not `resend_all`: that replays what was last sent.
+                    // One call covers both VPN families.
+                    if !std::mem::replace(&mut vpn_done, true) {
+                        self.announce_vpn_to(peer);
+                    }
+                } else {
+                    self.resend_all(peer, family, false);
+                }
+            }
+        }
+        changed
     }
 
     /// Records whether `peer` exchanges RFC 8097 validation states (an

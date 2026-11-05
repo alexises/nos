@@ -909,3 +909,23 @@ fn flowspec_policies_resolve_per_peer_group_and_unset_is_none() {
     let h = peers.iter().find(|p| p.peer_group == "h").unwrap();
     assert!(h.flowspec_import_policy.is_none() && h.flowspec_export_policy.is_none());
 }
+
+#[test]
+fn gs_knobs_come_from_the_peers_group_and_skip_peers_with_none_set() {
+    let cfg = config(instance(json!({
+        "peers": [
+            {"remote_address": "127.0.0.2", "peer_group": "drain"},
+            {"remote_address": "127.0.0.3", "peer_group": "g"},
+            {"remote_address": "127.0.0.4", "peer_group": "quiet"},
+        ],
+        "peer_groups": [
+            group("drain", json!({"graceful_shutdown": true})),
+            group("g", json!({})),
+            group("quiet", json!({"graceful_shutdown_receive_disabled": true})),
+        ],
+    })));
+    let k = super::gs_knobs(own(&cfg));
+    assert_eq!(k.len(), 2);
+    assert!(k[&"127.0.0.2".parse::<IpAddr>().unwrap()].send);
+    assert!(k[&"127.0.0.4".parse::<IpAddr>().unwrap()].receive_off);
+}

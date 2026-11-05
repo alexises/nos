@@ -192,6 +192,22 @@ fn resolve_peers(
     peers
 }
 
+/// Each peer's RFC 8326 knobs from its group. Kept out of `ResolvedPeer` so
+/// toggling them never resets a session; only peers with a knob on appear.
+pub(crate) fn gs_knobs(own: &nos_proto::BgpInstance) -> HashMap<IpAddr, crate::rib::GsKnobs> {
+    own.peers
+        .iter()
+        .filter_map(|peer| {
+            let g = own.peer_groups.iter().find(|g| g.name == peer.peer_group)?;
+            let k = crate::rib::GsKnobs {
+                send: g.graceful_shutdown,
+                receive_off: g.graceful_shutdown_receive_disabled,
+            };
+            (k != crate::rib::GsKnobs::default()).then_some((peer.remote_address, k))
+        })
+        .collect()
+}
+
 async fn resync(
     config_socket: &Path,
     watchdog_socket: &Path,
@@ -328,6 +344,7 @@ async fn resync(
         _ => bfd_client::Target::default(),
     });
     sessions.set_maximum_paths(own.maximum_paths).await;
+    sessions.set_graceful_shutdown(gs_knobs(own)).await;
     sessions
         .set_gr_stale_time(own.graceful_restart.stale_time())
         .await;

@@ -8,6 +8,15 @@ use super::{
     OutboundUpdate, OutboxTx, PeerGr, PeerOutbox,
 };
 
+/// A peer-group's RFC 8326 knobs, per peer (`BgpRib::set_graceful_shutdown`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GsKnobs {
+    /// Sender: tag exports and demote what the peer sends.
+    pub send: bool,
+    /// Receiver side switched off.
+    pub receive_off: bool,
+}
+
 impl BgpRib {
     /// Registers a newly-`Established` peer's outbound channel and does an
     /// initial full advertisement of the current Loc-RIB to it.
@@ -37,6 +46,7 @@ impl BgpRib {
                 is_ibgp,
                 is_confed: self.confed_peers.contains(&peer),
                 announce_rpki_state: self.rpki_state_peers.contains(&peer),
+                gs_send: self.gs_peers.get(&peer).is_some_and(|k| k.send),
                 confed_id: self.confed_id,
                 local_as: self.local_as_peers.get(&peer).copied(),
                 local_addr,

@@ -129,6 +129,8 @@ mod tests {
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             soft_reconfiguration_inbound: false,
+            graceful_shutdown: false,
+            graceful_shutdown_receive_disabled: false,
             local_as: None,
             add_path: None,
             add_path_send_count: None,

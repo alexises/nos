@@ -2001,6 +2001,34 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
         "router-b saw the community stripped by remove_matching"
     );
 
+    // RFC 8326 (#860): `graceful-shutdown` on router-a tags what it advertises;
+    // router-b demotes the tagged route to LOCAL_PREF 0, with no session
+    // reset on either side; `graceful-shutdown-receive disable` on router-b
+    // restores 100 once the Route Refresh re-sends the route.
+    log("graceful-shutdown: router-a tags its export, router-b demotes it");
+    let (gs_est_a, gs_est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    let tagged = |lp: u32| {
+        format!(
+            "{} .*communities=\\[.*{GRACEFUL_SHUTDOWN_PACKED}.*\\] local_pref={lp}",
+            learned()
+        )
+    };
+    let demoted_before = b.count(&tagged(0));
+    let mut gs_flags = flags.clone();
+    gs_flags.push("--graceful-shutdown");
+    a.provision(&gs_flags).await?;
+    b.wait_new(&tagged(0), demoted_before, 60).await?;
+    let restored_before = b.count(&tagged(100));
+    b.provision(&["--no-graceful-shutdown-receive"]).await?;
+    b.wait_new(&tagged(100), restored_before, 60).await?;
+    a.assert_quiet("bgp session established", gs_est_a, 10)
+        .await?;
+    b.assert_quiet("bgp session established", gs_est_b, 0)
+        .await?;
+
     // RFC 1997 (#873): the route carries NO_EXPORT, so router-b (eBGP to
     // router-c) must not pass it on, while its own untagged prefix goes.
     log("router-c peers router-b: the NO_EXPORT route must not be re-advertised");
@@ -4128,9 +4156,38 @@ pub async fn vpn_export(w: &mut World) -> anyhow::Result<()> {
     a.provision_flags(&with(&add)).await?;
     a.wait_new(&advertised, b_adv, 60).await?;
     gobgp_until(true).await?;
+
+    // RFC 8326 (#860): `graceful-shutdown` re-advertises the VPN route with
+    // 65535:0 (GoBGP prints it as `65535:0`, `graceful-shutdown` or `planned-shut`), live.
+    log("graceful-shutdown tags the VPN export, session untouched");
+    let est_a = a.count("bgp session established");
+    a.provision_flags(&with_gs(&with(&add))).await?;
+    let mut tagged = false;
+    let mut out = String::new();
+    for _ in 0..30 {
+        out = gobgp(w, &["global", "rib", "-a", "vpnv4"]).await?;
+        tagged = out.lines().any(|l| {
+            l.contains(&in_gobgp)
+                && (l.contains("65535:0")
+                    || l.contains("graceful-shutdown")
+                    || l.contains("planned-shut"))
+        });
+        if tagged {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(tagged, "GoBGP's VPN route never carried 65535:0: {out}");
+    a.assert_quiet("bgp session established", est_a, 0).await?;
     w.dock.container_remove("router-g").await;
 
     two_pes(w).await
+}
+
+fn with_gs(flags: &[String]) -> Vec<String> {
+    let mut f = flags.to_vec();
+    f.push("--graceful-shutdown".into());
+    f
 }
 
 /// Polls GoBGP's `family` (`vpnv4`/`vpnv6`) table until it does (or no
@@ -5706,6 +5763,25 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
             .any(|l| l.contains("multicast") && l.contains(&format!("rd:{EVPN_RD}")))
     })
     .await?;
+
+    // RFC 8326 (#860): EVPN bypasses export policy, so `graceful-shutdown`
+    // tags the Type-3 unconditionally and re-announces it live.
+    log("graceful-shutdown tags the Type-3, session untouched");
+    let est_a = a.count("bgp session established");
+    let mut gs = flags.clone();
+    gs.push("--graceful-shutdown".into());
+    a.provision_flags(&gs).await?;
+    gobgp_evpn_rib(w, "showed router-a's Type-3 with 65535:0", |rib| {
+        rib.lines().any(|l| {
+            l.contains("multicast")
+                && l.contains(&format!("rd:{EVPN_RD}"))
+                && (l.contains("65535:0")
+                    || l.contains("graceful-shutdown")
+                    || l.contains("planned-shut"))
+        })
+    })
+    .await?;
+    a.assert_quiet("bgp session established", est_a, 0).await?;
 
     log("redistribute from connected: the SVI address is a Type-2 with the bridge's MAC");
     a.wait(&format!(

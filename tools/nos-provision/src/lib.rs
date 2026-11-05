@@ -384,6 +384,16 @@ pub struct Args {
     #[arg(long)]
     pub announce_rpki_state: bool,
 
+    /// If set, `--peer-group` drains traffic before maintenance (RFC 8326):
+    /// `BgpPeerGroupOp::SetGracefulShutdown`.
+    #[arg(long)]
+    pub graceful_shutdown: bool,
+
+    /// If set, `--peer-group` ignores a received 65535:0
+    /// (`BgpPeerGroupOp::SetGracefulShutdownReceiveDisabled`).
+    #[arg(long)]
+    pub no_graceful_shutdown_receive: bool,
+
     /// If set, `--peer-group` keeps its received routes so import-policy
     /// changes apply without a reset (`BgpPeerGroupOp::SetSoftReconfigurationInbound`).
     #[arg(long)]
@@ -2765,6 +2775,24 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if args.announce_rpki_state {
         ops.push(ConfigOp::BgpPeerGroup(
             BgpPeerGroupOp::SetAnnounceRpkiState {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                enabled: true,
+            },
+        ));
+    }
+    if args.graceful_shutdown {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetGracefulShutdown {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                enabled: true,
+            },
+        ));
+    }
+    if args.no_graceful_shutdown_receive {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetGracefulShutdownReceiveDisabled {
                 instance: args.bgp_instance.clone(),
                 name: args.peer_group.clone(),
                 enabled: true,
@@ -5938,6 +5966,8 @@ mod tests {
             "--rpki-cache-md5-password",
             "cache-secret",
             "--announce-rpki-state",
+            "--graceful-shutdown",
+            "--no-graceful-shutdown-receive",
             "--soft-reconfiguration-inbound",
             "--aggregate-address",
             "10.0.0.0/8",
@@ -6005,6 +6035,8 @@ mod tests {
         shows(&o, "SetRpkiCache");
         shows(&o, r#"auth: Some(Md5 { key_ref: "rpki-192-0-2-5" })"#);
         shows(&o, "SetAnnounceRpkiState");
+        shows(&o, "SetGracefulShutdown {");
+        shows(&o, "SetGracefulShutdownReceiveDisabled");
         shows(&o, "SetSoftReconfigurationInbound");
         shows(&o, "as_set: true");
         shows(&o, "summary_only: true");

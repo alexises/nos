@@ -329,6 +329,7 @@ pub(super) fn learn_prefix(
                 otc = ?route.otc,
                 validation_state = ?route.validation_state,
                 communities = ?route.communities,
+                local_pref = route.local_pref,
                 "bgp: learned route for {prefix} into adj-rib-in"
             );
             put_path(table, counts, prefix, id, route);
@@ -650,11 +651,26 @@ impl BgpRib {
         if let Some(l) = local_as.filter(|l| !l.no_prepend) {
             as_path.prepend_seq(l.asn);
         }
+        // RFC 8326, eBGP only, before import policy so policy can override.
+        let mut communities = attrs.communities.clone();
+        let mut local_pref = received_local_pref(attrs.local_pref, remote_is_ibgp || from_confed);
+        if !remote_is_ibgp && !from_confed {
+            let gs = self.gs_peers.get(&from).copied().unwrap_or_default();
+            let tagged = communities.contains(&crate::message::COMMUNITY_GRACEFUL_SHUTDOWN);
+            // §4.2 initiator: tag what we receive too, and demote it.
+            if gs.send && !tagged {
+                communities.push(crate::message::COMMUNITY_GRACEFUL_SHUTDOWN);
+            }
+            // §4.1 receiver.
+            if gs.send || (tagged && !gs.receive_off) {
+                local_pref = 0;
+            }
+        }
         let base_route = RibRoute {
             origin: RouteOrigin::Peer(from),
             as_path: Arc::new(as_path),
             bgp_origin: attrs.origin,
-            local_pref: received_local_pref(attrs.local_pref, remote_is_ibgp || from_confed),
+            local_pref,
             med: attrs.med,
             learned_via_ibgp: remote_is_ibgp,
             learned_via_confed: from_confed,
@@ -663,7 +679,7 @@ impl BgpRib {
             received_at: Instant::now(),
             originator_id: attrs.originator_id,
             cluster_list: attrs.cluster_list.clone().into(),
-            communities: attrs.communities.clone(),
+            communities,
             extended_communities,
             large_communities: attrs.large_communities.clone(),
             atomic_aggregate: attrs.atomic_aggregate,

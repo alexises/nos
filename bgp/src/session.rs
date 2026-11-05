@@ -762,6 +762,23 @@ impl SessionManager {
         self.bgp_rib.lock().await.set_maximum_paths(maximum_paths);
     }
 
+    /// RFC 8326 knobs (`reconcile::gs_knobs`), applied live: a sender change
+    /// re-advertises inside the RIB, and any change asks established peers
+    /// to re-send, since rewritten routes are not retained. A peer without
+    /// Route Refresh keeps its old `LOCAL_PREFs` until it re-announces.
+    pub async fn set_graceful_shutdown(&self, knobs: HashMap<IpAddr, crate::rib::GsKnobs>) {
+        let changed = self.bgp_rib.lock().await.set_graceful_shutdown(knobs);
+        for (peer, _) in changed {
+            let slot = self.peers.read().await.get(&peer).cloned();
+            if let Some(slot) = slot
+                && slot.is_established().await
+                && slot.send_command(FsmCommand::SendRouteRefresh)
+            {
+                info!(%peer, "graceful-shutdown knob changed: requesting route refresh");
+            }
+        }
+    }
+
     /// The VRFs this instance imports VPN routes into (`rib::vpn_import`).
     pub async fn set_vpn_vrfs(&self, vrfs: crate::vpn::VrfSet) {
         let mut rib = self.bgp_rib.lock().await;
