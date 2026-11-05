@@ -4565,6 +4565,11 @@ mod tests {
             "--damping-half-life",
             "20",
             "--clear-damping",
+            "--blackhole-prefix-list",
+            "bh",
+            "--blackhole-prefix",
+            "203.0.113.64/28",
+            "--clear-blackhole",
             "--local-as",
             "65009",
             "--local-as-replace-as",
@@ -4624,6 +4629,31 @@ mod tests {
                 instance: "r1".into(),
                 remote_address: "10.0.0.2".parse().unwrap(),
                 message: Some("bye".into()),
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetBlackhole {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                prefix_list: "bh".into(),
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::ClearBlackhole {
+                instance: "r1".into(),
+                name: "pg1".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::PrefixList(nos_proto::PrefixListOp::AddEntry {
+                name: "bh".into(),
+                entry: nos_proto::PrefixListEntry {
+                    cidr: "203.0.113.64/28".parse().unwrap(),
+                    range: Some((32, 32)),
+                },
             }),
         );
         has(

@@ -1241,6 +1241,31 @@ mod tests {
     }
 
     #[test]
+    fn set_and_clear_blackhole() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetBlackhole {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            prefix_list: "bh".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].blackhole,
+            Some(BgpBlackhole {
+                prefix_list: "bh".into()
+            })
+        );
+        BgpPeerGroupOp::ClearBlackhole {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].blackhole, None);
+    }
+
+    #[test]
     fn graceful_shutdown_ops_toggle_their_flags() {
         let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
         let (instance, name) = ("r1".to_string(), "pg1".to_string());

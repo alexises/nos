@@ -912,6 +912,43 @@ fn flowspec_policies_resolve_per_peer_group_and_unset_is_none() {
 }
 
 #[test]
+fn blackhole_resolves_the_named_prefix_list_into_the_peer() {
+    let mut cfg = config(instance(json!({
+        "peers": [
+            {"remote_address": "127.0.0.2", "peer_group": "g"},
+            {"remote_address": "127.0.0.3", "peer_group": "h"},
+        ],
+        "peer_groups": [
+            group("g", json!({"blackhole": {"prefix_list": "bh"}})),
+            group("h", json!({})),
+        ],
+    })));
+    cfg.prefix_lists = vec![nos_proto::PrefixList {
+        name: "bh".to_string(),
+        entries: vec![nos_proto::PrefixListEntry {
+            cidr: "192.0.2.0/24".parse().unwrap(),
+            range: Some((32, 32)),
+        }],
+    }];
+    let peers = super::resolve_peers(
+        own(&cfg),
+        &std::collections::HashMap::new(),
+        &mut PolicyCache::default(),
+        &cfg,
+    );
+    let g = peers.iter().find(|p| p.peer_group == "g").unwrap();
+    let list = g.blackhole.as_ref().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].range, Some((32, 32)));
+    assert!(peers
+        .iter()
+        .find(|p| p.peer_group == "h")
+        .unwrap()
+        .blackhole
+        .is_none());
+}
+
+#[test]
 fn gs_knobs_come_from_the_peers_group_and_skip_peers_with_none_set() {
     let cfg = config(instance(json!({
         "peers": [
