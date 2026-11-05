@@ -17,6 +17,18 @@ pub struct GsKnobs {
     pub receive_off: bool,
 }
 
+impl GsKnobs {
+    /// RFC 8326 for one eBGP-received route: the initiator (§4.2) tags it,
+    /// the receiver (§4.1) demotes a tagged one. True: set `LOCAL_PREF` 0.
+    pub(super) fn apply(self, communities: &mut Vec<u32>) -> bool {
+        let tagged = communities.contains(&crate::message::COMMUNITY_GRACEFUL_SHUTDOWN);
+        if self.send && !tagged {
+            communities.push(crate::message::COMMUNITY_GRACEFUL_SHUTDOWN);
+        }
+        self.send || (tagged && !self.receive_off)
+    }
+}
+
 impl BgpRib {
     /// Registers a newly-`Established` peer's outbound channel and does an
     /// initial full advertisement of the current Loc-RIB to it.

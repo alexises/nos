@@ -656,14 +656,15 @@ Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are pa
 #### Graceful shutdown (RFC 8326)
 
 - Behaviour change: a route received from an eBGP peer carrying `65535:0` (GRACEFUL_SHUTDOWN) now gets LOCAL_PREF 0, so any other path wins. This is on by default; `graceful-shutdown-receive disable` in the peer-group turns it off. iBGP and confederation-internal sessions are never affected.
-- The demotion is applied before the import policy, which can still override it (`set this.bgp.local_pref = ...`). It covers IPv4/IPv6 unicast and VPN routes. A tagged EVPN route is not demoted yet (#874).
+- The demotion is applied before the import policy, which can still override it (`set this.bgp.local_pref = ...`). It covers IPv4/IPv6 unicast, VPN and EVPN routes. EVPN import policy is accept/reject only, so it cannot override the demotion.
+- EVPN: a tagged route is stored with LOCAL_PREF 0 and shown in `show bgp evpn` (`local-pref 0 communities [graceful-shutdown]`). When the same Type-2 MAC is held by several PEs (one ESI) the highest LOCAL_PREF wins, then the lowest VTEP, so a drained PE stops being the target. A Type-5 prefix below the best LOCAL_PREF for its (prefix, VNI) is withheld from `nos-ribd`; a lone route stays. Types 1, 3 and 4 are never demoted.
 - `graceful-shutdown` in an eBGP peer-group makes this router the one being drained: every unicast and VPN route sent to the group carries `65535:0` (before the export policy, which can strip it), every EVPN route too (EVPN has no export policy), and every route received from the group is tagged and gets LOCAL_PREF 0. Flowspec is not tagged. An iBGP peer-group is refused at commit.
 - Both knobs apply live, with no session reset. Routes already received are re-learned through a Route Refresh; a peer without Route Refresh keeps its old LOCAL_PREFs until it re-announces.
 
 How to drain a router for maintenance:
 
 1. `set bgp instance r1 peer-group upstream graceful-shutdown` and commit.
-2. Wait until the neighbours have converged on other paths (`show bgp routes` on them shows LOCAL_PREF 0 on this router's paths).
+2. Wait until the neighbours have converged on other paths (`show bgp routes` on them shows LOCAL_PREF 0 on this router's paths; for EVPN, `show bgp evpn` shows `local-pref 0 communities [graceful-shutdown]`).
 3. `set bgp instance r1 peer-group upstream shutdown maintenance` and commit.
 
 ### MD5 authentication (RFC 2385)

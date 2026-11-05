@@ -119,6 +119,37 @@ pub struct EvpnRouteSummary {
     pub next_hop: IpAddr,
     /// Extended communities rendered as `RT:65000:10000`, `encap:8`, ...
     pub extended_communities: Vec<String>,
+    /// The `LOCAL_PREF` this route is ranked by (0 when RFC 8326 demoted it).
+    pub local_pref: u32,
+    /// Standard communities, packed `high << 16 | low`.
+    pub communities: Vec<u32>,
+}
+
+/// IANA well-known community names (RFC 1997, 3765, 7611, 7999, 8326), the
+/// one table `nos-bgpd`'s logs and `nos`'s `show` lines render with.
+#[must_use]
+pub fn community_name(c: u32) -> Option<&'static str> {
+    Some(match c {
+        0xFFFF_0000 => "graceful-shutdown",
+        0xFFFF_0001 => "accept-own",
+        0xFFFF_029A => "blackhole",
+        0xFFFF_FF01 => "no-export",
+        0xFFFF_FF02 => "no-advertise",
+        0xFFFF_FF03 => "no-export-subconfed",
+        0xFFFF_FF04 => "no-peer",
+        _ => return None,
+    })
+}
+
+/// Communities space-joined: a well-known one by name, any other `high:low`.
+#[must_use]
+pub fn fmt_communities(cs: &[u32]) -> String {
+    cs.iter()
+        .map(|&c| {
+            community_name(c).map_or_else(|| format!("{}:{}", c >> 16, c & 0xFFFF), str::to_owned)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One received Flowspec (RFC 8955) route, for `show bgp flowspec`. `nlri` is
@@ -754,6 +785,30 @@ pub struct FamilyReeval {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn community_names_and_joined_rendering() {
+        use super::{community_name, fmt_communities};
+        for (c, n) in [
+            (0xFFFF_0000, "graceful-shutdown"),
+            (0xFFFF_0001, "accept-own"),
+            (0xFFFF_029A, "blackhole"),
+            (0xFFFF_FF01, "no-export"),
+            (0xFFFF_FF02, "no-advertise"),
+            (0xFFFF_FF03, "no-export-subconfed"),
+            (0xFFFF_FF04, "no-peer"),
+        ] {
+            assert_eq!(community_name(c), Some(n));
+            assert_eq!(fmt_communities(&[c]), n);
+        }
+        assert_eq!(fmt_communities(&[0xFDE9_0064]), "65001:100");
+        assert_eq!(fmt_communities(&[0xFFFF_0002]), "65535:2");
+        assert_eq!(fmt_communities(&[]), "");
+        assert_eq!(
+            fmt_communities(&[0xFFFF_0000, 0xFDE9_0064]),
+            "graceful-shutdown 65001:100"
+        );
+    }
+
     use super::*;
     use crate::chunk::FullStaging;
     use std::net::Ipv6Addr;

@@ -15,6 +15,8 @@
 //! a received route for the same NLRI, other than RFC 7432 §15 MAC mobility
 //! (`with_local_mobility`/`mac_mobility_recheck`, below).
 
+use ipnet::IpNet;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
@@ -346,7 +348,9 @@ impl BgpRib {
     /// the PEs that hold its `(VNI, MAC)` under RFC 7432 §15 mobility (the
     /// winner, or every PE on the winner's multi-homed segment), the lowest
     /// VTEP — since `nos-fdbd`'s own `EvpnKey` keeps different RDs apart and
-    /// expects one route per `(VNI, MAC)` (see `mac_mobility`).
+    /// expects one route per `(VNI, MAC)` (see `mac_mobility`). RFC 8326: among
+    /// those, the highest `LOCAL_PREF` wins before the lowest VTEP, and a Type-5
+    /// below its `(prefix, label)` group's best `LOCAL_PREF` is withheld.
     ///
     /// Type-5 (`EvpnKey::IpPrefix`) routes are in it too; `fdb_push_snapshot`
     /// and `rib_evpn_push_snapshot` split it per consumer.
@@ -360,19 +364,34 @@ impl BgpRib {
         // nos-fdbd — a losing PE's copy (a different RD, so it wouldn't
         // otherwise collide with the winner's own key below) is filtered out
         // here — and of a multi-homed segment's PEs, only the lowest VTEP.
-        let mut chosen: HashMap<(u32, [u8; 6]), IpAddr> = HashMap::new();
+        // RFC 8326: among holders, the highest LOCAL_PREF first (a drained
+        // PE's copies carry 0), then the lowest VTEP. Mobility decides first.
+        let mut chosen: HashMap<(u32, [u8; 6]), (Reverse<u32>, IpAddr)> = HashMap::new();
+        // Type-5 has no mobility: a copy below the best LOCAL_PREF for its
+        // (prefix, label) is withheld, a lone copy stays.
+        let mut best_t5: HashMap<(IpNet, u32), u32> = HashMap::new();
         for route in self.evpn_adj_rib_in.values().flat_map(HashMap::values) {
             let nlri = &route.nlri;
             if let Some((key, true)) = held(nlri, route.next_hop) {
-                let nh = chosen.entry(key).or_insert(route.next_hop);
-                *nh = (*nh).min(route.next_hop);
+                let rank = (Reverse(route.local_pref), route.next_hop);
+                let best = chosen.entry(key).or_insert(rank);
+                *best = (*best).min(rank);
+            }
+            if let EvpnNlri::IpPrefix { prefix, label, .. } = nlri {
+                let best = best_t5.entry((*prefix, *label)).or_insert(route.local_pref);
+                *best = (*best).max(route.local_pref);
             }
         }
         let mut out = HashMap::new();
         for route in self.evpn_adj_rib_in.values().flat_map(HashMap::values) {
             let nlri = &route.nlri;
             if let Some((key, _)) = held(nlri, route.next_hop)
-                && chosen.get(&key) != Some(&route.next_hop)
+                && chosen.get(&key).map(|c| c.1) != Some(route.next_hop)
+            {
+                continue;
+            }
+            if let EvpnNlri::IpPrefix { prefix, label, .. } = nlri
+                && best_t5.get(&(*prefix, *label)) > Some(&route.local_pref)
             {
                 continue;
             }

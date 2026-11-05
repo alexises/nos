@@ -2247,12 +2247,27 @@
       "EvpnRouteSummary": {
         "description": "One received EVPN (RFC 7432) route, for `show bgp evpn`. `route` is the\nNLRI rendered by `nos-bgpd` (`[2]:[65000:1]:[<esi>]:[<tag>]:...`) — nothing\ndownstream interprets it.",
         "properties": {
+          "communities": {
+            "description": "Standard communities, packed `high << 16 | low`.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
           "extended_communities": {
             "description": "Extended communities rendered as `RT:65000:10000`, `encap:8`, ...",
             "items": {
               "type": "string"
             },
             "type": "array"
+          },
+          "local_pref": {
+            "description": "The `LOCAL_PREF` this route is ranked by (0 when RFC 8326 demoted it).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "next_hop": {
             "description": "The route's BGP next hop.",
@@ -2278,7 +2293,9 @@
           "route_type",
           "route",
           "next_hop",
-          "extended_communities"
+          "extended_communities",
+          "local_pref",
+          "communities"
         ],
         "type": "object"
       },

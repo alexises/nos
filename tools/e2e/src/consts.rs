@@ -151,6 +151,8 @@ pub const EVPN_OTHER_RT_MAC: &str = "aa:bb:cc:00:00:02";
 /// `max-remote-macs 1` ceiling evicts (the lowest MAC address wins).
 pub const EVPN_EXTRA_MAC: &str = "aa:bb:cc:00:00:03";
 pub const EVPN_EXTRA_IP: &str = "192.0.2.11";
+/// How `nos_proto::bgp::community_name` renders RFC 8326 GRACEFUL_SHUTDOWN.
+pub const EVPN_GS_NAME: &str = "graceful-shutdown";
 pub const EVPN_PORT: &str = "evpn0";
 /// `evpn-fdb`'s Type-2-with-IP checks: an ARP binding pinned on the bridge for
 /// `EVPN_LOCAL_MAC`, the domain's SVI address (`redistribute from connected`),
