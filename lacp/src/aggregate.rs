@@ -41,6 +41,31 @@ fn churn_time() -> std::time::Duration {
         .map_or(CHURN_DETECTION_TIME, std::time::Duration::from_secs)
 }
 
+/// Daemon-wide 802.1AX §6.3.4 Port Number allocator: the system ID is shared
+/// by every aggregate, so a number must be unique (and non-zero) across all
+/// of them. Lowest free in `1..=65535`, sticky while the member stays
+/// configured, not persisted across restarts.
+#[derive(Clone, Default)]
+pub struct PortNumbers(Arc<Mutex<HashMap<String, u16>>>);
+
+impl PortNumbers {
+    /// The member's number, or `None` when all 65535 are taken.
+    pub fn get_or_assign(&self, interface: &str) -> Option<u16> {
+        let mut map = self.0.lock().unwrap();
+        if let Some(n) = map.get(interface) {
+            return Some(*n);
+        }
+        let used: HashSet<u16> = map.values().copied().collect();
+        let n = (1..=u16::MAX).find(|n| !used.contains(n))?;
+        map.insert(interface.to_string(), n);
+        Some(n)
+    }
+
+    pub fn release(&self, interface: &str) {
+        self.0.lock().unwrap().remove(interface);
+    }
+}
+
 type SelectedTxs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 
 pub struct AggregateManager {
@@ -78,10 +103,16 @@ pub struct AggregateManager {
     /// the hostname and machine-id).
     derived_system_id: [u8; 6],
     selection_task: JoinHandle<()>,
+    port_numbers: PortNumbers,
 }
 
 impl AggregateManager {
-    pub fn new(name: &str, key: u16, push_tx: mpsc::Sender<LacpAggregateMembers>) -> Arc<Self> {
+    pub fn new(
+        name: &str,
+        key: u16,
+        push_tx: mpsc::Sender<LacpAggregateMembers>,
+        port_numbers: PortNumbers,
+    ) -> Arc<Self> {
         let derived = local_system_id();
         let observations = Arc::new(Mutex::new(HashMap::new()));
         let changed = Arc::new(Notify::new());
@@ -112,6 +143,7 @@ impl AggregateManager {
             system_id: Mutex::new(derived),
             derived_system_id: derived,
             selection_task,
+            port_numbers,
         })
     }
 
@@ -175,6 +207,11 @@ impl AggregateManager {
             }
             selected_txs.remove(&interface);
             observations.remove(&interface);
+            // A restart (rate/priority change) keeps its number; only a
+            // member that left the aggregate frees it.
+            if !desired_members.contains(&interface) {
+                self.port_numbers.release(&interface);
+            }
         }
 
         for (interface, port_priority, mode) in &desired {
@@ -184,6 +221,10 @@ impl AggregateManager {
             if members.get(interface).is_some_and(|t| !t.is_finished()) {
                 continue;
             }
+            let Some(actor_port_number) = self.port_numbers.get_or_assign(interface) else {
+                warn!(%interface, "lacp port numbers exhausted, member skipped");
+                continue;
+            };
             port_priorities.insert(interface.clone(), *port_priority);
             modes.insert(interface.clone(), *mode);
             let (selected_tx, selected_rx) = watch::channel(false);
@@ -193,6 +234,7 @@ impl AggregateManager {
                 actor_system_priority: system_priority,
                 actor_key: self.key,
                 actor_port_priority: *port_priority,
+                actor_port_number,
                 actor_active: *mode == LacpMode::Active,
                 rate,
                 selected_rx,
@@ -278,8 +320,9 @@ impl AggregateManager {
     /// Stops every member task and the selection loop — called when this
     /// aggregate is removed from config entirely (see `reconcile.rs`).
     pub fn shutdown(&self) {
-        for (_, task) in self.members.lock().unwrap().drain() {
+        for (interface, task) in self.members.lock().unwrap().drain() {
             task.abort();
+            self.port_numbers.release(&interface);
         }
         self.selection_task.abort();
     }
@@ -497,7 +540,7 @@ mod tests {
     #[tokio::test]
     async fn configured_system_id_overrides_the_derived_one_and_reverts() {
         let (tx, _rx) = mpsc::channel(1);
-        let agg = AggregateManager::new("bond1", 1, tx);
+        let agg = AggregateManager::new("bond1", 1, tx, PortNumbers::default());
         let derived = agg.summary().actor_system_id;
         let mine = [0x02, 0, 0, 0, 0, 0x99];
         agg.reconcile(Vec::new(), LacpRate::Slow, Some(mine), DEFAULT_PRIORITY, 1);
@@ -505,6 +548,46 @@ mod tests {
         agg.reconcile(Vec::new(), LacpRate::Slow, None, DEFAULT_PRIORITY, 1);
         assert_eq!(agg.summary().actor_system_id, derived);
         agg.shutdown();
+    }
+
+    #[test]
+    fn port_numbers_are_non_zero_lowest_free_sticky_and_reused() {
+        let p = PortNumbers::default();
+        assert_eq!(p.get_or_assign("eth1"), Some(1));
+        assert_eq!(p.get_or_assign("eth2"), Some(2));
+        assert_eq!(p.get_or_assign("eth1"), Some(1));
+        p.release("eth1");
+        assert_eq!(p.get_or_assign("eth3"), Some(1));
+        assert_eq!(p.get_or_assign("eth2"), Some(2));
+    }
+
+    #[test]
+    fn port_numbers_exhaustion_returns_none_without_panicking() {
+        let p = PortNumbers::default();
+        for i in 1..=u16::MAX {
+            p.0.lock().unwrap().insert(format!("i{i}"), i);
+        }
+        assert_eq!(p.get_or_assign("last"), None);
+        p.release("i7");
+        assert_eq!(p.get_or_assign("last"), Some(7));
+    }
+
+    #[tokio::test]
+    async fn two_aggregates_never_share_a_port_number() {
+        let (tx, _rx) = mpsc::channel(1);
+        let ports = PortNumbers::default();
+        let a = AggregateManager::new("bond1", 1, tx.clone(), ports.clone());
+        let b = AggregateManager::new("bond2", 2, tx, ports.clone());
+        let m = |n: &str| vec![(n.to_string(), DEFAULT_PRIORITY, LacpMode::Active)];
+        a.reconcile(m("noif-a"), LacpRate::Slow, None, DEFAULT_PRIORITY, 1);
+        b.reconcile(m("noif-b"), LacpRate::Slow, None, DEFAULT_PRIORITY, 1);
+        assert_eq!(ports.get_or_assign("noif-a"), Some(1));
+        assert_eq!(ports.get_or_assign("noif-b"), Some(2));
+        b.reconcile(Vec::new(), LacpRate::Slow, None, DEFAULT_PRIORITY, 1);
+        assert_eq!(ports.get_or_assign("noif-c"), Some(2));
+        a.shutdown();
+        b.shutdown();
+        assert_eq!(ports.get_or_assign("noif-d"), Some(1));
     }
 
     #[test]

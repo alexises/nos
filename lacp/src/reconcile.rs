@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::aggregate::{AggregateManager, DEFAULT_PRIORITY};
+use crate::aggregate::{AggregateManager, PortNumbers, DEFAULT_PRIORITY};
 
 /// Every currently-configured `Lacp`-mode aggregate's manager, shared with
 /// `server.rs` so `show lacp` can read live state.
@@ -37,6 +37,7 @@ pub async fn run(
 ) {
     let scopes = vec![DiffScope::Interfaces, DiffScope::PortAggregates];
     let mut next_key: u16 = 1;
+    let port_numbers = PortNumbers::default();
 
     while !*shutdown.borrow() {
         match nos_daemon::config::subscribe_diff(&config_socket, scopes.clone()).await {
@@ -49,7 +50,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &aggregates, &mut next_key, &push_tx).await;
+                                resync(&config_socket, &aggregates, &mut next_key, &push_tx, &port_numbers).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -62,7 +63,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &aggregates, &mut next_key, &push_tx).await;
+                            resync(&config_socket, &aggregates, &mut next_key, &push_tx, &port_numbers).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -94,6 +95,7 @@ async fn resync(
     aggregates: &SharedAggregates,
     next_key: &mut u16,
     push_tx: &mpsc::Sender<LacpAggregateMembers>,
+    port_numbers: &PortNumbers,
 ) {
     let cfg = match nos_daemon::config::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
@@ -131,7 +133,7 @@ async fn resync(
             .or_insert_with(|| {
                 let key = *next_key;
                 *next_key += 1;
-                AggregateManager::new(name, key, push_tx.clone())
+                AggregateManager::new(name, key, push_tx.clone(), port_numbers.clone())
             })
             .clone();
         let members: Vec<(String, u16, nos_proto::LacpMode)> = cfg
