@@ -534,3 +534,24 @@ fn ipv6_address_specific_communities_follow_the_transitive_bit() {
         vec![transitive]
     );
 }
+
+/// RFC 1997 well-known communities gate Flowspec advertisements too (#873).
+#[test]
+fn no_advertise_blocks_flowspec_readvertisement() {
+    let (mut rib, mut rx) = setup();
+    feed(&mut rib, SRC, false, "2.2.2.1", &unicast(vec![65001], None));
+    let mut u = flow_update(vec![65001], None, None);
+    u.attributes.as_mut().unwrap().communities = vec![message::COMMUNITY_NO_ADVERTISE];
+    feed(&mut rib, SRC, false, "2.2.2.1", &u);
+    assert!(announced(&mut rx[1]).is_none(), "eBGP");
+    assert!(announced(&mut rx[2]).is_none(), "iBGP");
+    // control: untagged is announced
+    feed(
+        &mut rib,
+        SRC,
+        false,
+        "2.2.2.1",
+        &flow_update(vec![65001], None, None),
+    );
+    assert!(announced(&mut rx[1]).is_some());
+}

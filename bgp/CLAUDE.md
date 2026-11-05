@@ -18,15 +18,15 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 ## Raw TCP session model
 
 - Per peer, an active retry loop plus one shared passive listener (`0.0.0.0:179` + `[::]:179`), both scoped into the VRF by `SO_BINDTODEVICE` (`tcp.rs`).
-- Skip dialing while `PeerSlot::is_established` (either role), or every tick causes a collision.
+- Skip dialing while `PeerSlot::is_established` (either role), or ticks collide.
 - Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`), each `tcp::connect` bounded by it (#158).
-- Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease wait (#444); not in `clear_peer`.
+- Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease wait (#444).
 - **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In/`peer_outbox` outlive the session.
 
 ## Session authentication
 
 - Socket-level only: `fsm.rs` never sees it. MD5 or TCP-AO, mutually exclusive (one per socket); raw `setsockopt` lives in `nos-tcp-auth`, `nos-bgp` only calls its safe wrappers. Keys are admin labels (#508): `ResolvedAuth::resolve(&BgpAuth, &Config)` (peers and `rpki::resolve_auths`), subscribed with `DiffScope::Admin`, so a rotation restarts the peer (`diff_peers`) except what `session::ao_delta` expresses.
-- The listener is shared: keys are installed on it per peer address (`applied_auth`, `sync_listener_auth`; `spawn_listeners` primes them).
+- The listener is shared: keys are installed per peer address (`applied_auth`, `sync_listener_auth`; `spawn_listeners` primes them).
 - `tcp::apply_auth(on_listener)` strips `set_current`/`set_rnext` for a socket in `LISTEN` (`TCP_AO_ADD_KEY` returns `EINVAL` otherwise); the active side keeps them.
 - Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; `ao_delta` returns `None` (restart) for MD5, a changed kept key or a reused RecvID, else an Established session gets `FsmCommand::UpdateAo` (only rnext reaches a live socket, errors such as `EBUSY` reset). Rules: internals page.
 
@@ -106,7 +106,7 @@ Route-server candidates (`rs_candidates`) are never filtered by feasibility or a
 
 ## Communities
 
-The RFC 4360 transitive bit is enforced on eBGP export (#162).
+The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decision::well_known_blocks` (#873).
 
 ## EVPN and MAC mobility
 

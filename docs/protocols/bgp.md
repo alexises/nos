@@ -596,7 +596,24 @@ $C -X PUT -H 'Content-Type: application/json' \
 
 ### Communities
 
-Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are passed on unchanged to every peer, with one exception: a non-transitive extended community (its type has bit `0x40` set) is never sent to an eBGP peer, route-server clients included. The well-known communities (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`) have no built-in effect: write an export policy that acts on them if you need it. Policies can match, add and remove communities; see [Routing policy](routing-policy.md).
+Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are passed on unchanged to every peer, with one exception: a non-transitive extended community (its type has bit `0x40` set) is never sent to an eBGP peer, route-server clients included. The well-known communities are enforced on export, see below. Policies can match, add and remove communities; see [Routing policy](routing-policy.md).
+
+#### Well-known communities (RFC 1997)
+
+- Applies only to routes received from a peer. Locally originated, redistributed and aggregate routes are never filtered, whatever an export policy adds.
+- Checked on the route as stored, after the import policy and before the export policy, for unicast, VPN and Flowspec (not EVPN). Route-server clients count as eBGP.
+- What each community stops, by the destination peer:
+
+| Community | Own AS (iBGP) | Other member AS of our confederation | Outside (eBGP) |
+|---|---|---|---|
+| `NO_EXPORT` (`65535:65281`) | sent | sent | blocked |
+| `NO_ADVERTISE` (`65535:65282`) | blocked | blocked | blocked |
+| `NO_EXPORT_SUBCONFED` (`65535:65283`) | sent | blocked | blocked |
+
+- Without a confederation, `NO_EXPORT` and `NO_EXPORT_SUBCONFED` behave the same on eBGP.
+- To let such a route through, strip the community in an import policy: `this.bgp.communities.remove(65535:65281)`. An export policy can neither add the effect to a received route nor lift it.
+- A route re-learned with the community is withdrawn from the peers that may no longer have it.
+- A suppressed advertisement logs `advertisement suppressed by well-known community` at debug level.
 
 ### MD5 authentication (RFC 2385)
 
@@ -1080,7 +1097,6 @@ These are known gaps, so plan around them:
 
 - A route's attributes cannot be displayed. `show route` shows the chosen next hop, and the log records each learned route.
 - There is no soft reconfiguration: changing a peer-group or its policies resets its sessions.
-- The well-known communities have no built-in effect (see [Communities](#communities)).
 - Malformed UPDATEs: a malformed multiprotocol attribute resets the session (no AFI/SAFI-disable, RFC 7606 §3(d)).
 
 ## Configuration reference

@@ -549,6 +549,11 @@ pub const PYTHON_HELPER_IMAGE: &str = "nos-verify-python-helper:local";
 pub const COMMUNITY_AA: u32 = 65001;
 pub const COMMUNITY_NN: u32 = 100;
 pub const COMMUNITY_PACKED: u32 = (COMMUNITY_AA << 16) | COMMUNITY_NN;
+/// RFC 1997 NO_EXPORT (`65535:65281`), packed.
+pub const NO_EXPORT_PACKED: u32 = 0xFFFF_FF01;
+/// `communities` (#873): router-b's own, untagged prefix, the control that
+/// router-c must learn while the NO_EXPORT-tagged one never reaches it.
+pub const CONTROL_PREFIX: &str = "198.18.101.0/24";
 /// `communities`: tagged on then stripped by `remove_matching("^<STRIP_AA>:")`,
 /// so it must never reach router-b.
 pub const STRIP_AA: u32 = 65002;

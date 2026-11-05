@@ -52,6 +52,11 @@ const MAX_EXTENDED_MESSAGE_LEN: usize = 65535;
 /// in the four-octet AS number capability instead.
 pub const AS_TRANS: u16 = 23456;
 
+/// RFC 1997 well-known communities (`0xFFFF_xxxx`).
+pub const COMMUNITY_NO_EXPORT: u32 = 0xFFFF_FF01;
+pub const COMMUNITY_NO_ADVERTISE: u32 = 0xFFFF_FF02;
+pub const COMMUNITY_NO_EXPORT_SUBCONFED: u32 = 0xFFFF_FF03;
+
 const TYPE_OPEN: u8 = 1;
 const TYPE_UPDATE: u8 = 2;
 const TYPE_NOTIFICATION: u8 = 3;
