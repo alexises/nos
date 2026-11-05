@@ -366,10 +366,11 @@ impl Identity {
         if b.ca != self.0.shared.ca {
             return Err(err("bundle is from a different CA"));
         }
-        let current = certify(b)?;
-        self.set_crl(&b.crl)?;
-        self.0.shared.current.store(Some(Arc::new(current)));
-        Ok(())
+        let current = certify(b);
+        // A revocation must never be dropped because the leaf was bad.
+        let crl = self.set_crl(&b.crl);
+        self.0.shared.current.store(Some(Arc::new(current?)));
+        crl
     }
 
     /// Enforces `crl` (DER, signed by this identity's CA) on every handshake
@@ -629,5 +630,37 @@ pub(crate) fn rotate_from(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod crl_tests {
+    use super::*;
+    use crate::{KeyAlg, PeerId};
+    use std::time::Duration;
+
+    /// An empty-crl frame keeps the CRL held; a frame with a bad leaf still
+    /// installs its CRL (a revocation is never dropped).
+    #[test]
+    fn crl_survives_empty_frames_and_a_bad_leaf() {
+        let ca = crate::Ca::new(KeyAlg::MlDsa65).unwrap();
+        let mut b = ca
+            .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+            .unwrap();
+        let id = Identity::from_bundle(&b).unwrap();
+        let held = |id: &Identity| id.0.crl.lock().unwrap().clone();
+        assert_eq!(held(&id).len(), 0);
+
+        let crl = ca.crl_der().unwrap();
+        let mut bad = b.clone();
+        bad.cert = vec![1, 2, 3];
+        bad.crl.clone_from(&crl);
+        assert!(id.update(&bad).is_err());
+        assert_eq!(held(&id), crl);
+
+        b.crl.clear();
+        id.update(&b).unwrap();
+        id.update(&b).unwrap();
+        assert_eq!(held(&id), crl);
     }
 }

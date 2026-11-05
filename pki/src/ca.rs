@@ -331,7 +331,8 @@ pub fn generate_csr_for(alg: KeyAlg) -> io::Result<(Vec<u8>, Zeroizing<Vec<u8>>)
 
 /// Everything an identity is made of, as DER: the CA's certificate (trust
 /// anchor), this peer's leaf, the leaf's PKCS#8 private key, and the CA's
-/// current CRL (empty: keep whatever CRL the identity already holds).
+/// current CRL (empty: keep whatever CRL the identity already holds; the
+/// watchdog sends it only in a child's first frame and when it changes).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bundle {
     /// The CA certificate (trust anchor), DER.

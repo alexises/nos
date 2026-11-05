@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use nos_proto::Role;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 #[allow(
     clippy::disallowed_types,
     reason = "the supervisor's whole job is spawning the daemons (#228)"
 )]
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, Command};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -265,20 +265,23 @@ fn revoke_spawn(spec: &ProcessSpec, issued: &Mutex<Vec<Serial>>) {
 
 /// Delivers a child's identity down its stdin: the first frame right away, a
 /// fresh leaf every `rotate_every`, and the current leaf again with the new
-/// CRL whenever the CRL changes. The key travels only through this pipe:
+/// CRL whenever the CRL changes. The CRL itself rides only the first frame and
+/// those CRL-change frames; rotation frames send it empty (= "keep the one you
+/// hold"), so a big CRL is not re-sent to every child on every rotation. The key travels only through this pipe:
 /// never argv, environment or disk. Every leaf minted is recorded in `issued`
 /// for `revoke_spawn`. Ends when the child stops reading (it exited) or the
 /// supervisor aborts it.
-fn push_identity(
+fn push_identity<W: AsyncWrite + Unpin + Send + 'static>(
     name: String,
     id: SpawnIdentity,
-    mut stdin: ChildStdin,
+    mut stdin: W,
     issued: Arc<Mutex<Vec<Serial>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut crl = id.pki.crl();
         let mut current = None;
         let mut rotate = true;
+        let mut crl_pending = true;
         let mut next_rotation = tokio::time::Instant::now();
         loop {
             if rotate {
@@ -297,7 +300,14 @@ fn push_identity(
                 }
             }
             if let Some(bundle) = &mut current {
-                bundle.crl.clone_from(&crl.borrow_and_update());
+                crl_pending |= crl.has_changed().unwrap_or(false);
+                if crl_pending {
+                    bundle.crl.clone_from(&crl.borrow_and_update());
+                } else {
+                    bundle.crl.clear();
+                }
+                crl_pending = false;
+                info!(process = %name, crl_bytes = bundle.crl.len(), "identity pushed");
                 if let Err(e) = stdin.write_all(&bundle.encode()).await {
                     debug!(process = %name, error = %e, "child no longer reads its identity");
                     return;
@@ -310,6 +320,7 @@ fn push_identity(
                         return; // the Pki is gone: the watchdog is exiting
                     }
                     rotate = false;
+                    crl_pending = true;
                 }
             }
         }
@@ -349,6 +360,52 @@ async fn shutdown_child(name: &str, child: &mut Child) {
             warn!(process = %name, error = %e, "failed to force-kill process");
         }
         let _ = child.wait().await;
+    }
+}
+
+#[cfg(test)]
+mod push_tests {
+    use super::*;
+    use nos_pki::Bundle;
+    use tokio::io::{duplex, AsyncReadExt, DuplexStream};
+
+    async fn frame(r: &mut DuplexStream) -> Bundle {
+        let mut len = [0u8; 4];
+        r.read_exact(&mut len).await.unwrap();
+        let mut buf = len.to_vec();
+        buf.resize(4 + u32::from_le_bytes(len) as usize, 0);
+        r.read_exact(&mut buf[4..]).await.unwrap();
+        Bundle::read_from(&mut buf.as_slice()).unwrap().unwrap()
+    }
+
+    fn setup() -> (tempfile::TempDir, Arc<Pki>, DuplexStream) {
+        let tmp = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            tmp.path(),
+            Duration::from_secs(600),
+            Duration::from_millis(400),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let (w, r) = duplex(1 << 24);
+        let id = SpawnIdentity {
+            pki: pki.clone(),
+            role: Role::Configd,
+            name: "x".into(),
+        };
+        push_identity("x".into(), id, w, Arc::new(Mutex::new(Vec::new())));
+        (tmp, pki, r)
+    }
+
+    #[tokio::test]
+    async fn crl_rides_first_and_changed_frames_only() {
+        let (_t, pki, mut r) = setup();
+        assert_ne!(frame(&mut r).await.crl.len(), 0);
+        assert_eq!(frame(&mut r).await.crl.len(), 0, "rotation: keep");
+        let cert = pki.mint(Role::Configd, "y").unwrap().cert;
+        pki.revoke(Role::Configd, "y", vec![Serial::of(&cert).unwrap()]);
+        assert_ne!(frame(&mut r).await.crl.len(), 0, "change: sent once");
+        assert_eq!(frame(&mut r).await.crl.len(), 0);
     }
 }
 
