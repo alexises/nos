@@ -565,6 +565,10 @@ topics! {
     InterfaceFlowspec,
     /// `BgpPeerGroup.soft_reconfiguration_inbound`
     BgpPeerGroupSoftReconfigurationInbound,
+    /// `BgpPeerGroup.graceful_shutdown`
+    BgpPeerGroupGracefulShutdown,
+    /// `BgpPeerGroup.graceful_shutdown_receive_disabled`
+    BgpPeerGroupGracefulShutdownReceiveDisabled,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

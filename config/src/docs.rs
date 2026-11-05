@@ -1634,6 +1634,32 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Stop keeping received routes and free the memory; the session is not reset.",
             ),
         ),
+        Topic::BgpPeerGroupGracefulShutdown => (
+            "Drain traffic from this router before maintenance (RFC 8326).",
+            concat!(
+                "Every route advertised to the peer-group's eBGP peers, in unicast, VPN and EVPN \
+             families, gets the GRACEFUL_SHUTDOWN community (65535:0), and routes received from \
+             them are tagged too and demoted to LOCAL_PREF 0, so both directions move to \
+             another path. Enable it, wait for convergence, then `shutdown`. eBGP peer-groups \
+             only, checked at commit time. Applied live: no session reset. Unicast and VPN \
+             routes already received are re-learned through a Route Refresh. A policy can strip \
+             or override the community on unicast and VPN; EVPN has no export policy and is \
+             always tagged. Flowspec is not tagged.",
+                " ",
+                "Stop tagging and demoting.",
+            ),
+        ),
+        Topic::BgpPeerGroupGracefulShutdownReceiveDisabled => (
+            "Ignore the GRACEFUL_SHUTDOWN community (65535:0) received from the peer-group's peers.",
+            concat!(
+                "By default (RFC 8326 section 4.1) a route received from an eBGP peer carrying \
+             65535:0 gets LOCAL_PREF 0 before import policy, which can still override it. This \
+             turns that off for the peer-group. iBGP peers are never affected. Applied live: no \
+             session reset; routes already received are re-learned through a Route Refresh.",
+                " ",
+                "Honour the community again.",
+            ),
+        ),
         Topic::BfdProfile => (
             "Create or delete a BFD profile.",
             "A named set of BFD (RFC 5880) session parameters. BGP peer-groups, OSPF and OSPFv3 profiles and static routes reference it with `bfd <name>`. `edit` creates it with defaults (300 ms intervals, multiplier 3, minimum TTL 254) if missing; `delete` removes it, and the commit is refused while anything still references it. No BFD daemon exists yet, so a reference has no effect.",

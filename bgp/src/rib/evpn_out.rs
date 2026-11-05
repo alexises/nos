@@ -39,6 +39,8 @@ pub struct AdvertisedEvpn {
     pub as_path: AsPath,
     /// `Some` only toward iBGP peers.
     pub local_pref: Option<u32>,
+    /// RFC 8326 `GRACEFUL_SHUTDOWN` toward an eBGP peer with the knob on.
+    pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
     /// Type-3 only.
     pub pmsi: Option<Pmsi>,
@@ -142,6 +144,12 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
             p
         },
         local_pref: (outbox.is_ibgp || outbox.is_confed).then_some(LOCAL_PREF),
+        // EVPN bypasses export policy, so the tag is unconditional.
+        communities: if outbox.gs_send && !outbox.is_ibgp && !outbox.is_confed {
+            vec![crate::message::COMMUNITY_GRACEFUL_SHUTDOWN]
+        } else {
+            Vec::new()
+        },
         extended_communities: r.ext_communities.clone(),
         pmsi: match &r.key {
             EvpnKey::Imet { origin, .. } => Some(Pmsi {

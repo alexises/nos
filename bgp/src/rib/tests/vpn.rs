@@ -4,19 +4,19 @@ use super::*;
 use crate::rib::vpn_out::AdvertisedVpn;
 use crate::vpn::{Rd, VpnNlri};
 
-const SRC: &str = "10.0.0.1"; // eBGP source, AS 65001
-const EBGP: &str = "10.0.0.3"; // eBGP observer, AS 65003
-const IBGP: &str = "10.0.0.4"; // iBGP observer, not a client
+pub(super) const SRC: &str = "10.0.0.1"; // eBGP source, AS 65001
+pub(super) const EBGP: &str = "10.0.0.3"; // eBGP observer, AS 65003
+pub(super) const IBGP: &str = "10.0.0.4"; // iBGP observer, not a client
 const CLIENT: &str = "10.0.0.5"; // iBGP observer, route-reflector client
 const CLIENT_SRC: &str = "10.0.0.6"; // iBGP source, client
 const I1: &str = "10.0.0.7"; // iBGP source, not a client
 
-const RD1: Rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 1]; // 65001:1
+pub(super) const RD1: Rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 1]; // 65001:1
 const RD2: Rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 2]; // 65001:2
-const RT: u64 = 0x0002_fde8_0000_0001; // RT:65000:1
-const P: &str = "10.10.0.0/24";
+pub(super) const RT: u64 = 0x0002_fde8_0000_0001; // RT:65000:1
+pub(super) const P: &str = "10.10.0.0/24";
 
-fn nlri(rd: Rd, p: &str, label: u32) -> VpnNlri {
+pub(super) fn nlri(rd: Rd, p: &str, label: u32) -> VpnNlri {
     VpnNlri {
         labels: vec![label],
         rd,
@@ -36,7 +36,7 @@ fn batch_afi(n: &VpnNlri) -> u16 {
     }
 }
 
-fn reach(next_hop: &str, as_path: Vec<u32>, vpn: Vec<VpnNlri>) -> UpdateMessage {
+pub(super) fn reach(next_hop: &str, as_path: Vec<u32>, vpn: Vec<VpnNlri>) -> UpdateMessage {
     let mut u = ebgp_update(vec![], as_path, "0.0.0.0");
     u.attributes.as_mut().unwrap().extended_communities = vec![RT];
     u.mp_reach = vec![message::MpReachNlri {
@@ -100,7 +100,7 @@ fn reg(
 
 /// AS 65000, router-id/cluster-id 1.1.1.1; receivers in the order SRC,
 /// EBGP, IBGP, CLIENT, `CLIENT_SRC`, I1.
-fn setup() -> (BgpRib, Vec<mpsc::Receiver<OutboundUpdate>>) {
+pub(super) fn setup() -> (BgpRib, Vec<mpsc::Receiver<OutboundUpdate>>) {
     let mut rib = new_rib_with_identity(65000, v4("1.1.1.1"), v4("1.1.1.1"));
     rib.set_peer_asn(addr(SRC), 65001);
     rib.set_peer_asn(addr(EBGP), 65003);
@@ -115,7 +115,7 @@ fn setup() -> (BgpRib, Vec<mpsc::Receiver<OutboundUpdate>>) {
     (rib, rx)
 }
 
-fn feed(rib: &mut BgpRib, peer: &str, ibgp: bool, u: &UpdateMessage) {
+pub(super) fn feed(rib: &mut BgpRib, peer: &str, ibgp: bool, u: &UpdateMessage) {
     rib.handle_update(addr(peer), ibgp, v4("2.2.2.2"), u, &nos_rpl::ACCEPT_ALL);
 }
 
@@ -131,7 +131,7 @@ fn vpns(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<OutboundUpdate> {
         .collect()
 }
 
-fn advs(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<AdvertisedVpn> {
+pub(super) fn advs(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<AdvertisedVpn> {
     vpns(rx)
         .into_iter()
         .filter_map(|u| match u {

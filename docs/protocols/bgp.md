@@ -653,6 +653,19 @@ Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are pa
 - A route re-learned with the community is withdrawn from the peers that may no longer have it.
 - A suppressed advertisement logs `advertisement suppressed by well-known community` at debug level.
 
+#### Graceful shutdown (RFC 8326)
+
+- Behaviour change: a route received from an eBGP peer carrying `65535:0` (GRACEFUL_SHUTDOWN) now gets LOCAL_PREF 0, so any other path wins. This is on by default; `graceful-shutdown-receive disable` in the peer-group turns it off. iBGP and confederation-internal sessions are never affected.
+- The demotion is applied before the import policy, which can still override it (`set this.bgp.local_pref = ...`). It covers IPv4/IPv6 unicast and VPN routes. A tagged EVPN route is not demoted yet (#874).
+- `graceful-shutdown` in an eBGP peer-group makes this router the one being drained: every unicast and VPN route sent to the group carries `65535:0` (before the export policy, which can strip it), every EVPN route too (EVPN has no export policy), and every route received from the group is tagged and gets LOCAL_PREF 0. Flowspec is not tagged. An iBGP peer-group is refused at commit.
+- Both knobs apply live, with no session reset. Routes already received are re-learned through a Route Refresh; a peer without Route Refresh keeps its old LOCAL_PREFs until it re-announces.
+
+How to drain a router for maintenance:
+
+1. `set bgp instance r1 peer-group upstream graceful-shutdown` and commit.
+2. Wait until the neighbours have converged on other paths (`show bgp routes` on them shows LOCAL_PREF 0 on this router's paths).
+3. `set bgp instance r1 peer-group upstream shutdown maintenance` and commit.
+
 ### MD5 authentication (RFC 2385)
 
 Authentication keys are not typed into the peer-group: they live in the admin keystore under a label, and the peer-group names the label. To authenticate a peer-group:

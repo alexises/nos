@@ -384,6 +384,20 @@ pub(super) fn build_advertisement(
     {
         adjusted.med = None;
     }
+    // RFC 8326 §4.2: tag unicast and VPN exports toward eBGP before the
+    // policy, which may strip or override it. Flowspec stays untagged.
+    if outbox.gs_send
+        && !outbox.is_ibgp
+        && !outbox.is_confed
+        && flow.is_none_or(|(f, ..)| crate::fsm::is_vpn(f))
+        && !adjusted
+            .communities
+            .contains(&crate::message::COMMUNITY_GRACEFUL_SHUTDOWN)
+    {
+        adjusted
+            .communities
+            .push(crate::message::COMMUNITY_GRACEFUL_SHUTDOWN);
+    }
     let segs = policy_segments(&adjusted);
     let verdict = nos_rpl::vm::run(
         flow.map_or(&*outbox.export_policy, |(_, p, _)| p),

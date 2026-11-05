@@ -110,7 +110,7 @@ Route-server candidates (`rs_candidates`) are never filtered by feasibility or a
 
 ## Communities
 
-The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decision::well_known_blocks` (#873).
+The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decision::well_known_blocks` (#873). RFC 8326 (#860): knobs outside `ResolvedPeer`.
 
 ## EVPN and MAC mobility
 
@@ -141,7 +141,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 
 ## Performance
 
-Run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles memory (`docs/architecture/development.md`).
+Run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles memory.
 
 ## Modules
 

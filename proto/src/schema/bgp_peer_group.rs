@@ -684,6 +684,22 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupSoftReconfigurationInbound)]
     pub soft_reconfiguration_inbound: bool,
+
+    /// RFC 8326 sender side: tag every route exchanged with this group's
+    /// eBGP peers with `GRACEFUL_SHUTDOWN` (65535:0) and demote what they send
+    /// to `LOCAL_PREF` 0, so traffic drains before a `shutdown`. eBGP only
+    /// (`bgp_instance::valid_route_reflection_and_server`). Applied live.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupGracefulShutdown)]
+    pub graceful_shutdown: bool,
+
+    /// RFC 8326 §4.1 receiver side is on by default (an eBGP path carrying
+    /// 65535:0 gets `LOCAL_PREF` 0); `true` turns it off. Applied live.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupGracefulShutdownReceiveDisabled, words = "graceful-shutdown-receive disable")]
+    pub graceful_shutdown_receive_disabled: bool,
 }
 
 /// Knobs of the Flowspec validation procedure (RFC 8955 §6 as updated by
@@ -1059,6 +1075,8 @@ mod tests {
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             soft_reconfiguration_inbound: false,
+            graceful_shutdown: false,
+            graceful_shutdown_receive_disabled: false,
             local_as: None,
             add_path: None,
             add_path_send_count: None,

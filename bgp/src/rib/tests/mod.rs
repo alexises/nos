@@ -21,6 +21,7 @@ mod flowspec;
 mod flowspec_select;
 mod flowspec_validation;
 mod gr;
+mod graceful_shutdown;
 mod next_hop;
 mod outbox;
 mod policy;

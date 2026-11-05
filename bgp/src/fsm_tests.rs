@@ -574,6 +574,7 @@ fn markers_and_evpn_encode_per_family() {
             next_hop: ip("192.0.2.2"),
             as_path: vec![65001].into(),
             local_pref: None,
+            communities: Vec::new(),
             extended_communities: vec![1],
             pmsi: None,
         },
