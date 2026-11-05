@@ -405,7 +405,7 @@ pub async fn pki_crl(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&["--user", &format!("{CRL_USER}=first-password")])
         .await?;
-    let revoked = format!("certificates revoked role=user name={CRL_USER} serials={CRL_BURST} ");
+    let revoked = format!("certificates revoked role=user name={CRL_USER} serials={CRL_BURST}");
     let updated = "ipc crl updated entries=3[0-9][0-9][0-9][0-9]";
     let (revocations, updates, broken) = (
         a.count(&revoked),
