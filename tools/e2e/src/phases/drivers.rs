@@ -309,6 +309,22 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         }
     }
 
+    log("actor port numbers are allocated 1..n (not the ifindex), and the partner sees them");
+    for r in [a, b] {
+        for (iface, want) in [("eth1", 1), ("eth2", 2)] {
+            let p = lacp_port(r, iface).await?;
+            if p["actor_port_number"] != want {
+                bail!("{}: {iface} actor_port_number is not {want}: {p}", r.name());
+            }
+            if p["partner_port_number"] != want {
+                bail!(
+                    "{}: {iface} partner_port_number is not {want}: {p}",
+                    r.name()
+                );
+            }
+        }
+    }
+
     log("the configured lacp-system-id is the actor id, and the partner sees it");
     let body = a
         .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)

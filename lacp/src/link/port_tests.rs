@@ -53,6 +53,7 @@ fn config(active: bool, rate: LacpRate, selected_rx: watch::Receiver<bool>) -> L
         actor_system_priority: 100,
         actor_key: 7,
         actor_port_priority: 200,
+        actor_port_number: 1,
         actor_active: active,
         rate,
         selected_rx,

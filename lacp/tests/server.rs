@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_lacp::aggregate::AggregateManager;
+use nos_lacp::aggregate::{AggregateManager, PortNumbers};
 use nos_lacp::reconcile::SharedAggregates;
 use nos_lacp::server;
 use nos_pki::testing::shared;
@@ -31,7 +31,7 @@ async fn get_summary_lists_every_aggregate_sorted_with_its_rate() {
 
     let aggregates = SharedAggregates::default();
     for (name, key, rate) in [("bond-b", 2, LacpRate::Fast), ("bond-a", 1, LacpRate::Slow)] {
-        let manager = AggregateManager::new(name, key, push_tx.clone());
+        let manager = AggregateManager::new(name, key, push_tx.clone(), PortNumbers::default());
         // No members: exercises the summary/rate plumbing without needing a
         // raw socket (which needs CAP_NET_RAW).
         manager.reconcile(Vec::new(), rate, None, 32768, 1);

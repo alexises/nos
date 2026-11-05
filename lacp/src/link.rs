@@ -28,6 +28,9 @@ pub struct LinkConfig {
     pub actor_system_priority: u16,
     pub actor_key: u16,
     pub actor_port_priority: u16,
+    /// 802.1AX §6.3.4 Port Number: unique and non-zero across the daemon
+    /// (`aggregate::PortNumbers`), never derived from the ifindex.
+    pub actor_port_number: u16,
     /// `LACP_Activity`: `false` = Passive (see `periodic_tx_machine`).
     pub actor_active: bool,
     /// How fast we ask the partner to send (our advertised `LACP_Timeout`),
@@ -142,10 +145,7 @@ pub async fn run(
             return;
         }
     };
-    // `& 0xffff` always yields a value in `0..=0xffff` regardless of the
-    // operand's sign, so this always fits.
-    let port_number =
-        u16::try_from(socket.ifindex() & 0xffff).expect("masked to 16 bits, always fits");
+    let port_number = config.actor_port_number;
     let selected_rx = config.selected_rx.clone();
     let p = Port::new(config, observations, changed, port_number);
     drive(p, selected_rx, &socket).await;
