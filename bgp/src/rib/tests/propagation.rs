@@ -1039,3 +1039,260 @@ fn consecutive_restarts_keep_stale_routes_only_with_n() {
         }
     }
 }
+
+mod well_known {
+    use super::*;
+    use message::{COMMUNITY_NO_ADVERTISE, COMMUNITY_NO_EXPORT, COMMUNITY_NO_EXPORT_SUBCONFED};
+
+    const SRC: &str = "10.0.0.1";
+
+    #[derive(Clone, Copy, Debug)]
+    enum Dest {
+        Ibgp,
+        Ebgp,
+        OtherMember,
+        RrClient,
+        RsClient,
+    }
+
+    fn reg(
+        rib: &mut BgpRib,
+        ip: &str,
+        d: Dest,
+        export: Arc<CompiledPolicy>,
+    ) -> mpsc::Receiver<OutboundUpdate> {
+        if matches!(d, Dest::OtherMember) {
+            rib.set_peer_confed(addr(ip), true);
+        }
+        let (tx, rx) = test_channel();
+        rib.peer_established(
+            addr(ip),
+            matches!(d, Dest::Ibgp | Dest::RrClient),
+            Some(addr("10.0.0.254")),
+            all_afs(),
+            false,
+            None,
+            matches!(d, Dest::RrClient),
+            matches!(d, Dest::RsClient),
+            HashSet::new(),
+            export,
+            tx,
+        );
+        rx
+    }
+
+    fn tagged(communities: &[u32]) -> UpdateMessage {
+        let mut u = ebgp_update(vec!["1.2.3.0/24"], vec![65001], SRC);
+        u.attributes.as_mut().unwrap().communities = communities.to_vec();
+        u
+    }
+
+    fn pol(src: &str) -> Arc<CompiledPolicy> {
+        Arc::new(nos_rpl::compile(src, &nos_rpl::Symbols::EMPTY).unwrap())
+    }
+
+    /// Learn `communities` from an eBGP source and report whether `d` got it.
+    fn sent(confederation: bool, d: Dest, communities: &[u32]) -> bool {
+        let mut rib = new_rib(65101);
+        if confederation {
+            rib.set_confederation(Some(65100));
+        }
+        let _src = reg(&mut rib, SRC, Dest::Ebgp, accept_all_policy());
+        let mut rx = reg(&mut rib, "10.0.0.2", d, accept_all_policy());
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(communities),
+            &accept_all_policy(),
+        );
+        announced(&mut rx, "1.2.3.0/24").is_some()
+    }
+
+    #[test]
+    fn matrix() {
+        use Dest::{Ebgp, Ibgp, OtherMember, RrClient, RsClient};
+        // (community, confederation?, dest, sent?)
+        let cases = [
+            (COMMUNITY_NO_ADVERTISE, false, Ibgp, false),
+            (COMMUNITY_NO_ADVERTISE, false, Ebgp, false),
+            (COMMUNITY_NO_ADVERTISE, true, OtherMember, false),
+            (COMMUNITY_NO_ADVERTISE, false, RrClient, false),
+            (COMMUNITY_NO_ADVERTISE, false, RsClient, false),
+            (COMMUNITY_NO_EXPORT, false, Ibgp, true),
+            (COMMUNITY_NO_EXPORT, false, Ebgp, false),
+            (COMMUNITY_NO_EXPORT, true, Ebgp, false),
+            (COMMUNITY_NO_EXPORT, true, OtherMember, true),
+            (COMMUNITY_NO_EXPORT, false, RsClient, false),
+            (COMMUNITY_NO_EXPORT_SUBCONFED, false, Ibgp, true),
+            (COMMUNITY_NO_EXPORT_SUBCONFED, false, Ebgp, false),
+            (COMMUNITY_NO_EXPORT_SUBCONFED, true, Ebgp, false),
+            (COMMUNITY_NO_EXPORT_SUBCONFED, true, OtherMember, false),
+        ];
+        for (c, confed, d, want) in cases {
+            assert_eq!(sent(confed, d, &[c]), want, "{c:#x} confed={confed} {d:?}");
+        }
+    }
+
+    #[test]
+    fn other_communities_are_unaffected() {
+        for c in [0xFFFF_029A, (65001 << 16) | 100] {
+            assert!(sent(false, Dest::Ebgp, &[c]));
+        }
+        assert!(sent(false, Dest::Ebgp, &[]));
+    }
+
+    #[test]
+    fn locally_originated_route_tagged_by_export_policy_is_sent() {
+        let mut rib = new_rib(65000);
+        let mut rx = reg(
+            &mut rib,
+            "10.0.0.2",
+            Dest::Ebgp,
+            pol("this.bgp.communities.add(65535:65281)\naccept\n"),
+        );
+        rib.apply_redistribute_update(full_update(vec![("198.51.100.0/24", "10.9.9.9")]));
+        assert!(announced(&mut rx, "198.51.100.0/24").is_some());
+    }
+
+    #[test]
+    fn import_policy_can_lift_it_export_policy_cannot_add_or_lift() {
+        // import policy strips -> sent
+        let mut rib = new_rib(65000);
+        let _src = reg(&mut rib, SRC, Dest::Ebgp, accept_all_policy());
+        let mut rx = reg(&mut rib, "10.0.0.2", Dest::Ebgp, accept_all_policy());
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[COMMUNITY_NO_EXPORT]),
+            &pol("this.bgp.communities.remove(65535:65281)\naccept\n"),
+        );
+        assert!(announced(&mut rx, "1.2.3.0/24").is_some());
+
+        // export policy adds NO_EXPORT to a received route -> still sent
+        let mut rib = new_rib(65000);
+        let _src = reg(&mut rib, SRC, Dest::Ebgp, accept_all_policy());
+        let mut rx = reg(
+            &mut rib,
+            "10.0.0.2",
+            Dest::Ebgp,
+            pol("this.bgp.communities.add(65535:65281)\naccept\n"),
+        );
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[]),
+            &accept_all_policy(),
+        );
+        assert!(announced(&mut rx, "1.2.3.0/24").is_some());
+
+        // export policy removes it -> still blocked
+        let mut rib = new_rib(65000);
+        let _src = reg(&mut rib, SRC, Dest::Ebgp, accept_all_policy());
+        let mut rx = reg(
+            &mut rib,
+            "10.0.0.2",
+            Dest::Ebgp,
+            pol("this.bgp.communities.remove(65535:65281)\naccept\n"),
+        );
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[COMMUNITY_NO_EXPORT]),
+            &accept_all_policy(),
+        );
+        assert!(announced(&mut rx, "1.2.3.0/24").is_none());
+    }
+
+    #[test]
+    fn relearned_with_no_export_is_withdrawn_from_ebgp_only() {
+        let mut rib = new_rib(65000);
+        let _src = reg(&mut rib, SRC, Dest::Ebgp, accept_all_policy());
+        let mut ebgp = reg(&mut rib, "10.0.0.2", Dest::Ebgp, accept_all_policy());
+        let mut ibgp = reg(&mut rib, "10.0.0.3", Dest::Ibgp, accept_all_policy());
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[]),
+            &accept_all_policy(),
+        );
+        assert!(announced(&mut ebgp, "1.2.3.0/24").is_some());
+        recv_all(&mut ibgp);
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[COMMUNITY_NO_EXPORT]),
+            &accept_all_policy(),
+        );
+        assert!(recv_all(&mut ebgp)
+            .iter()
+            .any(|u| matches!(u, OutboundUpdate::Withdraw(p, ..) if *p == prefix("1.2.3.0/24"))));
+        assert!(!recv_all(&mut ibgp)
+            .iter()
+            .any(|u| matches!(u, OutboundUpdate::Withdraw(..))));
+    }
+
+    #[test]
+    fn route_refresh_replay_honours_it() {
+        let mut rib = new_rib(65000);
+        let _src = reg(&mut rib, SRC, Dest::Ebgp, accept_all_policy());
+        let mut rx = reg(&mut rib, "10.0.0.2", Dest::Ebgp, accept_all_policy());
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[]),
+            &accept_all_policy(),
+        );
+        recv_all(&mut rx);
+        rib.resend_all(addr("10.0.0.2"), AddressFamily::Ipv4Unicast, false);
+        assert!(announced(&mut rx, "1.2.3.0/24").is_some(), "control");
+        recv_all(&mut rx);
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[COMMUNITY_NO_EXPORT]),
+            &accept_all_policy(),
+        );
+        recv_all(&mut rx);
+        rib.resend_all(addr("10.0.0.2"), AddressFamily::Ipv4Unicast, false);
+        assert!(announced(&mut rx, "1.2.3.0/24").is_none());
+    }
+
+    #[test]
+    fn add_path_peer_honours_it() {
+        let mut rib = new_rib(65000);
+        let _src = reg(&mut rib, SRC, Dest::Ebgp, accept_all_policy());
+        let mut rx = register_peer_full(
+            &mut rib,
+            addr("10.0.0.3"),
+            false,
+            addr("10.0.0.252"),
+            false,
+            true,
+            [AddressFamily::Ipv4Unicast].into_iter().collect(),
+        );
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[]),
+            &accept_all_policy(),
+        );
+        assert!(announced(&mut rx, "1.2.3.0/24").is_some(), "control");
+        rib.handle_update(
+            addr(SRC),
+            false,
+            v4("9.9.9.9"),
+            &tagged(&[COMMUNITY_NO_EXPORT]),
+            &accept_all_policy(),
+        );
+        assert!(announced(&mut rx, "1.2.3.0/24").is_none());
+    }
+}

@@ -1731,7 +1731,7 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
         "tag-redistribute-with-community",
         // The prepend lands behind router-a's own ASN (added on export).
         &format!(
-            "this.bgp.communities.add({STRIP_AA}:7)\nthis.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\nthis.bgp.communities.remove_matching(\"^{STRIP_AA}:\")\nthis.bgp.as_path.prepend({PREPEND_ASN}, 2)\nset this.bgp.med = {MED}\naccept\n"
+            "this.bgp.communities.add({STRIP_AA}:7)\nthis.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\nthis.bgp.communities.remove_matching(\"^{STRIP_AA}:\")\nthis.bgp.communities.add(65535:65281)\nthis.bgp.as_path.prepend({PREPEND_ASN}, 2)\nset this.bgp.med = {MED}\naccept\n"
         ),
     )?;
     let mut flags = redistribute();
@@ -1766,7 +1766,7 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     reestablished(b, est_b).await?;
     // The tagged route can land a moment after the session is up.
     b.wait(&format!(
-        "{} .*communities=\\[{COMMUNITY_PACKED}\\]",
+        "{} .*communities=\\[{COMMUNITY_PACKED}, {NO_EXPORT_PACKED}\\]",
         loc_rib()
     ))
     .await?;
@@ -1782,6 +1782,58 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     anyhow::ensure!(
         b.count(&format!("{} .*communities=.*{STRIP_PACKED}", loc_rib())) == 0,
         "router-b saw the community stripped by remove_matching"
+    );
+
+    // RFC 1997 (#873): the route carries NO_EXPORT, so router-b (eBGP to
+    // router-c) must not pass it on, while its own untagged prefix goes.
+    log("router-c peers router-b: the NO_EXPORT route must not be re-advertised");
+    let c_flags = strings(&[
+        "--address",
+        &format!("{IP_C}/24"),
+        "--asn",
+        &ASN_C.to_string(),
+        "--router-id",
+        RID_C,
+        "--remote-as",
+        &ASN_B.to_string(),
+        "--peer",
+        IP_B,
+    ]);
+    w.start(C, Some(c_flags), &[]).await?;
+    let b = w.b()?;
+    let b_flags = strings(&[
+        "--address",
+        &format!("{IP_B}/24"),
+        "--asn",
+        &ASN_B.to_string(),
+        "--router-id",
+        RID_B,
+        "--peer-group",
+        "pg-c",
+        "--remote-as",
+        &ASN_C.to_string(),
+        "--peer",
+        IP_C,
+        "--static-route",
+        CONTROL_PREFIX,
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+    ]);
+    b.provision_flags(&b_flags).await?;
+    let c = w.c()?;
+    c.established().await?;
+    c.wait(&format!(
+        "learned route for {CONTROL_PREFIX} into adj-rib-in"
+    ))
+    .await?;
+    b.wait(&format!(
+        "advertisement suppressed by well-known community peer=.*prefix={REDISTRIBUTE_PREFIX}"
+    ))
+    .await?;
+    anyhow::ensure!(
+        c.count(&learned()) == 0,
+        "router-c learned the NO_EXPORT route {REDISTRIBUTE_PREFIX}"
     );
     Ok(())
 }

@@ -1166,3 +1166,14 @@ fn import_multipath_defers_with_graceful_restart() {
     rib.begin_deferral(5, 120, 360, [addr(SRC)]);
     assert_eq!(rib.vpn_import_snapshot(), (None, None));
 }
+
+/// RFC 1997 well-known communities gate VPN advertisements too (#873).
+#[test]
+fn no_export_blocks_vpn_to_ebgp_but_not_ibgp() {
+    let (mut rib, mut rx) = setup();
+    let mut u = reach(SRC, vec![65001], vec![nlri(RD1, P, 100)]);
+    u.attributes.as_mut().unwrap().communities = vec![message::COMMUNITY_NO_EXPORT];
+    feed(&mut rib, SRC, false, &u);
+    assert_eq!(advs(&mut rx[1]).len(), 0, "eBGP observer");
+    assert_eq!(advs(&mut rx[2]).len(), 1, "iBGP observer");
+}

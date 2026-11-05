@@ -304,6 +304,22 @@ pub(super) fn otc_leak(remote: nos_proto::BgpRole, otc: Option<u32>, peer_as: u3
     }
 }
 
+/// RFC 1997: does a well-known community on a route *received from a peer*
+/// forbid sending it to `outbox`? Peer classes: own member AS (`is_ibgp`),
+/// another member AS of our confederation (`is_confed`), outside. Locally
+/// originated routes are never filtered.
+pub(super) fn well_known_blocks(best: &RibRoute, outbox: &PeerOutbox) -> bool {
+    use message::{COMMUNITY_NO_ADVERTISE, COMMUNITY_NO_EXPORT, COMMUNITY_NO_EXPORT_SUBCONFED};
+    if !matches!(best.origin, RouteOrigin::Peer(_)) {
+        return false;
+    }
+    let has = |c| best.communities.contains(&c);
+    let outside = !outbox.is_ibgp && !outbox.is_confed;
+    has(COMMUNITY_NO_ADVERTISE)
+        || (outside && has(COMMUNITY_NO_EXPORT))
+        || (!outbox.is_ibgp && has(COMMUNITY_NO_EXPORT_SUBCONFED))
+}
+
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
 /// it for that destination. `None` covers every ineligibility case
 /// (split-horizon, source-peer echo, family not negotiated by this peer, no
@@ -341,6 +357,12 @@ pub(super) fn build_advertisement(
         matches!(best.origin, RouteOrigin::Peer(_)) && best.learned_via_ibgp && outbox.is_ibgp;
     let reflecting = ibgp_to_ibgp && (source_is_rr_client || outbox.is_rr_client);
     if ibgp_to_ibgp && !reflecting {
+        return None;
+    }
+    // RFC 1997, on the stored (post-import-policy) route and before the
+    // export policy, so only an import policy can lift it.
+    if well_known_blocks(best, outbox) {
+        tracing::debug!(%peer, %prefix, "advertisement suppressed by well-known community");
         return None;
     }
 
