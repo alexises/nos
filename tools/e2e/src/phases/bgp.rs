@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use reqwest::Method;
 
-use nos_proto::{ConfigOp, InterfaceOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp};
+use nos_proto::{
+    BgpPeerGroupOp, ConfigOp, InterfaceOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
+};
 
 use crate::consts::*;
 use crate::logs::bre;
@@ -1192,7 +1194,222 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
     let after = b.count(&learned());
     b.provision::<&str>(&[]).await?;
     b.wait_new(&learned(), after, 60).await?;
+    soft_reconfig(w).await?;
     as_set_export_policy(w).await
+}
+
+/// Turns router-b's `soft-reconfiguration-inbound` on or off through the
+/// config tree (`nos-provision` only ever enables it).
+async fn set_soft_reconfig(r: &Router, enabled: bool) -> anyhow::Result<()> {
+    r.edit(|config| {
+        BgpPeerGroupOp::SetSoftReconfigurationInbound {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            enabled,
+        }
+        .apply(config)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await
+    .map(drop)
+}
+
+/// #859: soft reconfiguration inbound against a Route-Refresh-capable peer
+/// (router-a). Enabling on the live session asks for a refresh instead of
+/// restarting it; an import-policy change is then re-evaluated from the
+/// retained routes (no new session, no new refresh); disabling frees them.
+async fn soft_reconfig(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let flag = ["--soft-reconfiguration-inbound"];
+    let (est_a, est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    let (enabled, refresh) = (
+        b.count("soft reconfiguration: retention enabled"),
+        b.count("sent route refresh request"),
+    );
+    log("soft reconfiguration: enabling on router-b's live session");
+    b.provision(&flag).await?;
+    b.wait_new("soft reconfiguration: retention enabled", enabled, 30)
+        .await?;
+    b.wait_new("sent route refresh request", refresh, 30)
+        .await?;
+    b.assert_quiet("bgp session established", est_b, 6).await?;
+    a.assert_quiet("bgp session established", est_a, 1).await?;
+
+    log("tightening router-b's import policy: re-evaluated in place, route rejected");
+    let file = policy_file(
+        "reject-soft-reconfig",
+        &format!(
+            "if this.bgp.peer_as == {ASN_A} and this.bgp.as_path.matches(\"^{ASN_A}$\"):\n    reject\nelse:\n    accept\n"
+        ),
+    )?;
+    let reeval = |accepted: u32| {
+        format!(
+            "re-evaluated import policy peer={IP_A} family=ipv4-unicast retained=[0-9]* accepted={accepted} "
+        )
+    };
+    let (rejected, refresh) = (b.count(&reeval(0)), b.count("sent route refresh request"));
+    let mut tight = strings(&flag);
+    tight.extend(strings(&[
+        "--policy-name",
+        "reject-soft-reconfig",
+        "--policy-source-file",
+        &file,
+        "--import-policy",
+        "reject-soft-reconfig",
+    ]));
+    b.provision(&tight).await?;
+    b.wait_new(&reeval(0), rejected, 30).await?;
+    b.assert_quiet("bgp session established", est_b, 6).await?;
+
+    log("loosening it again: the retained copy re-admits the route, no new refresh");
+    let (learned_before, accepted) = (b.count(&learned()), b.count(&reeval(1)));
+    b.provision(&flag).await?;
+    b.wait_new(&learned(), learned_before, 30).await?;
+    b.wait_new(&reeval(1), accepted, 30).await?;
+    b.assert_quiet("bgp session established", est_b, 6).await?;
+    b.assert_quiet("sent route refresh request", refresh, 3)
+        .await?;
+
+    log("`soft-in` re-evaluates locally and sends nothing");
+    let body = b
+        .rest_expect(
+            Method::POST,
+            &format!("/v1/bgp/r1/peer/{IP_A}/soft-in"),
+            None,
+            200,
+        )
+        .await?;
+    anyhow::ensure!(
+        body.contains("\"route_refresh\":\"none\"") && body.contains("ipv4-unicast"),
+        "soft-in reply: {body}"
+    );
+    b.assert_quiet("sent route refresh request", refresh, 2)
+        .await?;
+
+    log("disabling frees the retained routes without a restart");
+    let disabled = b.count("soft reconfiguration: retention disabled");
+    set_soft_reconfig(b, false).await?;
+    b.wait_new("soft reconfiguration: retention disabled", disabled, 30)
+        .await?;
+    b.assert_quiet("bgp session established", est_b, 3).await
+}
+
+/// #859 against FRR without Route Refresh (`router-f`, self-contained):
+/// `dont-capability-negotiate` makes FRR send a capability-less OPEN, so
+/// router-a cannot ask it to resend. With `soft-reconfiguration-inbound` the
+/// route FRR announced is still retained when router-a's import policy
+/// rejects it, and loosening the policy re-admits it locally, with no new
+/// session and no refresh. Enabling the flag on a live no-refresh session is
+/// the one case that must restart it.
+pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
+    let seed = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+    ]);
+    let file = policy_file("reject-frr-prefix", "reject\n")?;
+    let mut tight = seed.clone();
+    tight.extend(strings(&[
+        "--soft-reconfiguration-inbound",
+        "--policy-name",
+        "reject-frr-prefix",
+        "--policy-source-file",
+        &file,
+        "--import-policy",
+        "reject-frr-prefix",
+    ]));
+    w.start(A, Some(tight), &[]).await?;
+    w.dock.container_remove("router-g").await;
+    w.dock.ensure_pulled(FRR_IMAGE).await?;
+    let conf = format!(
+        "frr defaults traditional\nhostname router-f\n!\n\
+         router bgp {ASN_G}\n bgp router-id {RID_G}\n no bgp ebgp-requires-policy\n \
+         no bgp network import-check\n neighbor {IP_A} remote-as {ASN_A}\n \
+         neighbor {IP_A} dont-capability-negotiate\n \
+         address-family ipv4 unicast\n  network {FRR_BGP_PREFIX}\n exit-address-family\nexit\n"
+    );
+    w.dock
+        .start_plain_caps(
+            "router-f",
+            FRR_IMAGE,
+            NET,
+            IP_G,
+            &[
+                "sh",
+                "-c",
+                "sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons && exec /usr/lib/frr/docker-start",
+            ],
+            ("/etc/frr", "frr.conf", conf.as_bytes()),
+            &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
+        )
+        .await?;
+    let a = w.a()?;
+    let learned_frr = format!("learned route for {FRR_BGP_PREFIX} into adj-rib-in");
+    let reeval = |accepted: u32| {
+        format!(
+            "re-evaluated import policy peer={IP_G} family=ipv4-unicast retained=[0-9]* accepted={accepted} "
+        )
+    };
+
+    a.established().await?;
+    a.wait(&format!(
+        "route refresh capability peer={IP_G} route_refresh=false"
+    ))
+    .await?;
+    super::ospf::frr_until(w, &format!("show bgp neighbors {IP_A} json"), 60, |out| {
+        // FRR's `routeRefresh` is "received" (ours reached it); it never
+        // "advertised" one, which is what leaves router-a unable to ask.
+        out.contains("\"bgpState\":\"Established\"")
+            && out.contains("\"routeRefresh\":\"received\"")
+            && !out.contains("\"routeRefresh\":\"advertised")
+    })
+    .await?;
+
+    log("import policy rejects FRR's prefix: not learned, yet retained");
+    a.assert_quiet(&learned_frr, 0, 10).await?;
+    let body = a
+        .rest_expect(
+            Method::POST,
+            &format!("/v1/bgp/r1/peer/{IP_G}/soft-in"),
+            None,
+            200,
+        )
+        .await?;
+    anyhow::ensure!(
+        body.contains("\"route_refresh\":\"none\"")
+            && body.contains("\"retained\":1,\"accepted\":0"),
+        "soft-in on a peer without route refresh: {body}"
+    );
+
+    log("loosening the policy re-admits it from the retained copy: same session, no refresh");
+    let (est, accepted) = (a.count("bgp session established"), a.count(&reeval(1)));
+    let mut loose = seed;
+    loose.push("--soft-reconfiguration-inbound".into());
+    a.provision_flags(&loose).await?;
+    a.wait_new(&learned_frr, 0, 30).await?;
+    a.wait_new(&reeval(1), accepted, 30).await?;
+    a.assert_quiet("bgp session established", est, 6).await?;
+    a.assert_quiet("route refresh not sent", 0, 1).await?;
+
+    log("disabling is in place; enabling on a peer without route refresh restarts the session");
+    set_soft_reconfig(a, false).await?;
+    a.wait_new("soft reconfiguration: retention disabled", 0, 30)
+        .await?;
+    a.assert_quiet("bgp session established", est, 5).await?;
+    let seen = a.count(&learned_frr);
+    set_soft_reconfig(a, true).await?;
+    a.wait_new("bgp session established", est, 90).await?;
+    a.wait_new(&learned_frr, seen, 60).await
 }
 
 /// Router-a's aggregate flags with the named export policy.

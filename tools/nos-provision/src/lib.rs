@@ -384,6 +384,11 @@ pub struct Args {
     #[arg(long)]
     pub announce_rpki_state: bool,
 
+    /// If set, `--peer-group` keeps its received routes so import-policy
+    /// changes apply without a reset (`BgpPeerGroupOp::SetSoftReconfigurationInbound`).
+    #[arg(long)]
+    pub soft_reconfiguration_inbound: bool,
+
     /// If set, adds `address-family l2vpn-evpn` (RFC 7432, AFI 25 / SAFI 70)
     /// to `--peer-group`, alongside the default IPv4 unicast.
     #[arg(long)]
@@ -2760,6 +2765,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if args.announce_rpki_state {
         ops.push(ConfigOp::BgpPeerGroup(
             BgpPeerGroupOp::SetAnnounceRpkiState {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                enabled: true,
+            },
+        ));
+    }
+    if args.soft_reconfiguration_inbound {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetSoftReconfigurationInbound {
                 instance: args.bgp_instance.clone(),
                 name: args.peer_group.clone(),
                 enabled: true,
@@ -5924,6 +5938,7 @@ mod tests {
             "--rpki-cache-md5-password",
             "cache-secret",
             "--announce-rpki-state",
+            "--soft-reconfiguration-inbound",
             "--aggregate-address",
             "10.0.0.0/8",
             "--aggregate-as-set",
@@ -5990,6 +6005,7 @@ mod tests {
         shows(&o, "SetRpkiCache");
         shows(&o, r#"auth: Some(Md5 { key_ref: "rpki-192-0-2-5" })"#);
         shows(&o, "SetAnnounceRpkiState");
+        shows(&o, "SetSoftReconfigurationInbound");
         shows(&o, "as_set: true");
         shows(&o, "summary_only: true");
         shows(&o, "RemoveAggregate");

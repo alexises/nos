@@ -176,6 +176,7 @@ fn resolve_peers(
             shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
             maximum_prefix: group.maximum_prefix,
             announce_rpki_state: group.announce_rpki_state,
+            soft_reconfiguration_inbound: group.soft_reconfiguration_inbound,
             local_as: group.local_as,
             enforce_first_as: group.enforce_first_as.unwrap_or(true),
             flowspec_validation: group.flowspec_validation,

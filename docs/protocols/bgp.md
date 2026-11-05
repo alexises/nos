@@ -26,7 +26,7 @@ BGP configuration has three levels:
 Three rules catch people out:
 
 - **Both policies default to `deny-all`.** A peer-group with no `import-policy` accepts no routes, and one with no `export-policy` advertises none. The session still comes up, so nothing looks wrong until you check the routes. Set both, to `accept-all` or to one of your own policies (see [Routing policy](routing-policy.md)).
-- **Changing a peer-group resets its sessions.** Any change to a peer-group, or to a policy it uses, except `bfd` (see [BFD](#bfd-rfc-5882-rfc-9384)), closes its established sessions with a Cease NOTIFICATION (RFC 4486 subcode 6, Other Configuration Change) and opens them again with the new settings. Plan changes to production peer-groups accordingly.
+- **Changing a peer-group resets its sessions.** Any change to a peer-group, or to a policy it uses, except `bfd` (see [BFD](#bfd-rfc-5882-rfc-9384)) and, with [soft reconfiguration inbound](#keeping-received-routes-soft-reconfiguration-inbound), an import-policy change, closes its established sessions with a Cease NOTIFICATION (RFC 4486 subcode 6, Other Configuration Change) and opens them again with the new settings. Plan changes to production peer-groups accordingly.
 - **Names are global.** Peer-group names and peer addresses must be unique across all BGP instances, not just within one.
 
 ## Bringing up a session
@@ -220,7 +220,7 @@ $C -X DELETE $B/v1/transactions/t2/bgp-instance/r1/peer-group/pg1/shutdown # up 
 
 ## Asking a peer to resend its routes
 
-`clear bgp <instance> <peer> soft-in` sends the peer a route refresh request (RFC 2918): it resends every route it advertises to you, without resetting the session. Use it after changing something that affects routes you already hold, for example a prefix list that an import policy uses. It works in both modes and changes no configuration:
+`clear bgp <instance> <peer> soft-in` sends the peer a route refresh request (RFC 2918): it resends every route it advertises to you, without resetting the session. Use it after changing something that affects routes you already hold, for example a prefix list that an import policy uses. It works in both modes and changes no configuration. If the peer-group has [soft reconfiguration inbound](#keeping-received-routes-soft-reconfiguration-inbound), nothing is sent: the import policy is re-evaluated over the routes NOS kept, and the command prints the result per family:
 
 ```
 edge-1> clear bgp r1 10.50.0.3 soft-in
@@ -232,7 +232,45 @@ $ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/soft-in
 {"instance":"r1","peer":"10.50.0.3","route_refresh":"sent"}
 ```
 
-The request fails with `404` over REST if the peer is not configured or its session is not Established.
+```
+edge-1> clear bgp r1 10.50.0.3 soft-in
+re-evaluated import policy for 10.50.0.3:
+  ipv4-unicast: 120 retained, 118 accepted
+```
+
+```sh
+$ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/soft-in
+{"instance":"r1","peer":"10.50.0.3","route_refresh":"none","reevaluated":[{"family":"ipv4-unicast","retained":120,"accepted":118}]}
+```
+
+The request fails with `404` over REST if the peer is not configured or its session is not Established. It is `503` if a local re-evaluation was superseded or aborted (by a policy change, a disconnect or a maximum-prefix trip).
+
+## Keeping received routes (soft reconfiguration inbound)
+
+Without it, a route the import policy rejects is dropped, so changing a policy means restarting the session or asking the peer to resend. With `soft-reconfiguration-inbound` NOS keeps every route the peer sends before the import policy, and a policy change is applied in place: no session reset, no route refresh.
+
+- Enable it per peer-group: `set bgp instance r1 peer-group pg1 soft-reconfiguration-inbound true` (REST: `"soft_reconfiguration_inbound": true` on the peer-group). `delete` it to turn it off.
+- Scope: IPv4 and IPv6 unicast. Other families do not honour the flag yet (#866), and a peer-group that also carries EVPN, Flowspec or VPN still restarts its sessions on an import-policy change.
+- Changing the import policy of an established peer-group with the flag on is applied in place. NOS logs `soft reconfiguration: re-evaluated import policy peer=… family=… retained=… accepted=… changed=…` once per family, then `soft reconfiguration: re-evaluation finished` with the chunk count and duration. Routes whose result changed are re-decided and re-advertised; the rest are untouched. No damping penalty is applied.
+- The re-evaluation runs in chunks of 5000 prefixes and releases the RIB between them, so UPDATEs keep being processed. On a 1M-prefix table, a chunk held the lock about 5 ms (release build). A newer policy change supersedes a running pass; `soft-in` during a pass waits for it.
+- Enabling it on a session that is already up asks the peer for a route refresh (when it supports it) and keeps what comes back. A peer without the Route Refresh capability gets its session restarted instead (Cease, Other Configuration Change), since only a new session retains every route. Enabling while the session is down needs nothing: the next session retains from its first UPDATE.
+- Retention is complete once the peer has finished that refresh: with enhanced route refresh NOS logs `soft reconfiguration: retention complete`; otherwise only `retention enabled, route refresh requested`. A `soft-in` before then re-evaluates what is held so far.
+- Disabling it frees the memory and resets nothing (`soft reconfiguration: retention disabled`). Disabling it together with a policy change restarts the sessions.
+- Retention is dropped whenever the session ends, graceful restart included: after a restart it refills from the peer's announcements only.
+- Routes dropped before policy (AS loop, unusable next hop, first-AS and role-leak checks) are not kept.
+- Memory: roughly one extra copy of the peer's received routes. Measured with 100k /24s from one eBGP peer: 63 MB for the RIB without the flag, 112 MB with it (about 490 bytes per prefix more).
+- A change of RPKI VRPs re-evaluates a retained peer locally instead of asking it for a route refresh.
+
+Example:
+
+```
+edge-1(t9/bgp-instance:r1/peer-group:pg1)> set soft-reconfiguration-inbound true
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d 'true' \
+  $B/v1/transactions/t9/bgp-instance/r1/peer-group/pg1/soft-reconfiguration-inbound
+```
 
 ## Limiting the prefixes a peer sends
 
@@ -913,7 +951,7 @@ if this.bgp.validation_state == rpki.invalid:
 accept
 ```
 
-When the VRPs change, NOS re-validates every route it holds. A route the import policy rejected is not held, so about 5 seconds after a change NOS asks each established peer whose import policy reads the state for a route refresh. A peer that did not advertise the route refresh capability is not asked; its routes are checked again on its next session. The session is never reset.
+When the VRPs change, NOS re-validates every route it holds. A route the import policy rejected is not held (unless the peer-group keeps its received routes, see [soft reconfiguration inbound](#keeping-received-routes-soft-reconfiguration-inbound): then NOS re-evaluates them locally), so about 5 seconds after a change NOS asks each other established peer whose import policy reads the state for a route refresh. A peer that did not advertise the route refresh capability is not asked; its routes are checked again on its next session. The session is never reset.
 
 The cache's End of Data sets the refresh, retry and expire intervals (RFC 8210 §6; version 0 uses the defaults 3600, 600 and 7200 seconds). If no cache answers for the expire interval, the VRPs are dropped and every route is not-found, so the policy above accepts them again. Until then the last VRPs stay in use.
 

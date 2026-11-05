@@ -25,6 +25,7 @@ mod next_hop;
 mod outbox;
 mod policy;
 mod propagation;
+mod retain;
 mod vpn;
 
 fn prefix(s: &str) -> IpNet {

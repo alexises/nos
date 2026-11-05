@@ -1621,6 +1621,19 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Stop exchanging RPKI validation state with the peer-group's peers.",
             ),
         ),
+        Topic::BgpPeerGroupSoftReconfigurationInbound => (
+            "Keep the peer-group's received routes so import-policy changes apply without a reset.",
+            concat!(
+                "Every route received from these peers is kept as received, before import policy. \
+             A change to the import policy is then re-evaluated locally against the kept routes: \
+             no session reset, no Route Refresh. `clear ... soft-in` also re-evaluates locally. \
+             Enabling it on an established session asks the peer for a Route Refresh when it \
+             supports one and otherwise restarts the session. Costs roughly one extra copy of \
+             each peer's received routes. IPv4/IPv6 unicast only.",
+                " ",
+                "Stop keeping received routes and free the memory; the session is not reset.",
+            ),
+        ),
         Topic::BfdProfile => (
             "Create or delete a BFD profile.",
             "A named set of BFD (RFC 5880) session parameters. BGP peer-groups, OSPF and OSPFv3 profiles and static routes reference it with `bfd <name>`. `edit` creates it with defaults (300 ms intervals, multiplier 3, minimum TTL 254) if missing; `delete` removes it, and the commit is refused while anything still references it. No BFD daemon exists yet, so a reference has no effect.",

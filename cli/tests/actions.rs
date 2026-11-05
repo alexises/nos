@@ -182,6 +182,16 @@ fn lab() -> Lab {
                         routes: Vec::new(),
                         next: None,
                     },
+                    // 192.0.2.9 is a peer-group keeping its received routes.
+                    BgpRequest::SendRouteRefresh { peer } if peer.to_string() == "192.0.2.9" => {
+                        BgpEvent::SoftInReevaluated {
+                            families: vec![nos_proto::FamilyReeval {
+                                family: nos_proto::ReevalFamily::Ipv4Unicast,
+                                retained: 2,
+                                accepted: 1,
+                            }],
+                        }
+                    }
                     BgpRequest::SendRouteRefresh { .. } => BgpEvent::RouteRefreshSent,
                     BgpRequest::ClearPeer { .. } => BgpEvent::PeerCleared,
                     _ => BgpEvent::Summary(Vec::new()),
@@ -277,6 +287,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "show ospfv3 neigh",
             "show ospfv3 database",
             "clear bgp b1 192.0.2.2 soft-in",
+            "clear bgp b1 192.0.2.9 soft-in",
             "clear bgp nope 192.0.2.2 soft-in",
             "clear bgp b1 192.0.2.2",
             "save",

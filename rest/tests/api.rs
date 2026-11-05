@@ -1467,6 +1467,18 @@ async fn clear_bgp_soft_in_maps_the_daemons_reply_to_a_status() {
         BgpRequest::SendRouteRefresh { peer } if peer.to_string() == "192.0.2.1" => {
             BgpEvent::RouteRefreshSent
         }
+        BgpRequest::SendRouteRefresh { peer } if peer.to_string() == "192.0.2.5" => {
+            BgpEvent::SoftInReevaluated {
+                families: vec![nos_proto::FamilyReeval {
+                    family: nos_proto::ReevalFamily::Ipv4Unicast,
+                    retained: 3,
+                    accepted: 2,
+                }],
+            }
+        }
+        BgpRequest::SendRouteRefresh { peer } if peer.to_string() == "192.0.2.6" => {
+            BgpEvent::Error("re-evaluation superseded/aborted: superseded".into())
+        }
         _ => BgpEvent::PeerNotFound,
     });
     let f = fixture(vec![(ServiceRef::BgpInstance("r1".into()), bgpd)]).await;
@@ -1484,6 +1496,33 @@ async fn clear_bgp_soft_in_maps_the_daemons_reply_to_a_status() {
             StatusCode::OK,
             json!({ "instance": "r1", "peer": "192.0.2.1", "route_refresh": "sent" })
         )
+    );
+    // A peer-group with soft reconfiguration inbound re-evaluates locally.
+    let (s, v) = send(
+        &f.app,
+        Method::POST,
+        "/v1/bgp/r1/peer/192.0.2.5/soft-in",
+        None,
+    )
+    .await;
+    assert_eq!(
+        (s, v),
+        (
+            StatusCode::OK,
+            json!({ "instance": "r1", "peer": "192.0.2.5", "route_refresh": "none",
+                    "reevaluated": [{ "family": "ipv4-unicast", "retained": 3, "accepted": 2 }] })
+        )
+    );
+    assert_eq!(
+        send(
+            &f.app,
+            Method::POST,
+            "/v1/bgp/r1/peer/192.0.2.6/soft-in",
+            None
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
     );
     // No Established session (or unknown peer): 404. Unknown instance: 503. Bad address: 400.
     assert_eq!(
