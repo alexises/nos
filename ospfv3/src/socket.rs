@@ -78,6 +78,8 @@ pub struct OspfSocket {
     auth: Option<(TrailerAuth, Ipv6Addr, AtomicU64)>,
     /// RFC 5340 §A.3.1 Instance ID stamped into every packet sent.
     instance_id: u8,
+    /// `FF02::6` membership, driven by the election outcome (`link::run_election`).
+    drouters: nos_ospf_common::drouters::AllDRouters,
 }
 
 /// Wall-clock floor for the outgoing sequence number — mirrors
@@ -118,7 +120,17 @@ impl OspfSocket {
             inner: AsyncFd::new(socket)?,
             auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
             instance_id,
+            drouters: nos_ospf_common::drouters::AllDRouters::default(),
         })
+    }
+
+    /// Join/leave `FF02::6` so membership equals `want`; whether it changed.
+    pub fn set_all_drouters(&self, ifindex: u32, want: bool) -> io::Result<bool> {
+        self.drouters.sync(
+            self.inner.get_ref(),
+            nos_ospf_common::drouters::Iface::V6(ifindex),
+            want,
+        )
     }
 
     /// `payload` with the link's Instance ID stamped in and, when

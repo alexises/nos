@@ -3472,6 +3472,8 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
     .await?;
 
     let link = format!("link=broadcast-domain:{BD}");
+    let joined = format!("ospfv3 all-drouters membership changed {link} joined=true");
+    let base_c = c.count(&joined);
     a.wait(&format!(
         "ospfv3 neighbor reached two-way {link} neighbor={OSPFV3_ROUTER_ID_B}"
     ))
@@ -3516,6 +3518,11 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
         "ospfv3 neighbor reached full {link} neighbor={OSPFV3_ROUTER_ID_C}"
     ))
     .await?;
+
+    log("only the dr and bdr join ff02::6 (rfc 5340 a.1)");
+    b.wait(&joined).await?;
+    a.wait(&joined).await?;
+    c.assert_quiet(&joined, base_c, 10).await?;
 
     log("router-c holds only the bridge's own link-lsas (rfc 5340 §4.5.1)");
     assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID).await?;

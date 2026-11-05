@@ -121,7 +121,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `ospfv3-mtu-mismatch` | OSPFv3 | ospf-suite | `ospfv3` | OSPFv3 DBD MTU mismatch rejected; `mtu-ignore` reaches Full. |
 | `ospfv3-instance-id` | OSPFv3 | ospf-suite | `ospfv3` | RFC 5340 §A.3.1: an Instance ID mismatch drops packets and blocks Full. |
 | `ospfv3-bfd` | OSPFv3 | ospf-suite | `ospfv3` | The same over OSPFv3: sessions between link-local addresses scoped by `eth0.0`, UDP 3784 dropped with an `ipv6` filter. |
-| `ospfv3-dr` | OSPFv3 | ospf-suite | `ospfv3`, `ospf-dr` | The DR/BDR/DrOther election and Full restriction over OSPFv3 on the shared bridge, plus RFC 5340 §4.5.1 link-local flooding scope. |
+| `ospfv3-dr` | OSPFv3 | ospf-suite | `ospfv3`, `ospf-dr` | The DR/BDR/DrOther election and Full restriction over OSPFv3 on the shared bridge, plus RFC 5340 §4.5.1 link-local flooding scope, and only the DR/BDR join `ff02::6` (#854). |
 | `ospfv3-lfa` | OSPFv3 | ospf-suite | `ospfv3-dr` | OSPFv3 loop-free alternate installed as a link-local backup at a higher metric than the primary. |
 | `ospfv3-flush` | OSPFv3 | ospf-suite | `ospfv3-dr` | A DR that loses its last neighbor prematurely ages its (E-)Network-LSA and the neighbor flushes it within seconds; a SIGKILLed router-b re-originates above its reflected Router-LSA (§13.4). |
 | `ospfv3-mtu-pagination` | OSPFv3 | ospf-suite | self-contained | An `Ospfv3Profile.mtu` override alone (200) drives multi-packet OSPFv3 DBD pagination and splits LSU/LSR/LSAck across packets (20 AS-External-LSAs), still reaching Full with every route learned (#807). |
