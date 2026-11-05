@@ -30,6 +30,7 @@ async fn ask(
             IpcError::Connect { path, source } => InterfaceClientError::Connect { path, source },
             IpcError::Io(e) => InterfaceClientError::Io(e),
             IpcError::Closed => InterfaceClientError::ConnectionClosed,
+            IpcError::Timeout(_) => InterfaceClientError::Io(std::io::ErrorKind::TimedOut.into()),
         })
 }
 

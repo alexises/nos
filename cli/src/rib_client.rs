@@ -30,6 +30,7 @@ async fn ask(rib_socket: &Path, req: RibRequest) -> Result<RibEvent, RibClientEr
             IpcError::Connect { path, source } => RibClientError::Connect { path, source },
             IpcError::Io(e) => RibClientError::Io(e),
             IpcError::Closed => RibClientError::ConnectionClosed,
+            IpcError::Timeout(_) => RibClientError::Io(std::io::ErrorKind::TimedOut.into()),
         })
 }
 
