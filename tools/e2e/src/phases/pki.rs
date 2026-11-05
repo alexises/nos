@@ -340,6 +340,10 @@ async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
     bail!("the restarted nos-ribd never answered a route query")
 }
 
+/// #858: the watchdog's per-write line; `crl_bytes=0` is a rotation frame.
+const PUSHED_EMPTY: &str = "identity pushed process=[^ ]* crl_bytes=0";
+const PUSHED_CRL: &str = "identity pushed process=[^ ]* crl_bytes=[1-9]";
+
 /// Hot rotation: with certificates that expire in seconds, wait past a whole
 /// lifetime, then force fresh handshakes between long-lived processes. Each
 /// only succeeds if the dialing daemon had rotated to a certificate that isn't
@@ -353,6 +357,8 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.wait_new("ipc identity rotated", 0, PKI_ROTATE_EVERY_SECS * 3)
         .await?;
+    // #858: a rotation frame omits the CRL (empty = keep the one held).
+    a.wait(PUSHED_EMPTY).await?;
 
     let wait = PKI_LEAF_LIFETIME_SECS + 10;
     log(format!(
@@ -368,6 +374,11 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
     w.a()?.wait(&bgp::learned()).await?;
     let a = w.a()?;
     let snapshot = "sent initial bgp route snapshot to nos-ribd";
+    let (pushed, empty, updates) = (
+        a.count(PUSHED_CRL),
+        a.count(PUSHED_EMPTY),
+        a.count("ipc crl updated entries="),
+    );
     let (snapshots, kernel_routes, ribds) = (
         a.count(snapshot),
         a.count("added route"),
@@ -379,6 +390,12 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
         .await
         .context("killing nos-ribd")?;
     a.wait_new("nos-ribd starting", ribds, 30).await?;
+    // The revocation reaches the children as a CRL-carrying frame, and the
+    // rotations after it go back to empty frames (#858).
+    a.wait_new(PUSHED_CRL, pushed, 30).await?;
+    a.wait_new("ipc crl updated entries=", updates, 30).await?;
+    a.wait_new(PUSHED_EMPTY, empty, PKI_ROTATE_EVERY_SECS * 3)
+        .await?;
 
     // Router-a's long-lived nos-bgpd sees the old socket close, reconnects to
     // the new nos-ribd with its rotated identity, and the route lands in the
