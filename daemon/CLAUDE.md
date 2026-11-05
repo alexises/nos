@@ -6,7 +6,7 @@ Library crate (#418) holding what every NOS daemon repeated verbatim. Depends on
 
 - `watchdog::{resolve_once, resolve_with_retry}`: resolve a `ServiceRef` against `nos-watchdogd`'s broker; the retry loop is a fixed 1s delay until success or shutdown (`None`).
 - `config::{ConfigClientError, fetch_config, subscribe_diff}`: one-shot `Get` and a `SubscribeDiff` stream. A diff is only a resync trigger; callers re-fetch the config.
-- `ipc::one_shot<Req, Ev>(socket, Role, req) -> Option<Ev>`: connect as `Role`, send one request, read one reply; any failure is a `trace!` and `None`. Per-daemon `get_interface`/`get_vrf_name` stay in their crate as thin wrappers matching the expected reply variant.
+- `ipc::one_shot<Req, Ev>(socket, Role, req) -> Option<Ev>`: connect as `Role`, send one request, read one reply; the exchange is bounded by a 10 s reply timeout (`IpcError::Timeout`); any failure is a `trace!` and `None`. Per-daemon `get_interface`/`get_vrf_name` stay in their crate as thin wrappers matching the expected reply variant.
 - `bootstrap::{identity, init_tracing}`: stdin identity, then registry + `EnvFilter` (default `trace`) + fmt + `ForwardingLayer` + panic hook.
 
 ## Rules

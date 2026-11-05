@@ -1,6 +1,7 @@
 //! Generic best-effort one-shot request/reply against another daemon.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{IpcCodec, Role};
@@ -22,11 +23,29 @@ pub enum IpcError {
     Io(#[from] std::io::Error),
     #[error("connection closed before a reply")]
     Closed,
+    #[error("no reply within {0:?}")]
+    Timeout(Duration),
 }
+
+/// Bound on the send + reply exchange (the TLS handshake has its own).
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Connects to `socket` as a client of `role`, sends `req`, reads one reply.
 /// Callers match the reply variant they expect.
 pub async fn request<Req, Ev>(socket: &Path, role: Role, req: Req) -> Result<Ev, IpcError>
+where
+    Req: Serialize,
+    Ev: DeserializeOwned,
+{
+    request_within(REPLY_TIMEOUT, socket, role, req).await
+}
+
+async fn request_within<Req, Ev>(
+    limit: Duration,
+    socket: &Path,
+    role: Role,
+    req: Req,
+) -> Result<Ev, IpcError>
 where
     Req: Serialize,
     Ev: DeserializeOwned,
@@ -40,12 +59,17 @@ where
     let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<Ev>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<Req>::default());
-    writer.send(req).await?;
-    match reader.next().await {
-        Some(Ok(ev)) => Ok(ev),
-        Some(Err(e)) => Err(IpcError::Io(e)),
-        None => Err(IpcError::Closed),
-    }
+    let exchange = async {
+        writer.send(req).await?;
+        match reader.next().await {
+            Some(Ok(ev)) => Ok(ev),
+            Some(Err(e)) => Err(IpcError::Io(e)),
+            None => Err(IpcError::Closed),
+        }
+    };
+    tokio::time::timeout(limit, exchange)
+        .await
+        .unwrap_or(Err(IpcError::Timeout(limit)))
 }
 
 /// [`request`], best-effort: callers poll this every reconcile tick, and "no
@@ -137,6 +161,24 @@ mod tests {
         let p = tmp.path().join("s.sock");
         serve(&p, Box::new(|_w| Box::pin(async {})));
         assert_eq!(one_shot::<u32, u32>(&p, Role::Ribd, 1).await, None);
+    }
+
+    #[tokio::test]
+    async fn silent_server_times_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("t.sock");
+        serve(
+            &p,
+            Box::new(|_w| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                })
+            }),
+        );
+        assert!(matches!(
+            request_within::<u32, u32>(Duration::from_millis(100), &p, Role::Ribd, 1).await,
+            Err(IpcError::Timeout(_))
+        ));
     }
 
     #[tokio::test]
