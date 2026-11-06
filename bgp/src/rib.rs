@@ -1538,6 +1538,7 @@ impl BgpRib {
             AddressFamily::Ipv6Flowspec => self.accepted_flowspec(peer)[1],
             AddressFamily::Vpnv4Unicast => self.accepted_vpn(peer)[0],
             AddressFamily::Vpnv6Unicast => self.accepted_vpn(peer)[1],
+            AddressFamily::RtConstraint => 0, // counted once the RTC table lands (commit 4)
         }
     }
 

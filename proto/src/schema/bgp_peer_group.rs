@@ -37,11 +37,15 @@ pub enum AddressFamily {
     #[cli(words = "vpnv6")]
     /// RFC 4659 VPN-IPv6 unicast (AFI 2 / SAFI 128).
     Vpnv6Unicast,
+    #[cli(words = "rt-constraint")]
+    /// RFC 4684 Route Target Constraint (AFI 1 / SAFI 132): only the VPN and
+    /// EVPN routes the peer asked for are sent. Needs a VPN or EVPN family.
+    RtConstraint,
 }
 
 impl AddressFamily {
     /// Every variant, in declaration order.
-    pub const ALL: [AddressFamily; 7] = [
+    pub const ALL: [AddressFamily; 8] = [
         AddressFamily::Ipv4Unicast,
         AddressFamily::Ipv6Unicast,
         AddressFamily::L2vpnEvpn,
@@ -49,6 +53,7 @@ impl AddressFamily {
         AddressFamily::Ipv6Flowspec,
         AddressFamily::Vpnv4Unicast,
         AddressFamily::Vpnv6Unicast,
+        AddressFamily::RtConstraint,
     ];
 
     /// The CLI spelling of the family.
@@ -61,6 +66,7 @@ impl AddressFamily {
             AddressFamily::Ipv6Flowspec => "ipv6-flowspec",
             AddressFamily::Vpnv4Unicast => "vpnv4",
             AddressFamily::Vpnv6Unicast => "vpnv6",
+            AddressFamily::RtConstraint => "rt-constraint",
         }
     }
 }
@@ -392,6 +398,10 @@ pub struct BgpMaximumPrefix {
     #[cli(topic = BgpPeerGroupMaximumPrefix)]
     /// Limit for VPN-IPv6; `None` is unlimited.
     pub vpnv6: Option<BgpPrefixLimit>,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    /// Limit for RT-Constraint membership routes; `None` is unlimited.
+    pub rt_constraint: Option<BgpPrefixLimit>,
 }
 
 impl BgpMaximumPrefix {
@@ -405,6 +415,7 @@ impl BgpMaximumPrefix {
             AddressFamily::Ipv6Flowspec => self.ipv6_flowspec,
             AddressFamily::Vpnv4Unicast => self.vpnv4,
             AddressFamily::Vpnv6Unicast => self.vpnv6,
+            AddressFamily::RtConstraint => self.rt_constraint,
         }
     }
 
@@ -418,6 +429,7 @@ impl BgpMaximumPrefix {
             AddressFamily::Ipv6Flowspec => &mut self.ipv6_flowspec,
             AddressFamily::Vpnv4Unicast => &mut self.vpnv4,
             AddressFamily::Vpnv6Unicast => &mut self.vpnv6,
+            AddressFamily::RtConstraint => &mut self.rt_constraint,
         }
     }
 }
@@ -1015,6 +1027,23 @@ pub(crate) fn valid_peer_group_timers(groups: &[BgpPeerGroup], ctx: &Config) -> 
             return Err(garde::Error::new(
                 "maximum-prefix is set for an address family the peer-group does not negotiate",
             ));
+        }
+        if group
+            .address_families
+            .contains(&AddressFamily::RtConstraint)
+            && ![
+                AddressFamily::Vpnv4Unicast,
+                AddressFamily::Vpnv6Unicast,
+                AddressFamily::L2vpnEvpn,
+            ]
+            .iter()
+            .any(|af| group.address_families.contains(af))
+        {
+            return Err(garde::Error::new(format!(
+                "peer-group '{}' enables rt-constraint without vpnv4, vpnv6 or l2vpn-evpn: \
+                 there is nothing to constrain",
+                group.name
+            )));
         }
         valid_next_hop_family(group, ctx)?;
     }
@@ -1659,6 +1688,23 @@ mod tests {
     }
 
     #[test]
+    fn rt_constraint_needs_a_vpn_or_evpn_family() {
+        use AddressFamily::*;
+        let ok = |afs: Vec<AddressFamily>| {
+            let cfg = config_with(vec![instance_with_groups(
+                "r1",
+                vec![group("pg1", 65001, afs)],
+            )]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(!ok(vec![Ipv4Unicast, RtConstraint]));
+        assert!(!ok(vec![RtConstraint]));
+        for f in [Vpnv4Unicast, Vpnv6Unicast, L2vpnEvpn] {
+            assert!(ok(vec![f, RtConstraint]));
+        }
+    }
+
+    #[test]
     fn vpn_families_are_appended_and_round_trip() {
         use AddressFamily::*;
         // postcard indexes by position: existing variants must never move.
@@ -1670,6 +1716,7 @@ mod tests {
             (4, Ipv6Flowspec),
             (5, Vpnv4Unicast),
             (6, Vpnv6Unicast),
+            (7, RtConstraint),
         ] {
             let bytes = postcard::to_allocvec(&f).unwrap();
             assert_eq!(bytes, [i]);
@@ -1702,7 +1749,8 @@ mod tests {
                 "ipv4-flowspec",
                 "ipv6-flowspec",
                 "vpnv4",
-                "vpnv6"
+                "vpnv6",
+                "rt-constraint"
             ]
         );
         let roles = [

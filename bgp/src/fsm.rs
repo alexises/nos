@@ -58,9 +58,10 @@ pub(crate) fn trip_max_prefix(
 
 fn afi_of(family: AddressFamily) -> u16 {
     match family {
-        AddressFamily::Ipv4Unicast | AddressFamily::Ipv4Flowspec | AddressFamily::Vpnv4Unicast => {
-            AFI_IPV4
-        }
+        AddressFamily::Ipv4Unicast
+        | AddressFamily::Ipv4Flowspec
+        | AddressFamily::Vpnv4Unicast
+        | AddressFamily::RtConstraint => AFI_IPV4,
         AddressFamily::Ipv6Unicast | AddressFamily::Ipv6Flowspec | AddressFamily::Vpnv6Unicast => {
             AFI_IPV6
         }
@@ -75,6 +76,7 @@ fn safi_of(family: AddressFamily) -> u8 {
         AddressFamily::L2vpnEvpn => message::SAFI_EVPN,
         AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => message::SAFI_FLOWSPEC,
         AddressFamily::Vpnv4Unicast | AddressFamily::Vpnv6Unicast => message::SAFI_VPN,
+        AddressFamily::RtConstraint => message::SAFI_RTC,
     }
 }
 

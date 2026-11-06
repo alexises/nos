@@ -21,6 +21,7 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 - `label` is optional, 16-1048575 (0-15 are reserved by RFC 3032) and used by no other table. `site_of_origin` is optional and well-formed like an RT (it may equal one).
 - The RD is compared as its 8 encoded bytes against every other table's `vpn.rd` and `evpn.rd` (an RD names one VRF, RFC 4364 section 4.2; EVPN Type-5 shares the namespace). A table may reuse its own `evpn.rd` as `vpn.rd`.
 - `AddressFamily` gained `Vpnv4Unicast` (CLI `vpnv4`, AFI 1 / SAFI 128) and `Vpnv6Unicast` (`vpnv6`, AFI 2 / SAFI 128), appended after `Ipv6Flowspec` (postcard indexes by position). `BgpMaximumPrefix` gained `vpnv4`/`vpnv6`. `nos-bgpd` negotiates and carries them.
+- `AddressFamily::RtConstraint` (CLI `rt-constraint`, RFC 4684, AFI 1 / SAFI 132) is appended last (postcard index 7); `BgpMaximumPrefix.rt_constraint` caps its membership routes. Commit validation: a group that enables it must also enable `vpnv4`, `vpnv6` or `l2vpn-evpn`.
 
 ## `redistribute`: a list keyed by `to`
 
