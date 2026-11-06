@@ -25,6 +25,12 @@ pub enum FieldId {
     BgpMed,
     /// `this.bgp.next_hop` (RFC 4271 `NEXT_HOP`).
     BgpNextHop,
+    /// First AS of the effective path, read-only (see `Op::OptIntCmp`).
+    BgpFirstAs,
+    /// First non-confederation AS of the effective path, read-only.
+    BgpNeighborAs,
+    /// Last AS of the effective path, read-only.
+    BgpOriginAs,
     /// Address of the neighbor the route is imported from / exported to.
     BgpPeer,
     /// AS number of that neighbor.
@@ -132,6 +138,30 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
             id: FieldId::BgpMed,
             ty: FieldType::OptionalInt,
             mutable: true,
+        },
+    ),
+    (
+        &["bgp", "first_as"],
+        FieldInfo {
+            id: FieldId::BgpFirstAs,
+            ty: FieldType::OptionalInt,
+            mutable: false,
+        },
+    ),
+    (
+        &["bgp", "neighbor_as"],
+        FieldInfo {
+            id: FieldId::BgpNeighborAs,
+            ty: FieldType::OptionalInt,
+            mutable: false,
+        },
+    ),
+    (
+        &["bgp", "origin_as"],
+        FieldInfo {
+            id: FieldId::BgpOriginAs,
+            ty: FieldType::OptionalInt,
+            mutable: false,
         },
     ),
     (

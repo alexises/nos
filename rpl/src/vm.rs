@@ -254,6 +254,18 @@ pub enum Op {
     /// `this.bgp.<field> == <ip literal>` on an optional-address field:
     /// false when the field is unset.
     OptIpEq(FieldId, IpAddr),
+    /// `this.bgp.med` read: pushes the current MED, 0 when unset.
+    LoadMed,
+    /// `this.bgp.{first,neighbor,origin}_as <cmp> <int literal>` on the
+    /// effective path: unset is false for every comparison but `!=`.
+    OptIntCmp(FieldId, CmpKind, i64),
+    /// `this.bgp.<optional-ip field> in <cidr>`: false when unset.
+    OptIpIn(FieldId, IpNet),
+    /// `this.bgp.<optional-ip field> in <prefix-list>`: false when unset.
+    OptIpInList(FieldId, Vec<PrefixListEntry>),
+    /// `this.bgp.as_path.path_length` (RFC 4271 section 9.1.2.2) over the
+    /// effective path.
+    AsPathLen,
     /// `this.bgp.rd == rd(..)`: false when the route has no RD.
     OptRdEq(u64),
     /// Pops an `Enum` and sets `this.bgp.origin`.
@@ -312,6 +324,23 @@ pub enum Op {
     Reject,
 }
 
+/// Comparison of an [`Op::OptIntCmp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpKind {
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `>`
+    Gt,
+    /// `>=`
+    Ge,
+}
+
 /// A compiled policy: bytecode plus the stack depth it needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledPolicy {
@@ -348,7 +377,11 @@ pub struct BgpInput<'a> {
     /// `AS_PATH` as a flat ASN list (RFC 4271 §5.1.2).
     pub as_path: &'a [u32],
     /// The same path split into segments, for `matches`/`as-path-list`
-    /// rendering. Empty means "one `AS_SEQUENCE` of `as_path`".
+    /// rendering. For `matches` empty means "one `AS_SEQUENCE` of
+    /// `as_path`"; `path_length` and `first_as`/`neighbor_as`/`origin_as`
+    /// ignore the flat list. A caller MUST therefore pass the complete
+    /// path here, concatenating to `as_path` (empty only for an empty
+    /// path); `run` debug-asserts it.
     pub as_path_segments: &'a [Segment<'a>],
     /// `LOCAL_PREF` (RFC 4271 §5.1.5).
     pub local_pref: u32,
@@ -450,6 +483,10 @@ pub const MAX_STACK_DEPTH: usize = 32;
 /// `Verdict`, but `Cow::to_mut()` only clones on a script's first actual
 /// write, and `Reject` never pays for it at all.
 pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
+    debug_assert!(
+        segments_match_flat(input),
+        "BgpInput.as_path_segments must concatenate to as_path"
+    );
     let mut stack = [Value::Int(0); MAX_STACK_DEPTH];
     let mut sp = 0usize;
     let mut cur_local_pref = input.bgp.local_pref;
@@ -497,15 +534,13 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             Op::ListContainsCommunity(id, val) => push!(Value::Bool(lists.has(*id, val))),
             Op::AsPathMatches(re) => push!(Value::Bool(as_path_matches(re, input, &lists))),
             Op::CommunityMatches(id, re) => push!(Value::Bool(lists.matches(*id, re))),
-            Op::AsPathPrepend(asn, count) => {
-                lists
-                    .as_path
-                    .to_mut()
-                    .splice(0..0, std::iter::repeat_n(*asn, usize::from(*count)));
-            }
-            Op::OptIpEq(id, ip) => {
-                push!(Value::Bool(opt_ip(*id, input, next_hop_edit) == Some(*ip)));
-            }
+            Op::AsPathPrepend(asn, count) => lists.prepend(*asn, *count),
+            Op::LoadMed
+            | Op::OptIntCmp(..)
+            | Op::OptIpEq(..)
+            | Op::OptIpIn(..)
+            | Op::OptIpInList(..)
+            | Op::AsPathLen => push!(read_op(op, input, &lists, next_hop_edit, cur_med)),
             Op::OptRdEq(rd) => push!(Value::Bool(input.bgp.rd == Some(*rd))),
             Op::SetOrigin => cur_origin = origin_from(pop!()),
             Op::SetNextHop => match pop!() {
@@ -611,6 +646,13 @@ struct Lists<'a> {
 }
 
 impl Lists<'_> {
+    /// `Op::AsPathPrepend`.
+    fn prepend(&mut self, asn: u32, count: u8) {
+        self.as_path
+            .to_mut()
+            .splice(0..0, std::iter::repeat_n(asn, usize::from(count)));
+    }
+
     /// `Op::ListContainsCommunity`.
     fn has(&self, id: FieldId, val: &CommunityValue) -> bool {
         match (id, val) {
@@ -754,6 +796,117 @@ fn load_field(id: FieldId, input: &Input, origin: Origin, local_pref: u32) -> Va
         FieldId::BgpLearnedViaIbgp => Value::Bool(input.bgp.learned_via_ibgp),
         FieldId::BgpValidationState => Value::Enum(input.bgp.validation_state as u8),
         _ => unreachable!("check.rs rejects LoadField for {id:?}"),
+    }
+}
+
+/// The path as segments for `path_length` and the AS accessors: the input
+/// segments, with the ASNs the script prepended (the first
+/// `lists.as_path.len() - input.as_path.len()`) joined to the first
+/// `AS_SEQUENCE`, or leading a new one. The flat `as_path` is never a
+/// fallback.
+// ponytail: allocates per evaluation, only for scripts using these ops.
+fn effective_segments(input: &Input, lists: &Lists) -> Vec<(SegKind, Vec<u32>)> {
+    let added = lists.as_path.len().saturating_sub(input.bgp.as_path.len());
+    let new = &lists.as_path[..added];
+    let mut out: Vec<(SegKind, Vec<u32>)> = input
+        .bgp
+        .as_path_segments
+        .iter()
+        .map(|s| (s.kind, s.asns.to_vec()))
+        .collect();
+    if !new.is_empty() {
+        match out.first_mut() {
+            Some((SegKind::Sequence, asns)) => {
+                *asns = new.iter().chain(asns.iter()).copied().collect();
+            }
+            _ => out.insert(0, (SegKind::Sequence, new.to_vec())),
+        }
+    }
+    out
+}
+
+/// The side-effect-free reads (`LoadMed`, the optional-field and path ops),
+/// split out of `run` for length.
+fn read_op(
+    op: &Op,
+    input: &Input,
+    lists: &Lists,
+    next_hop_edit: NextHopSet,
+    med: Option<u32>,
+) -> Value {
+    match op {
+        Op::LoadMed => Value::Int(i64::from(med.unwrap_or(0))),
+        Op::OptIntCmp(id, kind, n) => {
+            Value::Bool(opt_int_cmp(opt_int(*id, input, lists), *kind, *n))
+        }
+        Op::OptIpEq(id, ip) => Value::Bool(opt_ip(*id, input, next_hop_edit) == Some(*ip)),
+        Op::OptIpIn(id, net) => {
+            Value::Bool(opt_ip(*id, input, next_hop_edit).is_some_and(|a| net.contains(&a)))
+        }
+        Op::OptIpInList(id, entries) => Value::Bool(
+            opt_ip(*id, input, next_hop_edit)
+                .is_some_and(|a| prefix_in_list(entries, IpNet::from(a))),
+        ),
+        Op::AsPathLen => Value::Int(as_path_len(input, lists)),
+        _ => unreachable!("run() routes only read ops here"),
+    }
+}
+
+/// The `BgpInput.as_path_segments` contract: empty, or the flat path.
+fn segments_match_flat(input: &Input) -> bool {
+    input.bgp.as_path_segments.is_empty()
+        || input
+            .bgp
+            .as_path_segments
+            .iter()
+            .flat_map(|s| s.asns.iter().copied())
+            .eq(input.bgp.as_path.iter().copied())
+}
+
+/// `Op::OptIntCmp`: an unset value is false for every comparison but `!=`.
+fn opt_int_cmp(v: Option<u32>, kind: CmpKind, n: i64) -> bool {
+    let Some(v) = v.map(i64::from) else {
+        return kind == CmpKind::Ne;
+    };
+    match kind {
+        CmpKind::Eq => v == n,
+        CmpKind::Ne => v != n,
+        CmpKind::Lt => v < n,
+        CmpKind::Le => v <= n,
+        CmpKind::Gt => v > n,
+        CmpKind::Ge => v >= n,
+    }
+}
+
+/// `Op::AsPathLen` (RFC 4271 section 9.1.2.2) over the effective path.
+fn as_path_len(input: &Input, lists: &Lists) -> i64 {
+    effective_segments(input, lists)
+        .iter()
+        .map(|(k, a)| match k {
+            SegKind::Sequence => len_as_int(a.len()),
+            SegKind::Set => 1,
+            SegKind::ConfedSequence | SegKind::ConfedSet => 0,
+        })
+        .fold(0, i64::saturating_add)
+}
+
+/// `Op::OptIntCmp`'s current value.
+fn opt_int(id: FieldId, input: &Input, lists: &Lists) -> Option<u32> {
+    let segs = effective_segments(input, lists);
+    let seq = |s: Option<&(SegKind, Vec<u32>)>, last: bool| match s {
+        Some((SegKind::Sequence, a)) if last => a.last().copied(),
+        Some((SegKind::Sequence, a)) => a.first().copied(),
+        _ => None,
+    };
+    match id {
+        FieldId::BgpFirstAs => seq(segs.first(), false),
+        FieldId::BgpNeighborAs => seq(
+            segs.iter()
+                .find(|(k, _)| !matches!(k, SegKind::ConfedSequence | SegKind::ConfedSet)),
+            false,
+        ),
+        FieldId::BgpOriginAs => seq(segs.last(), true),
+        _ => unreachable!("codegen.rs only emits OptIntCmp for AS accessors"),
     }
 }
 
