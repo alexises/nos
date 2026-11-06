@@ -29,6 +29,7 @@ mod outbox;
 mod policy;
 mod propagation;
 mod retain;
+mod rpl_path;
 mod vpn;
 
 fn prefix(s: &str) -> IpNet {

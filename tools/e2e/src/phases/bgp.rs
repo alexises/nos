@@ -1168,7 +1168,7 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
         // Neighbor context (`peer_as`) and an as-path regex, on a real
         // session: router-a's route arrives with the path [ASN_A] from ASN_A.
         &format!(
-            "if this.bgp.peer_as == {ASN_A} and this.bgp.as_path.matches(\"^{ASN_A}$\"):\n    reject\nelse:\n    accept\n"
+            "if this.bgp.peer_as == {ASN_A} and this.bgp.as_path.matches(\"^{ASN_A}$\") and this.bgp.med == 0 and this.bgp.first_as == {ASN_A} and this.bgp.neighbor_as == {ASN_A} and this.bgp.origin_as == {ASN_A} and this.bgp.as_path.path_length == 1 and this.bgp.next_hop in {SUBNET}:\n    reject\nelse:\n    accept\n"
         ),
     )?;
     b.provision(&[
@@ -1242,7 +1242,7 @@ async fn soft_reconfig(w: &mut World) -> anyhow::Result<()> {
     let file = policy_file(
         "reject-soft-reconfig",
         &format!(
-            "if this.bgp.peer_as == {ASN_A} and this.bgp.as_path.matches(\"^{ASN_A}$\"):\n    reject\nelse:\n    accept\n"
+            "if this.bgp.peer_as == {ASN_A} and this.bgp.as_path.matches(\"^{ASN_A}$\") and this.bgp.med == 0 and this.bgp.first_as == {ASN_A} and this.bgp.neighbor_as == {ASN_A} and this.bgp.origin_as == {ASN_A} and this.bgp.as_path.path_length == 1 and this.bgp.next_hop in {SUBNET}:\n    reject\nelse:\n    accept\n"
         ),
     )?;
     let reeval = |accepted: u32| {

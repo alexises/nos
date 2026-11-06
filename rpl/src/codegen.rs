@@ -10,7 +10,7 @@ use crate::ast::{BinOp, Expr, ExprKind, ExtKind, Policy, Postfix, Stmt, StmtKind
 use crate::schema::{self, FieldInfo, FieldType};
 use crate::symbols::Symbols;
 use crate::vm::{
-    AsPathRegexes, CommunityValue, CompiledPolicy, Op, ValidationState, MAX_STACK_DEPTH,
+    AsPathRegexes, CmpKind, CommunityValue, CompiledPolicy, Op, ValidationState, MAX_STACK_DEPTH,
 };
 use crate::CompileError;
 
@@ -312,6 +312,11 @@ impl Codegen<'_> {
                 self.emit(if op == BinOp::Add { Op::Add } else { Op::Sub }, -1);
                 Ok(Ty::Int)
             }
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+                if self.try_as_accessor_cmp(op, lhs, rhs, line)? =>
+            {
+                Ok(Ty::Bool)
+            }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let lt = self.compile_expr(lhs)?;
                 expect_ty(lt, Ty::Int, lhs.line)?;
@@ -371,6 +376,34 @@ impl Codegen<'_> {
                 Ok(Ty::Bool)
             }
             BinOp::In => {
+                if let Some(id) = optional_ip_field(lhs) {
+                    match &rhs.kind {
+                        ExprKind::PrefixLit(net) => {
+                            self.emit(Op::OptIpIn(id, *net), 1);
+                        }
+                        ExprKind::Ident(name) => {
+                            let Some((_, entries)) = self
+                                .symbols
+                                .prefix_lists
+                                .iter()
+                                .find(|(n, _)| *n == name.as_str())
+                            else {
+                                return Err(CompileError::new(
+                                    rhs.line,
+                                    format!("undefined prefix-list '{name}'"),
+                                ));
+                            };
+                            self.emit(Op::OptIpInList(id, entries.to_vec()), 1);
+                        }
+                        _ => {
+                            return Err(CompileError::new(
+                                rhs.line,
+                                "'in' on an address field needs a prefix literal or a prefix-list",
+                            ));
+                        }
+                    }
+                    return Ok(Ty::Bool);
+                }
                 if let (ExprKind::Ident(name), true) = (&rhs.kind, is_as_path(lhs)) {
                     let Some((_, patterns)) = self
                         .symbols
@@ -416,6 +449,38 @@ impl Codegen<'_> {
         }
     }
 
+    /// `this.bgp.{first,neighbor,origin}_as <cmp> <int literal>`: emits
+    /// `Op::OptIntCmp` and returns true; false when `lhs` is not an AS
+    /// accessor. An accessor with any other rhs, or on the rhs, is an error.
+    fn try_as_accessor_cmp(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        line: usize,
+    ) -> Result<bool, CompileError> {
+        let l = optional_int_field(lhs);
+        if l.is_none() && optional_int_field(rhs).is_none() {
+            return Ok(false);
+        }
+        let (Some(id), ExprKind::IntLit(n)) = (l, &rhs.kind) else {
+            return Err(CompileError::new(
+                line,
+                "'first_as'/'neighbor_as'/'origin_as' compare only as 'this.bgp.<field> <op> <integer literal>'",
+            ));
+        };
+        let kind = match op {
+            BinOp::Eq => CmpKind::Eq,
+            BinOp::Ne => CmpKind::Ne,
+            BinOp::Lt => CmpKind::Lt,
+            BinOp::Le => CmpKind::Le,
+            BinOp::Gt => CmpKind::Gt,
+            _ => CmpKind::Ge,
+        };
+        self.emit(Op::OptIntCmp(id, kind, *n), 1);
+        Ok(true)
+    }
+
     fn compile_field_access(
         &mut self,
         segments: &[Postfix],
@@ -449,6 +514,12 @@ impl Codegen<'_> {
         }
         match &leftover[0] {
             Postfix::Field(name) if name == "length" => self.compile_field_len(info, line),
+            Postfix::Field(name)
+                if name == "path_length" && info.id == schema::FieldId::BgpAsPath =>
+            {
+                self.emit(Op::AsPathLen, 1);
+                Ok(Ty::Int)
+            }
             Postfix::Field(other) => Err(CompileError::new(
                 line,
                 format!("unknown property '.{other}'"),
@@ -497,7 +568,15 @@ impl Codegen<'_> {
                 self.emit(Op::LoadField(info.id), 1);
                 Ok(Ty::Enum(name))
             }
-            FieldType::OptionalInt | FieldType::OptionalIp | FieldType::OptionalRd => Err(CompileError::new(
+            FieldType::OptionalInt if info.id == schema::FieldId::BgpMed => {
+                self.emit(Op::LoadMed, 1);
+                Ok(Ty::Int)
+            }
+            FieldType::OptionalInt => Err(CompileError::new(
+                line,
+                "this field may be unset: compare it with '==', '!=', '<', '<=', '>' or '>=' against an integer literal",
+            )),
+            FieldType::OptionalIp | FieldType::OptionalRd => Err(CompileError::new(
                 line,
                 "this field may be unset and can't be read directly yet (only 'set' is supported)",
             )),
@@ -808,6 +887,24 @@ fn optional_ip_field(expr: &Expr) -> Option<schema::FieldId> {
 fn is_rd_field(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::This(s)
         if matches!(s.as_slice(), [Postfix::Field(a), Postfix::Field(b)] if a == "bgp" && b == "rd"))
+}
+
+/// The `FieldId` of `this.bgp.{first,neighbor,origin}_as` exactly.
+fn optional_int_field(expr: &Expr) -> Option<schema::FieldId> {
+    use crate::schema::FieldId::{BgpFirstAs, BgpNeighborAs, BgpOriginAs};
+    let ExprKind::This(segments) = &expr.kind else {
+        return None;
+    };
+    let names: Vec<String> = segments
+        .iter()
+        .map(|s| match s {
+            Postfix::Field(n) => Some(n.clone()),
+            Postfix::Call(..) => None,
+        })
+        .collect::<Option<_>>()?;
+    let (info, consumed) = schema::resolve_field(&names)?;
+    (consumed == names.len() && matches!(info.id, BgpFirstAs | BgpNeighborAs | BgpOriginAs))
+        .then_some(info.id)
 }
 
 /// `this.bgp.as_path` exactly, with no suffix.
@@ -1538,7 +1635,7 @@ mod tests {
 
     #[test]
     fn reading_optional_field_is_a_compile_error() {
-        let err = compile_err("if this.bgp.med == 50:\n    accept\nelse:\n    reject\n");
+        let err = compile_err("if this.bgp.first_as:\n    accept\nelse:\n    reject\n");
         assert!(err.to_string().contains("unset"));
     }
 
@@ -1845,5 +1942,196 @@ mod tests {
         ] {
             assert!(crate::compile(src, &Symbols::EMPTY).is_err(), "{src}");
         }
+    }
+
+    /// Runs `pre` then `if cond: accept else: reject`; true when accepted.
+    fn eval(
+        pre: &str,
+        cond: &str,
+        symbols: &Symbols,
+        segs: &[vm::Segment],
+        med: Option<u32>,
+        next_hop: Option<std::net::IpAddr>,
+    ) -> bool {
+        let p = compile_src_with(
+            &format!("{pre}\nif {cond}:\n    accept\nelse:\n    reject\n"),
+            symbols,
+        );
+        let flat: Vec<u32> = segs.iter().flat_map(|s| s.asns.iter().copied()).collect();
+        let (prefix, _, cl) = default_input("10.0.0.0/8");
+        let mut input = make_input(prefix, &flat, 100, med, &cl);
+        input.bgp.as_path_segments = segs;
+        input.bgp.next_hop = next_hop;
+        matches!(vm::run(&p, &input), Verdict::Accept { .. })
+    }
+
+    fn seg(kind: vm::SegKind, asns: &[u32]) -> vm::Segment<'_> {
+        vm::Segment { kind, asns }
+    }
+
+    #[test]
+    fn med_reads_zero_when_unset_and_sees_own_writes() {
+        let ev = |pre: &str, c: &str, med| eval(pre, c, &Symbols::EMPTY, &[], med, None);
+        assert!(ev("", "this.bgp.med == 0", None));
+        assert!(ev("", "this.bgp.med < 1", None));
+        assert!(ev("", "this.bgp.med == 7", Some(7)));
+        assert!(ev("", "this.bgp.med != 0", Some(7)));
+        assert!(ev("", "this.bgp.med <= 7", Some(7)));
+        assert!(ev("", "this.bgp.med >= 7", Some(7)));
+        assert!(ev("", "this.bgp.med > 6", Some(7)));
+        assert!(!ev("", "this.bgp.med > 7", Some(7)));
+        assert!(ev("set this.bgp.med = 5", "this.bgp.med > 4", None));
+        assert!(ev("set this.bgp.med += 2", "this.bgp.med == 2", None));
+        assert!(ev("", "this.bgp.med + 1 == 8", Some(7)));
+    }
+
+    #[test]
+    fn next_hop_in_prefix_and_prefix_list() {
+        let entries: &[PrefixListEntry] = &[
+            PrefixListEntry {
+                cidr: "10.1.0.1/32".parse().unwrap(),
+                range: None,
+            },
+            PrefixListEntry {
+                cidr: "2001:db8::/32".parse().unwrap(),
+                range: Some((64, 128)),
+            },
+        ];
+        let lists: &[(&str, &[PrefixListEntry])] = &[("NH", entries)];
+        let symbols = Symbols {
+            aliases: &[],
+            groups: &[],
+            prefix_lists: lists,
+            as_path_lists: &[],
+        };
+        let v4: Option<std::net::IpAddr> = Some("10.1.0.1".parse().unwrap());
+        let v4b: Option<std::net::IpAddr> = Some("10.1.0.2".parse().unwrap());
+        let v6: Option<std::net::IpAddr> = Some("2001:db8::5".parse().unwrap());
+        let ev = |pre: &str, c: &str, nh| eval(pre, c, &symbols, &[], None, nh);
+        assert!(ev("", "this.bgp.next_hop in 10.0.0.0/8", v4));
+        assert!(!ev("", "this.bgp.next_hop in 10.0.0.0/8", v6));
+        assert!(!ev("", "this.bgp.next_hop in 10.0.0.0/8", None));
+        assert!(ev("", "not this.bgp.next_hop in 10.0.0.0/8", None));
+        assert!(ev("", "this.bgp.next_hop in NH", v4));
+        assert!(!ev("", "this.bgp.next_hop in NH", v4b));
+        assert!(ev("", "this.bgp.next_hop in NH", v6));
+        assert!(!ev("", "this.bgp.next_hop in NH", None));
+        assert!(ev(
+            "set this.bgp.next_hop = 10.0.0.1",
+            "this.bgp.next_hop in 10.0.0.0/8",
+            None
+        ));
+        assert!(!ev(
+            "set this.bgp.next_hop = self",
+            "this.bgp.next_hop in 10.0.0.0/8",
+            v4
+        ));
+        assert!(ev("", "this.bgp.peer in 10.0.0.0/8 or this.bgp.router_id in 1.0.0.0/8 or this.bgp.originator_id in 1.0.0.0/8 or this.bgp.next_hop in 10.0.0.0/8", v4));
+        let err = compile_err_with(
+            "if this.bgp.next_hop in NOPE:\n    accept\nelse:\n    reject\n",
+            &symbols,
+        );
+        assert!(err.to_string().contains("undefined prefix-list"));
+        assert!(crate::compile(
+            "if this.bgp.next_hop in 5:\n    accept\nelse:\n    reject\n",
+            &Symbols::EMPTY
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn as_accessors_and_path_length() {
+        use vm::SegKind::*;
+        let ev = |pre: &str, c: &str, segs: &[vm::Segment]| {
+            eval(pre, c, &Symbols::EMPTY, segs, None, None)
+        };
+        let seq = [seg(Sequence, &[65001, 65002, 65003])];
+        assert!(ev("", "this.bgp.first_as == 65001", &seq));
+        assert!(ev("", "this.bgp.neighbor_as == 65001", &seq));
+        assert!(ev("", "this.bgp.origin_as == 65003", &seq));
+        assert!(ev(
+            "",
+            "this.bgp.origin_as >= 65003 and this.bgp.origin_as <= 65003",
+            &seq
+        ));
+        assert!(ev(
+            "",
+            "this.bgp.origin_as > 1 and this.bgp.origin_as < 70000",
+            &seq
+        ));
+        assert!(ev("", "this.bgp.as_path.path_length == 3", &seq));
+        assert!(ev("", "this.bgp.as_path.length == 3", &seq));
+        // Leading confed segment: neighbor skips it, first_as is unset.
+        let confed = [
+            seg(ConfedSequence, &[65100]),
+            seg(Sequence, &[65001]),
+            seg(Set, &[1, 2, 3]),
+        ];
+        assert!(!ev("", "this.bgp.first_as == 65100", &confed));
+        assert!(ev("", "this.bgp.first_as != 65100", &confed));
+        assert!(ev("", "this.bgp.neighbor_as == 65001", &confed));
+        // Ends in an AS_SET: origin unset, == false, != true; set counts 1.
+        assert!(!ev("", "this.bgp.origin_as == 3", &confed));
+        assert!(ev("", "this.bgp.origin_as != 3", &confed));
+        assert!(!ev("", "this.bgp.origin_as < 100", &confed));
+        assert!(ev("", "this.bgp.as_path.path_length == 2", &confed));
+        // A leading AS_SET: neighbor unset too.
+        let set_first = [seg(Set, &[1, 2]), seg(Sequence, &[9])];
+        assert!(!ev("", "this.bgp.neighbor_as == 1", &set_first));
+        assert!(ev("", "this.bgp.origin_as == 9", &set_first));
+        // Empty segments: everything unset / zero, even with a flat path.
+        assert!(ev("", "this.bgp.as_path.path_length == 0", &[]));
+        assert!(ev("", "this.bgp.first_as != 1", &[]));
+        assert!(!ev("", "this.bgp.origin_as == 0", &[]));
+        // Prepend joins the first sequence, or leads a new one.
+        assert!(ev(
+            "this.bgp.as_path.prepend(7, 3)",
+            "this.bgp.first_as == 7 and this.bgp.as_path.path_length == 6 and this.bgp.origin_as == 65003",
+            &seq
+        ));
+        assert!(ev(
+            "this.bgp.as_path.prepend(7, 2)",
+            "this.bgp.neighbor_as == 7 and this.bgp.as_path.path_length == 4 and this.bgp.as_path.length == 7",
+            &confed
+        ));
+        let only_set = [seg(Set, &[5, 6])];
+        assert!(ev(
+            "this.bgp.as_path.prepend(7)",
+            "this.bgp.first_as == 7 and this.bgp.origin_as != 6 and this.bgp.as_path.path_length == 2",
+            &only_set
+        ));
+        // Empty segments + prepend: the prepended ASNs are the whole path.
+        assert!(ev(
+            "this.bgp.as_path.prepend(7, 2)",
+            "this.bgp.first_as == 7 and this.bgp.origin_as == 7 and this.bgp.as_path.path_length == 2",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn as_accessor_misuse_is_a_compile_error() {
+        for src in [
+            "if this.bgp.first_as:\n    accept\nelse:\n    reject\n",
+            "if this.bgp.first_as == this.bgp.peer_as:\n    accept\nelse:\n    reject\n",
+            "if 5 < this.bgp.origin_as:\n    accept\nelse:\n    reject\n",
+            "set this.bgp.first_as = 5\naccept\n",
+            "if this.bgp.local_pref.path_length == 1:\n    accept\nelse:\n    reject\n",
+            "if this.bgp.first_as in 10.0.0.0/8:\n    accept\nelse:\n    reject\n",
+        ] {
+            assert!(crate::compile(src, &Symbols::EMPTY).is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn empty_segments_ignore_flat_path() {
+        let (prefix, _, cl) = default_input("10.0.0.0/8");
+        let flat = [65001, 65002];
+        let input = make_input(prefix, &flat, 100, None, &cl);
+        let p = compile_src(
+            "if this.bgp.as_path.path_length == 0 and this.bgp.first_as != 65001:\n    accept\nelse:\n    reject\n",
+        );
+        // segments empty but flat non-empty violates the contract only for
+        // non-empty segments, so this is the documented "no fallback" case.
+        assert!(matches!(vm::run(&p, &input), Verdict::Accept { .. }));
     }
 }
