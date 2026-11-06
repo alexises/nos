@@ -249,6 +249,10 @@ pub const VPN_RD_A: &str = "65000:100";
 /// `vpn-export`: router-b's RD and the RT both PEs export and import.
 pub const VPN_RD_B: &str = "65000:200";
 pub const VPN_RT: &str = "65000:1";
+/// `rtc`: router-a's VRF import RT (originated as RT-Constraint membership
+/// with origin AS `ASN_A`) and the one a commit swaps it for.
+pub const RTC_IMPORT: &str = "65000:1";
+pub const RTC_IMPORT_2: &str = "65000:2";
 /// `vpn-export`: each PE's VRF loopback, the connected route it exports.
 pub const VPN_EXPORT_A: &str = "192.0.2.10/32";
 pub const VPN_EXPORT_B: &str = "192.0.2.20/32";

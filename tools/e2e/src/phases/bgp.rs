@@ -3729,6 +3729,12 @@ pub(super) async fn start_gobgp(w: &World, afi_safis: &[&str]) -> anyhow::Result
 
 /// `start_gobgp` with GoBGP in AS `asn` (`ASN_A` makes it an iBGP peer).
 async fn start_gobgp_as(w: &World, afi_safis: &[&str], asn: u32) -> anyhow::Result<()> {
+    start_gobgp_gr(w, afi_safis, asn, false).await
+}
+
+/// `start_gobgp_as`, with `gr`: RFC 4724 graceful restart (restart and helper
+/// roles) enabled for every family in `afi_safis`.
+async fn start_gobgp_gr(w: &World, afi_safis: &[&str], asn: u32, gr: bool) -> anyhow::Result<()> {
     log("building/starting the GoBGP speaker (router-g)");
     w.dock
         .ensure_image(GOBGP_IMAGE, &gobgp_dockerfile())
@@ -3739,11 +3745,21 @@ async fn start_gobgp_as(w: &World, afi_safis: &[&str], asn: u32) -> anyhow::Resu
          [neighbors.transport.config]\n    local-address = \"{IP_G}\"\n  \
          [neighbors.timers.config]\n    connect-retry = 5\n"
     );
+    if gr {
+        conf.push_str(
+            "  [neighbors.graceful-restart.config]\n    enabled = true\n    restart-time = 120\n",
+        );
+    }
     for n in afi_safis {
         let _ = write!(
             conf,
             "  [[neighbors.afi-safis]]\n    [neighbors.afi-safis.config]\n      afi-safi-name = \"{n}\"\n"
         );
+        if gr {
+            conf.push_str(
+                "    [neighbors.afi-safis.mp-graceful-restart.config]\n      enabled = true\n",
+            );
+        }
     }
     w.dock
         .start_plain(
@@ -9467,5 +9483,214 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
     );
     w.dock.container_remove("router-g").await;
     w.remove(C).await;
+    Ok(())
+}
+
+/// router-a's flags for `rtc`: `vpn_flags` (VRF `VPN_TABLE` importing
+/// `import_rt`) plus EVPN, `rt-constraint` and the `evpn-fdb` broadcast
+/// domain, all toward GoBGP.
+fn rtc_flags(import_rt: &str) -> Vec<String> {
+    let mut f = vpn_flags(import_rt);
+    f.extend(strings(&[
+        "--evpn",
+        "--rtc",
+        "--vpn-loopback-address",
+        VPN_EXPORT_A,
+        "--broadcast-domain",
+        EVPN_DOMAIN,
+        "--evpn-vni",
+        &EVPN_VNI.to_string(),
+        "--evpn-rd",
+        EVPN_RD,
+        "--evpn-rt-import",
+        EVPN_RT_IMPORT,
+        "--evpn-rt-export",
+        EVPN_RT_EXPORT,
+        "--evpn-vtep-source-interface",
+        "eth0",
+        "--evpn-redistribute-bgp",
+        "r1",
+    ]));
+    f
+}
+
+/// Polls GoBGP's `family` RIB (`gobgp global rib -a <family>`) until
+/// `want(rib)` holds.
+async fn gobgp_rib_until(
+    w: &World,
+    family: &str,
+    what: &str,
+    want: impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = gobgp(w, &["global", "rib", "-a", family]).await?;
+        if want(&last) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("GoBGP's {family} RIB never {what}: {last}")
+}
+
+/// RFC 4684 Route Target Constraint against GoBGP (#875). router-a has a VRF
+/// (import `RTC_IMPORT`, export `VPN_RD_A`), a VNI domain (import
+/// `EVPN_RT_IMPORT`, export `EVPN_RT_EXPORT`) and `rt-constraint`.
+///
+/// - GoBGP sends no membership: router-a holds back its VPN route and
+///   Type-3 (GoBGP's VPNv4 and EVPN RIBs stay empty);
+/// - GoBGP's membership for the VRF's export RT releases the VPN route,
+///   its withdrawal takes it back; the Type-3 follows its own RT;
+/// - the default membership route releases everything, its withdrawal takes
+///   everything back;
+/// - reverse: router-a originates its import RTs (origin AS router-a's AS),
+///   a commit changing the VRF import RT swaps them;
+/// - graceful restart (GoBGP carries (1, 132) in its GR capability): killing
+///   router-a's `nos-bgpd` keeps GoBGP's copy of the VPN route, and
+///   router-a's selection deferral ends only after GoBGP's membership is back.
+pub async fn rtc(w: &mut World) -> anyhow::Result<()> {
+    w.start(A, Some(rtc_flags(RTC_IMPORT)), &[]).await?;
+    start_gobgp_gr(w, &["l3vpn-ipv4-unicast", "l2vpn-evpn", "rtc"], ASN_G, true).await?;
+    mpls_ready(w, &["router-a"]).await?;
+    let a = w.a()?;
+    a.wait(&format!(
+        "address families negotiated peer={IP_G} families=\\[.*\"rt-constraint\""
+    ))
+    .await?;
+    let advertised = format!(
+        "vpn route advertised peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix={VPN_EXPORT_A} "
+    );
+    let withdrawn = format!(
+        "vpn route advertisement withdrawn peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix={VPN_EXPORT_A}"
+    );
+    let in_gobgp = format!("{VPN_RD_A}:{VPN_EXPORT_A}");
+    let has_vpn = |present: bool| gobgp_vpn_until(w, "vpnv4", &in_gobgp, present);
+    let type3 = |rib: &str| {
+        rib.lines()
+            .any(|l| l.contains("multicast") && l.contains(&format!("rd:{EVPN_RD}")))
+    };
+    let rtc = |verb: &'static str, spec: &[&str]| {
+        let mut v = strings(&["global", "rib", "-a", "rtc", verb]);
+        v.extend(strings(spec));
+        gobgp_owned(w, v)
+    };
+    let g_asn = ASN_G.to_string();
+
+    log("no membership from GoBGP: nothing is advertised");
+    a.wait("vxlan device ready").await?;
+    let base = a.count(&advertised);
+    a.assert_quiet(&advertised, base, 8).await?;
+    let out = gobgp(w, &["global", "rib", "-a", "vpnv4"]).await?;
+    anyhow::ensure!(!out.contains(&in_gobgp), "VPN route leaked: {out}");
+    let out = gobgp(w, &["global", "rib", "-a", "evpn"]).await?;
+    anyhow::ensure!(!type3(&out), "Type-3 leaked: {out}");
+
+    log("membership for the VRF's export RT releases the VPN route, not the Type-3");
+    let base = a.count(&advertised);
+    rtc("add", &["asn", &g_asn, "rt", VPN_RD_A]).await?;
+    a.wait_new(&advertised, base, 30).await?;
+    has_vpn(true).await?;
+    let out = gobgp(w, &["global", "rib", "-a", "evpn"]).await?;
+    anyhow::ensure!(!type3(&out), "Type-3 sent without its RT: {out}");
+
+    log("membership for the domain's export RT releases the Type-3");
+    rtc("add", &["asn", &g_asn, "rt", EVPN_RT_EXPORT]).await?;
+    gobgp_rib_until(w, "evpn", "showed router-a's Type-3", type3).await?;
+
+    log("withdrawing the VRF membership withdraws the VPN route");
+    let base = a.count(&withdrawn);
+    rtc("del", &["asn", &g_asn, "rt", VPN_RD_A]).await?;
+    a.wait_new(&withdrawn, base, 30).await?;
+    has_vpn(false).await?;
+    rtc("del", &["asn", &g_asn, "rt", EVPN_RT_EXPORT]).await?;
+    gobgp_rib_until(w, "evpn", "dropped the Type-3", |r| !type3(r)).await?;
+
+    log("the default membership route wants everything");
+    let base = a.count(&advertised);
+    rtc("add", &["default"]).await?;
+    a.wait_new(&advertised, base, 30).await?;
+    has_vpn(true).await?;
+    gobgp_rib_until(w, "evpn", "showed router-a's Type-3", type3).await?;
+    let base = a.count(&withdrawn);
+    rtc("del", &["default"]).await?;
+    a.wait_new(&withdrawn, base, 30).await?;
+    has_vpn(false).await?;
+    gobgp_rib_until(w, "evpn", "dropped the Type-3", |r| !type3(r)).await?;
+
+    log("reverse: router-a originates its VRF and domain import RTs");
+    let member = |asn: u32, rt: &str| format!("{asn}:{rt}/96");
+    let held = |rt: &'static str| {
+        let want = member(ASN_A, rt);
+        move |r: &str| r.contains(&want)
+    };
+    gobgp_rib_until(w, "rtc", "showed the VRF import RT", held(RTC_IMPORT)).await?;
+    gobgp_rib_until(
+        w,
+        "rtc",
+        "showed the domain import RT",
+        held(EVPN_RT_IMPORT),
+    )
+    .await?;
+    log("changing the VRF import RT swaps the membership route");
+    a.provision_flags(&rtc_flags(RTC_IMPORT_2)).await?;
+    gobgp_rib_until(w, "rtc", "showed the new import RT", held(RTC_IMPORT_2)).await?;
+    gobgp_rib_until(w, "rtc", "dropped the old import RT", |r| {
+        !r.contains(&member(ASN_A, RTC_IMPORT))
+    })
+    .await?;
+    a.provision_flags(&rtc_flags(RTC_IMPORT)).await?;
+    gobgp_rib_until(w, "rtc", "showed the VRF import RT again", held(RTC_IMPORT)).await?;
+
+    rtc_graceful_restart(w).await
+}
+
+/// `rtc`'s last step: GoBGP's graceful restart capability lists `rtc` and so
+/// does router-a's; with GoBGP's membership `default`, router-a's `nos-bgpd`
+/// is killed and must re-learn the membership, receive GoBGP's RTC
+/// End-of-RIB and re-advertise the VPN route.
+// ponytail: GoBGP does not send its unicast routes once RT-Constraint is
+// negotiated, so `nos-ribd` holds no BGP route across the kill: router-a's
+// restart is not deferred here, and "the deferral waits for the RTC
+// End-of-RIB" is covered by a unit test only.
+async fn rtc_graceful_restart(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let in_gobgp = format!("{VPN_RD_A}:{VPN_EXPORT_A}");
+    let learned = format!("rtc membership learned peer={IP_G} ");
+    let eor = format!("received end-of-rib peer={IP_G} family=rt-constraint");
+    let advertised = format!(
+        "vpn route advertised peer={IP_G} family=vpnv4 rd={VPN_RD_A} prefix={VPN_EXPORT_A} "
+    );
+    let est = "bgp session established";
+    gobgp_owned(
+        w,
+        strings(&["global", "rib", "-a", "rtc", "add", "default"]),
+    )
+    .await?;
+    gobgp_vpn_until(w, "vpnv4", &in_gobgp, true).await?;
+    // Both capabilities carry (1, 132): GoBGP lists `rtc` among router-a's
+    // restartable families.
+    let neighbor = gobgp(w, &["neighbor", IP_A]).await?;
+    let remote = neighbor
+        .split("Remote:")
+        .nth(1)
+        .context("GoBGP shows no remote graceful restart capability")?;
+    anyhow::ensure!(
+        remote.contains("rtc"),
+        "router-a's graceful restart capability lacks rtc: {neighbor}"
+    );
+
+    log("killing router-a's nos-bgpd: it re-learns the membership and GoBGP's End-of-RIB");
+    let (learned_n, eor_n, adv_n, est_n) = (
+        a.count(&learned),
+        a.count(&eor),
+        a.count(&advertised),
+        a.count(est),
+    );
+    w.dock.kill_process("router-a", "nos-bgpd").await?;
+    a.wait_new(est, est_n, 90).await?;
+    a.wait_new(&learned, learned_n, 60).await?;
+    a.wait_new(&eor, eor_n, 60).await?;
+    a.wait_new(&advertised, adv_n, 60).await?;
+    gobgp_vpn_until(w, "vpnv4", &in_gobgp, true).await?;
     Ok(())
 }

@@ -795,6 +795,9 @@ pub struct BgpRib {
     rtc_local: std::collections::BTreeSet<u64>,
     /// Per key, the selected copy and where it came from (`select_rtc`).
     rtc_loc: HashMap<RtcKey, (RouteOrigin, RibRoute)>,
+    /// Membership kept across a graceful restart (RFC 4724), still live
+    /// interest until re-announced, End-of-RIB or the timers.
+    rtc_stale: HashMap<IpAddr, HashSet<RtcKey>>,
     /// What each peer was last sent per key (`sync_rtc_to`).
     rtc_adj_rib_out: HashMap<IpAddr, HashMap<RtcKey, AdvertisedRtc>>,
     /// Peers whose peer-group tunes Flowspec validation (`set_peer_flowspec_validation`).
@@ -951,6 +954,7 @@ impl BgpRib {
             rtc_adj_rib_in: HashMap::new(),
             rtc_local: std::collections::BTreeSet::new(),
             rtc_loc: HashMap::new(),
+            rtc_stale: HashMap::new(),
             rtc_adj_rib_out: HashMap::new(),
             flow_ix: flowspec_validate::FlowIndexes::default(),
             stale: HashMap::new(),
@@ -1694,17 +1698,21 @@ impl BgpRib {
         self.rtc_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
-        // ponytail: membership is dropped with the session even under graceful
-        // restart (no `rtc_stale` yet); the peer re-announces it on return.
-        let rtcs: Vec<RtcKey> = self
-            .rtc_adj_rib_in
-            .get(&peer)
-            .into_iter()
-            .flat_map(HashMap::keys)
-            .copied()
-            .collect();
-        for k in rtcs {
-            self.drop_rtc(peer, &k);
+        // Membership survives a graceful restart that lists RT-Constraint
+        // (`retain_as_stale` marks it stale); otherwise it goes with the
+        // session.
+        if !retained.contains(&AddressFamily::RtConstraint) {
+            let rtcs: Vec<RtcKey> = self
+                .rtc_adj_rib_in
+                .get(&peer)
+                .into_iter()
+                .flat_map(HashMap::keys)
+                .copied()
+                .collect();
+            for k in rtcs {
+                self.drop_rtc(peer, &k);
+            }
+            self.rtc_stale.remove(&peer);
         }
         if let (false, Some(gr)) = (retained.is_empty(), gr) {
             self.retain_as_stale(peer, gr, &retained);

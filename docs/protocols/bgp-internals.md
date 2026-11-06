@@ -202,6 +202,8 @@ On by default: `BgpInstance.graceful_restart` (`nos_proto::BgpGracefulRestart { 
 
 Verified by `nos-e2e bgp-graceful-restart` (nos↔nos, both sides) and `bgp-gr-frr` (FRR), and `bgp/tests/session.rs`'s `graceful_restart_keeps_routes_across_a_graceful_reset` and `shutdown_sends_a_hard_reset_so_the_peer_keeps_nothing` (SIGINT's Cease, which a bare abort would turn into retention).
 
+Performance: run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles memory. `set_igp` re-decides every Adj-RIB-In prefix, not only the Loc-RIB, and `next_hop_feasible` also gates the backup pick.
+
 ### RT-Constraint (RFC 4684, #875)
 
 - Code: `rib/rtc.rs` (RIB), `message.rs` (`RtcNlri`, `decode_rtc_nlris`/`encode_rtc_nlris`, `SAFI_RTC`), `fsm.rs` (`negotiate_rtc`). Family `AddressFamily::RtConstraint` (AFI 1 / SAFI 132, IPv4 only), carried in the Multiprotocol capability and our graceful restart capability tuple.
@@ -209,8 +211,8 @@ Verified by `nos-e2e bgp-graceful-restart` (nos↔nos, both sides) and `bgp-gr-f
 - Selection and advertisement reuse `best_path` and `build_advertisement` (reflection, eBGP prepend) with an accept-all policy; the next hop is always our session address. `ponytail:` export/import policy does not apply to membership.
 - Filter: `PeerOutbox.rtc_interest` is `None` when the family is not negotiated (nothing filtered), else `RtcInterest` built from the peer's whole `rtc_adj_rib_in`. `advertise_vpn` and `evpn_out::advertise` consult it (Type-4 never). `rtc_changed` re-syncs only routes whose RTs the changed keys cover (`resync_vpn`, `resync_evpn`). `ponytail:` O(table) scan per membership batch; index by RT if profiling asks.
 - Initial update: membership dump, RTC End-of-RIB (sent whenever the family is negotiated, not duplicated by the graceful restart loop), then the VPN/EVPN dump.
-- Unverified RFC points: RFC 4684 section 4 does not define what a partial prefix or a 32-bit prefix matches; the rule used is "first `bits - 32` bits of the RT, origin AS ignored". No interop run against another implementation yet.
-- Graceful restart for SAFI 132 is not implemented: `peer_disconnected` drops the peer's membership even when it retains its other families, and there is no `rtc_stale` set. Planned in #875's second PR.
+- Unverified RFC points: RFC 4684 section 4 does not define what a partial prefix or a 32-bit prefix matches; the rule used is "first `bits - 32` bits of the RT, origin AS ignored". Interop: the `rtc` e2e phase runs against GoBGP 4.9.0; its VPN/EVPN filtering by a 96-bit membership and the default route behave as implemented, and GoBGP cannot announce a partial prefix (its CLI stores any length as /96), so partial matching is unit-tested only. GoBGP does not send its unicast routes to a peer once RT-Constraint is negotiated, so the restart-deferral wait for the RTC End-of-RIB is unit-tested only.
+- Graceful restart (Q10 b): `peer_disconnected` keeps `rtc_adj_rib_in` when `RtConstraint` is among the retained families and `retain_as_stale` -> `mark_rtc_stale` fills `rtc_stale: HashMap<IpAddr, HashSet<RtcKey>>`; otherwise it drops the membership as before. Stale entries are live interest (`rtc_interest_for` reads the whole table), so the returning peer's VPN/EVPN dump is already filtered. `apply_withdrawals` clears a key's stale mark when the peer mentions it again. `purge_stale_rtc` removes the stale keys through `drop_rtcs` (re-select, re-advertise, `rtc_changed` -> `resync_vpn`/`resync_evpn`); it is the `RtConstraint` arm of `purge_stale`, `begin_refresh_in`/`end_refresh_in` (BoRR/EoRR) use `mark_rtc_stale`/`purge_stale_rtc`, and `has_stale`/`stale_count` count `rtc_stale`. `resend_all` re-sends `rtc_adj_rib_out` (`resend_rtc`). Our own restart: `Deferral` waits for the End-of-RIB of every negotiated family, RT-Constraint included, so no extra timer exists.
 
 ### BFD (RFC 5880, RFC 5882, #286)
 

@@ -448,7 +448,9 @@ Constrain VPN distribution with RT-Constraint (RFC 4684):
 - EVPN: only locally originated routes are filtered; Ethernet Segment (Type-4) routes are never held back.
 - Partial prefixes (33 to 95 bits) match the first `length - 32` bits of the Route Target and a 32-bit prefix matches every Route Target; RFC 4684 section 4 does not define this, so it is an inference.
 - Export and import policy do not apply to membership routes. There is no `show` command for them; the log lines `rtc membership learned|withdrawn|advertised|advertisement withdrawn` show the exchange.
-- Not yet implemented: graceful restart for SAFI 132. A restarting peer's memberships are dropped with the session (not kept stale), so the VPN routes it keeps from us are withdrawn from it until it re-announces its membership.
+- Graceful restart: when the peer's graceful restart capability lists `rt-constraint` (NOS sends it), its memberships are kept, marked stale, while its session is down. They still count as interest, so the VPN routes it keeps from us are not withdrawn and the memberships keep being propagated. A re-announced membership loses its stale mark; the rest is purged at the peer's RTC End-of-RIB or when the restart/stale timer ends, and the VPN/EVPN routes it no longer asks for are withdrawn. A peer that comes back without the family (or with F = 0) has them purged at once.
+- After a restart of this router, route selection waits for each peer's RTC End-of-RIB like for any other negotiated family, so the VPN dump is filtered by memberships that are already in.
+- Limits: no policy on membership routes, no `show` command, and EVPN filtering covers locally originated routes only (EVPN routes received from peers are not re-advertised).
 
 Limits:
 

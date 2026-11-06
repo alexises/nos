@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 
 ## Scope
 
-`nos-bgpd` resolves its peers and VRF from `nos-configd`, runs the RFC 4271 FSM over VRF-scoped TCP, keeps the RIBs, and exchanges routes with `nos-ribd`/`nos-fdbd`. `bgp/TODO.md` lists what is open.
+`nos-bgpd` resolves peers and VRF from `nos-configd`, runs the RFC 4271 FSM over VRF-scoped TCP, keeps the RIBs and exchanges routes with `nos-ribd`/`nos-fdbd`. Open work: `bgp/TODO.md`.
 
 ## VRF resolution
 
@@ -120,7 +120,9 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 - Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH), VRF import (`vpn::VrfSet`; PE via the underlay's `ResolveNextHop`): internals page.
 - `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP, VNI, label (`evpn_local` by `EvpnSource`, `vpn_local` by table).
 
-## L3VPN (#573)
+## L3VPN (#573), RT-Constraint (#875)
+
+- RT-Constraint interest is the per-peer `rtc_adj_rib_in` (stale entries included), cached as `PeerOutbox.rtc_interest`; `None` = family not negotiated = no filtering. Type-4 is never filtered.
 
 - A reflector holds every VPN path whatever its RTs (no VRF needed) and keeps label, RD and next hop; a VRF export is next-hop-self.
 - Imported routes are never re-exported; a route with a VRF's own Site of Origin is not imported into it.
@@ -133,15 +135,11 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 
 ## IGP cost, next-hop feasibility
 
-`igp_client.rs` polls `nos-ribd` every 2s (`RibRequest::IgpCosts`). Infeasible candidates (`next_hop_feasible`) leave the decision and the backup pick entirely, except before the first `set_igp` (`igp_ready`) and for route-server clients. `set_igp` re-decides every Adj-RIB-In prefix, not only the Loc-RIB.
+`igp_client.rs` polls `nos-ribd` every 2s. Infeasible candidates (`next_hop_feasible`) leave the decision entirely, except before the first `set_igp` and for route-server clients; `set_igp` re-decides every Adj-RIB-In prefix (details: internals page).
 
 ## BFD (#286)
 
-`bfd` stays out of `ResolvedPeer` (no reset on add/remove). `bfd_client.rs` acts only on Up to Down; `BfdDown { flush }` flushes only with the C bit at both ends (RFC 5882 §4.3).
-
-## Performance
-
-Run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles memory.
+`bfd` stays out of `ResolvedPeer` (no reset on add/remove). `bfd_client.rs` acts only on Up to Down; `BfdDown { flush }` needs the C bit at both ends (RFC 5882 §4.3).
 
 ## Modules
 
@@ -151,9 +149,9 @@ Run `tools/bench-bgp.sh` around RIB changes; `--features dhat-heap` profiles mem
 | `session.rs`, `tcp.rs`, `collision.rs` | `SessionManager`, `diff_peers`, `ao_delta`; VRF-scoped sockets; `PeerSlot` |
 | `fsm.rs`, `status.rs`, `gr.rs`, `mrai.rs`, `damping.rs`, `mac_mobility.rs` | State machine and per-peer state |
 | `message.rs`, `evpn.rs`, `flowspec*.rs`, `vpn/`, `as_path.rs` | Wire codecs (`BgpCodec`) |
-| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `vpn_out`, `vpn_import`, `shared` (`SharedRib`), `tests/` |
+| `rib.rs`, `rib/` | RIB core; `decision`, `adj_in`, `gr`, `aggregate`, `evpn_out`, `flowspec_out`, `vpn_out`, `vpn_import`, `rtc`, `shared`, `tests/` |
 | `page.rs` | Keyset paging (#722/#723), generic: `Snapshot<K>`, `Keyed`, `page` |
-| `rib_push_client.rs`, `fdb_push_client.rs`, `vpn_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write-guard generation (#420); rib/fdb/vpn pushes EOF-watch via `push_conn` (#718); acl/igp do not |
+| `rib_push_client.rs`, `fdb_push_client.rs`, `vpn_push_client.rs`, `acl_push_client.rs`, `igp_client.rs` | Pushes wake on `SharedRib`'s write generation (#420); rib/fdb/vpn EOF-watch via `push_conn` (#718) |
 | `rib_client.rs`, `interface_client.rs` | One-shot queries (`nos_daemon::ipc::one_shot`) |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 

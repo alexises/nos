@@ -549,25 +549,207 @@ fn covers_rejects_an_illegal_length_and_the_default_logs_as_such() {
     assert_eq!(crate::rib::rtc::rt_text_for_tests(&default_rt()), "default");
 }
 
-/// Graceful restart for SAFI 132 is not implemented (#875): a retaining
-/// disconnect still drops the peer's membership, so nothing lingers
-/// un-purgeable in `rtc_adj_rib_in`.
-#[test]
-fn membership_is_dropped_on_a_graceful_restart_disconnect() {
-    let (mut rib, _rx) = setup();
+// --- graceful restart (RFC 4724, Q10 b) ---
+
+const OBS: &str = "10.0.0.8";
+
+fn gr_cap(families: &[AddressFamily]) -> PeerGr {
+    let f: Vec<_> = families.iter().map(|f| (*f, true)).collect();
+    gr(true, &f)
+}
+
+fn rtc_gr_cap() -> PeerGr {
+    gr_cap(&[AddressFamily::Vpnv4Unicast, AddressFamily::RtConstraint])
+}
+
+type Rx = mpsc::Receiver<OutboundUpdate>;
+
+/// `EBGP` (RTC + GR cap `cap`) holds membership `RT`; `SRC` sends a VPN
+/// route for that RT; `OBS` is an RTC observer. Receivers: ebgp, obs.
+fn gr_world(cap: Option<PeerGr>) -> (BgpRib, Rx, Rx) {
+    let mut rib = new_rib_with_identity(65000, v4("1.1.1.1"), v4("1.1.1.1"));
+    rib.set_peer_asn(addr(SRC), 65001);
+    rib.set_peer_asn(addr(EBGP), OBS_AS);
+    rib.set_peer_gr(addr(EBGP), cap);
+    let _src = reg(&mut rib, SRC, false, false, plain_afs());
+    let mut ebgp = reg(&mut rib, EBGP, false, false, rtc_afs());
+    let mut obs = reg(&mut rib, OBS, true, false, rtc_afs());
     feed_rtc(&mut rib, vec![exact(RT)]);
+    feed(
+        &mut rib,
+        SRC,
+        false,
+        &reach(SRC, vec![65001], vec![nlri(RD1, P, 100)]),
+    );
+    let _ = (recv_all(&mut ebgp), recv_all(&mut obs));
+    (rib, ebgp, obs)
+}
+
+fn rtc_withdraws(v: &[OutboundUpdate]) -> usize {
+    v.iter()
+        .filter(|u| matches!(u, OutboundUpdate::WithdrawRtc(_)))
+        .count()
+}
+
+#[test]
+fn membership_is_retained_stale_only_with_rtc_in_the_gr_families() {
+    // Listed: kept, counted stale, still propagated to others.
+    let (mut rib, _e, mut obs) = gr_world(Some(rtc_gr_cap()));
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
     assert_eq!(rib.accepted_rtc(addr(EBGP)), 1);
-    let cap = PeerGr::from_cap(&crate::message::GracefulRestartCap {
-        restart: false,
-        notification: true,
-        time: 120,
-        families: vec![crate::message::GrFamily {
-            afi: 1,
-            safi: message::SAFI_RTC,
-            forwarding: true,
-        }],
-    });
-    rib.set_peer_gr(addr(EBGP), Some(cap));
+    assert_eq!(rib.stale_count(addr(EBGP)), 1);
+    assert!(rib.has_stale(addr(EBGP), Some(AddressFamily::RtConstraint)));
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 0);
+
+    // Not listed: dropped and withdrawn at once.
+    let (mut rib, _e, mut obs) = gr_world(Some(gr_cap(&[AddressFamily::Vpnv4Unicast])));
     rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
     assert_eq!(rib.accepted_rtc(addr(EBGP)), 0);
+    assert_eq!(rib.stale_count(addr(EBGP)), 0);
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+
+    // No capability: same.
+    let (mut rib, _e, mut obs) = gr_world(None);
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 0);
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+}
+
+#[test]
+fn stale_membership_is_live_interest_until_it_is_purged() {
+    let (mut rib, _e, mut obs) = gr_world(Some(rtc_gr_cap()));
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    let _ = recv_all(&mut obs);
+    // The peer returns: its dump is filtered by the retained membership.
+    let mut ebgp = reg(&mut rib, EBGP, false, false, rtc_afs());
+    assert_eq!(advs(&mut ebgp).len(), 1, "stale membership still permits");
+    assert_eq!(rib.stale_count(addr(EBGP)), 1);
+
+    // End-of-RIB without re-announcing: purged, VPN route withdrawn, the
+    // observer told.
+    rib.end_of_rib(addr(EBGP), AddressFamily::RtConstraint);
+    assert_eq!(rib.stale_count(addr(EBGP)), 0);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 0);
+    assert_eq!(withdrawn_vpn(&mut ebgp), 1);
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+    assert!(!rib.gr_deadline.contains_key(&addr(EBGP)));
+}
+
+#[test]
+fn a_reannounced_or_withdrawn_membership_stops_being_stale() {
+    let (mut rib, _e, _obs) = gr_world(Some(rtc_gr_cap()));
+    feed_rtc(&mut rib, vec![exact(RT2)]);
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    assert_eq!(rib.stale_count(addr(EBGP)), 2);
+    let _e = reg(&mut rib, EBGP, false, false, rtc_afs());
+    feed_rtc(&mut rib, vec![exact(RT)]);
+    assert_eq!(rib.stale_count(addr(EBGP)), 1);
+    rib.handle_update(
+        addr(EBGP),
+        false,
+        v4("2.2.2.2"),
+        &rtc_withdraw(vec![exact(RT2)]),
+        &nos_rpl::ACCEPT_ALL,
+    );
+    assert_eq!(rib.stale_count(addr(EBGP)), 0);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 1);
+    rib.end_of_rib(addr(EBGP), AddressFamily::RtConstraint);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 1, "the fresh one stays");
+}
+
+#[test]
+fn stale_membership_is_purged_by_the_timers_and_by_bfd() {
+    // Restart timer while the peer is down.
+    let (mut rib, _e, mut obs) = gr_world(Some(rtc_gr_cap()));
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    let _ = recv_all(&mut obs);
+    rib.gr_tick_at(Instant::now() + Duration::from_secs(121));
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 0);
+
+    // Stale timer once it is back.
+    let (mut rib, _e, mut obs) = gr_world(Some(rtc_gr_cap()));
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    rib.set_gr_stale_time(10);
+    let _e = reg(&mut rib, EBGP, false, false, rtc_afs());
+    let _ = recv_all(&mut obs);
+    rib.gr_tick_at(Instant::now() + Duration::from_secs(11));
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+
+    // BFD abort.
+    let (mut rib, _e, mut obs) = gr_world(Some(rtc_gr_cap()));
+    assert!(!rib.gr_abort(addr(EBGP)));
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    let _ = recv_all(&mut obs);
+    assert!(rib.gr_abort(addr(EBGP)));
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+    assert_eq!(rib.stale_count(addr(EBGP)), 0);
+}
+
+#[test]
+fn stale_membership_is_flushed_when_the_peer_returns_without_forwarding_state() {
+    for back in [
+        None,
+        Some(gr(true, &[(AddressFamily::RtConstraint, false)])),
+        Some(gr_cap(&[AddressFamily::Vpnv4Unicast])),
+    ] {
+        let (mut rib, _e, mut obs) = gr_world(Some(rtc_gr_cap()));
+        rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+        let _ = recv_all(&mut obs);
+        rib.set_peer_gr(addr(EBGP), back);
+        let _e = reg(&mut rib, EBGP, false, false, rtc_afs());
+        assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1, "{back:?}");
+        assert_eq!(rib.accepted_rtc(addr(EBGP)), 0);
+    }
+}
+
+#[test]
+fn a_consecutive_restart_without_the_n_bit_drops_the_previous_stale_set() {
+    let mut cap = rtc_gr_cap();
+    cap.notification = false;
+    let (mut rib, _e, mut obs) = gr_world(Some(cap));
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    let _ = recv_all(&mut obs);
+    let _e = reg(&mut rib, EBGP, false, false, rtc_afs());
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 0);
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+}
+
+#[test]
+fn route_refresh_markers_stale_and_purge_membership() {
+    let (mut rib, _e, mut obs) = gr_world(Some(rtc_gr_cap()));
+    feed_rtc(&mut rib, vec![exact(RT2)]);
+    rib.begin_refresh_in(addr(EBGP), AddressFamily::RtConstraint);
+    assert_eq!(rib.stale_count(addr(EBGP)), 2);
+    let _ = recv_all(&mut obs);
+    feed_rtc(&mut rib, vec![exact(RT)]);
+    assert_eq!(
+        rib.end_refresh_in(addr(EBGP), AddressFamily::RtConstraint),
+        1
+    );
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 1);
+    assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
+    // Nothing held from an unknown peer.
+    rib.begin_refresh_in(addr("10.9.9.9"), AddressFamily::RtConstraint);
+}
+
+#[test]
+fn our_restart_defers_until_the_rtc_end_of_rib() {
+    let mut rib = new_rib_with_identity(65000, v4("1.1.1.1"), v4("1.1.1.1"));
+    rib.apply_redistribute_update(RedistributeUpdate::Full(Vec::new()));
+    rib.begin_deferral(1, 120, 300, [addr(EBGP)]);
+    rib.set_peer_gr(addr(EBGP), Some(rtc_gr_cap()));
+    let _rx = reg(&mut rib, EBGP, false, false, rtc_afs());
+    assert!(rib.deferring());
+    for family in [
+        AddressFamily::Vpnv4Unicast,
+        AddressFamily::Ipv4Unicast,
+        AddressFamily::L2vpnEvpn,
+    ] {
+        rib.end_of_rib(addr(EBGP), family);
+        assert!(rib.deferring(), "{family} alone is not enough");
+    }
+    rib.end_of_rib(addr(EBGP), AddressFamily::RtConstraint);
+    assert!(!rib.deferring());
 }
