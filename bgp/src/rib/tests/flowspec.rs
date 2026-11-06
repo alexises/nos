@@ -29,6 +29,7 @@ fn reach(afi: u16, rules: Vec<FlowSpec>) -> UpdateMessage {
         evpn: vec![],
         flowspec: rules,
         vpn: Vec::new(),
+        rtc: Vec::new(),
     }];
     u
 }
@@ -44,6 +45,7 @@ fn unreach(afi: u16, rules: Vec<FlowSpec>) -> UpdateMessage {
         evpn: vec![],
         flowspec: rules,
         vpn: Vec::new(),
+        rtc: Vec::new(),
     }];
     u
 }

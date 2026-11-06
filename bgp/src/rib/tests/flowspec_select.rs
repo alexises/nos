@@ -85,6 +85,7 @@ fn flow_update(
         evpn: vec![],
         flowspec: vec![rule()],
         vpn: Vec::new(),
+        rtc: Vec::new(),
     }];
     u
 }
@@ -209,6 +210,7 @@ fn a_withdrawn_flow_is_withdrawn_downstream() {
         evpn: vec![],
         flowspec: vec![rule()],
         vpn: Vec::new(),
+        rtc: Vec::new(),
     }];
     feed(&mut rib, SRC, false, "2.2.2.1", &u);
     assert!(withdrawn(&mut ebgp));
@@ -616,6 +618,7 @@ fn reevaluation_readmits_a_rejected_rule_and_never_rewrites_twice() {
         evpn: vec![],
         flowspec: vec![rule()],
         vpn: vec![],
+        rtc: Vec::new(),
     }];
     let before = rib.retained_count(src);
     feed(&mut rib, SRC, false, "2.2.2.1", &u);

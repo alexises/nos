@@ -48,6 +48,8 @@ pub(super) struct Backlog {
     flows: HashSet<FlowspecKey>,
     /// VPN keys whose latest update was dropped.
     vpns: HashSet<VpnKey<IpNet>>,
+    /// RT-Constraint keys whose latest update was dropped.
+    rtcs: HashSet<super::RtcKey>,
     /// Prefixes re-sent so far in this overflow episode (for the log).
     drained: usize,
 }
@@ -57,6 +59,7 @@ impl Backlog {
         self.dirty.is_empty()
             && self.flows.is_empty()
             && self.vpns.is_empty()
+            && self.rtcs.is_empty()
             && self.markers.is_empty()
             && self.evpns.is_empty()
     }
@@ -90,6 +93,12 @@ impl Backlog {
             OutboundUpdate::WithdrawVpn(key) => {
                 self.vpns.insert(key);
             }
+            OutboundUpdate::AnnounceRtc(adv) => {
+                self.rtcs.insert(adv.key);
+            }
+            OutboundUpdate::WithdrawRtc(key) => {
+                self.rtcs.insert(key);
+            }
             marker @ (OutboundUpdate::RefreshMarker { .. } | OutboundUpdate::EndOfRib(_)) => {
                 if !self.markers.contains(&marker) {
                     self.markers.push(marker);
@@ -103,6 +112,7 @@ impl Backlog {
         self.dirty.extend(newer.dirty);
         self.flows.extend(newer.flows);
         self.vpns.extend(newer.vpns);
+        self.rtcs.extend(newer.rtcs);
         for (prefix, ids) in newer.lost_ids {
             self.lost_ids.entry(prefix).or_default().extend(ids);
         }
@@ -238,6 +248,10 @@ impl BgpRib {
         // small); batch like `dirty` if one ever overflows the queue alone.
         for k in std::mem::take(&mut backlog.flows) {
             self.sync_flow_to(peer, &k, true);
+        }
+        // Membership first: it gates what the VPN/EVPN resync may send.
+        for k in std::mem::take(&mut backlog.rtcs) {
+            self.sync_rtc_to(peer, &k, true);
         }
         // Batched like `dirty`: a reflector's VPN table can be a full one.
         let vpns: Vec<_> = backlog.vpns.iter().take(DRAIN_BATCH).copied().collect();

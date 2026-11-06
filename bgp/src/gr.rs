@@ -23,6 +23,7 @@ fn bit(family: AddressFamily) -> u8 {
         AddressFamily::Ipv6Flowspec => 16,
         AddressFamily::Vpnv4Unicast => 32,
         AddressFamily::Vpnv6Unicast => 64,
+        AddressFamily::RtConstraint => 128,
     }
 }
 
@@ -36,6 +37,7 @@ pub fn afi_safi(family: AddressFamily) -> (u16, u8) {
         AddressFamily::Ipv6Flowspec => (2, crate::message::SAFI_FLOWSPEC),
         AddressFamily::Vpnv4Unicast => (1, crate::message::SAFI_VPN),
         AddressFamily::Vpnv6Unicast => (2, crate::message::SAFI_VPN),
+        AddressFamily::RtConstraint => (1, crate::message::SAFI_RTC),
     }
 }
 
@@ -312,6 +314,21 @@ mod tests {
                 })
                 .collect(),
         })
+    }
+
+    #[test]
+    fn every_family_has_its_own_bit_and_tuple_including_rtc() {
+        let mut seen = 0u8;
+        for f in AddressFamily::ALL {
+            assert_eq!(seen & bit(f), 0, "{f} shares a bit");
+            seen |= bit(f);
+            let (afi, safi) = afi_safi(f);
+            assert_eq!(family_of(afi, safi), Some(f));
+        }
+        assert_eq!(seen, u8::MAX);
+        assert_eq!(afi_safi(AddressFamily::RtConstraint), (1, 132));
+        let gr = cap(true, &[(AddressFamily::RtConstraint, true)]);
+        assert!(gr.has(AddressFamily::RtConstraint) && !gr.has(AddressFamily::Vpnv4Unicast));
     }
 
     #[test]

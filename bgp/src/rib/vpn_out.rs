@@ -264,6 +264,10 @@ impl BgpRib {
         r: &VpnRoute,
     ) -> Option<AdvertisedVpn> {
         let outbox = self.peer_outboxes.get(&peer)?;
+        if self.rtc_holds(peer, &r.route.extended_communities) {
+            super::rtc::log_held(peer, &format_rd(&k.0), k.1);
+            return None;
+        }
         let mut route = build_advertisement(
             k.1,
             &r.route,

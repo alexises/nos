@@ -167,6 +167,7 @@ fn a_withdrawal_drops_the_rejected_copy_and_a_chunk_skips_it() {
         evpn: vec![evpn_nlri(1), evpn_nlri(2)],
         flowspec: vec![],
         vpn: vec![],
+        rtc: Vec::new(),
     }];
     rib.handle_update(peer, false, v4("192.0.2.1"), &u, &deny_all_policy());
     assert_eq!(rib.retained_count(peer), 0);

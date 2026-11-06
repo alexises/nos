@@ -202,6 +202,16 @@ On by default: `BgpInstance.graceful_restart` (`nos_proto::BgpGracefulRestart { 
 
 Verified by `nos-e2e bgp-graceful-restart` (nos↔nos, both sides) and `bgp-gr-frr` (FRR), and `bgp/tests/session.rs`'s `graceful_restart_keeps_routes_across_a_graceful_reset` and `shutdown_sends_a_hard_reset_so_the_peer_keeps_nothing` (SIGINT's Cease, which a bare abort would turn into retention).
 
+### RT-Constraint (RFC 4684, #875)
+
+- Code: `rib/rtc.rs` (RIB), `message.rs` (`RtcNlri`, `decode_rtc_nlris`/`encode_rtc_nlris`, `SAFI_RTC`), `fsm.rs` (`negotiate_rtc`). Family `AddressFamily::RtConstraint` (AFI 1 / SAFI 132, IPv4 only), carried in the Multiprotocol capability and our graceful restart capability tuple.
+- State: `rtc_adj_rib_in` (per peer), `rtc_local` (our import RTs, `rtc::membership(cfg, instance)`, pushed by `SessionManager::set_rtc_membership`, cleared while `!restart_decided`), `rtc_loc` (best per key), `rtc_adj_rib_out`. A key is `RtcNlri { origin_as, rt, bits }`; `bits` is 0 or 32..=96, trailing bits are zero.
+- Selection and advertisement reuse `best_path` and `build_advertisement` (reflection, eBGP prepend) with an accept-all policy; the next hop is always our session address. `ponytail:` export/import policy does not apply to membership.
+- Filter: `PeerOutbox.rtc_interest` is `None` when the family is not negotiated (nothing filtered), else `RtcInterest` built from the peer's whole `rtc_adj_rib_in`. `advertise_vpn` and `evpn_out::advertise` consult it (Type-4 never). `rtc_changed` re-syncs only routes whose RTs the changed keys cover (`resync_vpn`, `resync_evpn`). `ponytail:` O(table) scan per membership batch; index by RT if profiling asks.
+- Initial update: membership dump, RTC End-of-RIB (sent whenever the family is negotiated, not duplicated by the graceful restart loop), then the VPN/EVPN dump.
+- Unverified RFC points: RFC 4684 section 4 does not define what a partial prefix or a 32-bit prefix matches; the rule used is "first `bits - 32` bits of the RT, origin AS ignored". No interop run against another implementation yet.
+- Graceful restart for SAFI 132 is not implemented: `peer_disconnected` drops the peer's membership even when it retains its other families, and there is no `rtc_stale` set. Planned in #875's second PR.
+
 ### BFD (RFC 5880, RFC 5882, #286)
 
 - `bfd` lives outside `ResolvedPeer` (which `diff_peers` compares), so changing it restarts nothing. `reconcile::bfd_target` builds the wanted sessions (non-shut peers of a group with `bfd`; each `Want` carries `multihop` = `max-hops` above 1 or `!Config::is_connected(table, peer)`, and the peer-group's resolved `source-address` as `local`) and `SessionManager::set_bfd_targets` publishes them on a `watch`; `DiffScope::BfdProfiles` triggers the resync.

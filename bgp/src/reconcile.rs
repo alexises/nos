@@ -334,6 +334,8 @@ async fn resync(
         .collect();
     // The VRFs whose `vpn` rides this (underlay) instance (RFC 4364 import).
     let mut vpn_vrfs = crate::vpn::VrfSet::from_config(&cfg, instance);
+    // RFC 4684: our membership is every import RT of this instance.
+    let mut rtc_membership = crate::rib::rtc_membership(&cfg, instance);
 
     let mut routing_table = own.routing_table.clone();
     if !*restart_decided {
@@ -347,6 +349,7 @@ async fn resync(
         fdb_domains.clear();
         evpn_tables.clear();
         vpn_vrfs = crate::vpn::VrfSet::default();
+        rtc_membership.clear();
     }
 
     // After the restart decision: `routing_table` is cleared until then.
@@ -378,6 +381,7 @@ async fn resync(
     // attribute carries.
     sessions.set_aggregates(own.aggregates.clone()).await;
     sessions.set_vpn_vrfs(vpn_vrfs).await;
+    sessions.set_rtc_membership(rtc_membership).await;
 }
 
 /// The BFD sessions `own`'s peers want: a non-shut peer whose peer-group

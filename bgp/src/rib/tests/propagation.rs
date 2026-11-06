@@ -413,7 +413,9 @@ fn peer_disconnected_withdraws_every_route_it_contributed() {
         | OutboundUpdate::AnnounceFlowspec(_)
         | OutboundUpdate::WithdrawFlowspec(..)
         | OutboundUpdate::AnnounceVpn(_)
-        | OutboundUpdate::WithdrawVpn(_) => String::new(),
+        | OutboundUpdate::WithdrawVpn(_)
+        | OutboundUpdate::AnnounceRtc(_)
+        | OutboundUpdate::WithdrawRtc(_) => String::new(),
     });
     assert_eq!(
         updates,
@@ -998,6 +1000,7 @@ fn prefix_counters_match_a_recount_through_every_mutation() {
             evpn: vec![],
             flowspec: Vec::new(),
             vpn: Vec::new(),
+            rtc: Vec::new(),
         }],
         ..empty_update()
     };

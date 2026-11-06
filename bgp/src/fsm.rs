@@ -58,9 +58,10 @@ pub(crate) fn trip_max_prefix(
 
 fn afi_of(family: AddressFamily) -> u16 {
     match family {
-        AddressFamily::Ipv4Unicast | AddressFamily::Ipv4Flowspec | AddressFamily::Vpnv4Unicast => {
-            AFI_IPV4
-        }
+        AddressFamily::Ipv4Unicast
+        | AddressFamily::Ipv4Flowspec
+        | AddressFamily::Vpnv4Unicast
+        | AddressFamily::RtConstraint => AFI_IPV4,
         AddressFamily::Ipv6Unicast | AddressFamily::Ipv6Flowspec | AddressFamily::Vpnv6Unicast => {
             AFI_IPV6
         }
@@ -75,6 +76,7 @@ fn safi_of(family: AddressFamily) -> u8 {
         AddressFamily::L2vpnEvpn => message::SAFI_EVPN,
         AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => message::SAFI_FLOWSPEC,
         AddressFamily::Vpnv4Unicast | AddressFamily::Vpnv6Unicast => message::SAFI_VPN,
+        AddressFamily::RtConstraint => message::SAFI_RTC,
     }
 }
 
@@ -250,6 +252,17 @@ fn negotiate_vpn(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2] {
     )
 }
 
+/// RFC 4684 Route Target Constraint (AFI 1 / SAFI 132, IPv4 only; the
+/// capability is the plain Multiprotocol one, section 5).
+fn negotiate_rtc(open: &OpenMessage, ctx: &NegotiationContext) -> bool {
+    negotiate_safi(
+        open,
+        ctx,
+        message::SAFI_RTC,
+        [AddressFamily::RtConstraint, AddressFamily::RtConstraint],
+    )[0]
+}
+
 /// RFC 7911 §5, for one unicast family of one session: whether received
 /// NLRI carry a Path Identifier (`rx`) and whether ours must (`tx`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -375,6 +388,8 @@ struct RemoteInfo {
     negotiated_flowspec: [bool; 2],
     /// VPNv4/VPNv6 negotiated, `[vpnv4, vpnv6]` (`negotiate_vpn`).
     negotiated_vpn: [bool; 2],
+    /// RFC 4684 Route Target Constraint negotiated (`negotiate_rtc`).
+    negotiated_rtc: bool,
     /// RFC 7911 ADD-PATH per family, `[ipv4, ipv6]` (`negotiate_add_path`).
     add_path: [AddPathDir; 2],
     /// The peer sent the four-octet AS capability (RFC 6793); `false` means
@@ -432,6 +447,7 @@ enum Action {
         negotiated_evpn: bool,
         negotiated_flowspec: [bool; 2],
         negotiated_vpn: [bool; 2],
+        negotiated_rtc: bool,
         add_path: [AddPathDir; 2],
         four_octet_as: bool,
         extended_message: bool,
@@ -491,6 +507,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 negotiated_evpn: remote.negotiated_evpn,
                 negotiated_flowspec: remote.negotiated_flowspec,
                 negotiated_vpn: remote.negotiated_vpn,
+                negotiated_rtc: remote.negotiated_rtc,
                 add_path: remote.add_path,
                 four_octet_as: remote.four_octet_as,
                 extended_message: remote.extended_message,
@@ -594,6 +611,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiate_address_families(open, ctx);
     let negotiated_flowspec = negotiate_flowspec(open, ctx);
     let vpn_afs = negotiate_vpn(open, ctx);
+    let negotiated_rtc = negotiate_rtc(open, ctx);
     let add_path = negotiate_add_path(open, ctx);
     let Ok(role) = negotiate_role(open, ctx) else {
         return reject(OpenMessageSubcode::RoleMismatch);
@@ -608,6 +626,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiated_evpn,
         negotiated_flowspec,
         negotiated_vpn: vpn_afs,
+        negotiated_rtc,
         add_path,
         four_octet_as: message::four_octet_asn(open).is_some(),
         extended_message: open
@@ -805,7 +824,7 @@ async fn resend_loc_rib(
     // `resend_all`); any other SAFI keeps meaning unicast of its AFI.
     let family = if matches!(
         rr.safi,
-        message::SAFI_FLOWSPEC | message::SAFI_VPN | message::SAFI_EVPN
+        message::SAFI_FLOWSPEC | message::SAFI_VPN | message::SAFI_EVPN | message::SAFI_RTC
     ) {
         gr::family_of(rr.afi, rr.safi)
     } else {
@@ -889,6 +908,9 @@ async fn send_route_refresh(
             .then_some((message::AFI_L2VPN, message::SAFI_EVPN)),
         remote.negotiated_flowspec[0].then_some((AFI_IPV4, message::SAFI_FLOWSPEC)),
         remote.negotiated_flowspec[1].then_some((AFI_IPV6, message::SAFI_FLOWSPEC)),
+        remote
+            .negotiated_rtc
+            .then_some((AFI_IPV4, message::SAFI_RTC)),
     ];
     for (afi, safi) in families.into_iter().flatten() {
         let _ = writer
@@ -1325,6 +1347,7 @@ async fn report_established(
         negotiated_evpn,
         negotiated_flowspec,
         negotiated_vpn,
+        negotiated_rtc,
         add_path,
         four_octet_as,
         extended_message,
@@ -1355,6 +1378,7 @@ async fn report_established(
         (negotiated_flowspec[1], AddressFamily::Ipv6Flowspec),
         (negotiated_vpn[0], AddressFamily::Vpnv4Unicast),
         (negotiated_vpn[1], AddressFamily::Vpnv6Unicast),
+        (*negotiated_rtc, AddressFamily::RtConstraint),
     ];
     negotiated_afs.extend(
         non_unicast
@@ -1800,6 +1824,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
                     vpn: Vec::new(),
+                    rtc: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
             })
@@ -1837,6 +1862,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 evpn: Vec::new(),
                 flowspec: vec![f.nlri],
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             mp_unreach: Vec::new(),
         }),
@@ -1856,9 +1882,54 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: vec![nlri],
                     vpn: Vec::new(),
+                    rtc: Vec::new(),
                 }],
             })
         }
+        OutboundUpdate::AnnounceRtc(a) => {
+            let (key, next_hop) = (a.key, a.route.next_hop);
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                attributes: Some(advertised_attributes(
+                    a.route,
+                    Ipv4Addr::UNSPECIFIED,
+                    Vec::new(),
+                )),
+                mp_reach: vec![message::MpReachNlri {
+                    afi: AFI_IPV4,
+                    safi: message::SAFI_RTC,
+                    next_hop,
+                    nlri: Vec::new(),
+                    nlri_path_ids: Vec::new(),
+                    evpn: Vec::new(),
+                    flowspec: Vec::new(),
+                    vpn: Vec::new(),
+                    rtc: vec![key],
+                }],
+                mp_unreach: Vec::new(),
+            })
+        }
+        OutboundUpdate::WithdrawRtc(key) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            attributes: None,
+            mp_reach: Vec::new(),
+            mp_unreach: vec![message::MpUnreachNlri {
+                afi: AFI_IPV4,
+                safi: message::SAFI_RTC,
+                withdrawn: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                evpn: Vec::new(),
+                flowspec: Vec::new(),
+                vpn: Vec::new(),
+                rtc: vec![key],
+            }],
+        }),
         OutboundUpdate::AnnounceVpn(v) => {
             let ((rd, prefix), labels) = (v.key, v.labels);
             let next_hop = v.route.next_hop;
@@ -1881,6 +1952,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
                     vpn: vec![crate::vpn::VpnNlri { labels, rd, prefix }],
+                    rtc: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
             })
@@ -1904,6 +1976,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     rd,
                     prefix,
                 }],
+                rtc: Vec::new(),
             }],
         }),
         OutboundUpdate::Withdraw(prefix, use_mp, path_id) if use_mp => {
@@ -1923,6 +1996,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
                     vpn: Vec::new(),
+                    rtc: Vec::new(),
                 }],
             })
         }
@@ -1968,6 +2042,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 evpn: vec![route.nlri],
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             mp_unreach: Vec::new(),
         }),
@@ -1986,6 +2061,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 evpn: vec![nlri],
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
         }),
         OutboundUpdate::Withdraw(prefix, _, path_id) => {
@@ -2545,6 +2621,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2575,6 +2652,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2608,6 +2686,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2676,6 +2755,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,
@@ -2704,6 +2784,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
             four_octet_as: true,

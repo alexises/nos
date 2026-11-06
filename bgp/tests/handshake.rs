@@ -631,6 +631,7 @@ async fn fake_evpn_peer(
             nlri_path_ids: vec![],
             flowspec: vec![],
             vpn: Vec::new(),
+            rtc: Vec::new(),
             evpn: vec![
                 EvpnNlri::MacIp {
                     rd,

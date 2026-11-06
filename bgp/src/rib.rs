@@ -109,6 +109,7 @@ mod gr;
 mod outbox;
 mod retain;
 pub use gr::GsKnobs;
+mod rtc;
 mod shared;
 mod vpn_import;
 mod vpn_out;
@@ -118,6 +119,7 @@ pub use flowspec_out::AdvertisedFlowspec;
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
 pub use retain::{ChunkOutcome, ImportPolicies, ReevalPass, REEVAL_CHUNK};
+pub use rtc::{membership as rtc_membership, AdvertisedRtc, RtcKey};
 pub use shared::{RibGuard, SharedRib};
 pub use vpn_import::{SooSkip, VpnImport, VpnImportPath, VpnImports};
 pub use vpn_out::AdvertisedVpn;
@@ -568,6 +570,9 @@ pub enum OutboundUpdate {
     /// A selected VPN path (see `vpn_out`).
     AnnounceVpn(AdvertisedVpn),
     WithdrawVpn(VpnKey<IpNet>),
+    /// An RFC 4684 membership route (see `rtc`).
+    AnnounceRtc(AdvertisedRtc),
+    WithdrawRtc(RtcKey),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -681,6 +686,10 @@ struct PeerOutbox {
     /// by default (see root `CLAUDE.md`'s "Default-deny rollout impact"),
     /// consulted by `build_advertisement`.
     export_policy: Arc<CompiledPolicy>,
+    /// RFC 4684: what the peer asked for, rebuilt from its membership table
+    /// on every change. `None` = RT-Constraint not negotiated = VPN/EVPN
+    /// routes are not filtered (today's behaviour).
+    rtc_interest: Option<rtc::RtcInterest>,
 }
 
 impl PeerOutbox {
@@ -780,6 +789,14 @@ pub struct BgpRib {
     vpn_stale: HashMap<IpAddr, HashSet<VpnKey<IpNet>>>,
     /// The VRFs this (underlay) instance imports VPN routes into (`vpn_import`).
     vpn_vrfs: crate::vpn::VrfSet,
+    /// RFC 4684 membership per peer (`rtc`), stale entries included.
+    rtc_adj_rib_in: HashMap<IpAddr, HashMap<RtcKey, RibRoute>>,
+    /// The Route Targets this instance originates membership for.
+    rtc_local: std::collections::BTreeSet<u64>,
+    /// Per key, the selected copy and where it came from (`select_rtc`).
+    rtc_loc: HashMap<RtcKey, (RouteOrigin, RibRoute)>,
+    /// What each peer was last sent per key (`sync_rtc_to`).
+    rtc_adj_rib_out: HashMap<IpAddr, HashMap<RtcKey, AdvertisedRtc>>,
     /// Peers whose peer-group tunes Flowspec validation (`set_peer_flowspec_validation`).
     flowspec_validation: HashMap<IpAddr, nos_proto::BgpFlowspecValidation>,
     /// Derived indexes for incremental Flowspec revalidation.
@@ -931,6 +948,10 @@ impl BgpRib {
             vpn_adj_rib_out: HashMap::new(),
             vpn_stale: HashMap::new(),
             vpn_vrfs: crate::vpn::VrfSet::default(),
+            rtc_adj_rib_in: HashMap::new(),
+            rtc_local: std::collections::BTreeSet::new(),
+            rtc_loc: HashMap::new(),
+            rtc_adj_rib_out: HashMap::new(),
             flow_ix: flowspec_validate::FlowIndexes::default(),
             stale: HashMap::new(),
             evpn_stale: HashMap::new(),
@@ -1538,6 +1559,7 @@ impl BgpRib {
             AddressFamily::Ipv6Flowspec => self.accepted_flowspec(peer)[1],
             AddressFamily::Vpnv4Unicast => self.accepted_vpn(peer)[0],
             AddressFamily::Vpnv6Unicast => self.accepted_vpn(peer)[1],
+            AddressFamily::RtConstraint => self.accepted_rtc(peer),
         }
     }
 
@@ -1669,8 +1691,21 @@ impl BgpRib {
         self.evpn_adj_rib_out.remove(&peer);
         self.flowspec_adj_rib_out.remove(&peer);
         self.vpn_adj_rib_out.remove(&peer);
+        self.rtc_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
+        // ponytail: membership is dropped with the session even under graceful
+        // restart (no `rtc_stale` yet); the peer re-announces it on return.
+        let rtcs: Vec<RtcKey> = self
+            .rtc_adj_rib_in
+            .get(&peer)
+            .into_iter()
+            .flat_map(HashMap::keys)
+            .copied()
+            .collect();
+        for k in rtcs {
+            self.drop_rtc(peer, &k);
+        }
         if let (false, Some(gr)) = (retained.is_empty(), gr) {
             self.retain_as_stale(peer, gr, &retained);
             return;

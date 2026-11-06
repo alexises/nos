@@ -188,6 +188,7 @@ fn family_slot(f: AddressFamily) -> usize {
         AddressFamily::Ipv6Flowspec => 4,
         AddressFamily::Vpnv4Unicast => 5,
         AddressFamily::Vpnv6Unicast => 6,
+        AddressFamily::RtConstraint => unreachable!("RT-Constraint routes are never re-evaluated"),
     }
 }
 
@@ -361,6 +362,7 @@ impl BgpRib {
             .get(&peer)
             .into_iter()
             .flat_map(|o| o.negotiated_afs.iter())
+            .filter(|f| **f != AddressFamily::RtConstraint)
         {
             shown[family_slot(*f)] = true;
         }

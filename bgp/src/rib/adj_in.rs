@@ -474,7 +474,12 @@ impl BgpRib {
                     update
                         .mp_reach
                         .iter()
-                        .filter(|m| !m.nlri.is_empty() || !m.evpn.is_empty() || !m.vpn.is_empty())
+                        .filter(|m| {
+                            !m.nlri.is_empty()
+                                || !m.evpn.is_empty()
+                                || !m.vpn.is_empty()
+                                || !m.rtc.is_empty()
+                        })
                         .find(|m| martian(m.next_hop))
                         .map(|m| m.next_hop)
                 });
@@ -624,6 +629,7 @@ impl BgpRib {
             }
         }
         for u in &update.mp_unreach {
+            self.drop_rtcs(from, &u.rtc);
             for n in &u.vpn {
                 self.drop_vpn(from, &(n.rd, n.prefix));
             }
@@ -835,6 +841,7 @@ impl BgpRib {
         for (vni, mac) in evpn_recheck {
             self.mac_mobility_recheck(vni, mac);
         }
+        self.learn_rtc(update, &base_route, from);
         self.learn_vpn(update, &base_route, (from, peer_as), import_policy);
     }
 
@@ -855,6 +862,7 @@ impl BgpRib {
             }
         }
         for m in &update.mp_reach {
+            self.drop_rtcs(from, &m.rtc);
             for n in &m.vpn {
                 self.drop_vpn(from, &(n.rd, n.prefix));
             }

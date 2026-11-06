@@ -439,10 +439,21 @@ Troubleshooting, by log line:
 | `sent initial vpn snapshot to nos-bgpd table=red …` (`nos-ribd`) | The VRF's export reached `nos-bgpd` |
 | `MPLS is not available`, `mpls label not programmed, vpn export withheld` (`nos-ribd`) | `mpls_router` is not loaded |
 
+Constrain VPN distribution with RT-Constraint (RFC 4684):
+
+- Add `address-family rt-constraint` next to `vpnv4`, `vpnv6` or `l2vpn-evpn` in the peer-group (commit refuses it alone). It is negotiated only when both sides advertise AFI 1 / SAFI 132.
+- `nos-bgpd` originates one membership route per import Route Target of this instance (VRF `vpn`, the `l2vpn-evpn` import RTs of its broadcast domains and IP-VRFs), from its own AS (the confederation identifier when set). No import RT, nothing originated.
+- A peer with the family negotiated receives VPN and EVPN routes only for the Route Targets it announced; the default route (prefix length 0) means everything, and a peer that announced nothing receives no VPN or EVPN route. A peer without the family is unaffected.
+- A membership change adds or withdraws the matching routes at once. A route reflector re-advertises memberships with Originator ID and Cluster List, never back to the sender.
+- EVPN: only locally originated routes are filtered; Ethernet Segment (Type-4) routes are never held back.
+- Partial prefixes (33 to 95 bits) match the first `length - 32` bits of the Route Target and a 32-bit prefix matches every Route Target; RFC 4684 section 4 does not define this, so it is an inference.
+- Export and import policy do not apply to membership routes. There is no `show` command for them; the log lines `rtc membership learned|withdrawn|advertised|advertisement withdrawn` show the exchange.
+- Not yet implemented: graceful restart for SAFI 132. A restarting peer's memberships are dropped with the session (not kept stale), so the VPN routes it keeps from us are withdrawn from it until it re-announces its membership.
+
 Limits:
 
 - One VPN label per route (no label stacks, so no LDP or segment-routing transport).
-- No RT-constrained distribution (RFC 4684), no inter-AS options (RFC 4364 section 10), no carrier's carrier, no ADD-PATH on SAFI 128, no per-prefix labels, one Site of Origin per table (not per CE).
+- No inter-AS options (RFC 4364 section 10), no carrier's carrier, no ADD-PATH on SAFI 128, no per-prefix labels, one Site of Origin per table (not per CE).
 - Load-balancing a VPN route over several PEs: see [Multipath](#multipath).
 
 ### Flowspec (RFC 8955, RFC 8956)

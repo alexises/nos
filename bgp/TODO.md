@@ -54,8 +54,7 @@ of re-auditing the codebase. Update this file as items are implemented.
   COMMUNITIES, LARGE COMMUNITIES, AS4_PATH/AS4_AGGREGATOR (moot — always
   native 4-byte).
 - **Capabilities**: Graceful Restart, ORF, dynamic capability negotiation.
-- **AFI/SAFI**: multicast. VPN (#573) still lacks RT-constrained
-  distribution (RFC 4684), inter-AS options B/C, carrier's carrier, ADD-PATH
+- **AFI/SAFI**: multicast. VPN (#573) lacks inter-AS options B/C, carrier's carrier, ADD-PATH
   on SAFI 128 and a per-CE Site of Origin (one per VRF today). A reflected
   VPN best path has no next-hop feasibility check, is not re-run on an IGP
   cost change, and reflected routes keep their next hop (next-hop-self needs

@@ -791,6 +791,16 @@ impl SessionManager {
         }
     }
 
+    /// The Route Targets this instance originates RT-Constraint membership
+    /// for (`rib::rtc_membership`).
+    pub async fn set_rtc_membership(&self, rts: std::collections::BTreeSet<u64>) {
+        let mut rib = self.bgp_rib.lock().await;
+        // Unchanged: no `&mut` access, so the push clients are not woken.
+        if rib.rtc_local() != &rts {
+            rib.set_rtc_membership(rts);
+        }
+    }
+
     /// `BgpRib::vpn_soo_skipped`, for `vpn_push_client`'s log line.
     pub async fn vpn_soo_skipped(&self) -> std::collections::HashSet<crate::rib::SooSkip> {
         self.bgp_rib.lock().await.vpn_soo_skipped()
@@ -1928,6 +1938,7 @@ mod tests {
                 nlri_path_ids: vec![],
                 evpn: vec![],
                 flowspec: vec![],
+                rtc: vec![],
                 vpn: [1, 2]
                     .map(|n| crate::vpn::VpnNlri {
                         labels: vec![100 * u32::from(n)],
@@ -2074,6 +2085,7 @@ mod tests {
             evpn: vec![],
             flowspec: vec![],
             vpn: vec![],
+            rtc: Vec::new(),
         };
         let mut evpn = mp(crate::message::AFI_L2VPN, crate::message::SAFI_EVPN);
         evpn.evpn = [3u8, 1, 2]
