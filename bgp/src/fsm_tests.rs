@@ -157,6 +157,7 @@ fn remote(enhanced: bool, route_refresh: bool) -> RemoteInfo {
         negotiated_evpn: false,
         negotiated_flowspec: [false; 2],
         negotiated_vpn: [false; 2],
+        negotiated_rtc: false,
         add_path: [AddPathDir::default(); 2],
         four_octet_as: true,
         extended_message: false,
@@ -251,6 +252,65 @@ fn a_cross_family_unicast_needs_the_peers_extended_next_hop() {
     assert_eq!(
         negotiate_address_families(&open, &ctx),
         (true, true, true, false)
+    );
+}
+
+#[test]
+fn rtc_is_negotiated_only_when_configured_and_advertised() {
+    let ctx = |afs: Vec<AddressFamily>| NegotiationContext {
+        expected_remote_as: 65002,
+        local_hold_time: 90,
+        keepalive_override: None,
+        address_families: afs,
+        transport_afi: AFI_IPV4,
+        add_path: None,
+        role: None,
+        strict_mode: false,
+    };
+    let mut open = message::build_open(65002, Ipv4Addr::new(2, 2, 2, 2), 90);
+    let both = vec![AddressFamily::Vpnv4Unicast, AddressFamily::RtConstraint];
+    assert!(!negotiate_rtc(&open, &ctx(both.clone())), "peer silent");
+    open.capabilities.push(Capability::MultiProtocol {
+        afi: 1,
+        safi: message::SAFI_RTC,
+    });
+    assert!(negotiate_rtc(&open, &ctx(both)));
+    assert!(
+        !negotiate_rtc(&open, &ctx(vec![AddressFamily::Vpnv4Unicast])),
+        "not configured here"
+    );
+    assert_eq!(
+        (
+            afi_of(AddressFamily::RtConstraint),
+            safi_of(AddressFamily::RtConstraint)
+        ),
+        (1, 132)
+    );
+    assert_eq!(
+        build_mp_capabilities(&[AddressFamily::RtConstraint], AFI_IPV6),
+        [Capability::MultiProtocol { afi: 1, safi: 132 }],
+        "no extended next hop for a non-unicast SAFI"
+    );
+}
+
+#[tokio::test]
+async fn route_refresh_requests_cover_rtc_when_negotiated() {
+    let rp = rpeer();
+    let peer = pctx(&rp);
+    let (mut w, mut r) = script_pair().await;
+    let mut rem = remote(true, true);
+    rem.negotiated_ipv4_unicast = false;
+    rem.negotiated_ipv6_unicast = false;
+    rem.negotiated_rtc = true;
+    send_route_refresh(&mut w, &State::Established(rem), &peer).await;
+    let m = within("refresh", r.next()).await.unwrap().unwrap();
+    assert_eq!(
+        m,
+        BgpMessage::RouteRefresh(RouteRefreshMessage {
+            afi: AFI_IPV4,
+            subtype: message::REFRESH_REQUEST,
+            safi: message::SAFI_RTC
+        })
     );
 }
 

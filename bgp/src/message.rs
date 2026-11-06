@@ -1836,7 +1836,7 @@ impl RtcNlri {
         let bits = usize::from(self.bits);
         for (i, b) in buf.iter_mut().enumerate() {
             let keep = bits.saturating_sub(i * 8).min(8);
-            *b &= (0xffu16 << (8 - keep)) as u8;
+            *b &= 0xffu8.checked_shl((8 - keep) as u32).unwrap_or(0);
         }
         buf
     }

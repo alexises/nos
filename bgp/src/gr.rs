@@ -317,6 +317,21 @@ mod tests {
     }
 
     #[test]
+    fn every_family_has_its_own_bit_and_tuple_including_rtc() {
+        let mut seen = 0u8;
+        for f in AddressFamily::ALL {
+            assert_eq!(seen & bit(f), 0, "{f} shares a bit");
+            seen |= bit(f);
+            let (afi, safi) = afi_safi(f);
+            assert_eq!(family_of(afi, safi), Some(f));
+        }
+        assert_eq!(seen, u8::MAX);
+        assert_eq!(afi_safi(AddressFamily::RtConstraint), (1, 132));
+        let gr = cap(true, &[(AddressFamily::RtConstraint, true)]);
+        assert!(gr.has(AddressFamily::RtConstraint) && !gr.has(AddressFamily::Vpnv4Unicast));
+    }
+
+    #[test]
     fn capability_families_and_f_bits() {
         let gr = cap(
             true,
