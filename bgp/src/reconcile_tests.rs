@@ -305,6 +305,7 @@ fn resolved_peer(addr: &str, shutdown: bool) -> ResolvedPeer {
         shutdown: shutdown.then_some(BgpShutdown { message: None }),
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        blackhole: None,
         soft_reconfiguration_inbound: false,
         local_as: None,
         add_path: None,
@@ -908,6 +909,43 @@ fn flowspec_policies_resolve_per_peer_group_and_unset_is_none() {
     );
     let h = peers.iter().find(|p| p.peer_group == "h").unwrap();
     assert!(h.flowspec_import_policy.is_none() && h.flowspec_export_policy.is_none());
+}
+
+#[test]
+fn blackhole_resolves_the_named_prefix_list_into_the_peer() {
+    let mut cfg = config(instance(json!({
+        "peers": [
+            {"remote_address": "127.0.0.2", "peer_group": "g"},
+            {"remote_address": "127.0.0.3", "peer_group": "h"},
+        ],
+        "peer_groups": [
+            group("g", json!({"blackhole": {"prefix_list": "bh"}})),
+            group("h", json!({})),
+        ],
+    })));
+    cfg.prefix_lists = vec![nos_proto::PrefixList {
+        name: "bh".to_string(),
+        entries: vec![nos_proto::PrefixListEntry {
+            cidr: "192.0.2.0/24".parse().unwrap(),
+            range: Some((32, 32)),
+        }],
+    }];
+    let peers = super::resolve_peers(
+        own(&cfg),
+        &std::collections::HashMap::new(),
+        &mut PolicyCache::default(),
+        &cfg,
+    );
+    let g = peers.iter().find(|p| p.peer_group == "g").unwrap();
+    let list = g.blackhole.as_ref().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].range, Some((32, 32)));
+    assert!(peers
+        .iter()
+        .find(|p| p.peer_group == "h")
+        .unwrap()
+        .blackhole
+        .is_none());
 }
 
 #[test]

@@ -720,6 +720,19 @@
           }
         ]
       },
+      "BgpBlackhole": {
+        "description": "RFC 7999 remotely triggered blackhole: a unicast route from this group's\npeers that carries BLACKHOLE (65535:666) and falls inside `prefix_list`\n(the authorisation, with normal prefix-list `range` rules: write\n`10.0.0.0/8 upto 32` to cover host routes) is tagged `NO_EXPORT` and, once\nbest, installed as a discard route. It still runs through `import_policy`,\nwhich under the default deny-all must accept it. eBGP peer-groups only.",
+        "properties": {
+          "prefix_list": {
+            "description": "Name of the `PrefixList` bounding which prefixes the peer may blackhole.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prefix_list"
+        ],
+        "type": "object"
+      },
       "BgpConfederation": {
         "description": "RFC 5065 §2: the confederation identifier (`None`: not in a\nconfederation) and the other member ASes (`peers`) — a peer-group whose\n`remote_as` is one of them is a confederation-external peer, not an\nexternal one.",
         "properties": {
@@ -1109,6 +1122,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "blackhole": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BgpBlackhole",
+                "description": "RFC 7999 BLACKHOLE handling for this group's peers; `None` leaves the\ncommunity an ordinary one. See `BgpBlackhole`. eBGP only."
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "connect_retry_time": {
@@ -4666,6 +4690,10 @@
           },
           "backup_tunnel": {
             "description": "`backup` is an RFC 7490 remote LFA: the PQ node the backup tunnels\n(IP-in-IP) to, not a neighbor.",
+            "type": "boolean"
+          },
+          "blackhole": {
+            "description": "`discard` came from a BGP RFC 7999 blackhole (an OSPF ABR discard\nstays `false`).",
             "type": "boolean"
           },
           "discard": {
@@ -17778,6 +17806,258 @@
           }
         },
         "summary": "Set: The `bfd` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/blackhole": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `blackhole` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpBlackhole",
+                  "description": "RFC 7999 BLACKHOLE handling for this group's peers; `None` leaves the\ncommunity an ordinary one. See `BgpBlackhole`. eBGP only."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `blackhole` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BgpBlackhole",
+                "description": "RFC 7999 BLACKHOLE handling for this group's peers; `None` leaves the\ncommunity an ordinary one. See `BgpBlackhole`. eBGP only."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpBlackhole",
+                  "description": "RFC 7999 BLACKHOLE handling for this group's peers; `None` leaves the\ncommunity an ordinary one. See `BgpBlackhole`. eBGP only."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `blackhole` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/blackhole/prefix-list": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `prefix-list` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Name of the `PrefixList` bounding which prefixes the peer may blackhole.",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `prefix-list` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Name of the `PrefixList` bounding which prefixes the peer may blackhole.",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Name of the `PrefixList` bounding which prefixes the peer may blackhole.",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `prefix-list` setting.",
         "tags": [
           "transactions"
         ]

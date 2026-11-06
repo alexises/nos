@@ -113,6 +113,10 @@ pub struct RouteEntry {
     /// `Vpn` candidate; empty otherwise.
     #[serde(default)]
     pub vpn: Vec<VpnRouteInfo>,
+    /// `discard` came from a BGP RFC 7999 blackhole (an OSPF ABR discard
+    /// stays `false`).
+    #[serde(default)]
+    pub blackhole: bool,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -147,13 +151,16 @@ pub struct BgpRoute {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
     /// The best path's next hop plus every multipath sibling's
-    /// (`BgpInstance.maximum_paths`), sorted, never empty. Two or more
+    /// (`BgpInstance.maximum_paths`), sorted, never empty unless `discard`. Two or more
     /// become one `RTA_MULTIPATH` kernel route.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub next_hops: Vec<IpAddr>,
     /// Runner-up path's next hop (none of `next_hops`), if any.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub backup_next_hop: Option<IpAddr>,
+    /// An RFC 7999 blackhole: install a discard route; `next_hops` is empty.
+    #[serde(default)]
+    pub discard: bool,
 }
 
 /// Sent by the owning `nos-bgpd` instance to `nos-ribd` over a persistent,
@@ -636,6 +643,7 @@ mod tests {
             prefix: IpNet::new(IpAddr::from(i.to_be_bytes()), 32).unwrap(),
             next_hops: vec![IpAddr::from([10, 0, 0, 1])],
             backup_next_hop: None,
+            discard: false,
         }
     }
 
@@ -711,6 +719,7 @@ mod tests {
             prefix: IpNet::new(v6(1), 128).unwrap(),
             next_hops: (0..255).map(v6).collect(),
             backup_next_hop: Some(v6(999)),
+            discard: false,
         };
         let frame =
             RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(vec![worst; BGP_PUSH_CHUNK])]);

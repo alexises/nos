@@ -700,6 +700,36 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupGracefulShutdownReceiveDisabled, words = "graceful-shutdown-receive disable")]
     pub graceful_shutdown_receive_disabled: bool,
+
+    /// RFC 7999 BLACKHOLE handling for this group's peers; `None` leaves the
+    /// community an ordinary one. See `BgpBlackhole`. eBGP only.
+    #[serde(default)]
+    #[garde(custom(|b: &Option<BgpBlackhole>, ctx: &Config| valid_blackhole(b.as_ref(), ctx)))]
+    #[cli(topic = BgpPeerGroupBlackhole)]
+    pub blackhole: Option<BgpBlackhole>,
+}
+
+/// RFC 7999 remotely triggered blackhole: a unicast route from this group's
+/// peers that carries BLACKHOLE (65535:666) and falls inside `prefix_list`
+/// (the authorisation, with normal prefix-list `range` rules: write
+/// `10.0.0.0/8 upto 32` to cover host routes) is tagged `NO_EXPORT` and, once
+/// best, installed as a discard route. It still runs through `import_policy`,
+/// which under the default deny-all must accept it. eBGP peer-groups only.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct BgpBlackhole {
+    #[cli(topic = BgpPeerGroupBlackhole)]
+    /// Name of the `PrefixList` bounding which prefixes the peer may blackhole.
+    pub prefix_list: String,
+}
+
+pub(super) fn valid_blackhole(b: Option<&BgpBlackhole>, ctx: &Config) -> garde::Result {
+    match b {
+        Some(b) if !ctx.prefix_lists.iter().any(|p| p.name == b.prefix_list) => {
+            Err(garde::Error::new("referenced prefix-list does not exist"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Knobs of the Flowspec validation procedure (RFC 8955 §6 as updated by
@@ -1077,6 +1107,7 @@ mod tests {
             soft_reconfiguration_inbound: false,
             graceful_shutdown: false,
             graceful_shutdown_receive_disabled: false,
+            blackhole: None,
             local_as: None,
             add_path: None,
             add_path_send_count: None,

@@ -500,35 +500,18 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
     for update in updates {
         match update {
             BgpRouteUpdate::Full(routes) => {
-                guard.replace_source(
-                    RouteSource::Bgp,
-                    routes.into_iter().map(|r| RibEntry {
-                        prefix: r.prefix,
-                        next_hops: r.next_hops.into_iter().map(|h| (h, None).into()).collect(),
-                        source: RouteSource::Bgp,
-                        backup: r.backup_next_hop,
-                        backup_interface_id: None,
-                        backup_tunnel: false,
-                    }),
-                );
+                guard.replace_source(RouteSource::Bgp, routes.into_iter().map(bgp_entry));
                 full_replace = true;
             }
             BgpRouteUpdate::Add(r) => {
-                let entry = RibEntry {
-                    prefix: r.prefix,
-                    next_hops: r.next_hops.iter().map(|&h| (h, None).into()).collect(),
-                    source: RouteSource::Bgp,
-                    backup: r.backup_next_hop,
-                    backup_interface_id: None,
-                    backup_tunnel: false,
-                };
-                match guard.upsert_and_diff(entry) {
+                let prefix = r.prefix;
+                match guard.upsert_and_diff(bgp_entry(r)) {
                     BestPathChange::Unchanged => {}
                     BestPathChange::Installed(e) => {
-                        deltas.insert(r.prefix, Some(e));
+                        deltas.insert(prefix, Some(e));
                     }
                     BestPathChange::Removed => {
-                        deltas.insert(r.prefix, None);
+                        deltas.insert(prefix, None);
                     }
                 }
             }
@@ -636,6 +619,23 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
     }
 }
 
+/// A pushed BGP route as a `Rib` candidate: an RFC 7999 blackhole (`discard`)
+/// has no next hop and no backup — see `RibEntry::is_discard`.
+fn bgp_entry(r: BgpRoute) -> RibEntry {
+    RibEntry {
+        prefix: r.prefix,
+        next_hops: if r.discard {
+            Vec::new()
+        } else {
+            r.next_hops.into_iter().map(|h| (h, None).into()).collect()
+        },
+        source: RouteSource::Bgp,
+        backup: r.backup_next_hop.filter(|_| !r.discard),
+        backup_interface_id: None,
+        backup_tunnel: false,
+    }
+}
+
 /// A pushed OSPF route as a `Rib` candidate: a discard route is one with no
 /// next hop (and so no backup) — see `RibEntry::is_discard`.
 fn ospf_entry(r: OspfRoute) -> RibEntry {
@@ -664,6 +664,8 @@ fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry], rib: &Rib
                 source: to_source_kind(e.source),
                 backup: e.backup,
                 discard: e.is_discard(),
+                // A BGP discard is an RFC 7999 blackhole; an OSPF ABR's is not.
+                blackhole: e.is_discard() && e.source == RouteSource::Bgp,
                 evpn: evpn_info(e, evpn),
                 backup_tunnel: e.backup_tunnel,
                 mpls_labels: e.next_hops.iter().map(|h| h.labels.clone()).collect(),
@@ -765,6 +767,43 @@ mod authz_tests {
         assert!(!ospf_entry(route(Some(ip), None, false)).backup_tunnel);
         assert!(!ospf_entry(route(Some(ip), Some(ip), false)).backup_tunnel);
         assert!(!ospf_entry(route(None, Some(ip), true)).backup_tunnel);
+    }
+
+    /// RFC 7999: a BGP discard has no hop or backup and is reported as a
+    /// blackhole; an OSPF ABR discard is a plain discard.
+    #[test]
+    fn a_bgp_discard_is_a_blackhole_and_an_ospf_one_is_not() {
+        let b = bgp_entry(BgpRoute {
+            prefix: "198.51.100.7/32".parse().unwrap(),
+            next_hops: vec![],
+            backup_next_hop: Some("10.0.0.9".parse().unwrap()),
+            discard: true,
+        });
+        assert!(b.is_discard() && b.backup.is_none());
+        let normal = bgp_entry(BgpRoute {
+            prefix: "198.51.100.8/32".parse().unwrap(),
+            next_hops: vec!["10.0.0.2".parse().unwrap()],
+            backup_next_hop: None,
+            discard: false,
+        });
+        assert!(!normal.is_discard());
+        let o = ospf_entry(OspfRoute {
+            prefix: "10.2.0.0/24".parse().unwrap(),
+            next_hops: vec![],
+            metric: 1,
+            discard: true,
+            backup_next_hop: None,
+            backup_tunnel: None,
+            backup_interface_id: None,
+        });
+        let rib = Rib::new();
+        let flags = |e: RibEntry| {
+            let c = &to_prefix_routes(e.prefix, &[e], &rib).candidates[0];
+            (c.discard, c.blackhole)
+        };
+        assert_eq!(flags(b), (true, true));
+        assert_eq!(flags(normal), (false, false));
+        assert_eq!(flags(o), (true, false));
     }
 
     #[test]
@@ -874,6 +913,7 @@ mod authz_tests {
             prefix: p.parse().unwrap(),
             next_hops: vec!["10.0.0.2".parse().unwrap()],
             backup_next_hop: None,
+            discard: false,
         };
         apply_bgp_route_update(&ctx, vec![BgpRouteUpdate::Add(r("10.1.0.0/24"))]).await;
         assert!(dirty(&ctx));

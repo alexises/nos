@@ -1448,6 +1448,10 @@ async fn report_established(
         peer.remote_address,
         slot.peer.announce_rpki_state && remote_is_ibgp,
     );
+    rib.set_peer_blackhole(
+        peer.remote_address,
+        slot.peer.blackhole.clone().filter(|_| !remote_is_ibgp),
+    );
     rib.peer_established(
         peer.remote_address,
         remote_is_ibgp,

@@ -177,6 +177,19 @@ fn resolve_peers(
             maximum_prefix: group.maximum_prefix,
             announce_rpki_state: group.announce_rpki_state,
             soft_reconfiguration_inbound: group.soft_reconfiguration_inbound,
+            blackhole: group.blackhole.as_ref().map(|b| {
+                Arc::new(
+                    cfg.prefix_lists
+                        .iter()
+                        .filter(|l| l.name == b.prefix_list)
+                        .flat_map(|l| &l.entries)
+                        .map(|e| nos_rpl::PrefixListEntry {
+                            cidr: e.cidr,
+                            range: e.range,
+                        })
+                        .collect(),
+                )
+            }),
             local_as: group.local_as,
             enforce_first_as: group.enforce_first_as.unwrap_or(true),
             flowspec_validation: group.flowspec_validation,

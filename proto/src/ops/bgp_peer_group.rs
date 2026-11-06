@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    AddressFamily, BgpAddPath, BgpAoKey, BgpAuth, BgpDamping, BgpLocalAs, BgpPeerGroup,
-    BgpPrefixLimit, BgpRole, BgpShutdown, Config, NextHopMode, SourceAddress,
+    AddressFamily, BgpAddPath, BgpAoKey, BgpAuth, BgpBlackhole, BgpDamping, BgpLocalAs,
+    BgpPeerGroup, BgpPrefixLimit, BgpRole, BgpShutdown, Config, NextHopMode, SourceAddress,
 };
 
 use super::bgp_instance::find_instance_mut;
@@ -148,6 +148,22 @@ pub enum BgpPeerGroupOp {
     },
     /// Clears the route refresh stale time of the BGP peer group so it reverts to the default.
     ClearRouteRefreshStaleTime {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+    },
+    /// Sets the RFC 7999 blackhole handling of the BGP peer group (see `BgpBlackhole`).
+    SetBlackhole {
+        /// Name of the BGP instance owning the target.
+        instance: String,
+        /// Name of the BGP peer group this op targets.
+        name: String,
+        /// Name of the prefix-list bounding what the peers may blackhole.
+        prefix_list: String,
+    },
+    /// Clears the blackhole handling of the BGP peer group.
+    ClearBlackhole {
         /// Name of the BGP instance owning the target.
         instance: String,
         /// Name of the BGP peer group this op targets.
@@ -562,6 +578,8 @@ impl BgpPeerGroupOp {
             | BgpPeerGroupOp::ClearMrai { .. }
             | BgpPeerGroupOp::SetRouteRefreshStaleTime { .. }
             | BgpPeerGroupOp::ClearRouteRefreshStaleTime { .. }
+            | BgpPeerGroupOp::SetBlackhole { .. }
+            | BgpPeerGroupOp::ClearBlackhole { .. }
             | BgpPeerGroupOp::SetDamping { .. }
             | BgpPeerGroupOp::ClearDamping { .. }
             | BgpPeerGroupOp::SetLocalAs { .. }
@@ -651,6 +669,7 @@ impl BgpPeerGroupOp {
                         soft_reconfiguration_inbound: false,
                         graceful_shutdown: false,
                         graceful_shutdown_receive_disabled: false,
+                        blackhole: None,
                         local_as: None,
                         add_path: None,
                         add_path_send_count: None,
@@ -808,6 +827,20 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearRouteRefreshStaleTime { instance, name } => {
                 find_group_mut(config, instance, name)?.route_refresh_stale_time = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetBlackhole {
+                instance,
+                name,
+                prefix_list,
+            } => {
+                find_group_mut(config, instance, name)?.blackhole = Some(BgpBlackhole {
+                    prefix_list: prefix_list.clone(),
+                });
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearBlackhole { instance, name } => {
+                find_group_mut(config, instance, name)?.blackhole = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetDamping {
@@ -1154,6 +1187,7 @@ mod tests {
             soft_reconfiguration_inbound: false,
             graceful_shutdown: false,
             graceful_shutdown_receive_disabled: false,
+            blackhole: None,
             local_as: None,
             add_path: None,
             add_path_send_count: None,
@@ -1204,6 +1238,31 @@ mod tests {
                 enabled
             );
         }
+    }
+
+    #[test]
+    fn set_and_clear_blackhole() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetBlackhole {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            prefix_list: "bh".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].blackhole,
+            Some(BgpBlackhole {
+                prefix_list: "bh".into()
+            })
+        );
+        BgpPeerGroupOp::ClearBlackhole {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].blackhole, None);
     }
 
     #[test]

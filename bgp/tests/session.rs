@@ -54,6 +54,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        blackhole: None,
         soft_reconfiguration_inbound: false,
         local_as: None,
         add_path: None,

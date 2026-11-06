@@ -206,11 +206,12 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
     }
 }
 
-fn to_route(prefix: IpNet, (next_hops, backup_next_hop): &crate::rib::Hops) -> BgpRoute {
+fn to_route(prefix: IpNet, (next_hops, backup_next_hop, discard): &crate::rib::Hops) -> BgpRoute {
     BgpRoute {
         prefix,
         next_hops: next_hops.clone(),
         backup_next_hop: *backup_next_hop,
+        discard: *discard,
     }
 }
 
@@ -254,7 +255,7 @@ mod tests {
     fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, crate::rib::Hops> {
         pairs
             .iter()
-            .map(|(p, gw)| (p.parse().unwrap(), (vec![gw.parse().unwrap()], None)))
+            .map(|(p, gw)| (p.parse().unwrap(), (vec![gw.parse().unwrap()], None, false)))
             .collect()
     }
 
@@ -262,6 +263,7 @@ mod tests {
         BgpRoute {
             prefix: prefix.parse().unwrap(),
             next_hops: gws.iter().map(|g| g.parse().unwrap()).collect(),
+            discard: false,
             backup_next_hop: backup.map(|b| b.parse().unwrap()),
         }
     }
@@ -368,13 +370,32 @@ mod tests {
         assert_eq!(updates, expected);
     }
 
+    /// RFC 7999: a route flipping to a blackhole is re-pushed as a discard.
+    #[test]
+    fn diff_blackhole_flip_is_add_with_discard() {
+        let gw: IpAddr = "10.0.0.1".parse().unwrap();
+        let p: IpNet = "10.0.0.1/32".parse().unwrap();
+        let last_sent = HashMap::from([(p, (vec![gw], None, false))]);
+        let new_routes = HashMap::from([(p, (vec![], None, true))]);
+        let want = BgpRoute {
+            prefix: p,
+            next_hops: vec![],
+            backup_next_hop: None,
+            discard: true,
+        };
+        assert_eq!(
+            diff_routes(&last_sent, &new_routes),
+            vec![BgpRouteUpdate::Add(want)]
+        );
+    }
+
     #[test]
     fn diff_backup_only_change_is_add() {
         let gw: IpAddr = "10.0.0.1".parse().unwrap();
         let bk: IpAddr = "10.0.9.9".parse().unwrap();
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
-        let last_sent = HashMap::from([(p, (vec![gw], None))]);
-        let new_routes = HashMap::from([(p, (vec![gw], Some(bk)))]);
+        let last_sent = HashMap::from([(p, (vec![gw], None, false))]);
+        let new_routes = HashMap::from([(p, (vec![gw], Some(bk), false))]);
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![BgpRouteUpdate::Add(route(
@@ -390,8 +411,8 @@ mod tests {
         let gw: IpAddr = "10.0.0.1".parse().unwrap();
         let gw2: IpAddr = "10.0.0.2".parse().unwrap();
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
-        let last_sent = HashMap::from([(p, (vec![gw], None))]);
-        let new_routes = HashMap::from([(p, (vec![gw, gw2], None))]);
+        let last_sent = HashMap::from([(p, (vec![gw], None, false))]);
+        let new_routes = HashMap::from([(p, (vec![gw, gw2], None, false))]);
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![BgpRouteUpdate::Add(route(

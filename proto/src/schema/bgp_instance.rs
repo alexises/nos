@@ -379,6 +379,7 @@ impl Default for BgpInstance {
 ///   asn`) — reflection is an iBGP-only concept (RFC 4456).
 /// - `announce_rpki_state` requires an iBGP peer-group: RFC 8097's
 ///   community is non-transitive, and ignored when received over eBGP.
+/// - `blackhole` requires an eBGP peer-group (RFC 7999 is customer-facing).
 /// - `graceful_shutdown` requires an eBGP peer-group (RFC 8326 is eBGP-only).
 /// - `route_server_client` requires an eBGP peer-group (`remote_as != asn`)
 ///   — a route server's transparency (no `AS_PATH` prepend) is an eBGP concept
@@ -407,6 +408,11 @@ pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> ga
             if group.graceful_shutdown && group.remote_as == instance.asn {
                 return Err(garde::Error::new(
                     "graceful-shutdown requires an eBGP peer-group (remote-as must differ from this instance's asn)",
+                ));
+            }
+            if group.blackhole.is_some() && group.remote_as == instance.asn {
+                return Err(garde::Error::new(
+                    "blackhole requires an eBGP peer-group (remote-as must differ from this instance's asn)",
                 ));
             }
             if group.damping.is_some() && group.remote_as == instance.asn {
@@ -675,6 +681,7 @@ mod tests {
                 soft_reconfiguration_inbound: false,
                 graceful_shutdown: false,
                 graceful_shutdown_receive_disabled: false,
+                blackhole: None,
                 local_as: None,
                 add_path: None,
                 add_path_send_count: None,
@@ -711,6 +718,7 @@ mod tests {
                 soft_reconfiguration_inbound: false,
                 graceful_shutdown: false,
                 graceful_shutdown_receive_disabled: false,
+                blackhole: None,
                 local_as: None,
                 add_path: None,
                 add_path_send_count: None,
@@ -759,6 +767,7 @@ mod tests {
             soft_reconfiguration_inbound: false,
             graceful_shutdown: false,
             graceful_shutdown_receive_disabled: false,
+            blackhole: None,
             local_as: None,
             add_path: None,
             add_path_send_count: None,
@@ -970,6 +979,32 @@ mod tests {
         assert!(!check(65001, 65001, false, false), "== remote-as");
         assert!(!check(65001, 0, false, false), "asn 0");
         assert!(!check(65001, 65009, true, false), "route-server-client");
+    }
+
+    #[test]
+    fn blackhole_needs_an_ebgp_group_and_an_existing_prefix_list() {
+        let check = |remote_as: u32, list: &str, defined: bool| {
+            let mut inst = instance("r1", 65000);
+            let mut g = group_with_flags("pg1", remote_as, false, false);
+            g.blackhole = Some(crate::schema::BgpBlackhole {
+                prefix_list: list.to_string(),
+            });
+            inst.peer_groups = vec![g];
+            let mut cfg = config_with(vec![inst]);
+            if defined {
+                cfg.prefix_lists = vec![crate::schema::PrefixList {
+                    name: "bh".to_string(),
+                    entries: vec![crate::schema::PrefixListEntry {
+                        cidr: "192.0.2.0/24".parse().unwrap(),
+                        range: Some((32, 32)),
+                    }],
+                }];
+            }
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(check(65001, "bh", true));
+        assert!(!check(65001, "bh", false), "unknown prefix-list");
+        assert!(!check(65000, "bh", true), "iBGP group");
     }
 
     #[test]

@@ -337,6 +337,12 @@ pub const RID_C: &str = "3.3.3.3";
 /// TEST-NET-2 — a fake redistributed prefix.
 pub const REDISTRIBUTE_PREFIX: &str = "198.51.100.0/24";
 pub const REDISTRIBUTE_GATEWAY: &str = "10.50.0.99";
+/// `blackhole` (#861): TEST-NET-3 host routes router-a tags BLACKHOLE;
+/// router-b's prefix-list covers `BLACKHOLE_NET` at /32 only, so the first is
+/// authorised and the second (TEST-NET-1) is not.
+pub const BLACKHOLE_NET: &str = "203.0.113.64/28";
+pub const BLACKHOLE_COVERED: &str = "203.0.113.66/32";
+pub const BLACKHOLE_UNCOVERED: &str = "192.0.2.77/32";
 /// `aggregate`: router-a's aggregate, covering `REDISTRIBUTE_PREFIX` and the
 /// static router-b redistributes for the phase.
 pub const AGGREGATE_PREFIX: &str = "198.51.0.0/16";

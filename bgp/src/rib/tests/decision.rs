@@ -606,7 +606,7 @@ fn runner_up_backup_also_requires_resolvable_next_hop() {
     }
     assert_eq!(
         rib.push_snapshot().1[&prefix("9.9.9.0/24")],
-        (vec![addr("10.1.0.1")], None)
+        (vec![addr("10.1.0.1")], None, false)
     );
 
     // Once peer_b's resolves too, it becomes the backup.
@@ -616,7 +616,7 @@ fn runner_up_backup_also_requires_resolvable_next_hop() {
     ]));
     assert_eq!(
         rib.push_snapshot().1[&prefix("9.9.9.0/24")],
-        (vec![addr("10.1.0.1")], Some(addr("10.2.0.1")))
+        (vec![addr("10.1.0.1")], Some(addr("10.2.0.1")), false)
     );
 }
 
@@ -791,7 +791,7 @@ fn push_snapshot_carries_runner_up_as_backup() {
     let (_, routes) = rib.push_snapshot();
     assert_eq!(
         routes.get(&prefix("1.2.3.0/24")),
-        Some(&(vec![addr("10.0.0.9")], Some(addr("10.0.0.8"))))
+        Some(&(vec![addr("10.0.0.9")], Some(addr("10.0.0.8")), false))
     );
 
     // Losing the runner-up drops the backup.
@@ -799,7 +799,7 @@ fn push_snapshot_carries_runner_up_as_backup() {
     let (_, routes) = rib.push_snapshot();
     assert_eq!(
         routes.get(&prefix("1.2.3.0/24")),
-        Some(&(vec![addr("10.0.0.9")], None))
+        Some(&(vec![addr("10.0.0.9")], None, false))
     );
 }
 
@@ -824,8 +824,9 @@ fn learn_mp(
     );
 }
 
-fn mp_hops(rib: &BgpRib) -> Hops {
-    rib.push_snapshot().1[&prefix("1.2.3.0/24")].clone()
+fn mp_hops(rib: &BgpRib) -> (Vec<IpAddr>, Option<IpAddr>) {
+    let (hops, backup, _) = rib.push_snapshot().1[&prefix("1.2.3.0/24")].clone();
+    (hops, backup)
 }
 
 #[test]

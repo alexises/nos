@@ -131,6 +131,7 @@ mod tests {
             soft_reconfiguration_inbound: false,
             graceful_shutdown: false,
             graceful_shutdown_receive_disabled: false,
+            blackhole: None,
             local_as: None,
             add_path: None,
             add_path_send_count: None,

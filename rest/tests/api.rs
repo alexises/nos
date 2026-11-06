@@ -785,6 +785,7 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
                         backup_tunnel: false,
                         mpls_labels: vec![],
                         vpn: vec![],
+                        blackhole: false,
                     }],
                 }],
                 next: Some("10.0.0.0/8".parse().unwrap()),

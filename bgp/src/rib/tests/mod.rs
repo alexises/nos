@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 mod add_path;
 mod aggregate;
+mod blackhole;
 mod confed;
 mod decision;
 mod evpn;

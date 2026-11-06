@@ -441,6 +441,19 @@ pub struct Args {
     #[arg(long)]
     pub damping_max_suppress: Option<u32>,
 
+    /// If set, enables `--peer-group`'s RFC 7999 blackhole handling
+    /// (`BgpPeerGroupOp::SetBlackhole`) with this prefix-list; with
+    /// `--blackhole-prefix` the list is (re)created covering host routes
+    /// (`/32`) inside that prefix.
+    #[arg(long)]
+    pub blackhole_prefix_list: Option<String>,
+    #[arg(long, requires = "blackhole_prefix_list")]
+    pub blackhole_prefix: Option<nos_proto::IpNet>,
+
+    /// Disables `--peer-group`'s blackhole handling (`BgpPeerGroupOp::ClearBlackhole`).
+    #[arg(long)]
+    pub clear_blackhole: bool,
+
     /// Disables `--peer-group`'s flap damping (`BgpPeerGroupOp::ClearDamping`).
     #[arg(long)]
     pub clear_damping: bool,
@@ -3001,6 +3014,31 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         }));
     }
+    if let Some(list) = &args.blackhole_prefix_list {
+        if let Some(cidr) = args.blackhole_prefix {
+            ops.push(ConfigOp::PrefixList(nos_proto::PrefixListOp::Ensure {
+                name: list.clone(),
+            }));
+            ops.push(ConfigOp::PrefixList(nos_proto::PrefixListOp::AddEntry {
+                name: list.clone(),
+                entry: nos_proto::PrefixListEntry {
+                    cidr,
+                    range: Some((32, 32)),
+                },
+            }));
+        }
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetBlackhole {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            prefix_list: list.clone(),
+        }));
+    }
+    if args.clear_blackhole {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearBlackhole {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+        }));
+    }
     if let Some(asn) = args.local_as {
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetLocalAs {
             instance: args.bgp_instance.clone(),
@@ -4527,6 +4565,11 @@ mod tests {
             "--damping-half-life",
             "20",
             "--clear-damping",
+            "--blackhole-prefix-list",
+            "bh",
+            "--blackhole-prefix",
+            "203.0.113.64/28",
+            "--clear-blackhole",
             "--local-as",
             "65009",
             "--local-as-replace-as",
@@ -4586,6 +4629,31 @@ mod tests {
                 instance: "r1".into(),
                 remote_address: "10.0.0.2".parse().unwrap(),
                 message: Some("bye".into()),
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetBlackhole {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                prefix_list: "bh".into(),
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::ClearBlackhole {
+                instance: "r1".into(),
+                name: "pg1".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::PrefixList(nos_proto::PrefixListOp::AddEntry {
+                name: "bh".into(),
+                entry: nos_proto::PrefixListEntry {
+                    cidr: "203.0.113.64/28".parse().unwrap(),
+                    range: Some((32, 32)),
+                },
             }),
         );
         has(
