@@ -85,6 +85,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "real UDP socket")]
     fn v4_idempotent_cycle() {
         let s = udp(Domain::IPV4);
         let a = AllDRouters::default();
@@ -97,6 +98,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "real UDP socket")]
     fn v4_already_joined_is_tolerated() {
         let s = udp(Domain::IPV4);
         s.join_multicast_v4(&ALL_D_ROUTERS_V4, &Ipv4Addr::LOCALHOST)
@@ -106,6 +108,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "real UDP socket")]
     fn v4_leave_when_never_joined_is_tolerated() {
         // Flag says joined, kernel says not: leave hits EADDRNOTAVAIL.
         let s = udp(Domain::IPV4);
@@ -116,6 +119,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "real UDP socket")]
     fn v6_idempotent_cycle() {
         // lo is ifindex 1 on Linux.
         let s = udp(Domain::IPV6);
@@ -128,6 +132,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "real UDP socket")]
     fn failure_leaves_state_unchanged() {
         // v6 join on a v4 socket is rejected with a non-tolerated error.
         let s = udp(Domain::IPV4);
