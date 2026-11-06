@@ -23,7 +23,7 @@ use nos_proto::{VpnPrefix, VpnPrefixUpdate};
 
 use super::{
     apply_policy, best_path, build_advertisement, decision, info, message, warn, AdvertisedRoute,
-    BgpRib, Candidate, OutboundUpdate, RibRoute, RouteOrigin, VpnRoute,
+    BgpRib, Candidate, OutboundUpdate, PolicyPeer, RibRoute, RouteOrigin, VpnRoute,
 };
 use crate::vpn::{format_rd, VpnKey};
 
@@ -76,9 +76,13 @@ fn learn_batch(
                 },
             );
         }
-        let Some(mut route) =
-            apply_policy(n.prefix, candidate, import_policy, Some(peer), Some(n.rd))
-        else {
+        let Some(mut route) = apply_policy(
+            n.prefix,
+            candidate,
+            import_policy,
+            Some(PolicyPeer::new(peer.0, peer.1)),
+            Some(n.rd),
+        ) else {
             table.remove(&k);
             warn!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, "vpn route rejected by import policy");
             continue;

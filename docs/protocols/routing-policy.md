@@ -214,13 +214,15 @@ Every field starts with `this.`. The prefix and the BGP attributes are:
 - `this.bgp.cluster_list`: the `CLUSTER_LIST`, a list of IPv4 addresses. Read it with `.length` and `.contains(<address>)`.
 - `this.bgp.communities`, `this.bgp.extended_communities`, `this.bgp.large_communities`: the three kinds of communities. Read them with `.length`, `.contains(<value>)` and `.matches("<regex>")`; change them with `.add`, `.remove`, `.remove_matching("<regex>")` and `.clear`.
 - `this.bgp.rd`: the Route Distinguisher of a VPN route (RFC 4364), absent on other routes. Compare it with `==` or `!=` against `rd(<asn>:<nn>)` or `rd(<a.b.c.d>:<nn>)`; read-only. An absent RD is never equal to anything.
+- `this.bgp.local_role`, `this.bgp.remote_role`: the RFC 9234 role on the session the policy runs for, `role.provider`, `role.rs`, `role.rs_client`, `role.customer` or `role.peer`. Compare with `==` or `!=` only; read-only. `local_role` is the session's configured `role`; `remote_role` is set only when both ends sent matching Role capabilities (a peer with no Role capability leaves it unset). An unset role is never `==` anything, and is `!=` everything. In an export policy they are the roles of the session the route is sent to. They are unset for redistributed routes and for EVPN, VPN and Flowspec policies.
+- `this.bgp.otc`: the route's Only-To-Customer ASN (RFC 9234) as the policy sees it, after receipt marking: a route learned from a `provider`, `peer` or `route-server` that carried no OTC reads as the neighbor's ASN. Absent on other routes. Compare with an integer using `==`, `!=`, `<`, `<=`, `>`, `>=`; an absent value is false for all but `!=`. Read-only.
 - `this.bgp.validation_state`: the route's RPKI origin validation state (RFC 6811), `rpki.valid`, `rpki.invalid` or `rpki.not_found`. Compare with `==` or `!=`; read-only. It is `rpki.not_found` unless the instance has an RPKI cache (see [RPKI origin validation](bgp.md#rpki-origin-validation-rfc-6811-rfc-8210)).
 
 A list field (the AS path, the cluster list and the communities) cannot be used as a whole value; use one of its methods.
 
 ### Conditions
 
-- `==`, `!=`, `<`, `<=`, `>`, `>=` compare numbers. `==` and `!=` also compare an origin with an `origin.*` value, the validation state with an `rpki.*` value, and an address field with an address.
+- `==`, `!=`, `<`, `<=`, `>`, `>=` compare numbers. `==` and `!=` also compare an origin with an `origin.*` value, the validation state with an `rpki.*` value, a role field with a `role.*` value, and an address field with an address.
 - `this.prefix in <prefix>` is true when the route's prefix is that prefix or a more specific one inside it: `this.prefix in 10.0.0.0/8` matches 10.0.0.0/8, 10.1.0.0/16 and 10.1.2.0/24.
 - `this.prefix in <prefix-list>` uses a named prefix list, which can match exactly (see [Prefix lists](#prefix-lists)).
 - `this.bgp.as_path in <as-path-list>` is true when any pattern of the named AS-path list matches.
@@ -239,7 +241,7 @@ A list field (the AS path, the cluster list and the communities) cannot be used 
   - a large community (RFC 8092) is `<global>:<local1>:<local2>`, each 0 to 4294967295: `65001:1:1`.
 - Route targets, Sites of Origin and Route Distinguishers: `rt(65000:10000)`, `soo(65001:77)` and `rd(65001:1)`, with an AS number or an IPv4 address before the colon (`rt(192.0.2.1:7)`). `rt()` and `soo()` are extended communities (`.contains`, `.add`, `.remove` on `this.bgp.extended_communities`); `rd()` only compares with `this.bgp.rd`. They encode exactly as the configuration does (two-octet AS and 32-bit number, IPv4 address and 16-bit number, or four-octet AS and 16-bit number), so `rt(65000:10000)` is the raw `0:2:279172874250000`, which still works.
 - Strings in double quotes, used only as the regular expression of `.matches(…)`. `\"` is a literal quote and does not end the string; any other backslash sequence reaches the regex unchanged and must be a valid regex escape (`\\`, `\_`, `\{`, `\d`, `\w`, …), otherwise it is a compile error. Over REST/JSON, a script's `\"` is written `\\\"`.
-- `origin.igp`, `origin.egp`, `origin.incomplete`, `rpki.valid`, `rpki.invalid`, `rpki.not_found`, and `self` (only as a next hop).
+- `origin.igp`, `origin.egp`, `origin.incomplete`, `rpki.valid`, `rpki.invalid`, `rpki.not_found`, `role.provider`, `role.rs`, `role.rs_client`, `role.customer`, `role.peer`, and `self` (only as a next hop).
 - A bare name refers to a prefix list, community alias or group, or AS-path list, depending on where it is used. A name that is not defined is a compile error.
 
 ### Errors
@@ -438,6 +440,13 @@ accept
 ```
 
 On export, the same script language edits what a PE sends: `this.bgp.extended_communities.add(rt(65000:2))` before `accept`. The Site of Origin the VRF attaches is visible there too (`soo(65001:77)`). See [L3VPN](bgp.md#l3vpn-vpnv4vpnv6).
+
+### Filter by BGP role and OTC
+
+- Drop everything learned from a customer: `if this.bgp.remote_role == role.customer:` then `reject`.
+- Match only when the peer negotiated a role: `if this.bgp.remote_role != role.provider:` is also true for a peer with no Role capability, so test `local_role` first when that matters.
+- Match a leaked-looking route: `if this.bgp.otc != 65001:` is true for a route with no OTC, so use `==` or `<` when you mean "has an OTC".
+- You cannot `set` any of these: RFC 9234 section 5 forbids the operator changing the OTC procedures.
 
 ### Drop tagged routes and clean communities on export
 

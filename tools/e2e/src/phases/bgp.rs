@@ -9307,16 +9307,70 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
     c.wait(&format!("{} .*otc=Some({ASN_A})", learned()))
         .await?;
 
-    log("otc: a customer's OTC is a route leak, dropped although it sent no Role capability");
+    // #872: RPL role/OTC fields on b's session to a (b is a's customer, so
+    // local_role customer, remote_role provider, post-ingress otc = a's ASN).
+    log("otc: an import policy matching the roles and OTC rejects a's route");
+    let matches = format!(
+        "this.bgp.local_role == role.customer and this.bgp.remote_role == role.provider and this.bgp.otc == {ASN_A}"
+    );
+    let on_a = |name: &str, src: &str| -> anyhow::Result<Vec<String>> {
+        let file = policy_file(name, src)?;
+        Ok(strings(&[
+            "--role",
+            "customer",
+            "--policy-name",
+            name,
+            "--policy-source-file",
+            &file,
+            "--import-policy",
+            name,
+        ]))
+    };
+    let est_b = w.b()?.count(est);
     w.b()?
-        .provision_flags(&b_group("pg-g", ASN_G, IP_G, "provider"))
+        .provision(&on_a(
+            "otc-reject",
+            &format!("if {matches}:\n    reject\nelse:\n    accept\n"),
+        )?)
         .await?;
+    reestablished(w.b()?, est_b).await?;
+    let learned_otc = format!("{} .*otc=Some({ASN_A})", learned());
+    let base = w.b()?.count(&learned_otc);
+    w.b()?.assert_quiet(&learned_otc, base, 10).await?;
+
+    log("otc: the same condition as an accept finds a's route again");
+    let base = w.b()?.count(&learned_otc);
+    w.b()?
+        .provision(&on_a(
+            "otc-accept",
+            &format!("if {matches}:\n    accept\nelse:\n    reject\n"),
+        )?)
+        .await?;
+    w.b()?.wait_new(&learned_otc, base, 60).await?;
+
+    log("otc: a customer's OTC is a route leak, dropped although it sent no Role capability");
+    // The role-less customer's remote_role is unset: only `!=` matches it.
+    let unset = policy_file(
+        "otc-unset-role",
+        "if this.bgp.remote_role != role.provider and this.bgp.remote_role != role.customer and this.bgp.local_role == role.provider:\n    accept\nelse:\n    reject\n",
+    )?;
+    let mut g_flags = b_group("pg-g", ASN_G, IP_G, "provider");
+    g_flags.extend(strings(&[
+        "--policy-name",
+        "otc-unset-role",
+        "--policy-source-file",
+        &unset,
+        "--import-policy",
+        "otc-unset-role",
+    ]));
+    w.b()?.provision_flags(&g_flags).await?;
     ensure_exabgp(w).await?;
     let conf = format!(
         "neighbor {IP_B} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
          local-as {ASN_G};\n    peer-as {ASN_B};\n    family {{ ipv4 unicast; }}\n    \
          static {{\n        route {OTC_LEAK_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
-         attribute [ 0x23 0xc0 0x0000fde8 ];\n    }}\n}}\n"
+         attribute [ 0x23 0xc0 0x0000fde8 ];\n        \
+         route {OTC_PLAIN_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ];\n    }}\n}}\n"
     );
     w.dock
         .start_plain(
@@ -9330,6 +9384,10 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
         .await?;
     let b = w.b()?;
     b.wait("route leak detected").await?;
+    b.wait(&format!(
+        "learned route for {OTC_PLAIN_PREFIX} into adj-rib-in"
+    ))
+    .await?;
     anyhow::ensure!(
         b.count(&format!("loc-rib best path for {OTC_LEAK_PREFIX}")) == 0
             && b.count(&format!("learned route for {OTC_LEAK_PREFIX}")) == 0,

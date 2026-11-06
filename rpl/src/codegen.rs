@@ -10,7 +10,8 @@ use crate::ast::{BinOp, Expr, ExprKind, ExtKind, Policy, Postfix, Stmt, StmtKind
 use crate::schema::{self, FieldInfo, FieldType};
 use crate::symbols::Symbols;
 use crate::vm::{
-    AsPathRegexes, CmpKind, CommunityValue, CompiledPolicy, Op, ValidationState, MAX_STACK_DEPTH,
+    AsPathRegexes, CmpKind, CommunityValue, CompiledPolicy, Op, Role, ValidationState,
+    MAX_STACK_DEPTH,
 };
 use crate::CompileError;
 
@@ -449,6 +450,30 @@ impl Codegen<'_> {
         }
     }
 
+    /// `this.bgp.{local,remote}_role ==/!= role.*`: emits `Op::OptEnumEq`.
+    fn compile_role_cmp(
+        &mut self,
+        op: BinOp,
+        id: schema::FieldId,
+        rhs: &Expr,
+        line: usize,
+    ) -> Result<(), CompileError> {
+        let bad =
+            || CompileError::new(line, "a role is only comparable with '==' / '!=' to role.*");
+        let ExprKind::EnumLit(name, variant) = &rhs.kind else {
+            return Err(bad());
+        };
+        let (enum_name, v) = resolve_enum_literal(name, variant, rhs.line)?;
+        if enum_name != "role" {
+            return Err(bad());
+        }
+        self.emit(Op::OptEnumEq(id, v), 1);
+        if op == BinOp::Ne {
+            self.emit(Op::Not, 0);
+        }
+        Ok(())
+    }
+
     /// `this.bgp.{first,neighbor,origin}_as <cmp> <int literal>`: emits
     /// `Op::OptIntCmp` and returns true; false when `lhs` is not an AS
     /// accessor. An accessor with any other rhs, or on the rhs, is an error.
@@ -459,6 +484,10 @@ impl Codegen<'_> {
         rhs: &Expr,
         line: usize,
     ) -> Result<bool, CompileError> {
+        if let (Some(id), BinOp::Eq | BinOp::Ne) = (optional_role_field(lhs), op) {
+            self.compile_role_cmp(op, id, rhs, line)?;
+            return Ok(true);
+        }
         let l = optional_int_field(lhs);
         if l.is_none() && optional_int_field(rhs).is_none() {
             return Ok(false);
@@ -575,6 +604,10 @@ impl Codegen<'_> {
             FieldType::OptionalInt => Err(CompileError::new(
                 line,
                 "this field may be unset: compare it with '==', '!=', '<', '<=', '>' or '>=' against an integer literal",
+            )),
+            FieldType::OptionalEnum(_) => Err(CompileError::new(
+                line,
+                "this field may be unset: compare it only with '==' / '!=' against a literal of its enum",
             )),
             FieldType::OptionalIp | FieldType::OptionalRd => Err(CompileError::new(
                 line,
@@ -883,6 +916,22 @@ fn optional_ip_field(expr: &Expr) -> Option<schema::FieldId> {
     (consumed == names.len() && info.ty == FieldType::OptionalIp).then_some(info.id)
 }
 
+/// The `FieldId` of `this.bgp.{local,remote}_role` exactly.
+fn optional_role_field(expr: &Expr) -> Option<schema::FieldId> {
+    let ExprKind::This(s) = &expr.kind else {
+        return None;
+    };
+    match s.as_slice() {
+        [Postfix::Field(a), Postfix::Field(b)] if a == "bgp" && b == "local_role" => {
+            Some(schema::FieldId::BgpLocalRole)
+        }
+        [Postfix::Field(a), Postfix::Field(b)] if a == "bgp" && b == "remote_role" => {
+            Some(schema::FieldId::BgpRemoteRole)
+        }
+        _ => None,
+    }
+}
+
 /// `this.bgp.rd` exactly.
 fn is_rd_field(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::This(s)
@@ -891,7 +940,7 @@ fn is_rd_field(expr: &Expr) -> bool {
 
 /// The `FieldId` of `this.bgp.{first,neighbor,origin}_as` exactly.
 fn optional_int_field(expr: &Expr) -> Option<schema::FieldId> {
-    use crate::schema::FieldId::{BgpFirstAs, BgpNeighborAs, BgpOriginAs};
+    use crate::schema::FieldId::{BgpFirstAs, BgpNeighborAs, BgpOriginAs, BgpOtc};
     let ExprKind::This(segments) = &expr.kind else {
         return None;
     };
@@ -903,8 +952,9 @@ fn optional_int_field(expr: &Expr) -> Option<schema::FieldId> {
         })
         .collect::<Option<_>>()?;
     let (info, consumed) = schema::resolve_field(&names)?;
-    (consumed == names.len() && matches!(info.id, BgpFirstAs | BgpNeighborAs | BgpOriginAs))
-        .then_some(info.id)
+    (consumed == names.len()
+        && matches!(info.id, BgpFirstAs | BgpNeighborAs | BgpOriginAs | BgpOtc))
+    .then_some(info.id)
 }
 
 /// `this.bgp.as_path` exactly, with no suffix.
@@ -965,6 +1015,11 @@ fn resolve_enum_literal(
         ("rpki", "valid") => Ok(("rpki", ValidationState::Valid as u8)),
         ("rpki", "invalid") => Ok(("rpki", ValidationState::Invalid as u8)),
         ("rpki", "not_found") => Ok(("rpki", ValidationState::NotFound as u8)),
+        ("role", "provider") => Ok(("role", Role::Provider as u8)),
+        ("role", "rs") => Ok(("role", Role::RouteServer as u8)),
+        ("role", "rs_client") => Ok(("role", Role::RouteServerClient as u8)),
+        ("role", "customer") => Ok(("role", Role::Customer as u8)),
+        ("role", "peer") => Ok(("role", Role::Peer as u8)),
         _ => Err(CompileError::new(
             line,
             format!("unknown enum literal '{name}.{variant}'"),
@@ -1039,6 +1094,9 @@ mod tests {
                 large_communities: &[],
                 validation_state: ValidationState::default(),
                 rd: None,
+                local_role: None,
+                remote_role: None,
+                otc: None,
             },
         }
     }
@@ -1069,7 +1127,70 @@ mod tests {
                 large_communities,
                 validation_state: ValidationState::default(),
                 rd: None,
+                local_role: None,
+                remote_role: None,
+                otc: None,
             },
+        }
+    }
+
+    /// RFC 9234 / #872: `this.bgp.{local,remote}_role` and `this.bgp.otc`.
+    #[test]
+    fn role_and_otc_fields() {
+        let (prefix, as_path, cluster_list) = default_input("10.0.0.0/8");
+        let mut input = make_input(prefix, &as_path, 100, None, &cluster_list);
+        let rejects =
+            |src: &str, input: &Input| vm::run(&compile_src(src), input) == Verdict::Reject;
+        let eq = "if this.bgp.local_role == role.customer:\n    reject\naccept\n";
+        let ne = "if this.bgp.remote_role != role.provider:\n    reject\naccept\n";
+        // Unset: `==` false, `!=` true.
+        assert!(!rejects(eq, &input));
+        assert!(rejects(ne, &input));
+        input.bgp.local_role = Some(vm::Role::Customer);
+        input.bgp.remote_role = Some(vm::Role::Provider);
+        assert!(rejects(eq, &input));
+        assert!(!rejects(ne, &input));
+        for (lit, role) in [
+            ("rs", vm::Role::RouteServer),
+            ("rs_client", vm::Role::RouteServerClient),
+            ("peer", vm::Role::Peer),
+        ] {
+            input.bgp.remote_role = Some(role);
+            let src = format!("if this.bgp.remote_role == role.{lit}:\n    reject\naccept\n");
+            assert!(rejects(&src, &input), "{lit}");
+        }
+        for src in [
+            "if this.bgp.local_role < role.peer:\n    reject\naccept\n",
+            "if role.peer == this.bgp.local_role:\n    reject\naccept\n",
+            "if this.bgp.local_role == origin.igp:\n    reject\naccept\n",
+            "if this.bgp.local_role == 3:\n    reject\naccept\n",
+            "if this.bgp.local_role:\n    reject\naccept\n",
+        ] {
+            compile_err(src);
+        }
+        assert!(
+            compile_err("if this.bgp.local_role == role.bogus:\n    reject\naccept\n")
+                .message
+                .contains("unknown enum literal")
+        );
+        for src in [
+            "set this.bgp.local_role = role.peer\naccept\n",
+            "set this.bgp.otc = 1\naccept\n",
+        ] {
+            assert!(compile_err(src).message.contains("not settable"));
+        }
+        // OTC: unset compares false, `!=` true.
+        for (otc, cond, rejected) in [
+            (None, "this.bgp.otc == 65000", false),
+            (None, "this.bgp.otc != 65000", true),
+            (None, "this.bgp.otc < 65000", false),
+            (Some(65000), "this.bgp.otc == 65000", true),
+            (Some(65000), "this.bgp.otc != 65000", false),
+            (Some(65000), "this.bgp.otc < 65001", true),
+        ] {
+            input.bgp.otc = otc;
+            let src = format!("if {cond}:\n    reject\naccept\n");
+            assert_eq!(rejects(&src, &input), rejected, "{cond} {otc:?}");
         }
     }
 

@@ -149,6 +149,49 @@ fn policy_segments(route: &RibRoute) -> Vec<nos_rpl::Segment<'_>> {
         .collect()
 }
 
+/// The neighbor a policy runs for (`None` at the call: a redistributed route).
+/// The roles are RFC 9234 ones and stay unset for every non-unicast run.
+#[derive(Clone, Copy)]
+struct PolicyPeer {
+    addr: IpAddr,
+    asn: u32,
+    local_role: Option<nos_rpl::Role>,
+    remote_role: Option<nos_rpl::Role>,
+}
+
+impl PolicyPeer {
+    fn new(addr: IpAddr, asn: u32) -> Self {
+        Self {
+            addr,
+            asn,
+            local_role: None,
+            remote_role: None,
+        }
+    }
+
+    fn with_roles(self, (local_role, remote_role): PolicyRoles) -> Self {
+        Self {
+            local_role,
+            remote_role,
+            ..self
+        }
+    }
+}
+
+/// `(local_role, remote_role)` as the policy sees them.
+type PolicyRoles = (Option<nos_rpl::Role>, Option<nos_rpl::Role>);
+
+fn rpl_role(r: nos_proto::BgpRole) -> nos_rpl::Role {
+    use nos_proto::BgpRole as B;
+    match r {
+        B::Provider => nos_rpl::Role::Provider,
+        B::RouteServer => nos_rpl::Role::RouteServer,
+        B::RouteServerClient => nos_rpl::Role::RouteServerClient,
+        B::Customer => nos_rpl::Role::Customer,
+        B::Peer => nos_rpl::Role::Peer,
+    }
+}
+
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
 /// "Execution model". A plain function, not an adapter trait: there is
 /// exactly one producer (`RibRoute`) today, so a trait would add indirection
@@ -157,7 +200,7 @@ fn to_policy_input<'a>(
     prefix: IpNet,
     route: &'a RibRoute,
     segments: &'a [nos_rpl::Segment<'a>],
-    peer: Option<(IpAddr, u32)>,
+    peer: Option<PolicyPeer>,
     rd: Option<[u8; 8]>,
 ) -> nos_rpl::Input<'a> {
     nos_rpl::Input {
@@ -177,13 +220,16 @@ fn to_policy_input<'a>(
             router_id: route.router_id,
             originator_id: route.originator_id,
             cluster_list: &route.cluster_list,
-            peer: peer.map(|(addr, _)| addr),
-            peer_as: peer.map_or(0, |(_, asn)| asn),
+            peer: peer.map(|p| p.addr),
+            peer_as: peer.map_or(0, |p| p.asn),
             communities: &route.communities,
             extended_communities: &route.extended_communities,
             large_communities: &route.large_communities,
             validation_state: route.validation_state,
             rd: rd.map(u64::from_be_bytes),
+            local_role: peer.and_then(|p| p.local_role),
+            remote_role: peer.and_then(|p| p.remote_role),
+            otc: route.otc,
         },
     }
 }
@@ -199,7 +245,7 @@ fn apply_policy(
     prefix: IpNet,
     mut candidate: RibRoute,
     policy: &CompiledPolicy,
-    peer: Option<(IpAddr, u32)>,
+    peer: Option<PolicyPeer>,
     rd: Option<[u8; 8]>,
 ) -> Option<RibRoute> {
     let segs = policy_segments(&candidate);
@@ -621,6 +667,8 @@ struct PeerOutbox {
     remote_asn: u32,
     /// RFC 9234: the peer's role (the counterpart of the configured one).
     remote_role: Option<nos_proto::BgpRole>,
+    /// What an export policy sees as `local_role`/`remote_role` (`BgpRib::policy_roles`).
+    policy_roles: PolicyRoles,
     /// Address families we send RFC 7911 ADD-PATH ids to this peer for
     /// (`fsm::negotiate_add_path`). Every NLRI of such a family must carry
     /// one, so the plain fan-out skips them and `propagate_add_path` sends
@@ -663,6 +711,8 @@ pub struct BgpRib {
     local_as_peers: HashMap<IpAddr, nos_proto::BgpLocalAs>,
     /// Peers with a configured RFC 9234 role (`set_peer_role`), ours toward them.
     role_peers: HashMap<IpAddr, nos_proto::BgpRole>,
+    /// Peers whose RFC 9234 role was negotiated this session (`set_peer_role_negotiated`).
+    role_negotiated: HashSet<IpAddr>,
     /// Peers whose first AS is checked (`set_peer_enforce_first_as`).
     first_as_peers: HashSet<IpAddr>,
     /// Per peer: when the first-AS warning last fired and how many were
@@ -853,6 +903,7 @@ impl BgpRib {
             confed_peers: HashSet::new(),
             local_as_peers: HashMap::new(),
             role_peers: HashMap::new(),
+            role_negotiated: HashSet::new(),
             first_as_peers: HashSet::new(),
             first_as_warned: HashMap::new(),
             blackhole_peers: HashMap::new(),
@@ -1097,6 +1148,28 @@ impl BgpRib {
             Some(r) => self.role_peers.insert(peer, r),
             None => self.role_peers.remove(&peer),
         };
+    }
+
+    /// Whether the peer's Role capability matched ours this session; only then
+    /// does a policy see `remote_role`. Call with `set_peer_role`.
+    pub fn set_peer_role_negotiated(&mut self, peer: IpAddr, negotiated: bool) {
+        if negotiated {
+            self.role_negotiated.insert(peer);
+        } else {
+            self.role_negotiated.remove(&peer);
+        }
+    }
+
+    /// `(local_role, remote_role)` a unicast policy for `peer` sees: ours, and
+    /// the counterpart only when negotiated (a mismatch is refused, so it equals
+    /// what the peer sent).
+    fn policy_roles(&self, peer: IpAddr) -> PolicyRoles {
+        let local = self.role_peers.get(&peer).copied();
+        let remote = local.filter(|_| self.role_negotiated.contains(&peer));
+        (
+            local.map(rpl_role),
+            remote.map(|r| rpl_role(r.counterpart())),
+        )
     }
 
     /// Sets `peer`'s EVPN import policy (`None`: accept all) and re-runs the

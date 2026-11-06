@@ -19,7 +19,8 @@ use nos_rpl::CompiledPolicy;
 
 use super::{
     apply_policy, best_path, build_advertisement, info, warn, AdvertisedRoute, Arc, BgpRib,
-    FlowspecKey, FlowspecRoute, OutboundUpdate, RibRoute, RouteOrigin, DEFAULT_LOCAL_PREF,
+    FlowspecKey, FlowspecRoute, OutboundUpdate, PolicyPeer, RibRoute, RouteOrigin,
+    DEFAULT_LOCAL_PREF,
 };
 use crate::flowspec::FlowSpec;
 
@@ -87,7 +88,13 @@ pub(super) fn import_flow(
 ) -> bool {
     let candidate = flow_rib_route(peer, r, confed);
     let prefix = flow_prefix(r.family, &r.nlri);
-    let Some(out) = apply_policy(prefix, candidate, policy, Some((peer, peer_as)), None) else {
+    let Some(out) = apply_policy(
+        prefix,
+        candidate,
+        policy,
+        Some(PolicyPeer::new(peer, peer_as)),
+        None,
+    ) else {
         return false;
     };
     let a = &mut r.attributes;

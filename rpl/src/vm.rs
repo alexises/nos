@@ -47,6 +47,22 @@ pub enum ValidationState {
     NotFound = 2,
 }
 
+/// RFC 9234 §4.1 BGP role, `role.provider`/`role.rs`/`role.rs_client`/
+/// `role.customer`/`role.peer` in a script (same values as the capability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Provider.
+    Provider = 0,
+    /// Route server.
+    RouteServer = 1,
+    /// Route server client.
+    RouteServerClient = 2,
+    /// Customer.
+    Customer = 3,
+    /// Peer (lateral peer).
+    Peer = 4,
+}
+
 /// A stack value of the interpreter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
@@ -268,6 +284,8 @@ pub enum Op {
     AsPathLen,
     /// `this.bgp.rd == rd(..)`: false when the route has no RD.
     OptRdEq(u64),
+    /// `this.bgp.{local,remote}_role == role.*`: false when the role is unset.
+    OptEnumEq(FieldId, u8),
     /// Pops an `Enum` and sets `this.bgp.origin`.
     SetOrigin,
     /// Pops an `Ip` and sets `this.bgp.next_hop`.
@@ -415,6 +433,13 @@ pub struct BgpInput<'a> {
     /// octets as a big-endian integer (types 0/1/2 start with a zero octet,
     /// so it is also a non-negative `i64`); `None` for a non-VPN route.
     pub rd: Option<u64>,
+    /// Our RFC 9234 role on the session; `None` for a route with no unicast
+    /// session (redistributed, EVPN, VPN, Flowspec) or no configured role.
+    pub local_role: Option<Role>,
+    /// The peer's negotiated RFC 9234 role; `None` when none was negotiated.
+    pub remote_role: Option<Role>,
+    /// The route's RFC 9234 Only-To-Customer ASN (after ingress marking).
+    pub otc: Option<u32>,
 }
 
 /// Attribute rewrites beyond the always-carried ones on `Verdict::Accept`.
@@ -537,6 +562,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             Op::AsPathPrepend(asn, count) => lists.prepend(*asn, *count),
             Op::LoadMed
             | Op::OptIntCmp(..)
+            | Op::OptEnumEq(..)
             | Op::OptIpEq(..)
             | Op::OptIpIn(..)
             | Op::OptIpInList(..)
@@ -839,6 +865,13 @@ fn read_op(
         Op::OptIntCmp(id, kind, n) => {
             Value::Bool(opt_int_cmp(opt_int(*id, input, lists), *kind, *n))
         }
+        Op::OptEnumEq(id, v) => Value::Bool(
+            match id {
+                FieldId::BgpLocalRole => input.bgp.local_role,
+                _ => input.bgp.remote_role,
+            }
+            .is_some_and(|r| r as u8 == *v),
+        ),
         Op::OptIpEq(id, ip) => Value::Bool(opt_ip(*id, input, next_hop_edit) == Some(*ip)),
         Op::OptIpIn(id, net) => {
             Value::Bool(opt_ip(*id, input, next_hop_edit).is_some_and(|a| net.contains(&a)))
@@ -906,7 +939,8 @@ fn opt_int(id: FieldId, input: &Input, lists: &Lists) -> Option<u32> {
             false,
         ),
         FieldId::BgpOriginAs => seq(segs.last(), true),
-        _ => unreachable!("codegen.rs only emits OptIntCmp for AS accessors"),
+        FieldId::BgpOtc => input.bgp.otc,
+        _ => unreachable!("codegen.rs only emits OptIntCmp for these accessors"),
     }
 }
 

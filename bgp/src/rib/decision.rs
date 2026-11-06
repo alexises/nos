@@ -5,7 +5,8 @@
 use super::{
     apply_verdict, family_of, message, next_hop_family_ok, policy_segments, to_policy_input,
     warn_next_hop_family, AddressFamily, AdvertisedRoute, Arc, AsPath, HashMap, Instant, IpAddr,
-    IpNet, Ipv4Addr, NextHopMode, PeerOutbox, RibRoute, RouteOrigin, DEFAULT_LOCAL_PREF,
+    IpNet, Ipv4Addr, NextHopMode, PeerOutbox, PolicyPeer, RibRoute, RouteOrigin,
+    DEFAULT_LOCAL_PREF,
 };
 use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
 
@@ -406,7 +407,13 @@ pub(super) fn build_advertisement(
             prefix,
             &adjusted,
             &segs,
-            Some((peer, outbox.remote_asn)),
+            Some(
+                PolicyPeer::new(peer, outbox.remote_asn).with_roles(if flow.is_none() {
+                    outbox.policy_roles
+                } else {
+                    (None, None)
+                }),
+            ),
             flow.and_then(|(.., rd)| rd),
         ),
     );

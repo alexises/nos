@@ -942,6 +942,7 @@ With a `role`, the Only-To-Customer (OTC) attribute marks routes as they cross p
 - So a route learned from one provider is not passed to another provider or to a peer, but does reach customers. Export policy cannot override this.
 - Check with the `learned route for <prefix> into adj-rib-in` log line, which carries `otc=`; it is not shown in `show bgp`.
 - A neighbor that does not speak RFC 9234 gets its routes marked on receipt, so they are not leaked onward either.
+- Policies can match on the roles and the OTC: see `this.bgp.local_role`, `this.bgp.remote_role` and `this.bgp.otc` in [routing policy](routing-policy.md#fields).
 
 ```
 edge-1(t9/bgp-instance:r1/peer-group:pg1)> set role customer

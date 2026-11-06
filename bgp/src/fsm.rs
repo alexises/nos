@@ -1452,6 +1452,7 @@ async fn report_established(
         slot.peer.local_as.filter(|_| kind == PeerKind::External),
     );
     rib.set_peer_role(peer.remote_address, slot.peer.role);
+    rib.set_peer_role_negotiated(peer.remote_address, negotiated_role.is_some());
     rib.set_peer_enforce_first_as(
         peer.remote_address,
         slot.peer.enforce_first_as && !slot.peer.route_server_client,

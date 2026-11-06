@@ -15,7 +15,8 @@ use super::flowspec_out::import_flow;
 use super::vpn_out::vpn_family;
 use super::{
     apply_policy, family_index, info, ov_state, warn, Arc, BgpRib, CompiledPolicy, EvpnNlri,
-    EvpnRoute, FlowspecKey, FlowspecRoute, HashMap, HashSet, IpAddr, IpNet, RibRoute, VpnRoute,
+    EvpnRoute, FlowspecKey, FlowspecRoute, HashMap, HashSet, IpAddr, IpNet, PolicyPeer, RibRoute,
+    VpnRoute,
 };
 use crate::vpn::{format_rd, VpnKey};
 use nos_proto::{AddressFamily, FamilyReeval, ReevalFamily};
@@ -447,6 +448,7 @@ impl BgpRib {
             return false;
         };
         let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
+        let pp = PolicyPeer::new(peer, peer_as).with_roles(self.policy_roles(peer));
         let local = self.confed_id.unwrap_or(self.local_asn);
         let adj = self.adj_rib_in.entry(peer).or_default();
         let counts = self.path_counts.entry(peer).or_default();
@@ -460,7 +462,7 @@ impl BgpRib {
                 crate::rpki::origin_as(&cand.as_path, local),
                 cand.received_ov,
             );
-            let result = apply_policy(prefix, cand, policy, Some((peer, peer_as)), None);
+            let result = apply_policy(prefix, cand, policy, Some(pp), None);
             stats[fam].0 += 1;
             stats[fam].1 += u32::from(result.is_some());
             changed |= settle(adj, counts, (peer, prefix, *id), result);
@@ -580,7 +582,13 @@ impl BgpRib {
             return false;
         };
         let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
-        let result = apply_policy(k.1, raw.route, policy, Some((peer, peer_as)), Some(k.0));
+        let result = apply_policy(
+            k.1,
+            raw.route,
+            policy,
+            Some(PolicyPeer::new(peer, peer_as)),
+            Some(k.0),
+        );
         let accepted = result.is_some();
         let table = self.vpn_adj_rib_in.entry(peer).or_default();
         let changed = if let Some(mut route) = result {

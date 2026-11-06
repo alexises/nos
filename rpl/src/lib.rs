@@ -19,7 +19,7 @@ pub mod vm;
 
 pub use symbols::{PrefixListEntry, Symbols};
 pub use vm::{
-    AsPathRegexes, BgpInput, CmpKind, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin,
+    AsPathRegexes, BgpInput, CmpKind, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin, Role,
     SegKind, Segment, ValidationState, Value, Verdict,
 };
 
@@ -189,6 +189,9 @@ mod tests {
                 large_communities: &[],
                 validation_state: ValidationState::default(),
                 rd: None,
+                local_role: None,
+                remote_role: None,
+                otc: None,
             },
         };
         assert_eq!(
@@ -226,6 +229,9 @@ mod tests {
                 large_communities: &[],
                 validation_state: ValidationState::default(),
                 rd: None,
+                local_role: None,
+                remote_role: None,
+                otc: None,
             },
         };
         assert_eq!(vm::run(&DENY_ALL, &input), Verdict::Reject);

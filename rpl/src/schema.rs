@@ -54,6 +54,12 @@ pub enum FieldId {
     /// `this.bgp.rd`: the Route Distinguisher of a VPN route (RFC 4364),
     /// read-only; unset for a non-VPN route.
     BgpRd,
+    /// `this.bgp.local_role`: our RFC 9234 role on the session, read-only.
+    BgpLocalRole,
+    /// `this.bgp.remote_role`: the peer's negotiated RFC 9234 role, read-only.
+    BgpRemoteRole,
+    /// `this.bgp.otc`: the RFC 9234 Only-To-Customer ASN after ingress, read-only.
+    BgpOtc,
 }
 
 /// The type of a [`FieldId`], as the checker sees it.
@@ -71,6 +77,8 @@ pub enum FieldType {
     OptionalInt,
     /// A Route Distinguisher that may be absent; only `==`/`!=` against `rd(..)`.
     OptionalRd,
+    /// An enum that may be absent; only `==`/`!=` against its literals.
+    OptionalEnum(&'static str),
     /// One of the named enum's variants (e.g. `origin`).
     Enum(&'static str),
     /// List of integers (e.g. an AS path).
@@ -257,6 +265,30 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
         FieldInfo {
             id: FieldId::BgpRd,
             ty: FieldType::OptionalRd,
+            mutable: false,
+        },
+    ),
+    (
+        &["bgp", "local_role"],
+        FieldInfo {
+            id: FieldId::BgpLocalRole,
+            ty: FieldType::OptionalEnum("role"),
+            mutable: false,
+        },
+    ),
+    (
+        &["bgp", "remote_role"],
+        FieldInfo {
+            id: FieldId::BgpRemoteRole,
+            ty: FieldType::OptionalEnum("role"),
+            mutable: false,
+        },
+    ),
+    (
+        &["bgp", "otc"],
+        FieldInfo {
+            id: FieldId::BgpOtc,
+            ty: FieldType::OptionalInt,
             mutable: false,
         },
     ),
