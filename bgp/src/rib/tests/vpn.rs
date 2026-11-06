@@ -1177,3 +1177,54 @@ fn no_export_blocks_vpn_to_ebgp_but_not_ibgp() {
     assert_eq!(advs(&mut rx[1]).len(), 0, "eBGP observer");
     assert_eq!(advs(&mut rx[2]).len(), 1, "iBGP observer");
 }
+
+fn vpn_policies(script: &str) -> crate::rib::ImportPolicies {
+    nos_rpl::compile(script, &nos_rpl::Symbols::EMPTY)
+        .map(|p| crate::rib::ImportPolicies::from(Arc::new(p)))
+        .unwrap()
+}
+
+#[test]
+fn reevaluation_readmits_both_rds_and_a_withdrawal_drops_the_raw_copy() {
+    let (mut rib, _rx) = setup();
+    let src = addr(SRC);
+    rib.set_peer_soft_reconfig(src, true);
+    let u = reach(SRC, vec![65001], vec![nlri(RD1, P, 100), nlri(RD2, P, 200)]);
+    rib.handle_update(src, false, v4("2.2.2.2"), &u, &nos_rpl::DENY_ALL);
+    assert_eq!(held(&rib, AddressFamily::Vpnv4Unicast).len(), 0);
+    assert_eq!(rib.retained_count(src), 2);
+    // Loosen: both RDs return, each its own best.
+    let fams = rib.reevaluate_peer(src, vpn_policies("accept\n"));
+    let f = fams
+        .iter()
+        .find(|f| f.family == nos_proto::ReevalFamily::Vpnv4)
+        .unwrap();
+    assert_eq!((f.retained, f.accepted), (2, 2));
+    assert_eq!(held(&rib, AddressFamily::Vpnv4Unicast).len(), 2);
+    // A rewrite applies to the raw path, once.
+    rib.reevaluate_peer(
+        src,
+        vpn_policies("this.bgp.communities.add(65000:7)\naccept\n"),
+    );
+    rib.reevaluate_peer(
+        src,
+        vpn_policies("this.bgp.communities.add(65000:9)\naccept\n"),
+    );
+    let communities: Vec<_> = rib.vpn_adj_rib_in[&src]
+        .values()
+        .map(|r| r.route.communities.clone())
+        .collect();
+    assert!(communities.iter().all(|c| *c == vec![(65000 << 16) | 9]));
+    // Tighten, then withdraw one RD: its raw copy goes with it.
+    rib.reevaluate_peer(src, vpn_policies("reject\n"));
+    assert_eq!(held(&rib, AddressFamily::Vpnv4Unicast).len(), 0);
+    assert_eq!(rib.retained_count(src), 2);
+    rib.handle_update(
+        src,
+        false,
+        v4("2.2.2.2"),
+        &unreach(vec![nlri(RD1, P, 100)]),
+        &nos_rpl::DENY_ALL,
+    );
+    assert_eq!(rib.retained_count(src), 1);
+}

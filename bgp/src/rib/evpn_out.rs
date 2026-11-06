@@ -342,6 +342,21 @@ impl BgpRib {
         }
     }
 
+    /// Route refresh (RFC 2918) of EVPN: re-sends what `peer` was last sent.
+    pub(super) fn resend_evpn(&self, peer: IpAddr) {
+        let Some(outbox) = self.peer_outboxes.get(&peer) else {
+            return;
+        };
+        for adv in self
+            .evpn_adj_rib_out
+            .get(&peer)
+            .into_iter()
+            .flat_map(HashMap::values)
+        {
+            outbox.tx.send(OutboundUpdate::AnnounceEvpn(adv.clone()));
+        }
+    }
+
     /// Every received Type-2/3/4 route, across peers, as the wire shape
     /// `nos-fdbd` consumes. A Type-2 MAC (or MAC+IP) learned from several
     /// peers under different RDs still collapses to one PE's copies — among

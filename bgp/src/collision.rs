@@ -178,6 +178,9 @@ pub struct PeerSlot {
     /// soft reconfiguration inbound is applied in place (#859), so the live
     /// session and every new one read the current policy from here.
     import_policy: std::sync::Mutex<Arc<nos_rpl::CompiledPolicy>>,
+    /// The EVPN and Flowspec import policies, replaceable like `import_policy`.
+    evpn_import: std::sync::Mutex<Option<Arc<nos_rpl::CompiledPolicy>>>,
+    flowspec_import: std::sync::Mutex<Option<Arc<nos_rpl::CompiledPolicy>>>,
     /// `peer.soft_reconfiguration_inbound`, replaceable for the same reason.
     soft_reconfig: std::sync::atomic::AtomicBool,
     /// What the established session negotiated: bit 0 RFC 2918 Route Refresh,
@@ -187,8 +190,14 @@ pub struct PeerSlot {
     reeval: std::sync::Mutex<ReevalState>,
 }
 
+/// Why a `soft-in` got no counts: a policy change started a newer pass, the
+/// session went down, or the pass tripped a maximum-prefix limit.
+pub const REEVAL_SUPERSEDED: &str = "import policy changed during re-evaluation";
+pub const REEVAL_SESSION_DOWN: &str = "session down";
+pub const REEVAL_MAX_PREFIX: &str = "maximum prefix exceeded during re-evaluation";
+
 /// Answer to a `soft-in` waiting on a pass: the per-family counts, or why it
-/// ended early (`superseded`, `disconnected`, ...).
+/// ended early (see `REEVAL_SUPERSEDED` and friends).
 pub type ReevalResult = Result<Vec<nos_proto::FamilyReeval>, String>;
 
 #[derive(Default)]
@@ -212,6 +221,8 @@ impl PeerSlot {
             max_prefix_hold: std::sync::Mutex::new(None),
             stopping: std::sync::atomic::AtomicBool::new(false),
             import_policy: std::sync::Mutex::new(peer.import_policy.clone()),
+            evpn_import: std::sync::Mutex::new(peer.evpn_import_policy.clone()),
+            flowspec_import: std::sync::Mutex::new(peer.flowspec_import_policy.clone()),
             soft_reconfig: std::sync::atomic::AtomicBool::new(peer.soft_reconfiguration_inbound),
             refresh_caps: std::sync::atomic::AtomicU8::new(0),
             reeval: std::sync::Mutex::new(ReevalState::default()),
@@ -250,6 +261,47 @@ impl PeerSlot {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The peer's current EVPN import policy (`None` accepts all).
+    pub fn evpn_import_policy(&self) -> Option<Arc<nos_rpl::CompiledPolicy>> {
+        self.evpn_import
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The peer's current Flowspec import policy (`None` accepts all).
+    pub fn flowspec_import_policy(&self) -> Option<Arc<nos_rpl::CompiledPolicy>> {
+        self.flowspec_import
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// All three import policies, for a re-evaluation pass.
+    pub fn import_policies(&self) -> crate::rib::ImportPolicies {
+        crate::rib::ImportPolicies {
+            unicast: self.import_policy(),
+            evpn: self.evpn_import_policy(),
+            flowspec: self.flowspec_import_policy(),
+        }
+    }
+
+    /// Replaces the EVPN and Flowspec import policies (an in-place change).
+    pub fn set_family_import_policies(
+        &self,
+        evpn: Option<Arc<nos_rpl::CompiledPolicy>>,
+        flowspec: Option<Arc<nos_rpl::CompiledPolicy>>,
+    ) {
+        *self
+            .evpn_import
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = evpn;
+        *self
+            .flowspec_import
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = flowspec;
     }
 
     pub fn set_import_policy(&self, policy: Arc<nos_rpl::CompiledPolicy>) {
@@ -292,7 +344,7 @@ impl PeerSlot {
 
     /// Registers a re-evaluation pass. `supersede` (a policy change or flag
     /// enable) starts a new generation and answers the old waiters
-    /// `superseded`; otherwise (`soft-in`) a running pass is joined: the
+    /// `REEVAL_SUPERSEDED`; otherwise (`soft-in`) a running pass is joined: the
     /// waiter is queued and `None` returned. `Some(generation)`: the caller
     /// must run the pass.
     pub fn reeval_begin(
@@ -304,7 +356,7 @@ impl PeerSlot {
         if supersede {
             st.generation += 1;
             for w in std::mem::take(&mut st.waiters) {
-                let _ = w.send(Err("superseded".into()));
+                let _ = w.send(Err(REEVAL_SUPERSEDED.into()));
             }
         } else if st.running {
             st.waiters.extend(waiter);
@@ -984,7 +1036,7 @@ mod tests {
         let old = slot.reeval_begin(false, Some(t3)).unwrap();
         let newer = slot.reeval_begin(true, None).unwrap();
         assert!(!slot.reeval_current(old) && slot.reeval_current(newer));
-        assert_eq!(r3.try_recv().unwrap(), Err("superseded".to_string()));
+        assert_eq!(r3.try_recv().unwrap(), Err(REEVAL_SUPERSEDED.to_string()));
         slot.reeval_finish(old, &Ok(Vec::new())); // a stale finish is a no-op
         let (t4, mut r4) = channel();
         assert_eq!(slot.reeval_begin(false, Some(t4)), None, "still running");

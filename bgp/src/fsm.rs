@@ -801,9 +801,12 @@ async fn resend_loc_rib(
         );
         return;
     }
-    // A Flowspec or VPN refresh names its own family (resent by
+    // A Flowspec, VPN or EVPN refresh names its own family (resent by
     // `resend_all`); any other SAFI keeps meaning unicast of its AFI.
-    let family = if matches!(rr.safi, message::SAFI_FLOWSPEC | message::SAFI_VPN) {
+    let family = if matches!(
+        rr.safi,
+        message::SAFI_FLOWSPEC | message::SAFI_VPN | message::SAFI_EVPN
+    ) {
         gr::family_of(rr.afi, rr.safi)
     } else {
         family_of_afi(rr.afi)
@@ -881,6 +884,11 @@ async fn send_route_refresh(
         remote.negotiated_ipv6_unicast.then_some((AFI_IPV6, 1)),
         remote.negotiated_vpn[0].then_some((AFI_IPV4, message::SAFI_VPN)),
         remote.negotiated_vpn[1].then_some((AFI_IPV6, message::SAFI_VPN)),
+        remote
+            .negotiated_evpn
+            .then_some((message::AFI_L2VPN, message::SAFI_EVPN)),
+        remote.negotiated_flowspec[0].then_some((AFI_IPV4, message::SAFI_FLOWSPEC)),
+        remote.negotiated_flowspec[1].then_some((AFI_IPV6, message::SAFI_FLOWSPEC)),
     ];
     for (afi, safi) in families.into_iter().flatten() {
         let _ = writer
@@ -1429,11 +1437,16 @@ async fn report_established(
     rib.set_peer_asn(peer.remote_address, *remote_asn);
     rib.set_peer_evpn_import_policy(
         peer.remote_address,
-        slot.peer.evpn_import_policy.clone(),
+        slot.evpn_import_policy(),
         remote_is_ibgp,
     );
     rib.set_peer_confed(peer.remote_address, kind == PeerKind::ConfedExternal);
-    rib.set_peer_flowspec(&slot.peer);
+    rib.set_peer_flowspec_validation(peer.remote_address, slot.peer.flowspec_validation);
+    rib.set_peer_flowspec_policies(
+        peer.remote_address,
+        slot.flowspec_import_policy(),
+        slot.peer.flowspec_export_policy.clone(),
+    );
     rib.set_peer_local_as(
         peer.remote_address,
         slot.peer.local_as.filter(|_| kind == PeerKind::External),

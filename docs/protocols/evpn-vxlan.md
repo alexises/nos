@@ -141,6 +141,7 @@ edge-1(t1/bgp-instance:r1/peer-group:pg-evpn)> set evpn-import-policy only-tenan
 - Applies to Type-1, 2, 3 and 5. A rejected route is treated like a withdrawal: it is not stored, not given to `nos-fdbd`, and `nos-bgpd` logs `evpn route rejected by import policy`.
 - Type-4 (Ethernet Segment) routes are never filtered by this policy: their route target is the ES-Import one, so an RT match would reject all of them. `nos-fdbd` applies the ES-Import check itself (below).
 - Only accept/reject counts; attribute rewrites are ignored. `this.prefix` is the Type-5 prefix, `0.0.0.0/0` for the other types.
+- With [soft reconfiguration inbound](bgp.md#keeping-received-routes-soft-reconfiguration-inbound) on the peer-group, changing this policy is applied in place (no session reset): the routes it rejects are kept aside, so loosening it brings them back without a refresh. `nos-bgpd` logs `re-evaluated import policy peer=… family=l2vpn-evpn`. Type-4 routes are exempt, and MAC mobility only ever sees accepted routes. The kept-aside routes are dropped when the session ends.
 - Unset means accept everything (unlike `import-policy`, which defaults to `deny-all`), so existing EVPN setups keep working.
 - Changing the policy restarts the peer's sessions; routes stored from before are re-checked against the new policy.
 - MAC mobility (RFC 7432 section 15) is the defense against a peer claiming a MAC you own: `nos-bgpd` arbitrates by sequence number, a rejected Type-2 never takes part, and a MAC that moves too often is frozen on its last holder.

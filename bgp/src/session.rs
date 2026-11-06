@@ -1357,6 +1357,10 @@ impl SessionManager {
         for (peer, kind, slot, established) in reapply {
             let addr = peer.remote_address;
             slot.set_import_policy(peer.import_policy.clone());
+            slot.set_family_import_policies(
+                peer.evpn_import_policy.clone(),
+                peer.flowspec_import_policy.clone(),
+            );
             slot.set_soft_reconfig(peer.soft_reconfiguration_inbound);
             if let Some(task) = tasks.get_mut(&addr) {
                 task.peer = peer;
@@ -1704,8 +1708,8 @@ fn diff_peers(
     (to_stop, to_spawn, to_update, to_reapply)
 }
 
-/// How a peer whose only differences are `import_policy` and
-/// `soft_reconfiguration_inbound` is updated without a restart (#859).
+/// How a peer whose only differences are its import policies (unicast/VPN,
+/// EVPN, Flowspec) and `soft_reconfiguration_inbound` is updated without a restart (#859).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reapply {
     /// Flag on before and after: re-evaluate the retained routes.
@@ -1716,26 +1720,27 @@ enum Reapply {
     Disable,
 }
 
-/// `None`: restart. Anything else changing, a policy change without the
-/// flag, or a policy change on a peer carrying non-unicast families (their
-/// retention is #866) all restart.
+/// `None`: restart. Anything else changing (an export policy included) or a
+/// policy change without the flag restarts.
 fn reapply_kind(running: &ResolvedPeer, wanted: &ResolvedPeer) -> Option<Reapply> {
     let mut same = running.clone();
     same.import_policy.clone_from(&wanted.import_policy);
+    same.evpn_import_policy
+        .clone_from(&wanted.evpn_import_policy);
+    same.flowspec_import_policy
+        .clone_from(&wanted.flowspec_import_policy);
     same.soft_reconfiguration_inbound = wanted.soft_reconfiguration_inbound;
     if same != *wanted {
         return None;
     }
-    let policy_changed = running.import_policy != wanted.import_policy;
-    let unicast_only = wanted
-        .address_families
-        .iter()
-        .all(|f| matches!(f, AddressFamily::Ipv4Unicast | AddressFamily::Ipv6Unicast));
+    let policy_changed = running.import_policy != wanted.import_policy
+        || running.evpn_import_policy != wanted.evpn_import_policy
+        || running.flowspec_import_policy != wanted.flowspec_import_policy;
     match (
         running.soft_reconfiguration_inbound,
         wanted.soft_reconfiguration_inbound,
     ) {
-        (true, true) if policy_changed && unicast_only => Some(Reapply::Policy),
+        (true, true) if policy_changed => Some(Reapply::Policy),
         (false, true) => Some(Reapply::Enable),
         (true, false) if !policy_changed => Some(Reapply::Disable),
         _ => None,
@@ -2613,11 +2618,32 @@ mod tests {
     }
 
     #[test]
-    fn diff_peers_policy_change_on_a_non_unicast_peer_restarts_until_866() {
+    fn diff_peers_policy_change_on_a_non_unicast_peer_is_reapplied_in_place() {
         let (mut a, mut b) = (flagged(true, false), flagged(true, true));
         a.address_families.push(AddressFamily::L2vpnEvpn);
         b.address_families.push(AddressFamily::L2vpnEvpn);
-        assert_eq!(reapply(&a, &b), (true, None));
+        assert_eq!(reapply(&a, &b), (false, Some(Reapply::Policy)));
+    }
+
+    #[test]
+    fn diff_peers_evpn_or_flowspec_import_change_is_reapplied_but_export_restarts() {
+        let deny = Arc::new(nos_rpl::DENY_ALL.clone());
+        let a = flagged(true, false);
+        let mut evpn = a.clone();
+        evpn.evpn_import_policy = Some(deny.clone());
+        assert_eq!(reapply(&a, &evpn), (false, Some(Reapply::Policy)));
+        let mut flow = a.clone();
+        flow.flowspec_import_policy = Some(deny.clone());
+        assert_eq!(reapply(&a, &flow), (false, Some(Reapply::Policy)));
+        let mut export = a.clone();
+        export.flowspec_export_policy = Some(deny);
+        assert_eq!(reapply(&a, &export), (true, None));
+        // Without the flag the same change restarts.
+        let mut off = flagged(false, false);
+        let mut off_evpn = off.clone();
+        off_evpn.evpn_import_policy = Some(Arc::new(nos_rpl::DENY_ALL.clone()));
+        off.soft_reconfiguration_inbound = false;
+        assert_eq!(reapply(&off, &off_evpn), (true, None));
     }
 
     #[test]

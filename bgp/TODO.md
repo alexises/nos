@@ -33,10 +33,9 @@ of re-auditing the codebase. Update this file as items are implemented.
   other route-server-client's path for a prefix, not just the single
   instance-wide best path — see `docs/protocols/bgp-internals.md`'s "Route reflection and
   route server" section.
-- **Soft reconfiguration inbound (#859)**: opt-in per peer-group; unicast
-  retention and in-place import-policy re-evaluation. EVPN/Flowspec/VPN
-  retention, and lifting the unicast-only gate on in-place policy changes, is
-  #866.
+- **Soft reconfiguration inbound (#859, #866)**: opt-in per peer-group;
+  retention (unicast, VPN, Flowspec raw; EVPN rejected-only) and in-place
+  import-policy re-evaluation for every family.
 - **Collision resolution**: real RFC 4271 §6.8, router-ID based.
 - **Session auth**: RFC 2385 MD5 + RFC 5925 TCP-AO with key rotation.
 - **Config/CLI**: peer-group/peer/instance fields as expected; `show bgp

@@ -51,6 +51,7 @@ pub(crate) fn vpn_family(prefix: IpNet) -> AddressFamily {
 /// age (decision step 8).
 fn learn_batch(
     table: &mut HashMap<VpnKey<IpNet>, VpnRoute>,
+    mut retain: Option<&mut HashMap<VpnKey<IpNet>, VpnRoute>>,
     mp: &message::MpReachNlri,
     base: &RibRoute,
     peer: (IpAddr, u32),
@@ -65,6 +66,16 @@ fn learn_batch(
             next_hop: Some(mp.next_hop),
             ..base.clone()
         };
+        // The policy rewrites the held copy: keep the raw one.
+        if let Some(r) = retain.as_deref_mut() {
+            r.insert(
+                k,
+                VpnRoute {
+                    labels: n.labels.clone(),
+                    route: candidate.clone(),
+                },
+            );
+        }
         let Some(mut route) =
             apply_policy(n.prefix, candidate, import_policy, Some(peer), Some(n.rd))
         else {
@@ -120,7 +131,8 @@ impl BgpRib {
                 continue;
             }
             let table = self.vpn_adj_rib_in.entry(from).or_default();
-            keys.extend(learn_batch(table, mp, base, peer, import_policy));
+            let retain = self.retained.vpn_slot(from);
+            keys.extend(learn_batch(table, retain, mp, base, peer, import_policy));
         }
         for k in keys {
             self.select_vpn(&k);
@@ -130,6 +142,8 @@ impl BgpRib {
     /// Removes path `k` from `peer`'s VPN Adj-RIB-In (logged) and re-selects
     /// it.
     pub(super) fn drop_vpn(&mut self, peer: IpAddr, k: &VpnKey<IpNet>) -> bool {
+        // A path the policy rejected is not held, but its raw copy is.
+        self.retained.take_vpn(peer, k);
         let removed = self
             .vpn_adj_rib_in
             .get_mut(&peer)
