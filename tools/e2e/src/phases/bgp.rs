@@ -3540,6 +3540,96 @@ fn evpn_flags() -> Vec<String> {
     ])
 }
 
+/// #866: soft reconfiguration inbound on an EVPN peer. Enabling asks GoBGP
+/// for a refresh (it answers EVPN); a reject-all EVPN import policy then
+/// takes the Type-3 route out of `show bgp evpn` in place, accept-all brings
+/// it back from the retained copy, and neither restarts the session.
+async fn evpn_soft_reconfig<F, Fut>(a: &Router, show: &F) -> anyhow::Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    let flag = "--soft-reconfiguration-inbound";
+    let with = |extra: &[&str]| {
+        let mut f = evpn_flags();
+        f.extend(strings(extra));
+        f
+    };
+    log("soft reconfiguration (#866): enabling on router-a's live EVPN session");
+    let (sessions, enabled, refresh) = (
+        a.count("bgp session established"),
+        a.count("soft reconfiguration: retention enabled"),
+        a.count("sent route refresh request"),
+    );
+    a.provision_flags(&with(&[flag])).await?;
+    a.wait_new("soft reconfiguration: retention enabled", enabled, 30)
+        .await?;
+    a.wait_new("sent route refresh request", refresh, 30)
+        .await?;
+    a.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let reeval = |accepted: u32| {
+        format!(
+            "re-evaluated import policy peer={IP_G} family=l2vpn-evpn retained=[0-9]* accepted={accepted} "
+        )
+    };
+    log("a reject-all EVPN import policy applies in place");
+    let reject = policy_file("evpn-reject-soft", "reject\n")?;
+    let (rejected, dropped, refresh) = (
+        a.count(&reeval(0)),
+        a.count("evpn route rejected by import policy"),
+        a.count("sent route refresh request"),
+    );
+    a.provision_flags(&with(&[
+        flag,
+        "--policy-name",
+        "evpn-reject-soft",
+        "--policy-source-file",
+        &reject,
+        "--evpn-import-policy",
+        "evpn-reject-soft",
+    ]))
+    .await?;
+    a.wait_new(&reeval(0), rejected, 30).await?;
+    a.wait_new("evpn route rejected by import policy", dropped, 30)
+        .await?;
+    a.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    if show().await?.contains("\"route_type\":3") {
+        bail!("a rejected EVPN route is still in show bgp evpn");
+    }
+
+    log("accept-all brings it back from the retained copy, no new route refresh");
+    let accepted = a.count(&reeval(1));
+    a.provision_flags(&with(&[flag, "--evpn-import-policy", "accept-all"]))
+        .await?;
+    a.wait_new(&reeval(1), accepted, 30).await?;
+    a.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    a.assert_quiet("sent route refresh request", refresh, 3)
+        .await?;
+    if !show().await?.contains("\"route_type\":3") {
+        bail!("the retained EVPN route did not come back");
+    }
+
+    log("`soft-in` re-evaluates the EVPN routes locally");
+    let body = a
+        .rest_expect(
+            Method::POST,
+            &format!("/v1/bgp/r1/peer/{IP_G}/soft-in"),
+            None,
+            200,
+        )
+        .await?;
+    anyhow::ensure!(
+        body.contains("\"route_refresh\":\"none\"") && body.contains("l2vpn-evpn"),
+        "soft-in reply: {body}"
+    );
+    Ok(())
+}
+
 /// Starts router-a with `evpn_flags` (and `watchdog_args`), builds/starts the GoBGP speaker
 /// (router-g) peering it over l2vpn-evpn, and waits for the session and
 /// gobgpd's gRPC API.
@@ -3913,6 +4003,8 @@ async fn flowspec_propagation(
     reestablished(b, sessions).await?;
     b.wait_new(&learned, base, 60).await?;
 
+    flowspec_soft_reconfig(w, b_flags).await?;
+
     log("router-a's flowspec export policy toward router-b keeps the rule from it");
     let deny = policy_file("flowspec-export-deny", "reject\n")?;
     let (base, sessions) = (b.count(&learned), b.count("bgp session established"));
@@ -3935,6 +4027,77 @@ async fn flowspec_propagation(
         .await?;
     reestablished(b, sessions).await?;
     b.wait_new(&learned, base, 60).await
+}
+
+/// #866: router-b keeps the raw Flowspec rules router-a sends, so the import
+/// policy flip that restarts the session above is applied in place: the rule
+/// leaves `show bgp flowspec` and comes back from the retained copy, with no
+/// new session and no new route refresh.
+async fn flowspec_soft_reconfig(
+    w: &World,
+    b_flags: &dyn Fn(&[&str]) -> Vec<String>,
+) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let flag = "--soft-reconfiguration-inbound";
+    let b_show = || b.rest_expect(Method::GET, "/v1/bgp/flowspec", None, 200);
+    log("soft reconfiguration (#866): enabling on router-b's live session");
+    let (sessions, enabled, resent) = (
+        b.count("bgp session established"),
+        b.count("soft reconfiguration: retention enabled"),
+        a.count("bgp: received route refresh, resending loc-rib"),
+    );
+    b.provision_flags(&b_flags(&[flag, "--flowspec-import-policy", "accept-all"]))
+        .await?;
+    b.wait_new("soft reconfiguration: retention enabled", enabled, 30)
+        .await?;
+    a.wait_new("bgp: received route refresh, resending loc-rib", resent, 30)
+        .await?;
+    b.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+
+    let reeval = |accepted: u32| {
+        format!(
+            "re-evaluated import policy peer={IP_A} family=ipv4-flowspec retained=[0-9]* accepted={accepted} "
+        )
+    };
+    log("tightening the flowspec import policy in place: the rule leaves, the session stays");
+    let reject = policy_file(
+        "flowspec-reject-soft",
+        "if this.prefix == 192.0.2.0/24:\n    reject\naccept\n",
+    )?;
+    let (rejected, refresh) = (b.count(&reeval(0)), b.count("sent route refresh request"));
+    b.provision_flags(&b_flags(&[
+        flag,
+        "--policy-name",
+        "flowspec-reject-soft",
+        "--policy-source-file",
+        &reject,
+        "--flowspec-import-policy",
+        "flowspec-reject-soft",
+    ]))
+    .await?;
+    b.wait_new(&reeval(0), rejected, 30).await?;
+    b.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    if b_show().await?.contains("dest 192.0.2.0/24") {
+        bail!("router-b still shows a rule its import policy rejects");
+    }
+
+    log("loosening it: the retained copy brings the rule back, no new route refresh");
+    let learned = format!("flowspec route learned peer={IP_A} family=ipv4-flowspec");
+    let (accepted, learned_before) = (b.count(&reeval(1)), b.count(&learned));
+    b.provision_flags(&b_flags(&[flag, "--flowspec-import-policy", "accept-all"]))
+        .await?;
+    b.wait_new(&reeval(1), accepted, 30).await?;
+    b.wait_new(&learned, learned_before, 30).await?;
+    b.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    b.assert_quiet("sent route refresh request", refresh, 3)
+        .await?;
+    if !b_show().await?.contains("dest 192.0.2.0/24") {
+        bail!("router-b lost the rule after the in-place re-evaluation");
+    }
+    Ok(())
 }
 
 /// RFC 4364/4659 VPN-IPv4/VPN-IPv6 (SAFI 128), receive side (#578). GoBGP
@@ -4024,6 +4187,8 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         bail!("show bgp vpnv6 is missing GoBGP's route: {body}");
     }
 
+    vpn_soft_reconfig(w, &vpn_flags).await?;
+
     log("withdrawing the second RD's route explicitly");
     let withdrawn = |family: &str, rd: &str, prefix: &str| {
         format!("vpn route withdrawn peer={IP_G} family={family} rd={rd} prefix={prefix}")
@@ -4061,6 +4226,93 @@ pub async fn vpn(w: &mut World) -> anyhow::Result<()> {
         }
     }
     vpn_chunked(w).await
+}
+
+/// #866: soft reconfiguration inbound on a VPN peer. A reject policy for
+/// 10.10.0.0/24 (both RDs) drops it from `show bgp vpnv4` and the VRF in
+/// place; accepting again brings both RDs back from the raw retained copies,
+/// with no new session and no new route refresh.
+async fn vpn_soft_reconfig(
+    w: &World,
+    vpn_flags: &dyn Fn(&str) -> Vec<String>,
+) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let flag = ["--soft-reconfiguration-inbound"];
+    let with = |extra: &[&str]| {
+        let mut f = vpn_flags("65000:1");
+        f.extend(strings(extra));
+        f
+    };
+    let show = || a.rest_expect(Method::GET, "/v1/bgp/vpnv4", None, 200);
+    log("soft reconfiguration (#866): enabling on router-a's live session");
+    let (sessions, enabled, refresh) = (
+        a.count("bgp session established"),
+        a.count("soft reconfiguration: retention enabled"),
+        a.count("sent route refresh request"),
+    );
+    a.provision_flags(&with(&flag)).await?;
+    a.wait_new("soft reconfiguration: retention enabled", enabled, 30)
+        .await?;
+    a.wait_new("sent route refresh request", refresh, 30)
+        .await?;
+    a.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    // The refresh answer is asynchronous: wait for GoBGP to have sent it.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let reeval = |accepted: u32| {
+        format!(
+            "re-evaluated import policy peer={IP_G} family=vpnv4 retained=[0-9]* accepted={accepted} "
+        )
+    };
+    log("rejecting 10.10.0.0/24 in place: both RDs leave the table and the VRF");
+    let reject = policy_file(
+        "vpn-reject-soft",
+        "if this.prefix == 10.10.0.0/24:\n    reject\naccept\n",
+    )?;
+    let unimported = format!("vpn route unimported table={VPN_TABLE} prefix=10.10.0.0/24");
+    let (rejected, gone, refresh) = (
+        a.count(&reeval(0)),
+        a.count(&unimported),
+        a.count("sent route refresh request"),
+    );
+    let mut tight = strings(&flag);
+    tight.extend(strings(&[
+        "--policy-name",
+        "vpn-reject-soft",
+        "--policy-source-file",
+        &reject,
+        "--import-policy",
+        "vpn-reject-soft",
+    ]));
+    a.provision_flags(&with(&tight.iter().map(String::as_str).collect::<Vec<_>>()))
+        .await?;
+    a.wait_new(&reeval(0), rejected, 30).await?;
+    a.wait_new(&unimported, gone, 30).await?;
+    a.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    if show().await?.contains("10.10.0.0/24") {
+        bail!("a rejected VPN prefix is still in show bgp vpnv4");
+    }
+
+    log("accepting it again: both RDs return from the retained copies, no new refresh");
+    let accepted = a.count(&reeval(2));
+    a.provision_flags(&with(&[
+        "--soft-reconfiguration-inbound",
+        "--import-policy",
+        "accept-all",
+    ]))
+    .await?;
+    a.wait_new(&reeval(2), accepted, 30).await?;
+    a.assert_quiet("bgp session established", sessions, 6)
+        .await?;
+    a.assert_quiet("sent route refresh request", refresh, 3)
+        .await?;
+    let body = show().await?;
+    if body.matches("10.10.0.0/24").count() != 2 {
+        bail!("both RDs of 10.10.0.0/24 must be back: {body}");
+    }
+    Ok(())
 }
 
 /// `VPN_TABLE`'s routes from the `10.100.0.0/16` burst, over REST (20 000
@@ -5245,6 +5497,8 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
     if body.contains("\"route_type\":2") || !body.contains("\"route_type\":3") {
         bail!("expected only the Type-3 route after the withdrawal: {body}");
     }
+
+    evpn_soft_reconfig(a, &show).await?;
 
     // RFC 9136 Type-5 + RFC 9135 Router's MAC from an independent
     // implementation: router-a's IP-VRF imports GoBGP's Route Target, and its

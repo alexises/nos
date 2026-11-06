@@ -682,3 +682,19 @@ fn evpn_update_with_own_asn_in_as_path_is_dropped() {
     );
     assert_eq!(rib.evpn_routes(), []);
 }
+
+/// A ROUTE-REFRESH for EVPN re-sends what the peer was last sent (#866).
+#[test]
+fn an_evpn_route_refresh_resends_the_last_advertisements() {
+    let mut rib = new_rib(65000);
+    let peer = addr("10.0.0.1");
+    let mut rx = register_mp_peer(&mut rib, peer, false, addr("10.0.0.254"), evpn_afs());
+    rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(mac_route(1)));
+    assert_eq!(recv_all(&mut rx).len(), 1);
+    rib.resend_all(peer, AddressFamily::L2vpnEvpn, false);
+    let again = recv_all(&mut rx);
+    assert!(matches!(
+        again.as_slice(),
+        [OutboundUpdate::AnnounceEvpn(_)]
+    ));
+}

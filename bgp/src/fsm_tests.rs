@@ -1000,6 +1000,34 @@ async fn route_refresh_requests_follow_the_negotiated_capability() {
 }
 
 #[tokio::test]
+async fn route_refresh_requests_cover_evpn_and_flowspec_when_negotiated() {
+    let rp = rpeer();
+    let peer = pctx(&rp);
+    let (mut w, mut r) = script_pair().await;
+    let mut rem = remote(true, true);
+    rem.negotiated_ipv4_unicast = false;
+    rem.negotiated_ipv6_unicast = false;
+    rem.negotiated_evpn = true;
+    rem.negotiated_flowspec = [true, true];
+    send_route_refresh(&mut w, &State::Established(rem), &peer).await;
+    for (afi, safi) in [
+        (message::AFI_L2VPN, message::SAFI_EVPN),
+        (AFI_IPV4, message::SAFI_FLOWSPEC),
+        (AFI_IPV6, message::SAFI_FLOWSPEC),
+    ] {
+        let m = within("refresh", r.next()).await.unwrap().unwrap();
+        assert_eq!(
+            m,
+            BgpMessage::RouteRefresh(RouteRefreshMessage {
+                afi,
+                subtype: message::REFRESH_REQUEST,
+                safi
+            })
+        );
+    }
+}
+
+#[tokio::test]
 async fn collision_verdict_publishes_the_winner_and_rewrites_the_loser() {
     let rp = rpeer();
     let slot = PeerSlot::new(rp);

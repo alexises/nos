@@ -158,6 +158,8 @@ impl BgpRib {
 
     /// Removes rule `k` from `peer`'s Adj-RIB-In (logged) and re-selects it.
     pub(super) fn drop_flow(&mut self, peer: IpAddr, k: &FlowspecKey) -> bool {
+        // A rule the policy rejected is not held, but its raw copy is.
+        self.retained.take_flow(peer, k);
         let removed = self
             .flowspec_adj_rib_in
             .get_mut(&peer)

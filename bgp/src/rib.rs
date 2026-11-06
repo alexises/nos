@@ -117,7 +117,7 @@ pub use flowspec_out::AdvertisedFlowspec;
 #[cfg(test)]
 pub use outbox::test_channel;
 pub use outbox::{channel as outbox_channel, OutboxTx, OUTBOX_CAPACITY};
-pub use retain::{ChunkOutcome, ReevalPass, REEVAL_CHUNK};
+pub use retain::{ChunkOutcome, ImportPolicies, ReevalPass, REEVAL_CHUNK};
 pub use shared::{RibGuard, SharedRib};
 pub use vpn_import::{SooSkip, VpnImport, VpnImportPath, VpnImports};
 pub use vpn_out::AdvertisedVpn;

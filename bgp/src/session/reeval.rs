@@ -3,7 +3,7 @@
 //! UPDATEs interleave; see `docs/protocols/bgp-internals.md`.
 
 use super::{info, Arc, Instant, IpAddr, PeerSlot, SessionManager};
-use crate::collision::ReevalResult;
+use crate::collision::{ReevalResult, REEVAL_MAX_PREFIX, REEVAL_SESSION_DOWN};
 use crate::rib::{ChunkOutcome, REEVAL_CHUNK};
 use tokio::sync::oneshot;
 
@@ -44,7 +44,7 @@ impl SessionManager {
             .bgp_rib
             .lock()
             .await
-            .begin_reevaluation(peer, slot.import_policy());
+            .begin_reevaluation(peer, slot.import_policies());
         let Some(mut pass) = begun else {
             return Self::abort_reeval(&slot, generation, peer, "disabled");
         };
@@ -63,12 +63,12 @@ impl SessionManager {
                 (outcome, trip)
             };
             match step {
-                (ChunkOutcome::Gone, _) => break Some("disconnected"),
+                (ChunkOutcome::Gone, _) => break Some(REEVAL_SESSION_DOWN),
                 (_, Some((family, limit, _))) => {
                     if !slot.max_prefix_held() {
                         crate::fsm::trip_max_prefix(&slot, family, limit);
                     }
-                    break Some("max-prefix");
+                    break Some(REEVAL_MAX_PREFIX);
                 }
                 (ChunkOutcome::Done, None) => break None,
                 (ChunkOutcome::More, None) => {

@@ -250,15 +250,22 @@ The request fails with `404` over REST if the peer is not configured or its sess
 Without it, a route the import policy rejects is dropped, so changing a policy means restarting the session or asking the peer to resend. With `soft-reconfiguration-inbound` NOS keeps every route the peer sends before the import policy, and a policy change is applied in place: no session reset, no route refresh.
 
 - Enable it per peer-group: `set bgp instance r1 peer-group pg1 soft-reconfiguration-inbound true` (REST: `"soft_reconfiguration_inbound": true` on the peer-group). `delete` it to turn it off.
-- Scope: IPv4 and IPv6 unicast. Other families do not honour the flag yet (#866), and a peer-group that also carries EVPN, Flowspec or VPN still restarts its sessions on an import-policy change.
-- Changing the import policy of an established peer-group with the flag on is applied in place. NOS logs `soft reconfiguration: re-evaluated import policy peer=… family=… retained=… accepted=… changed=…` once per family, then `soft reconfiguration: re-evaluation finished` with the chunk count and duration. Routes whose result changed are re-decided and re-advertised; the rest are untouched. No damping penalty is applied.
+- Scope: every family the peer-group carries. What is kept differs:
+  - IPv4/IPv6 unicast and VPNv4/VPNv6: every received path, before the import policy (VPN paths use the peer-group's `import-policy`, run with the route's RD).
+  - Flowspec: every received rule, before `flowspec-import-policy`, which rewrites the stored rule.
+  - EVPN: only the routes `evpn-import-policy` rejects. The held ones are already unmodified, since that policy only accepts or rejects.
+- A change to `import-policy`, `evpn-import-policy` or `flowspec-import-policy` is applied in place. A change to an export policy (`export-policy`, `flowspec-export-policy`) or anything else still restarts the sessions.
+- NOS logs `soft reconfiguration: re-evaluated import policy peer=… family=… retained=… accepted=… changed=…` once per family, then `soft reconfiguration: re-evaluation finished` with the chunk count and duration. Routes whose result changed are re-decided and re-advertised; the rest are untouched. No damping penalty is applied.
 - The re-evaluation runs in chunks of 5000 prefixes and releases the RIB between them, so UPDATEs keep being processed. On a 1M-prefix table, a chunk held the lock about 5 ms (release build). A newer policy change supersedes a running pass; `soft-in` during a pass waits for it.
 - Enabling it on a session that is already up asks the peer for a route refresh (when it supports it) and keeps what comes back. A peer without the Route Refresh capability gets its session restarted instead (Cease, Other Configuration Change), since only a new session retains every route. Enabling while the session is down needs nothing: the next session retains from its first UPDATE.
 - Retention is complete once the peer has finished that refresh: with enhanced route refresh NOS logs `soft reconfiguration: retention complete`; otherwise only `retention enabled, route refresh requested`. A `soft-in` before then re-evaluates what is held so far.
 - Disabling it frees the memory and resets nothing (`soft reconfiguration: retention disabled`). Disabling it together with a policy change restarts the sessions.
 - Retention is dropped whenever the session ends, graceful restart included: after a restart it refills from the peer's announcements only.
 - Routes dropped before policy (AS loop, unusable next hop, first-AS and role-leak checks) are not kept.
-- Memory: roughly one extra copy of the peer's received routes. Measured with 100k /24s from one eBGP peer: 63 MB for the RIB without the flag, 112 MB with it (about 490 bytes per prefix more).
+- Memory: roughly one extra copy of the peer's received routes for unicast, VPN and Flowspec; EVPN costs only the rejected set. Measured with 100k /24s from one eBGP peer: 63 MB for the RIB without the flag, 112 MB with it (about 490 bytes per prefix more).
+- Enabling it on a session that is up also asks for EVPN and Flowspec refreshes when those families are negotiated. An EVPN or Flowspec peer that answers no refresh keeps its old routes unretained until it re-announces them.
+- While a large re-evaluation runs, other peers and the feeds to `nos-fdbd`/VRFs can see the intermediate state (some routes already re-decided, some not); the end state is the same as a one-step re-evaluation.
+- `clear bgp … soft-in` waits for a running pass. If a policy change supersedes it, or the session drops, or a maximum-prefix limit trips during it, the reply is an error: `import policy changed during re-evaluation`, `session down` or `maximum prefix exceeded during re-evaluation`.
 - A change of RPKI VRPs re-evaluates a retained peer locally instead of asking it for a route refresh.
 
 Example:
@@ -1166,7 +1173,6 @@ A peer that rejects capability 64 with an OPEN error never comes up; turn gracef
 These are known gaps, so plan around them:
 
 - A route's attributes cannot be displayed. `show route` shows the chosen next hop, and the log records each learned route.
-- There is no soft reconfiguration: changing a peer-group or its policies resets its sessions.
 - Malformed UPDATEs: a malformed multiprotocol attribute resets the session (no AFI/SAFI-disable, RFC 7606 §3(d)).
 
 ## Configuration reference

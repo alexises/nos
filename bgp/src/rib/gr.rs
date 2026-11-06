@@ -204,7 +204,9 @@ impl BgpRib {
         if enhanced {
             outbox.tx.send(marker(message::REFRESH_BORR));
         }
-        if matches!(
+        if family == AddressFamily::L2vpnEvpn {
+            self.resend_evpn(peer);
+        } else if matches!(
             family,
             AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec
         ) {

@@ -555,3 +555,69 @@ fn no_advertise_blocks_flowspec_readvertisement() {
     );
     assert!(announced(&mut rx[1]).is_some());
 }
+
+fn flow_policies(flowspec: &str) -> crate::rib::ImportPolicies {
+    crate::rib::ImportPolicies {
+        unicast: accept_all_policy(),
+        evpn: None,
+        flowspec: Some(policy(flowspec)),
+    }
+}
+
+#[test]
+fn reevaluation_readmits_a_rejected_rule_and_never_rewrites_twice() {
+    let (mut rib, [_src, mut ebgp, ..]) = setup();
+    let src = addr(SRC);
+    rib.set_peer_soft_reconfig(src, true);
+    feed(&mut rib, SRC, false, "2.2.2.1", &unicast(vec![65001], None));
+    rib.set_peer_flowspec_policies(src, Some(policy("reject\n")), None);
+    feed(
+        &mut rib,
+        SRC,
+        false,
+        "2.2.2.1",
+        &flow_update(vec![65001], None, None),
+    );
+    assert_eq!(rib.flowspec_routes().len(), 0);
+    // Loosen with a rewrite: the rule is back, selected and advertised.
+    let fams = rib.reevaluate_peer(
+        src,
+        flow_policies("this.bgp.communities.add(65000:7)\naccept\n"),
+    );
+    let f = fams
+        .iter()
+        .find(|f| f.family == nos_proto::ReevalFamily::Ipv4Flowspec)
+        .unwrap();
+    assert_eq!((f.retained, f.accepted), (1, 1));
+    assert_eq!(rib.flowspec_best(&key()), Some(src));
+    assert_eq!(
+        announced(&mut ebgp).unwrap().route.communities,
+        vec![(65000 << 16) | 7]
+    );
+    // A different rewrite starts from the raw rule, not from the first one.
+    rib.reevaluate_peer(
+        src,
+        flow_policies("this.bgp.communities.add(65000:9)\naccept\n"),
+    );
+    let (_, r) = rib.flowspec_routes()[0];
+    assert_eq!(r.attributes.communities, vec![(65000 << 16) | 9]);
+    // Tighten: removed and withdrawn; the raw copy stays for later.
+    rib.reevaluate_peer(src, flow_policies("reject\n"));
+    assert_eq!(rib.flowspec_routes().len(), 0);
+    assert!(rib.retained_count(src) >= 1);
+    // A withdrawal from the peer drops the raw copy.
+    let mut u = ebgp_update(vec![], vec![], "0.0.0.0");
+    u.attributes = None;
+    u.mp_unreach = vec![message::MpUnreachNlri {
+        afi: 1,
+        safi: message::SAFI_FLOWSPEC,
+        withdrawn: vec![],
+        withdrawn_path_ids: vec![],
+        evpn: vec![],
+        flowspec: vec![rule()],
+        vpn: vec![],
+    }];
+    let before = rib.retained_count(src);
+    feed(&mut rib, SRC, false, "2.2.2.1", &u);
+    assert_eq!(rib.retained_count(src), before - 1);
+}

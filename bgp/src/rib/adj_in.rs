@@ -66,6 +66,19 @@ pub(super) fn evpn_rejected(
     )
 }
 
+/// Registers a Type-2 route's `(VNI, MAC)` as a mobility candidate (nothing
+/// for other route types).
+pub(super) fn register_mobility(mac_mobility: &mut MacMobility, route: &EvpnRoute) {
+    if let Some((vni, mac, esi)) = evpn_mac_key(&route.nlri) {
+        let (seq, sticky) = route
+            .extended_communities
+            .iter()
+            .find_map(|c| nos_proto::evpn_id::parse_mac_mobility(*c))
+            .unwrap_or((0, false));
+        mac_mobility.candidate(vni, mac, route.next_hop, esi, seq, sticky, Instant::now());
+    }
+}
+
 /// Stores one `MP_REACH_NLRI` batch's EVPN routes in a peer's EVPN Adj-RIB-In,
 /// logging only routes that are new or changed, and registers each Type-2's
 /// `(VNI, MAC)` as an RFC 7432 §15 mobility candidate. A route the peer's
@@ -74,6 +87,7 @@ pub(super) fn evpn_rejected(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn learn_evpn(
     table: &mut HashMap<EvpnNlri, EvpnRoute>,
+    mut retain: Option<&mut HashMap<EvpnNlri, EvpnRoute>>,
     mac_mobility: &mut MacMobility,
     from: IpAddr,
     mp: &message::MpReachNlri,
@@ -103,16 +117,16 @@ pub(super) fn learn_evpn(
             && evpn_rejected(policy, &route, from, peer_as, ibgp)
         {
             table.remove(&nlri.route_key());
+            if let Some(r) = retain.as_deref_mut() {
+                r.insert(nlri.route_key(), route);
+            }
             warn!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route rejected by import policy");
             continue;
         }
-        if let Some((vni, mac, esi)) = evpn_mac_key(nlri) {
-            let (seq, sticky) = extended_communities
-                .iter()
-                .find_map(|c| nos_proto::evpn_id::parse_mac_mobility(*c))
-                .unwrap_or((0, false));
-            mac_mobility.candidate(vni, mac, mp.next_hop, esi, seq, sticky, Instant::now());
+        if let Some(r) = retain.as_deref_mut() {
+            r.remove(&nlri.route_key());
         }
+        register_mobility(mac_mobility, &route);
         if table.insert(nlri.route_key(), route.clone()) != Some(route) {
             info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, local_pref, communities = %format_args!("[{}]", nos_proto::bgp::fmt_communities(&communities)), "evpn route learned");
         }
@@ -139,6 +153,7 @@ pub(super) struct FlowRx<'a> {
 /// re-validated, and its age when nothing changed.
 pub(super) fn learn_flowspec(
     table: &mut HashMap<FlowspecKey, FlowspecRoute>,
+    mut retain: Option<&mut HashMap<FlowspecKey, FlowspecRoute>>,
     mp: &message::MpReachNlri,
     rx: &FlowRx<'_>,
 ) -> Vec<FlowspecKey> {
@@ -156,6 +171,10 @@ pub(super) fn learn_flowspec(
             validity: None,
         };
         keys.push(k.clone());
+        // The policy rewrites the held copy: keep the raw one.
+        if let Some(r) = retain.as_deref_mut() {
+            r.insert(k.clone(), route.clone());
+        }
         if let Some((policy, peer_as, confed)) = rx.import
             && !super::flowspec_out::import_flow(policy, &mut route, from, peer_as, confed)
         {
@@ -589,6 +608,7 @@ impl BgpRib {
         }
 
         for nlri in update.mp_unreach.iter().flat_map(|u| &u.evpn) {
+            self.retained.take_evpn(from, &nlri.route_key());
             // mac_mobility's record of this route's (vni, mac) is
             // deliberately left alone here too — see peer_disconnected.
             let removed = self
@@ -750,6 +770,7 @@ impl BgpRib {
             if !mp.evpn.is_empty() {
                 learn_evpn(
                     self.evpn_adj_rib_in.entry(from).or_default(),
+                    retain.as_mut().map(|r| &mut *r.evpn),
                     &mut self.mac_mobility,
                     from,
                     mp,
@@ -793,6 +814,7 @@ impl BgpRib {
                     };
                     flow_keys.extend(learn_flowspec(
                         self.flowspec_adj_rib_in.entry(from).or_default(),
+                        retain.as_mut().map(|r| &mut *r.flow),
                         mp,
                         &rx,
                     ));
@@ -837,6 +859,9 @@ impl BgpRib {
             for rule in &m.flowspec {
                 self.drop_flow(from, &(family, rule.clone()));
             }
+        }
+        for nlri in update.mp_reach.iter().flat_map(|m| &m.evpn) {
+            self.retained.take_evpn(from, &nlri.route_key());
         }
         if let Some(table) = self.evpn_adj_rib_in.get_mut(&from) {
             for nlri in update.mp_reach.iter().flat_map(|m| &m.evpn) {
