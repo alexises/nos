@@ -50,6 +50,7 @@ impl BgpRib {
         tx: OutboxTx,
     ) {
         self.gr_peer_returned(peer);
+        let rtc_negotiated = negotiated_afs.contains(&AddressFamily::RtConstraint);
         let remote_asn = self.peer_asns.get(&peer).copied().unwrap_or(0);
         self.peer_outboxes.insert(
             peer,
@@ -75,6 +76,7 @@ impl BgpRib {
                     nos_proto::BgpPeerGroup::default_add_path_send_count(is_rs_client),
                 ),
                 export_policy,
+                rtc_interest: self.rtc_interest_for(peer, rtc_negotiated),
             },
         );
         if let Some(deferral) = self.deferral.as_mut() {
@@ -119,6 +121,9 @@ impl BgpRib {
             }
         }
         self.adj_rib_out.insert(peer, advertised);
+        // Membership and its End-of-RIB first: the VPN/EVPN dump below is
+        // filtered by what the peer's own membership asked for.
+        self.announce_rtc_to(peer);
         self.announce_evpn_to(peer);
         self.announce_flowspec_to(peer);
         self.announce_vpn_to(peer);
@@ -131,7 +136,9 @@ impl BgpRib {
         if self.gr.contains_key(&peer) {
             let outbox = &self.peer_outboxes[&peer];
             for family in AddressFamily::ALL {
-                if outbox.negotiated_afs.contains(&family) {
+                // RT-Constraint's went out right after its dump.
+                if family != AddressFamily::RtConstraint && outbox.negotiated_afs.contains(&family)
+                {
                     outbox.tx.send(OutboundUpdate::EndOfRib(family));
                 }
             }
@@ -214,6 +221,8 @@ impl BgpRib {
             self.resend_flowspec(peer, family);
         } else if crate::fsm::is_vpn(family) {
             self.resend_vpn(peer, family);
+        } else if family == AddressFamily::RtConstraint {
+            self.resend_rtc(peer);
         } else if outbox.add_path_tx.contains(&family) {
             // The same top N again, under the same ids (a path the export
             // policy now refuses gives its id up), plus every prefix still

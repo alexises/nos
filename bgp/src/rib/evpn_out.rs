@@ -130,6 +130,16 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
     if !outbox.negotiated_afs.contains(&AddressFamily::L2vpnEvpn) {
         return None;
     }
+    // RFC 4684 filters VPN NLRI; Type-4 (ES-Import) is never held back
+    // (RFC 7432 section 7.6, #875).
+    if !matches!(r.key, EvpnKey::EthernetSegment { .. })
+        && outbox
+            .rtc_interest
+            .as_ref()
+            .is_some_and(|i| !i.permits(&r.ext_communities))
+    {
+        return None;
+    }
     Some(AdvertisedEvpn {
         nlri: nlri_of(r),
         next_hop: r.next_hop,
@@ -338,6 +348,33 @@ impl BgpRib {
             if let Some(adv) = advertise(outbox, self.local_asn, r) {
                 sent.insert(adv.nlri.clone(), adv.clone());
                 outbox.tx.send(OutboundUpdate::AnnounceEvpn(adv));
+            }
+        }
+    }
+
+    /// RT-Constraint membership of `peer` changed at `keys`: announce the
+    /// local routes they newly cover, withdraw those no longer wanted.
+    pub(super) fn resync_evpn(&mut self, peer: IpAddr, keys: &[super::RtcKey]) {
+        let Some(outbox) = self.peer_outboxes.get(&peer) else {
+            return;
+        };
+        let sent = self.evpn_adj_rib_out.entry(peer).or_default();
+        for r in self.evpn_local.values().flat_map(HashMap::values) {
+            if !keys.iter().any(|k| k.covers_any(&r.ext_communities)) {
+                continue;
+            }
+            let nlri = nlri_of(r);
+            match advertise(outbox, self.local_asn, r) {
+                Some(adv) if sent.get(&nlri) != Some(&adv) => {
+                    sent.insert(nlri, adv.clone());
+                    outbox.tx.send(OutboundUpdate::AnnounceEvpn(adv));
+                }
+                Some(_) => {}
+                None => {
+                    if sent.remove(&nlri).is_some() {
+                        outbox.tx.send(OutboundUpdate::WithdrawEvpn(nlri));
+                    }
+                }
             }
         }
     }

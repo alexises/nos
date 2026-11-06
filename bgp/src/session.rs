@@ -791,6 +791,16 @@ impl SessionManager {
         }
     }
 
+    /// The Route Targets this instance originates RT-Constraint membership
+    /// for (`rib::rtc_membership`).
+    pub async fn set_rtc_membership(&self, rts: std::collections::BTreeSet<u64>) {
+        let mut rib = self.bgp_rib.lock().await;
+        // Unchanged: no `&mut` access, so the push clients are not woken.
+        if rib.rtc_local() != &rts {
+            rib.set_rtc_membership(rts);
+        }
+    }
+
     /// `BgpRib::vpn_soo_skipped`, for `vpn_push_client`'s log line.
     pub async fn vpn_soo_skipped(&self) -> std::collections::HashSet<crate::rib::SooSkip> {
         self.bgp_rib.lock().await.vpn_soo_skipped()

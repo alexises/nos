@@ -1886,6 +1886,50 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 }],
             })
         }
+        OutboundUpdate::AnnounceRtc(a) => {
+            let (key, next_hop) = (a.key, a.route.next_hop);
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                attributes: Some(advertised_attributes(
+                    a.route,
+                    Ipv4Addr::UNSPECIFIED,
+                    Vec::new(),
+                )),
+                mp_reach: vec![message::MpReachNlri {
+                    afi: AFI_IPV4,
+                    safi: message::SAFI_RTC,
+                    next_hop,
+                    nlri: Vec::new(),
+                    nlri_path_ids: Vec::new(),
+                    evpn: Vec::new(),
+                    flowspec: Vec::new(),
+                    vpn: Vec::new(),
+                    rtc: vec![key],
+                }],
+                mp_unreach: Vec::new(),
+            })
+        }
+        OutboundUpdate::WithdrawRtc(key) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            attributes: None,
+            mp_reach: Vec::new(),
+            mp_unreach: vec![message::MpUnreachNlri {
+                afi: AFI_IPV4,
+                safi: message::SAFI_RTC,
+                withdrawn: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                evpn: Vec::new(),
+                flowspec: Vec::new(),
+                vpn: Vec::new(),
+                rtc: vec![key],
+            }],
+        }),
         OutboundUpdate::AnnounceVpn(v) => {
             let ((rd, prefix), labels) = (v.key, v.labels);
             let next_hop = v.route.next_hop;

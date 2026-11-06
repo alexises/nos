@@ -30,6 +30,7 @@ mod policy;
 mod propagation;
 mod retain;
 mod rpl_path;
+mod rtc;
 mod vpn;
 
 fn prefix(s: &str) -> IpNet {
