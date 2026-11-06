@@ -42,6 +42,7 @@ use tracing::warn;
 fn register_fd<T: std::os::fd::AsRawFd>(fd: T) -> io::Result<AsyncFd<T>> {
     // SAFETY: callers pass an owning `socket2::Socket`, which keeps its fd
     // open and unchanged until it is dropped with the `AsyncFd`.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- AsyncFd::register contract above
     unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)
 }
 
