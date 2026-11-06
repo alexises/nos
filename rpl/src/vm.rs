@@ -498,6 +498,10 @@ pub enum Verdict {
 /// `Vec`.
 pub const MAX_STACK_DEPTH: usize = 32;
 
+/// Cap on emitted ops: `call` inlines callees, so fan-out k at depth 8 would
+/// compile k^8 copies; this bounds compile time and memory.
+pub const MAX_CODE_OPS: usize = 65_536;
+
 /// Executes `policy` against `input`. `local_pref`/`med` start at `input`'s
 /// own values and are only ever changed by a `SetField` the script actually
 /// executes — reading `this.bgp.local_pref` after a `set` sees the updated

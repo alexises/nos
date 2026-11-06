@@ -31,7 +31,8 @@ fn stmt_terminates(stmt: &Stmt) -> bool {
         | StmtKind::CommunityAdd(..)
         | StmtKind::CommunityRemove(..)
         | StmtKind::CommunityRemoveMatching(..)
-        | StmtKind::CommunityClear(..) => false,
+        | StmtKind::CommunityClear(..)
+        | StmtKind::Call(..) => false,
         StmtKind::If {
             branches,
             else_body,

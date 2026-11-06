@@ -1195,7 +1195,79 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
     b.provision::<&str>(&[]).await?;
     b.wait_new(&learned(), after, 60).await?;
     soft_reconfig(w).await?;
-    as_set_export_policy(w).await
+    as_set_export_policy(w).await?;
+    call_chain(w).await
+}
+
+/// #870: `call NAME` composes two stored policies. Router-b's import policy
+/// calls a callee that rejects (route not learned), then one that accepts
+/// (route learned); a call cycle is refused at commit.
+async fn call_chain(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    for (callee, verdict, entry) in [
+        ("chain-filter-reject", "reject", "chain-entry-reject"),
+        ("chain-filter-accept", "accept", "chain-entry-accept"),
+    ] {
+        log(format!("call chain: {entry} calls {callee} ({verdict})"));
+        // Defined through a bare edit: it touches no peering config, so no
+        // session restart lands after the baseline below.
+        b.edit(|c| {
+            c.policy_definitions.push(nos_proto::PolicyDefinition {
+                name: callee.into(),
+                source: format!("{verdict}\n"),
+            });
+            Ok(())
+        })
+        .await?;
+        let entry_file = policy_file(
+            entry,
+            &format!("call {callee}\nset this.bgp.local_pref = 150\naccept\n"),
+        )?;
+        let before = b.count(&learned());
+        let (est_a, est_b) = (
+            a.count("bgp session established"),
+            b.count("bgp session established"),
+        );
+        b.provision(&[
+            "--policy-name",
+            entry,
+            "--policy-source-file",
+            &entry_file,
+            "--import-policy",
+            entry,
+        ])
+        .await?;
+        reestablished(a, est_a).await?;
+        reestablished(b, est_b).await?;
+        if verdict == "reject" {
+            b.assert_quiet(&learned(), before, 6).await?;
+        } else {
+            b.wait_new(&learned(), before, 60).await?;
+        }
+    }
+
+    log("call chain: a call cycle is refused at commit");
+    let err = b
+        .edit(|c| {
+            for (name, other) in [("cycle-a", "cycle-b"), ("cycle-b", "cycle-a")] {
+                c.policy_definitions.push(nos_proto::PolicyDefinition {
+                    name: name.into(),
+                    source: format!("call {other}\naccept\n"),
+                });
+            }
+            Ok(())
+        })
+        .await
+        .expect_err("a call cycle must be rejected");
+    anyhow::ensure!(
+        format!("{err:#}").contains("cycle"),
+        "unexpected rejection: {err:#}"
+    );
+
+    log("call chain: restoring router-b's accept-all import policy");
+    let before = b.count(&learned());
+    b.provision::<&str>(&[]).await?;
+    b.wait_new(&learned(), before, 60).await
 }
 
 /// Turns router-b's `soft-reconfiguration-inbound` on or off through the

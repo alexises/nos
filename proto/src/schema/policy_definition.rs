@@ -127,11 +127,17 @@ fn valid_source(source: &str, ctx: &Config) -> garde::Result {
         .map(|(n, p)| (*n, p.as_slice()))
         .collect();
 
+    let policy_refs: Vec<(&str, &str)> = ctx
+        .policy_definitions
+        .iter()
+        .map(|p| (p.name.as_str(), p.source.as_str()))
+        .collect();
     let symbols = nos_rpl::Symbols {
         aliases: &alias_refs,
         groups: &group_refs,
         prefix_lists: &prefix_list_refs,
         as_path_lists: &as_path_list_refs,
+        policies: &policy_refs,
     };
 
     nos_rpl::compile(source, &symbols)
@@ -279,5 +285,22 @@ mod tests {
             "if this.prefix in NOT_DEFINED:\n    accept\nelse:\n    reject\n",
         )]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn call_chain_commits_and_bad_calls_fail() {
+        let ok = config_with(vec![
+            policy("a", "call b\naccept\n"),
+            policy("b", "accept\n"),
+        ]);
+        ok.validate_with(&ok).unwrap();
+        let missing = config_with(vec![policy("a", "call b\naccept\n")]);
+        assert!(missing.validate_with(&missing).is_err());
+        let cycle = config_with(vec![
+            policy("a", "call b\naccept\n"),
+            policy("b", "call a\naccept\n"),
+        ]);
+        let err = cycle.validate_with(&cycle).unwrap_err().to_string();
+        assert!(err.contains("cycle"), "{err}");
     }
 }

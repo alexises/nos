@@ -143,6 +143,9 @@ pub enum StmtKind {
     Accept,
     /// `reject` (terminal).
     Reject,
+    /// `call NAME`: runs another stored policy inline, then continues here
+    /// (the callee's `accept` returns; its `reject` rejects the route).
+    Call(String),
 }
 
 /// A statement with its source line.

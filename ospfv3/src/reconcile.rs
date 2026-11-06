@@ -756,11 +756,17 @@ fn resolve_redistribute_policy(
         .map(|(n, p)| (*n, p.as_slice()))
         .collect();
 
+    let policy_refs: Vec<(&str, &str)> = cfg
+        .policy_definitions
+        .iter()
+        .map(|p| (p.name.as_str(), p.source.as_str()))
+        .collect();
     let symbols = nos_rpl::Symbols {
         aliases: &alias_refs,
         groups: &group_refs,
         prefix_lists: &prefix_list_refs,
         as_path_lists: &as_path_list_refs,
+        policies: &policy_refs,
     };
 
     match nos_rpl::compile(&def.source, &symbols) {

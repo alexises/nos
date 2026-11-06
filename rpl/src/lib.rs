@@ -77,7 +77,7 @@ pub fn unconditional_next_hop(src: &str) -> Option<std::net::IpAddr> {
     let mut found = None;
     for stmt in &policy {
         match &stmt.kind {
-            StmtKind::If { .. } | StmtKind::Accept | StmtKind::Reject => break,
+            StmtKind::If { .. } | StmtKind::Call(_) | StmtKind::Accept | StmtKind::Reject => break,
             StmtKind::Set(target, value) => {
                 let ExprKind::This(path) = &target.kind else {
                     continue;
@@ -264,5 +264,11 @@ mod tests {
         assert_eq!(parse_colon_literal("not-a-literal"), None);
         assert_eq!(parse_colon_literal("65000:100 extra"), None);
         assert_eq!(parse_colon_literal("10.0.0.0/8"), None);
+    }
+
+    #[test]
+    fn unconditional_next_hop_stops_at_a_call() {
+        let src = "call p\nset this.bgp.next_hop = 192.0.2.1\naccept\n";
+        assert_eq!(unconditional_next_hop(src), None);
     }
 }
