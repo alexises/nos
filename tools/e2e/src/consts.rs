@@ -67,6 +67,9 @@ pub const BAD_NEXT_HOP_PREFIX: &str = "203.0.130.0/24";
 /// `bgp-role`: the route ExaBGP, a customer of router-b, announces carrying an
 /// OTC attribute (RFC 9234 §5: a leak, since a customer never sets it).
 pub const OTC_LEAK_PREFIX: &str = "203.0.115.0/24";
+/// `bgp-role` (#872): a plain route from the role-less ExaBGP customer, to
+/// show an unset `this.bgp.remote_role` compares `!=` true and `==` false.
+pub const OTC_PLAIN_PREFIX: &str = "203.0.131.0/24";
 /// `maximum-prefix`: the IPv4 routes ExaBGP announces to router-a — one more
 /// than the limit the phase trips.
 pub const MAX_PREFIX_ROUTES: [&str; 3] = ["203.0.113.0/24", "203.0.115.0/24", "203.0.116.0/24"];

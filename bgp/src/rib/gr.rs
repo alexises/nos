@@ -69,6 +69,7 @@ impl BgpRib {
                 is_rs_client,
                 remote_asn,
                 remote_role: self.role_peers.get(&peer).map(|r| r.counterpart()),
+                policy_roles: self.policy_roles(peer),
                 add_path_tx,
                 add_path_send_count: self.add_path_counts.get(&peer).copied().unwrap_or(
                     nos_proto::BgpPeerGroup::default_add_path_send_count(is_rs_client),

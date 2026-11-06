@@ -4,8 +4,8 @@
 use super::{
     apply_policy, debug, family_index, info, message, otc_leak, ov_state, warn, AddressFamily, Arc,
     BgpRib, CompiledPolicy, Damping, EvpnNlri, EvpnRoute, FlowspecKey, FlowspecRoute, GsKnobs,
-    HashMap, HashSet, Instant, IpAddr, IpNet, Ipv4Addr, MacMobility, RibRoute, RouteOrigin,
-    SmallVec, UpdateMessage, CHANGE_PENALTY, DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
+    HashMap, HashSet, Instant, IpAddr, IpNet, Ipv4Addr, MacMobility, PolicyPeer, RibRoute,
+    RouteOrigin, SmallVec, UpdateMessage, CHANGE_PENALTY, DEFAULT_LOCAL_PREF, WITHDRAW_PENALTY,
 };
 use crate::as_path::SegKind;
 use nos_proto::BgpRole::{Peer, Provider, RouteServer};
@@ -59,6 +59,9 @@ pub(super) fn evpn_rejected(
             large_communities: &[],
             validation_state: nos_rpl::ValidationState::NotFound,
             rd: None,
+            local_role: None,
+            remote_role: None,
+            otc: None,
         },
     };
     !matches!(
@@ -324,14 +327,14 @@ pub(super) fn learn_prefix(
     counts: &mut PathCounts,
     damping: &mut Damping,
     touched: &mut HashSet<IpNet>,
-    peer: (IpAddr, u32),
+    peer: PolicyPeer,
     (prefix, id): (IpNet, u32),
     candidate: RibRoute,
     import_policy: &CompiledPolicy,
     retain: Option<&mut super::retain::RetainSlot<'_>>,
     blackhole: Option<&[nos_rpl::PrefixListEntry]>,
 ) {
-    let (from, _) = peer;
+    let from = peer.addr;
     // Soft reconfiguration inbound: keep the pre-policy candidate.
     if let Some(r) = retain {
         put_path(r.table, r.counts, prefix, id, candidate.clone());
@@ -665,6 +668,7 @@ impl BgpRib {
         } = *rx;
         let mut evpn_recheck: Vec<(u32, [u8; 6])> = Vec::new();
         let mut flow_keys: Vec<FlowspecKey> = Vec::new();
+        let policy_peer = PolicyPeer::new(from, peer_as).with_roles(self.policy_roles(from));
         let table = self.adj_rib_in.entry(from).or_default();
         let counts = self.path_counts.entry(from).or_default();
         let mut retain = self.retained.slot(from);
@@ -740,7 +744,7 @@ impl BgpRib {
                 counts,
                 &mut self.damping,
                 touched,
-                (from, peer_as),
+                policy_peer,
                 (IpNet::V4(*prefix), path_id_at(&update.nlri_path_ids, i)),
                 candidate,
                 import_policy,
@@ -760,7 +764,7 @@ impl BgpRib {
                     counts,
                     &mut self.damping,
                     touched,
-                    (from, peer_as),
+                    policy_peer,
                     (*prefix, path_id_at(&mp.nlri_path_ids, i)),
                     candidate,
                     import_policy,
