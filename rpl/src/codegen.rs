@@ -4,6 +4,7 @@
 //! resolution twice). `check.rs` handles the one thing this pass doesn't
 //! need: the termination/reachability structure of the statement tree.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use crate::ast::{BinOp, Expr, ExprKind, ExtKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
@@ -11,7 +12,7 @@ use crate::schema::{self, FieldInfo, FieldType};
 use crate::symbols::Symbols;
 use crate::vm::{
     AsPathRegexes, CmpKind, CommunityValue, CompiledPolicy, Op, Role, ValidationState,
-    MAX_STACK_DEPTH,
+    MAX_CODE_OPS, MAX_STACK_DEPTH,
 };
 use crate::CompileError;
 
@@ -30,6 +31,9 @@ pub fn compile(policy: &Policy, symbols: &Symbols) -> Result<CompiledPolicy, Com
         depth: 0,
         max_depth: 0,
         symbols,
+        call_stack: Vec::new(),
+        accept_patches: Vec::new(),
+        callees: HashMap::new(),
     };
     cg.compile_stmts(policy)?;
     if cg.max_depth > MAX_STACK_DEPTH {
@@ -49,7 +53,17 @@ struct Codegen<'a> {
     depth: usize,
     max_depth: usize,
     symbols: &'a Symbols<'a>,
+    /// Policies being inlined right now (outermost first).
+    call_stack: Vec<String>,
+    /// One frame per active `call`: indices of the `Jump`s an `accept` in
+    /// that callee emitted, patched to the continuation after the callee.
+    accept_patches: Vec<Vec<usize>>,
+    /// Parsed + termination-checked callees, so one used N times is parsed once.
+    callees: HashMap<String, Policy>,
 }
+
+/// Deepest `call` nesting (owner decision, #870).
+const MAX_CALL_DEPTH: usize = 8;
 
 impl Codegen<'_> {
     fn emit(&mut self, op: Op, delta: isize) -> usize {
@@ -68,6 +82,67 @@ impl Codegen<'_> {
         }
     }
 
+    fn compile_call(&mut self, name: &str, line: usize) -> Result<(), CompileError> {
+        if let Some(pos) = self.call_stack.iter().position(|n| n == name) {
+            let mut chain = self.call_stack[pos..].to_vec();
+            chain.push(name.to_string());
+            return Err(CompileError::new(
+                line,
+                format!("policy call cycle: {}", chain.join(" -> ")),
+            ));
+        }
+        if self.call_stack.len() >= MAX_CALL_DEPTH {
+            return Err(CompileError::new(
+                line,
+                format!("policy calls nested deeper than {MAX_CALL_DEPTH}"),
+            ));
+        }
+        match name {
+            "deny-all" => {
+                self.emit(Op::Reject, 0);
+                return Ok(());
+            }
+            "accept-all" => return Ok(()),
+            _ => {}
+        }
+        if !self.callees.contains_key(name) {
+            let Some((_, src)) = self.symbols.policies.iter().find(|(n, _)| *n == name) else {
+                return Err(CompileError::new(line, format!("unknown policy '{name}'")));
+            };
+            let wrap = |e: CompileError| {
+                CompileError::new(line, format!("in called policy '{name}': {e}"))
+            };
+            let tokens = crate::lexer::lex(src).map_err(wrap)?;
+            let callee = crate::parser::parse(&tokens).map_err(wrap)?;
+            crate::check::check_termination(&callee).map_err(wrap)?;
+            self.callees.insert(name.to_string(), callee);
+        }
+        let callee = self.callees[name].clone();
+        self.call_stack.push(name.to_string());
+        self.accept_patches.push(Vec::new());
+        let res = self.compile_stmts(&callee);
+        self.call_stack.pop();
+        let patches = self.accept_patches.pop().unwrap_or_default();
+        res.map_err(|e| {
+            // Keep the innermost message; only attach the callee name once.
+            if e.message.starts_with("in called policy")
+                || e.message.starts_with("policy call cycle")
+                || e.message.starts_with("policy calls nested")
+                || e.message.starts_with("policy too large")
+                || e.message.starts_with("unknown policy")
+            {
+                CompileError::new(line, e.message)
+            } else {
+                CompileError::new(line, format!("in called policy '{name}': {e}"))
+            }
+        })?;
+        let target = self.code.len();
+        for idx in patches {
+            self.code[idx] = Op::Jump(target);
+        }
+        Ok(())
+    }
+
     fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
         for stmt in stmts {
             self.compile_stmt(stmt)?;
@@ -76,10 +151,24 @@ impl Codegen<'_> {
     }
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
+        if self.code.len() > MAX_CODE_OPS {
+            return Err(CompileError::new(
+                stmt.line,
+                format!("policy too large after inlining calls (limit {MAX_CODE_OPS} ops)"),
+            ));
+        }
         match &stmt.kind {
             StmtKind::Accept => {
-                self.emit(Op::Accept, 0);
+                // Inside a callee, accept returns to the caller.
+                if let Some(frame) = self.accept_patches.last_mut() {
+                    let idx = self.code.len();
+                    frame.push(idx);
+                    self.emit(Op::Jump(0), 0);
+                } else {
+                    self.emit(Op::Accept, 0);
+                }
             }
+            StmtKind::Call(name) => self.compile_call(name, stmt.line)?,
             StmtKind::Reject => {
                 self.emit(Op::Reject, 0);
             }
@@ -1794,6 +1883,7 @@ mod tests {
             groups: &[],
             prefix_lists: &[],
             as_path_lists: &[],
+            policies: &[],
         };
         let policy = compile_src_with(
             "if this.bgp.communities.contains(CUSTOMER_A):\n    reject\nelse:\n    accept\n",
@@ -1815,6 +1905,7 @@ mod tests {
             groups,
             prefix_lists: &[],
             as_path_lists: &[],
+            policies: &[],
         };
         let policy = compile_src_with(
             "if this.bgp.communities.contains(CUSTOMERS):\n    reject\nelse:\n    accept\n",
@@ -1848,6 +1939,7 @@ mod tests {
             groups,
             prefix_lists: &[],
             as_path_lists: &[],
+            policies: &[],
         };
         let policy = compile_src_with("this.bgp.communities.add(CUSTOMERS)\naccept\n", &symbols);
         let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
@@ -1887,6 +1979,7 @@ mod tests {
             groups: &[],
             prefix_lists: lists,
             as_path_lists: &[],
+            policies: &[],
         };
         let policy = compile_src_with(
             "if this.prefix in BLOCKS:\n    reject\nelse:\n    accept\n",
@@ -1924,6 +2017,7 @@ mod tests {
             groups: &[],
             prefix_lists: lists,
             as_path_lists: &[],
+            policies: &[],
         };
         let policy = compile_src_with(
             "if this.prefix in BLOCKS:\n    reject\nelse:\n    accept\n",
@@ -2124,6 +2218,7 @@ mod tests {
             groups: &[],
             prefix_lists: lists,
             as_path_lists: &[],
+            policies: &[],
         };
         let v4: Option<std::net::IpAddr> = Some("10.1.0.1".parse().unwrap());
         let v4b: Option<std::net::IpAddr> = Some("10.1.0.2".parse().unwrap());
@@ -2254,5 +2349,120 @@ mod tests {
         // segments empty but flat non-empty violates the contract only for
         // non-empty segments, so this is the documented "no fallback" case.
         assert!(matches!(vm::run(&p, &input), Verdict::Accept { .. }));
+    }
+
+    fn call_syms<'a>(p: &'a [(&'a str, &'a str)]) -> Symbols<'a> {
+        Symbols {
+            policies: p,
+            ..Symbols::EMPTY
+        }
+    }
+
+    fn verdict_of(src: &str, p: &[(&str, &str)]) -> Verdict {
+        let policy = compile_src_with(src, &call_syms(p));
+        let (prefix, path, cluster) = default_input("10.0.0.0/8");
+        let input = make_input(prefix, &path, 100, None, &cluster);
+        vm::run(&policy, &input)
+    }
+
+    fn call_err(src: &str, p: &[(&str, &str)]) -> String {
+        let tokens = lex(src).unwrap();
+        let policy = parse(&tokens).unwrap();
+        crate::check::check_termination(&policy).unwrap();
+        compile(&policy, &call_syms(p)).unwrap_err().to_string()
+    }
+
+    fn is_accept(v: &Verdict) -> bool {
+        matches!(v, Verdict::Accept { .. })
+    }
+
+    #[test]
+    fn call_callee_accept_returns_to_caller() {
+        let p = [("my-pol", "accept\n")];
+        assert_eq!(verdict_of("call my-pol\nreject\n", &p), Verdict::Reject);
+        assert!(is_accept(&verdict_of("call my-pol\naccept\n", &p)));
+    }
+
+    #[test]
+    fn call_callee_reject_rejects_and_set_is_visible() {
+        let p = [
+            ("r", "reject\n"),
+            ("s", "set this.bgp.origin = origin.incomplete\naccept\n"),
+        ];
+        assert_eq!(verdict_of("call r\naccept\n", &p), Verdict::Reject);
+        let Verdict::Accept { edits, .. } = verdict_of("call s\naccept\n", &p) else {
+            panic!("expected accept")
+        };
+        assert_eq!(edits.origin, Some(Origin::Incomplete));
+    }
+
+    #[test]
+    fn call_nested_accept_in_if_and_twice() {
+        let p = [(
+            "c",
+            "if this.prefix in 10.0.0.0/8:\n    accept\nelse:\n    reject\n",
+        )];
+        assert!(is_accept(&verdict_of("call c\ncall c\naccept\n", &p)));
+        let p2 = [
+            ("a", "call b\naccept\n"),
+            ("b", "call c\naccept\n"),
+            ("c", "accept\n"),
+        ];
+        assert!(is_accept(&verdict_of("call a\naccept\n", &p2)));
+    }
+
+    #[test]
+    fn call_builtin_policies() {
+        assert!(is_accept(&verdict_of("call accept-all\naccept\n", &[])));
+        assert_eq!(verdict_of("call deny-all\naccept\n", &[]), Verdict::Reject);
+    }
+
+    #[test]
+    fn call_errors() {
+        assert!(call_err("call nope\naccept\n", &[]).contains("unknown policy 'nope'"));
+        let p = [("a", "call b\naccept\n"), ("b", "call a\naccept\n")];
+        assert!(call_err("call a\naccept\n", &p).contains("cycle: a -> b -> a"));
+        let p = [("a", "call a\naccept\n")];
+        assert!(call_err("call a\naccept\n", &p).contains("cycle: a -> a"));
+        let p = [("bad", "set this.bgp.local_pref = 1\n")];
+        let e = call_err("call bad\naccept\n", &p);
+        assert!(e.contains("in called policy 'bad'") && e.contains("does not terminate"));
+    }
+
+    #[test]
+    fn call_depth_limit() {
+        // p0 -> p1 -> ... -> p9 (leaf): the root calling p0 nests 10 deep.
+        let srcs: Vec<(String, String)> = (0..10)
+            .map(|i| {
+                let body = if i == 9 {
+                    "accept\n".to_string()
+                } else {
+                    format!("call p{}\naccept\n", i + 1)
+                };
+                (format!("p{i}"), body)
+            })
+            .collect();
+        let at = |n: usize| -> Vec<(&str, &str)> {
+            srcs[n..]
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect()
+        };
+        // root -> p2 .. p9 is 8 nested calls: fine; root -> p1 is 9: error.
+        assert!(is_accept(&verdict_of("call p2\naccept\n", &at(2))));
+        assert!(call_err("call p1\naccept\n", &at(1)).contains("deeper than 8"));
+    }
+
+    #[test]
+    fn call_fan_out_hits_size_cap() {
+        let mut srcs: Vec<(String, String)> = (0..7)
+            .map(|i| {
+                let c = format!("call p{}\n", i + 1);
+                (format!("p{i}"), format!("{c}{c}{c}{c}{c}accept\n"))
+            })
+            .collect();
+        srcs.push(("p7".into(), "set this.bgp.local_pref = 1\naccept\n".into()));
+        let p: Vec<(&str, &str)> = srcs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert!(call_err("call p0\naccept\n", &p).contains("too large"));
     }
 }

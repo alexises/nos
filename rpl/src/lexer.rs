@@ -20,6 +20,7 @@ pub enum Token {
     Set,
     Accept,
     Reject,
+    Call,
     And,
     Or,
     Not,
@@ -223,6 +224,25 @@ fn lex_line(line: &str, lineno: usize, out: &mut Vec<SpannedToken>) -> Result<()
                 token: keyword_or_ident(word),
                 line: lineno,
             });
+            if word == "call" {
+                // The callee is a policy name, which may contain '-': scan
+                // it whole instead of splitting at the hyphen.
+                while bytes.get(i) == Some(&b' ') {
+                    i += 1;
+                }
+                let name_start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || b"_-".contains(&bytes[i]))
+                {
+                    i += 1;
+                }
+                if i > name_start {
+                    out.push(SpannedToken {
+                        token: Token::Ident(line[name_start..i].to_string()),
+                        line: lineno,
+                    });
+                }
+            }
             continue;
         }
         let (tok, width) = match c {
@@ -264,6 +284,7 @@ fn keyword_or_ident(word: &str) -> Token {
         "set" => Token::Set,
         "accept" => Token::Accept,
         "reject" => Token::Reject,
+        "call" => Token::Call,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,
@@ -434,5 +455,18 @@ mod tests {
     fn inconsistent_indentation_is_rejected() {
         let src = "a:\n    b\n        c\n      d\n";
         assert!(lex(src).is_err());
+    }
+
+    #[test]
+    fn call_scans_a_hyphenated_name() {
+        assert_eq!(
+            tokens_of("call my-pol_2\n"),
+            vec![
+                Token::Call,
+                Token::Ident("my-pol_2".into()),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
     }
 }

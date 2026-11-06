@@ -94,6 +94,15 @@ impl Parser<'_> {
                 self.expect(&Token::Newline)?;
                 StmtKind::Reject
             }
+            Token::Call => {
+                self.advance();
+                let Token::Ident(name) = self.peek().clone() else {
+                    return Err(CompileError::new(line, "'call' needs a policy name"));
+                };
+                self.advance();
+                self.expect(&Token::Newline)?;
+                StmtKind::Call(name)
+            }
             other => {
                 return Err(CompileError::new(
                     line,
@@ -555,5 +564,12 @@ mod tests {
         );
         assert!(matches!(policy[0].kind, StmtKind::CommunityRemove(..)));
         assert!(matches!(policy[1].kind, StmtKind::CommunityClear(..)));
+    }
+
+    #[test]
+    fn call_statement_parses_and_needs_a_name() {
+        let policy = parse(&lex("call a-b\naccept\n").unwrap()).unwrap();
+        assert_eq!(policy[0].kind, StmtKind::Call("a-b".into()));
+        assert!(parse(&lex("call\naccept\n").unwrap()).is_err());
     }
 }

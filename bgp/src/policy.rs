@@ -121,11 +121,16 @@ impl PolicyCache {
             .map(|(n, p)| (*n, p.as_slice()))
             .collect();
 
+        let policy_refs: Vec<(&str, &str)> = policies
+            .iter()
+            .map(|p| (p.name.as_str(), p.source.as_str()))
+            .collect();
         let symbols = nos_rpl::Symbols {
             aliases: &alias_refs,
             groups: &group_refs,
             prefix_lists: &prefix_list_refs,
             as_path_lists: &as_path_list_refs,
+            policies: &policy_refs,
         };
 
         let mut next = HashMap::with_capacity(policies.len());
@@ -317,5 +322,39 @@ mod tests {
             &[],
         );
         assert!(accepts(&cache.resolve(Some("p1"))));
+    }
+
+    #[test]
+    fn editing_a_callee_changes_the_caller() {
+        let mut cache = PolicyCache::default();
+        let caller = policy("caller", "call callee\nreject\n");
+        cache.resync(
+            &[caller.clone(), policy("callee", "accept\n")],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(!accepts(&cache.resolve(Some("caller"))));
+        let caller = policy("caller", "call callee\naccept\n");
+        cache.resync(
+            &[caller.clone(), policy("callee", "accept\n")],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(accepts(&cache.resolve(Some("caller"))));
+        cache.resync(
+            &[caller.clone(), policy("callee", "reject\n")],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(!accepts(&cache.resolve(Some("caller"))));
+        // A broken callee keeps the previous compiled caller.
+        cache.resync(&[caller, policy("callee", "bogus\n")], &[], &[], &[], &[]);
+        assert!(!accepts(&cache.resolve(Some("caller"))));
     }
 }

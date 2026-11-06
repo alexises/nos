@@ -191,7 +191,31 @@ A statement after `accept` or `reject` in the same block can never run, and is r
 - `this.bgp.communities.remove_matching("<regex>")` removes every community whose text matches the regex (see [Match communities with a regex](#match-communities-with-a-regex)).
 - `this.bgp.communities.add(<value>)` and `.remove(<value>)` add or remove one community; `.clear()` removes them all. The same three work on `this.bgp.extended_communities` and `this.bgp.large_communities`. `<value>` can be a literal, a community alias or a community group (see [below](#community-aliases-and-groups)); for a group, every member is added or removed. Adding a value that is already there does nothing.
 
+- `call <policy>` runs another policy and then continues with the next line. See [Reusing a policy with `call`](#reusing-a-policy-with-call).
+
 Changes are visible to the rest of the script: after `set this.bgp.local_pref = 200`, `this.bgp.local_pref` reads 200.
+
+### Reusing a policy with `call`
+
+- `call bogon-filter` runs the stored policy `bogon-filter` as if its lines were pasted at that point. Any policy name works, including `accept-all` (does nothing) and `deny-all` (rejects).
+- The callee runs on the route as already edited, and its edits stay visible after the call.
+- Callee `reject` rejects the route at once. Callee `accept` only returns to the caller, which carries on and still needs its own `accept` or `reject` at the end.
+- Example, an entry policy that applies a shared filter and then sets local preference:
+
+```
+call bogon-filter
+set this.bgp.local_pref = 150
+accept
+```
+
+- Limits, all checked at commit:
+  - A call to a policy that does not exist is refused, and so is removing or breaking a policy another one still calls (the commit fails on the caller).
+  - A cycle (`a` calls `b` calls `a`) is refused.
+  - Calls nest at most 8 deep.
+  - The inlined result may hold at most 65 536 operations, which stops large fan-out.
+- Editing a callee takes effect for its callers on the same commit; no caller needs touching.
+- `call` is a reserved word: a community alias or list named `call` can no longer be written as a bare name.
+- The next-hop family check at commit does not look inside called policies; only the run-time guard covers a `set this.bgp.next_hop` made by a callee.
 
 ### Fields
 

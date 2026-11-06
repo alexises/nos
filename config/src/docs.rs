@@ -1331,7 +1331,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::PolicyDefinitionSource => (
             "Set a routing policy's RPL source.",
-            "The whole RPL script, compiled at commit time: a script that doesn't compile, or doesn't end every path with accept or reject, is refused.",
+            "The whole RPL script, compiled at commit time: a script that doesn't compile, or doesn't end every path with accept or reject, is refused. `call <policy>` runs another stored policy inline; its accept returns here, its reject rejects the route.",
         ),
         Topic::CommunityAlias => (
             "Create or delete a community alias.",

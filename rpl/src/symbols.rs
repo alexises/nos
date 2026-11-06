@@ -32,6 +32,9 @@ pub struct Symbols<'a> {
     /// Named as-path lists: each entry is one regex (see `Op::AsPathMatches`);
     /// a list matches if ANY entry does.
     pub as_path_lists: &'a [(&'a str, &'a [&'a str])],
+    /// Stored policies callable with `call NAME`: `(name, RPL source)`.
+    /// Sources, not compiled code: callees are inlined at codegen.
+    pub policies: &'a [(&'a str, &'a str)],
 }
 
 impl Symbols<'_> {
@@ -41,5 +44,6 @@ impl Symbols<'_> {
         groups: &[],
         prefix_lists: &[],
         as_path_lists: &[],
+        policies: &[],
     };
 }
