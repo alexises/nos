@@ -724,7 +724,10 @@ fn route_refresh_markers_stale_and_purge_membership() {
     assert_eq!(rib.stale_count(addr(EBGP)), 2);
     let _ = recv_all(&mut obs);
     feed_rtc(&mut rib, vec![exact(RT)]);
-    assert_eq!(rib.end_refresh_in(addr(EBGP), AddressFamily::RtConstraint), 1);
+    assert_eq!(
+        rib.end_refresh_in(addr(EBGP), AddressFamily::RtConstraint),
+        1
+    );
     assert_eq!(rib.accepted_rtc(addr(EBGP)), 1);
     assert_eq!(rtc_withdraws(&recv_all(&mut obs)), 1);
     // Nothing held from an unknown peer.

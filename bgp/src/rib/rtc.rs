@@ -253,12 +253,7 @@ impl BgpRib {
     /// re-selects, re-advertises and resyncs VPN/EVPN toward the peer);
     /// returns how many.
     pub(super) fn purge_stale_rtc(&mut self, peer: IpAddr) -> usize {
-        let keys: Vec<RtcKey> = self
-            .rtc_stale
-            .remove(&peer)
-            .into_iter()
-            .flatten()
-            .collect();
+        let keys: Vec<RtcKey> = self.rtc_stale.remove(&peer).into_iter().flatten().collect();
         let before = self.rtc_adj_rib_in.get(&peer).map_or(0, HashMap::len);
         self.drop_rtcs(peer, &keys);
         before - self.rtc_adj_rib_in.get(&peer).map_or(0, HashMap::len)
