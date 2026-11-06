@@ -1694,16 +1694,8 @@ impl BgpRib {
         self.rtc_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
-        if let (false, Some(gr)) = (retained.is_empty(), gr) {
-            self.retain_as_stale(peer, gr, &retained);
-            return;
-        }
-        self.path_counts.remove(&peer);
-        self.stale.remove(&peer);
-        self.evpn_stale.remove(&peer);
-        self.flowspec_stale.remove(&peer);
-        self.vpn_stale.remove(&peer);
-        self.gr_deadline.remove(&peer);
+        // ponytail: membership is dropped with the session even under graceful
+        // restart (no `rtc_stale` yet); the peer re-announces it on return.
         let rtcs: Vec<RtcKey> = self
             .rtc_adj_rib_in
             .get(&peer)
@@ -1714,6 +1706,16 @@ impl BgpRib {
         for k in rtcs {
             self.drop_rtc(peer, &k);
         }
+        if let (false, Some(gr)) = (retained.is_empty(), gr) {
+            self.retain_as_stale(peer, gr, &retained);
+            return;
+        }
+        self.path_counts.remove(&peer);
+        self.stale.remove(&peer);
+        self.evpn_stale.remove(&peer);
+        self.flowspec_stale.remove(&peer);
+        self.vpn_stale.remove(&peer);
+        self.gr_deadline.remove(&peer);
         let vpns: Vec<VpnKey<IpNet>> = self
             .vpn_adj_rib_in
             .get(&peer)

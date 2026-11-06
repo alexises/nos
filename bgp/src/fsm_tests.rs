@@ -573,6 +573,30 @@ fn vpn_encodes_as_safi_128_with_its_label_rd_and_next_hop() {
 }
 
 #[test]
+fn rtc_encodes_as_safi_132_with_our_next_hop() {
+    let key = message::RtcNlri {
+        origin_as: 65000,
+        rt: 0x0002_fde8_0000_0001,
+        bits: 96,
+    };
+    let u = expect_update(outbound_update_to_message(OutboundUpdate::AnnounceRtc(
+        crate::rib::AdvertisedRtc {
+            key,
+            route: route("0.0.0.0/0", "192.0.2.9", true, None),
+        },
+    )));
+    let mp = &u.mp_reach[0];
+    assert_eq!((mp.afi, mp.safi), (AFI_IPV4, message::SAFI_RTC));
+    assert_eq!(mp.next_hop, "192.0.2.9".parse::<IpAddr>().unwrap());
+    assert_eq!(mp.rtc, [key]);
+    assert_eq!(u.attributes.unwrap().local_pref, Some(150));
+    let u = expect_update(outbound_update_to_message(OutboundUpdate::WithdrawRtc(key)));
+    assert!(u.attributes.is_none() && u.mp_reach.is_empty());
+    assert_eq!(u.mp_unreach[0].rtc, [key]);
+    assert_eq!(u.mp_unreach[0].safi, message::SAFI_RTC);
+}
+
+#[test]
 fn withdraws_encode_as_legacy_or_mp_unreach() {
     let v4: IpNet = "192.0.2.0/24".parse().unwrap();
     let v6: IpNet = "2001:db8::/32".parse().unwrap();

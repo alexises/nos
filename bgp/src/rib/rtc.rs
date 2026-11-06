@@ -443,6 +443,11 @@ fn rt_text(k: &RtcKey) -> String {
     }
 }
 
+#[cfg(test)]
+pub(super) fn rt_text_for_tests(k: &RtcKey) -> String {
+    rt_text(k)
+}
+
 /// Logged by `advertise_vpn` when RT-Constraint holds a route back.
 pub(super) fn log_held(peer: IpAddr, rd: &str, prefix: IpNet) {
     debug!(peer = %peer, rd = %rd, prefix = %prefix, "vpn route held by rt-constraint");

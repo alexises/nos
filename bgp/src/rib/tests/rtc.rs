@@ -514,3 +514,60 @@ fn membership_is_not_propagated_while_deferring() {
     rib.set_rtc_membership(std::collections::BTreeSet::from([RT]));
     assert_eq!(rtcs(&mut rx[1]), vec![]);
 }
+
+#[test]
+fn a_route_refresh_resends_the_membership_last_sent() {
+    let (mut rib, mut rx) = setup();
+    rib.set_rtc_membership(std::collections::BTreeSet::from([RT]));
+    let _ = recv_all(&mut rx[1]);
+    rib.resend_all(addr(EBGP), AddressFamily::RtConstraint, true);
+    let sent = recv_all(&mut rx[1]);
+    assert_eq!(sent.len(), 3, "BoRR, the membership, EoRR: {sent:?}");
+    assert!(matches!(&sent[1], OutboundUpdate::AnnounceRtc(a) if a.key == key(65000, RT, 96)));
+}
+
+#[test]
+fn a_lost_membership_update_is_re_sent_from_the_backlog_state() {
+    let (mut rib, mut rx) = setup();
+    rib.set_rtc_membership(std::collections::BTreeSet::from([RT]));
+    let _ = recv_all(&mut rx[1]);
+    // Forced, as `drain_backlog` does: an unchanged state is sent again.
+    rib.sync_rtc_to(addr(EBGP), &key(65000, RT, 96), true);
+    assert_eq!(rtcs(&mut rx[1]).len(), 1);
+    // A forced sync of a key we never held withdraws it (legal if unknown).
+    rib.sync_rtc_to(addr(EBGP), &key(65000, RT2, 96), true);
+    assert!(matches!(
+        &rtcs(&mut rx[1])[..],
+        [OutboundUpdate::WithdrawRtc(_)]
+    ));
+}
+
+#[test]
+fn covers_rejects_an_illegal_length_and_the_default_logs_as_such() {
+    assert!(!key(1, RT, 31).covers(RT));
+    assert!(!key(1, RT, 97).covers(RT));
+    assert_eq!(crate::rib::rtc::rt_text_for_tests(&default_rt()), "default");
+}
+
+/// Graceful restart for SAFI 132 is not implemented (#875): a retaining
+/// disconnect still drops the peer's membership, so nothing lingers
+/// un-purgeable in `rtc_adj_rib_in`.
+#[test]
+fn membership_is_dropped_on_a_graceful_restart_disconnect() {
+    let (mut rib, _rx) = setup();
+    feed_rtc(&mut rib, vec![exact(RT)]);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 1);
+    let cap = PeerGr::from_cap(&crate::message::GracefulRestartCap {
+        restart: false,
+        notification: true,
+        time: 120,
+        families: vec![crate::message::GrFamily {
+            afi: 1,
+            safi: message::SAFI_RTC,
+            forwarding: true,
+        }],
+    });
+    rib.set_peer_gr(addr(EBGP), Some(cap));
+    rib.peer_disconnected(addr(EBGP), Disconnect::Transport);
+    assert_eq!(rib.accepted_rtc(addr(EBGP)), 0);
+}
