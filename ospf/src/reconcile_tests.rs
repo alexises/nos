@@ -1217,7 +1217,19 @@ async fn run_reapplies_on_the_tick_without_a_diff() {
     // Nothing is pushed from here on: only REAPPLY_INTERVAL ticks can add
     // fetches (the connect-time ones may still be in flight, hence +3).
     let gets = configd.gets();
-    until("ticks resync", || configd.gets() >= gets + 3).await;
+    // The paused clock no longer auto-advances while socket I/O is pending
+    // (tokio 1.53.3), so step it by hand, giving the real I/O time to land.
+    for _ in 0..20 {
+        if configd.gets() >= gets + 3 {
+            break;
+        }
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert!(configd.gets() >= gets + 3, "ticks resync");
     r.stop().await;
 }
 

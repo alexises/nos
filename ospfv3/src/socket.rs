@@ -60,6 +60,20 @@ use tracing::warn;
 
 use crate::packet::{self, TrailerAuth};
 
+/// Registers `fd` with the tokio reactor. `AsyncFd::new` is deprecated
+/// (RUSTSEC-2026-0386): registering is `unsafe`, as the fd must stay open and
+/// keep the same raw fd for the `AsyncFd`'s life.
+#[allow(
+    unsafe_code,
+    reason = "socket2::Socket owns its fd for the AsyncFd's life"
+)]
+fn register_fd<T: AsRawFd>(fd: T) -> io::Result<AsyncFd<T>> {
+    // SAFETY: callers pass an owning `socket2::Socket`, which keeps its fd
+    // open and unchanged until it is dropped with the `AsyncFd`.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- AsyncFd::register contract above
+    unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)
+}
+
 pub const OSPF_IP_PROTO: i32 = 89;
 pub const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
 
@@ -117,7 +131,7 @@ impl OspfSocket {
         socket.set_multicast_hops_v6(1)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
-            inner: AsyncFd::new(socket)?,
+            inner: register_fd(socket)?,
             auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
             instance_id,
             drouters: nos_ospf_common::drouters::AllDRouters::default(),

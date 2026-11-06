@@ -8115,6 +8115,20 @@ const CHUNKED_PER_TABLE: u32 = 25_000;
 /// and a list must fit one 2 MiB REST `PUT`.
 const CHUNKED_EXTRA_RTS: u32 = 32;
 
+/// Lines of `name`'s container stdout (ANSI colors stripped) matching the BRE
+/// `pattern`: the lossless counterpart of `Router::count`, for a pattern that
+/// is logged just before a flood the REST log follower cannot keep up with.
+async fn stdout_count(w: &World, name: &str, pattern: &str) -> anyhow::Result<usize> {
+    let ansi = regex::Regex::new("\x1b\\[[0-9;]*m")?;
+    let re = bre(pattern);
+    let out = w.dock.logs(name).await?;
+    Ok(ansi
+        .replace_all(&out, "")
+        .lines()
+        .filter(|l| re.is_match(l))
+        .count())
+}
+
 /// The i-th `evpn-l3-chunked` prefix of table `t`: `100.64.0.0 + t * 25000 + i`.
 fn chunked_prefix(t: usize, i: u32) -> nos_proto::IpNet {
     let n = u32::try_from(t).unwrap_or(0) * CHUNKED_PER_TABLE + i;
@@ -8350,10 +8364,10 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     let assembled = |t: &str| {
         format!("assembled chunked evpn route snapshot table={t} routes=7[0-9][0-9][0-9][0-9] parts=[2-9]")
     };
-    let asm_base: Vec<usize> = CHUNKED_TABLES
-        .iter()
-        .map(|(t, _)| a.count(&assembled(t)))
-        .collect();
+    let mut asm_base = Vec::new();
+    for (t, _) in CHUNKED_TABLES {
+        asm_base.push(stdout_count(w, a.name(), &assembled(t)).await?);
+    }
     let removed = a.count("removed route");
     let applied = std::time::Instant::now();
     a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A)).await?;
@@ -8361,8 +8375,19 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
         a.provision_flags(&chunked_table_flags(A, table, *vni))
             .await?;
     }
+    // Counted on the container's stdout, not the REST log follower: the
+    // 75 000 `added route` lines that follow overrun logd's 1024-entry tail
+    // channel and the follower silently drops lines, `assembled` included
+    // (#838: tenant3's line was lost on tokio 1.53.1 and 1.53.2 alike).
     for ((t, _), base) in CHUNKED_TABLES.iter().zip(&asm_base) {
-        a.wait_new(&assembled(t), *base, 900).await?;
+        let deadline = std::time::Instant::now() + Duration::from_mins(15);
+        while stdout_count(w, a.name(), &assembled(t)).await? <= *base {
+            if std::time::Instant::now() > deadline {
+                bail!("router-a: no 'assembled' line for {t} within 900s");
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        log(format!("router-a: assembled chunked snapshot for {t}"));
     }
     // The routes are in each table (REST, not the log: 75 000 `added route`
     // lines overrun the harness's log follower, which then drops lines).

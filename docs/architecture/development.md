@@ -100,3 +100,9 @@ cargo fmt --all
 - Reproduce a crash: `cd fuzz && cargo +nightly fuzz run <target> artifacts/<target>/<crash-file>`.
 - A found crash becomes a regression unit test in the owning crate (minimised input as a `const` byte array) before the fix.
 - No seeds are committed (no binaries in the repo): `fuzz/corpus`, `fuzz/artifacts` and `fuzz/target` are git-ignored. Locally the corpus builds up in `fuzz/corpus/<target>/`; CI keeps it between nightly runs with `actions/cache`. Add a target by adding a `[[bin]]` plus a file under `fuzz/fuzz_targets/`, and its name to `FUZZ_TARGETS`.
+
+## tokio pitfalls
+
+- Register sockets with the per-crate `register_fd` (`l2-socket`, `ospf`, `ospfv3`, `bfd`), never `AsyncFd::new` (deprecated, RUSTSEC-2026-0386); the workspace floor is tokio 1.53.3.
+- A `start_paused` test that does real socket I/O must `tokio::time::advance` by hand: the paused clock no longer auto-advances while I/O is pending (see `run_reapplies_on_the_tick_without_a_diff`).
+- An e2e phase must not wait on a log line emitted just before a flood of thousands of lines: `nos-logd`'s 1024-entry tail channel drops entries for the REST follower (`log tail subscriber lagged`). Count the container stdout instead (`stdout_count` in `tools/e2e/src/phases/bgp.rs`, #838).

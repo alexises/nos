@@ -40,6 +40,20 @@ use nos_bfd_socket::{ifindex, recv_one, recv_probe, send_from, set_int};
 use nos_daemon::{ipc, watchdog};
 use nos_l2_socket::{L2Socket, L2Unicast};
 
+/// Registers `fd` with the tokio reactor. `AsyncFd::new` is deprecated
+/// (RUSTSEC-2026-0386): registering is `unsafe`, as the fd must stay open and
+/// keep the same raw fd for the `AsyncFd`'s life.
+#[allow(
+    unsafe_code,
+    reason = "socket2::Socket owns its fd for the AsyncFd's life"
+)]
+fn register_fd<T: AsRawFd>(fd: T) -> io::Result<AsyncFd<T>> {
+    // SAFETY: callers pass an owning `socket2::Socket`, which keeps its fd
+    // open and unchanged until it is dropped with the `AsyncFd`.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- AsyncFd::register contract above
+    unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)
+}
+
 /// The Linux VRF device of routing table `table`, `None` while `nos-ribd`
 /// is unreachable or has not created it.
 pub async fn vrf_name(watchdog_socket: &std::path::Path, table: &str) -> Option<String> {
@@ -88,7 +102,7 @@ fn rx_socket(vrf: &str, v6: bool, port: u16) -> io::Result<AsyncFd<Socket>> {
     };
     s.bind(&bind.into())?;
     s.set_nonblocking(true)?;
-    AsyncFd::new(s)
+    register_fd(s)
 }
 
 const BACKOFF_MIN: Duration = Duration::from_millis(10);
@@ -587,7 +601,7 @@ async fn sbfd_rx_loop(
                 .ok_or_else(|| io::Error::other("no sbfd socket"))?
                 .get_ref()
                 .try_clone()?;
-            *old = Some(AsyncFd::new(fd)?);
+            *old = Some(register_fd(fd)?);
             info!(peer = %peer, "bfd sbfd receive socket recreated");
             Ok(())
         },
@@ -639,7 +653,7 @@ fn reflector_socket(vrf: &str, v6: bool) -> io::Result<AsyncFd<Socket>> {
     };
     s.bind(&bind.into())?;
     s.set_nonblocking(true)?;
-    AsyncFd::new(s)
+    register_fd(s)
 }
 
 async fn reflect_loop(sock: AsyncFd<Socket>, vrf: String, v6: bool, reflector: Arc<Reflector>) {
@@ -932,7 +946,7 @@ impl Net for UdpNet {
         // Its own source port (never 7784, unique per session: `bind` fails
         // on a port in use) so the reflections find their way back.
         let tx = tx_socket(device, &vrf, key, sbfd::PORT)?;
-        let rx = AsyncFd::new(tx.0.try_clone()?)?;
+        let rx = register_fd(tx.0.try_clone()?)?;
         let (out, rx_chan) = tokio::sync::mpsc::channel(64);
         let task = tokio::spawn(sbfd_rx_loop(rx, key.peer, out));
         Ok(SbfdPath {
