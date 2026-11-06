@@ -26,6 +26,7 @@ fn mp_update(p: &str, nh: &str) -> UpdateMessage {
         evpn: vec![],
         flowspec: Vec::new(),
         vpn: Vec::new(),
+        rtc: Vec::new(),
     }];
     u
 }

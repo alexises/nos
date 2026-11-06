@@ -1802,6 +1802,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
                     vpn: Vec::new(),
+                    rtc: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
             })
@@ -1839,6 +1840,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 evpn: Vec::new(),
                 flowspec: vec![f.nlri],
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             mp_unreach: Vec::new(),
         }),
@@ -1858,6 +1860,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: vec![nlri],
                     vpn: Vec::new(),
+                    rtc: Vec::new(),
                 }],
             })
         }
@@ -1883,6 +1886,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
                     vpn: vec![crate::vpn::VpnNlri { labels, rd, prefix }],
+                    rtc: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
             })
@@ -1906,6 +1910,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     rd,
                     prefix,
                 }],
+                rtc: Vec::new(),
             }],
         }),
         OutboundUpdate::Withdraw(prefix, use_mp, path_id) if use_mp => {
@@ -1925,6 +1930,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
                     vpn: Vec::new(),
+                    rtc: Vec::new(),
                 }],
             })
         }
@@ -1970,6 +1976,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 evpn: vec![route.nlri],
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             mp_unreach: Vec::new(),
         }),
@@ -1988,6 +1995,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 evpn: vec![nlri],
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
         }),
         OutboundUpdate::Withdraw(prefix, _, path_id) => {

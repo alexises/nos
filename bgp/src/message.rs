@@ -510,6 +510,8 @@ pub struct MpReachNlri {
     /// AFI 1|2 / SAFI 128 routes (one label each); `nlri` is empty for such
     /// a batch. Never carries a Path Identifier.
     pub vpn: Vec<VpnNlri>,
+    /// AFI 1 / SAFI 132 membership (RFC 4684); `nlri` is empty for such a batch.
+    pub rtc: Vec<RtcNlri>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI`: one AFI/SAFI batch of withdrawn routes.
@@ -528,6 +530,8 @@ pub struct MpUnreachNlri {
     /// AFI 1|2 / SAFI 128 routes (`labels` empty); `withdrawn` is empty for
     /// such a batch.
     pub vpn: Vec<VpnNlri>,
+    /// AFI 1 / SAFI 132 membership; `withdrawn` is empty for such a batch.
+    pub rtc: Vec<RtcNlri>,
 }
 
 /// An RFC 4271 UPDATE message. `withdrawn_routes`/`nlri`/`attributes.next_hop`
@@ -782,10 +786,12 @@ enum SplitField {
     MpReachEvpn(usize),
     MpReachFlowspec(usize),
     MpReachVpn(usize),
+    MpReachRtc(usize),
     MpUnreachWithdrawn(usize),
     MpUnreachEvpn(usize),
     MpUnreachFlowspec(usize),
     MpUnreachVpn(usize),
+    MpUnreachRtc(usize),
 }
 
 // Split `v` (and its aligned path ids, if any) at `mid`; returns the tails.
@@ -823,12 +829,14 @@ fn split_update(
         lists.push((SplitField::MpReachEvpn(i), m.evpn.len()));
         lists.push((SplitField::MpReachFlowspec(i), m.flowspec.len()));
         lists.push((SplitField::MpReachVpn(i), m.vpn.len()));
+        lists.push((SplitField::MpReachRtc(i), m.rtc.len()));
     }
     for (i, m) in update.mp_unreach.iter().enumerate() {
         lists.push((SplitField::MpUnreachWithdrawn(i), m.withdrawn.len()));
         lists.push((SplitField::MpUnreachEvpn(i), m.evpn.len()));
         lists.push((SplitField::MpUnreachFlowspec(i), m.flowspec.len()));
         lists.push((SplitField::MpUnreachVpn(i), m.vpn.len()));
+        lists.push((SplitField::MpUnreachRtc(i), m.rtc.len()));
     }
     let (field, len) = lists
         .into_iter()
@@ -874,6 +882,7 @@ fn split_update(
                 evpn: vec![],
                 flowspec: vec![],
                 vpn: vec![],
+                rtc: vec![],
                 ..m.clone()
             });
             second.attributes.clone_from(&first.attributes);
@@ -887,6 +896,7 @@ fn split_update(
                 evpn,
                 flowspec: vec![],
                 vpn: vec![],
+                rtc: vec![],
                 ..m.clone()
             });
             second.attributes.clone_from(&first.attributes);
@@ -900,6 +910,7 @@ fn split_update(
                 evpn: vec![],
                 flowspec,
                 vpn: vec![],
+                rtc: vec![],
                 ..m.clone()
             });
             second.attributes.clone_from(&first.attributes);
@@ -913,6 +924,7 @@ fn split_update(
                 evpn: vec![],
                 flowspec: vec![],
                 vpn: vec![],
+                rtc: vec![],
                 ..m.clone()
             });
         }
@@ -925,6 +937,7 @@ fn split_update(
                 evpn,
                 flowspec: vec![],
                 vpn: vec![],
+                rtc: vec![],
                 ..m.clone()
             });
         }
@@ -937,6 +950,7 @@ fn split_update(
                 evpn: vec![],
                 flowspec,
                 vpn: vec![],
+                rtc: vec![],
                 ..m.clone()
             });
         }
@@ -949,6 +963,7 @@ fn split_update(
                 evpn: vec![],
                 flowspec: vec![],
                 vpn,
+                rtc: vec![],
                 ..m.clone()
             });
             second.attributes.clone_from(&first.attributes);
@@ -962,6 +977,34 @@ fn split_update(
                 evpn: vec![],
                 flowspec: vec![],
                 vpn,
+                rtc: vec![],
+                ..m.clone()
+            });
+        }
+        SplitField::MpReachRtc(i) => {
+            let m = &mut first.mp_reach[i];
+            let rtc = m.rtc.split_off(mid);
+            second.mp_reach.push(MpReachNlri {
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                vpn: vec![],
+                rtc,
+                ..m.clone()
+            });
+            second.attributes.clone_from(&first.attributes);
+        }
+        SplitField::MpUnreachRtc(i) => {
+            let m = &mut first.mp_unreach[i];
+            let rtc = m.rtc.split_off(mid);
+            second.mp_unreach.push(MpUnreachNlri {
+                withdrawn: vec![],
+                withdrawn_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                vpn: vec![],
+                rtc,
                 ..m.clone()
             });
         }
@@ -1770,6 +1813,76 @@ fn encode_pmsi(p: &Pmsi) -> Vec<u8> {
     v
 }
 
+/// One RFC 4684 Route Target membership NLRI: a `bits`-long prefix (0, or
+/// 32..=96) of `origin_as(4) || route target(8)`. `bits == 0` is the default
+/// route ("send me everything"); for a partial prefix `rt` holds the first
+/// `bits - 32` bits of the route target and the rest is zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RtcNlri {
+    /// Origin AS (zero for the default route; ignored for filtering).
+    pub origin_as: u32,
+    /// The 8-octet route target extended community (type, subtype, value).
+    pub rt: u64,
+    /// Prefix length in bits: 0 or 32..=96.
+    pub bits: u8,
+}
+
+impl RtcNlri {
+    /// The 12 octets `origin_as || rt` with every bit past `bits` zeroed.
+    fn masked(self) -> [u8; 12] {
+        let mut buf = [0u8; 12];
+        buf[..4].copy_from_slice(&self.origin_as.to_be_bytes());
+        buf[4..].copy_from_slice(&self.rt.to_be_bytes());
+        let bits = usize::from(self.bits);
+        for (i, b) in buf.iter_mut().enumerate() {
+            let keep = bits.saturating_sub(i * 8).min(8);
+            *b &= (0xffu16 << (8 - keep)) as u8;
+        }
+        buf
+    }
+
+    /// A well-formed prefix length (RFC 4684 section 4).
+    pub fn valid(self) -> bool {
+        self.bits == 0 || (32..=96).contains(&self.bits)
+    }
+}
+
+/// A run of RFC 4684 NLRIs: `len(1)` then `ceil(len/8)` prefix octets. A
+/// length of 1..=31 or over 96, or a truncated entry, is malformed.
+fn decode_rtc_nlris(mut data: &[u8]) -> Result<Vec<RtcNlri>, WireError> {
+    let mut out = Vec::new();
+    while let Some((&bits, rest)) = data.split_first() {
+        let n = usize::from(bits).div_ceil(8);
+        if (bits != 0 && !(32..=96).contains(&bits)) || rest.len() < n {
+            return Err(WireError::MalformedUpdate);
+        }
+        let mut buf = [0u8; 12];
+        buf[..n].copy_from_slice(&rest[..n]);
+        let raw = RtcNlri {
+            origin_as: u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            rt: u64::from_be_bytes(buf[4..].try_into().expect("8 octets")),
+            bits,
+        };
+        let m = raw.masked();
+        out.push(RtcNlri {
+            origin_as: u32::from_be_bytes([m[0], m[1], m[2], m[3]]),
+            rt: u64::from_be_bytes(m[4..].try_into().expect("8 octets")),
+            bits,
+        });
+        data = &rest[n..];
+    }
+    Ok(out)
+}
+
+fn encode_rtc_nlris(nlris: &[RtcNlri], out: &mut Vec<u8>) {
+    // ponytail: an invalid length is skipped; only `rib::rtc` builds these
+    // and it never produces one.
+    for n in nlris.iter().filter(|n| n.valid()) {
+        out.push(n.bits);
+        out.extend_from_slice(&n.masked()[..usize::from(n.bits).div_ceil(8)]);
+    }
+}
+
 /// RFC 4760 `MP_REACH_NLRI` value: `AFI(2) SAFI(1) NextHopLen(1)
 /// NextHop(NextHopLen) SNPACount(1) SNPAs... NLRI...`. SNPAs are always
 /// skipped by their own declared lengths (this crate never emits any, but
@@ -1827,6 +1940,20 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
             evpn: evpn::decode_nlris(&data[pos..])?,
             flowspec: Vec::new(),
             vpn: Vec::new(),
+            rtc: Vec::new(),
+        });
+    }
+    if safi == SAFI_RTC {
+        return Ok(MpReachNlri {
+            afi,
+            safi,
+            next_hop,
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            evpn: Vec::new(),
+            flowspec: Vec::new(),
+            vpn: Vec::new(),
+            rtc: decode_rtc_nlris(&data[pos..])?,
         });
     }
     if safi == SAFI_FLOWSPEC {
@@ -1839,6 +1966,7 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
             evpn: Vec::new(),
             flowspec: decode_flowspec(afi, &data[pos..])?,
             vpn: Vec::new(),
+            rtc: Vec::new(),
         });
     }
     // No ADD-PATH here: `add_path_afis` is keyed by AFI only, so consulting
@@ -1853,6 +1981,7 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
             evpn: Vec::new(),
             flowspec: Vec::new(),
             vpn: vpn::decode_vpn_reach(afi, &data[pos..])?,
+            rtc: Vec::new(),
         });
     }
     let (nlri, nlri_path_ids) = decode_prefixes(afi, &data[pos..], add_path_afis.contains(&afi))?;
@@ -1865,6 +1994,7 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
         evpn: Vec::new(),
         flowspec: Vec::new(),
         vpn: Vec::new(),
+        rtc: Vec::new(),
     })
 }
 
@@ -1889,6 +2019,19 @@ fn decode_mp_unreach(
             evpn: evpn::decode_nlris(&data[3..])?,
             flowspec: Vec::new(),
             vpn: Vec::new(),
+            rtc: Vec::new(),
+        });
+    }
+    if safi == SAFI_RTC {
+        return Ok(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            evpn: Vec::new(),
+            flowspec: Vec::new(),
+            vpn: Vec::new(),
+            rtc: decode_rtc_nlris(&data[3..])?,
         });
     }
     if safi == SAFI_FLOWSPEC {
@@ -1900,6 +2043,7 @@ fn decode_mp_unreach(
             evpn: Vec::new(),
             flowspec: decode_flowspec(afi, &data[3..])?,
             vpn: Vec::new(),
+            rtc: Vec::new(),
         });
     }
     if safi == SAFI_VPN {
@@ -1911,6 +2055,7 @@ fn decode_mp_unreach(
             evpn: Vec::new(),
             flowspec: Vec::new(),
             vpn: vpn::decode_vpn_unreach(afi, &data[3..])?,
+            rtc: Vec::new(),
         });
     }
     let (withdrawn, withdrawn_path_ids) =
@@ -1923,6 +2068,7 @@ fn decode_mp_unreach(
         evpn: Vec::new(),
         flowspec: Vec::new(),
         vpn: Vec::new(),
+        rtc: Vec::new(),
     })
 }
 
@@ -1981,6 +2127,7 @@ fn encode_mp_reach(mp: &MpReachNlri) -> Vec<u8> {
     mp.evpn.iter().for_each(|n| evpn::encode_nlri(n, &mut out));
     encode_flowspec(&mp.flowspec, &mut out);
     vpn::encode_vpn_reach(&mp.vpn, &mut out);
+    encode_rtc_nlris(&mp.rtc, &mut out);
     out
 }
 
@@ -1992,6 +2139,7 @@ fn encode_mp_unreach(mp: &MpUnreachNlri) -> Vec<u8> {
     mp.evpn.iter().for_each(|n| evpn::encode_nlri(n, &mut out));
     encode_flowspec(&mp.flowspec, &mut out);
     vpn::encode_vpn_unreach(&mp.vpn, &mut out);
+    encode_rtc_nlris(&mp.rtc, &mut out);
     out
 }
 
@@ -2139,6 +2287,7 @@ fn parse_update(
                         ..n
                     })
                     .collect(),
+                rtc: m.rtc,
             }
         }));
     }
@@ -2774,6 +2923,7 @@ mod tests {
             evpn: vec![],
             flowspec: Vec::new(),
             vpn: Vec::new(),
+            rtc: Vec::new(),
         }];
         let mut codec = BgpCodec::default();
         let mut buf = BytesMut::new();
@@ -2965,6 +3115,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: flow_rules(flowspec::Afi::V4),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }),
         );
         attrs.extend(reach);
@@ -3378,6 +3529,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3410,6 +3562,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3457,6 +3610,7 @@ mod tests {
                 evpn: evpn_routes(),
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3477,6 +3631,7 @@ mod tests {
                 evpn: evpn_routes(),
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3537,6 +3692,7 @@ mod tests {
                     evpn: vec![],
                     flowspec: flow_rules(afi),
                     vpn: Vec::new(),
+                    rtc: Vec::new(),
                 }],
                 ..empty_update()
             };
@@ -3566,6 +3722,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: flow_rules(flowspec::Afi::V4),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3596,6 +3753,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: flow_rules(flowspec::Afi::V4),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3639,6 +3797,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: flow_rules(flowspec::Afi::V4)[..1].to_vec(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3689,6 +3848,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: rules,
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -3727,6 +3887,7 @@ mod tests {
             nlri_path_ids: vec![],
             evpn: vec![],
             flowspec: vec![],
+            rtc: vec![],
             vpn,
         }
     }
@@ -3745,6 +3906,7 @@ mod tests {
             withdrawn_path_ids: vec![],
             evpn: vec![],
             flowspec: vec![],
+            rtc: vec![],
             vpn: vpn
                 .into_iter()
                 .map(|n| VpnNlri {
@@ -3894,6 +4056,7 @@ mod tests {
                 withdrawn_path_ids: vec![],
                 evpn: vec![],
                 flowspec: vec![],
+                rtc: vec![],
                 vpn: routes
                     .iter()
                     .map(|n| VpnNlri {
@@ -3947,6 +4110,7 @@ mod tests {
                 evpn: vec![],
                 flowspec: Vec::new(),
                 vpn: Vec::new(),
+                rtc: Vec::new(),
             }],
             ..empty_update()
         };
@@ -4602,5 +4766,127 @@ mod shutdown_message_tests {
         ));
         // Two SNPAs, the second missing.
         assert!(matches!(base(&[2, 0]), Err(WireError::MalformedUpdate)));
+    }
+
+    const RT: u64 = 0x0002_FDE8_0000_0064; // 65000:100
+
+    fn rtc(origin_as: u32, rt: u64, bits: u8) -> RtcNlri {
+        RtcNlri {
+            origin_as,
+            rt,
+            bits,
+        }
+    }
+
+    #[test]
+    fn rtc_nlri_round_trips_at_every_legal_length() {
+        let all = [
+            rtc(0, 0, 0),
+            rtc(65001, 0, 32),
+            rtc(65001, 0x0002_0000_0000_0000, 48),
+            rtc(65001, RT, 96),
+        ];
+        let mut wire = Vec::new();
+        encode_rtc_nlris(&all, &mut wire);
+        // len + ceil(len/8) octets each: 1, 5, 7, 13.
+        assert_eq!(wire.len(), 1 + 5 + 7 + 13);
+        assert_eq!(decode_rtc_nlris(&wire).unwrap(), all);
+    }
+
+    #[test]
+    fn rtc_trailing_bits_are_masked_on_decode_and_zeroed_on_encode() {
+        // 33 bits: one bit of the route target survives, the rest is noise.
+        let wire = [33, 0, 0, 0xfd, 0xe8, 0xff];
+        assert_eq!(
+            decode_rtc_nlris(&wire).unwrap(),
+            [rtc(0xfde8, 0x8000_0000_0000_0000, 33)]
+        );
+        let mut out = Vec::new();
+        encode_rtc_nlris(&[rtc(0xfde8, u64::MAX, 33)], &mut out);
+        assert_eq!(out, [33, 0, 0, 0xfd, 0xe8, 0x80]);
+    }
+
+    #[test]
+    fn rtc_bad_lengths_and_truncation_are_malformed() {
+        for wire in [
+            vec![1, 0],
+            vec![31, 0, 0, 0, 0],
+            vec![97; 14],
+            vec![32, 0, 0, 0],
+        ] {
+            assert!(
+                matches!(decode_rtc_nlris(&wire), Err(WireError::MalformedUpdate)),
+                "{wire:?}"
+            );
+        }
+        let mut out = Vec::new();
+        encode_rtc_nlris(&[rtc(1, 1, 31), rtc(1, 1, 97)], &mut out);
+        assert!(out.is_empty(), "invalid lengths are never encoded");
+    }
+
+    #[test]
+    fn rtc_mp_reach_and_unreach_round_trip_with_either_next_hop() {
+        for nh in ["192.0.2.1", "2001:db8::1"] {
+            let next_hop: IpAddr = nh.parse().unwrap();
+            let reach = MpReachNlri {
+                afi: AFI_IPV4,
+                safi: SAFI_RTC,
+                next_hop,
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                vpn: vec![],
+                rtc: vec![rtc(65001, RT, 96), rtc(0, 0, 0)],
+            };
+            let back = decode_mp_reach(&encode_mp_reach(&reach), &HashSet::new()).unwrap();
+            assert_eq!(back, reach);
+            let un = MpUnreachNlri {
+                afi: AFI_IPV4,
+                safi: SAFI_RTC,
+                withdrawn: vec![],
+                withdrawn_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                vpn: vec![],
+                rtc: reach.rtc.clone(),
+            };
+            let back = decode_mp_unreach(&encode_mp_unreach(&un), &HashSet::new()).unwrap();
+            assert_eq!(back, un);
+        }
+    }
+
+    #[test]
+    fn an_oversized_rtc_update_is_split_not_dropped() {
+        let rtc: Vec<_> = (0..400).map(|i| rtc(65001, RT + i, 96)).collect();
+        let update = UpdateMessage {
+            withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
+            nlri: vec![],
+            nlri_path_ids: vec![],
+            attributes: None,
+            mp_reach: vec![],
+            mp_unreach: vec![MpUnreachNlri {
+                afi: AFI_IPV4,
+                safi: SAFI_RTC,
+                withdrawn: vec![],
+                withdrawn_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                vpn: vec![],
+                rtc,
+            }],
+        };
+        let mut out = Vec::new();
+        split_update(&update, false, 1000, &mut out).unwrap();
+        assert!(out.len() > 1);
+        let total: usize = out
+            .iter()
+            .map(|b| {
+                let u = parse_update(b, &HashSet::new(), false).unwrap();
+                u.mp_unreach.iter().map(|m| m.rtc.len()).sum::<usize>()
+            })
+            .sum();
+        assert_eq!(total, 400);
     }
 }

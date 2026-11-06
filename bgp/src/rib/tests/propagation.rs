@@ -998,6 +998,7 @@ fn prefix_counters_match_a_recount_through_every_mutation() {
             evpn: vec![],
             flowspec: Vec::new(),
             vpn: Vec::new(),
+            rtc: Vec::new(),
         }],
         ..empty_update()
     };

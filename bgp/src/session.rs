@@ -1928,6 +1928,7 @@ mod tests {
                 nlri_path_ids: vec![],
                 evpn: vec![],
                 flowspec: vec![],
+                rtc: vec![],
                 vpn: [1, 2]
                     .map(|n| crate::vpn::VpnNlri {
                         labels: vec![100 * u32::from(n)],
@@ -2074,6 +2075,7 @@ mod tests {
             evpn: vec![],
             flowspec: vec![],
             vpn: vec![],
+            rtc: Vec::new(),
         };
         let mut evpn = mp(crate::message::AFI_L2VPN, crate::message::SAFI_EVPN);
         evpn.evpn = [3u8, 1, 2]
