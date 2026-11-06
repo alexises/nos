@@ -32,6 +32,19 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
 use tracing::warn;
 
+/// Registers `fd` with the tokio reactor. `AsyncFd::new` is deprecated
+/// (RUSTSEC-2026-0386): registering is `unsafe`, as the fd must stay open and
+/// keep the same raw fd for the `AsyncFd`'s life.
+#[allow(
+    unsafe_code,
+    reason = "socket2::Socket owns its fd for the AsyncFd's life"
+)]
+fn register_fd<T: std::os::fd::AsRawFd>(fd: T) -> io::Result<AsyncFd<T>> {
+    // SAFETY: callers pass an owning `socket2::Socket`, which keeps its fd
+    // open and unchanged until it is dropped with the `AsyncFd`.
+    unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)
+}
+
 pub const OSPF_IP_PROTO: i32 = 89;
 pub const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
 
@@ -67,7 +80,7 @@ impl OspfSocket {
         socket.set_multicast_ttl_v4(1)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
-            inner: AsyncFd::new(socket)?,
+            inner: register_fd(socket)?,
             local_addr,
             drouters: nos_ospf_common::drouters::AllDRouters::default(),
         })
@@ -94,7 +107,7 @@ impl OspfSocket {
         socket.bind(&SockAddr::from(SocketAddrV4::new(local_addr, 0)))?;
         socket.set_nonblocking(true)?;
         Ok(Self {
-            inner: AsyncFd::new(socket)?,
+            inner: register_fd(socket)?,
             local_addr,
             drouters: nos_ospf_common::drouters::AllDRouters::default(),
         })

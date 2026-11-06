@@ -31,6 +31,19 @@ use std::os::fd::AsRawFd;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
 
+/// Registers `fd` with the tokio reactor. `AsyncFd::new` is deprecated
+/// (RUSTSEC-2026-0386): registering is `unsafe`, as the fd must stay open and
+/// keep the same raw fd for the `AsyncFd`'s life.
+#[allow(
+    unsafe_code,
+    reason = "socket2::Socket owns its fd for the AsyncFd's life"
+)]
+fn register_fd<T: AsRawFd>(fd: T) -> io::Result<AsyncFd<T>> {
+    // SAFETY: callers pass an owning `socket2::Socket`, which keeps its fd
+    // open and unchanged until it is dropped with the `AsyncFd`.
+    unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)
+}
+
 const ETH_HEADER_LEN: usize = 14;
 
 // Field names deliberately mirror `linux/if_packet.h`'s own `sockaddr_ll`/
@@ -197,7 +210,7 @@ impl L2Socket {
         join_multicast(&socket, ifindex, group)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
-            inner: AsyncFd::new(socket)?,
+            inner: register_fd(socket)?,
             own_hw_addr,
             ifindex,
             ethertype,
@@ -240,7 +253,7 @@ impl L2Socket {
         }
         socket.set_nonblocking(true)?;
         Ok(Self {
-            inner: AsyncFd::new(socket)?,
+            inner: register_fd(socket)?,
             own_hw_addr,
             ifindex,
             ethertype: ETH_P_ALL,
@@ -373,7 +386,7 @@ impl L2Unicast {
         let socket = open_raw(if_index(interface)?, ethertype, Some(prog))?;
         socket.set_nonblocking(true)?;
         Ok(Self {
-            inner: AsyncFd::new(socket)?,
+            inner: register_fd(socket)?,
             own_hw_addr,
             ethertype,
         })
