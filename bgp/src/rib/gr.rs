@@ -275,6 +275,9 @@ impl BgpRib {
         if crate::fsm::is_vpn(family) {
             return self.mark_vpn_stale(peer, family);
         }
+        if family == AddressFamily::RtConstraint {
+            return self.mark_rtc_stale(peer);
+        }
         let Some(table) = self.adj_rib_in.get(&peer) else {
             return;
         };
@@ -292,6 +295,9 @@ impl BgpRib {
     pub fn end_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) -> usize {
         if crate::fsm::is_vpn(family) {
             return self.purge_stale_vpn(peer, family);
+        }
+        if family == AddressFamily::RtConstraint {
+            return self.purge_stale_rtc(peer);
         }
         let Some(set) = self.stale.get_mut(&peer) else {
             return 0;
@@ -349,6 +355,7 @@ impl BgpRib {
             AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => {
                 self.purge_stale_flowspec(peer, family)
             }
+            AddressFamily::RtConstraint => self.purge_stale_rtc(peer),
             _ => self.end_refresh_in(peer, family),
         }
     }
@@ -370,7 +377,9 @@ impl BgpRib {
             s.iter()
                 .any(|k| family.is_none_or(|f| super::vpn_out::vpn_family(k.1) == f))
         });
-        ip || evpn || flowspec || vpn
+        let rtc = family.is_none_or(|f| f == AddressFamily::RtConstraint)
+            && self.rtc_stale.get(&peer).is_some_and(|s| !s.is_empty());
+        ip || evpn || flowspec || vpn || rtc
     }
 
     /// `BgpGracefulRestart.stale_time`.
@@ -405,7 +414,8 @@ impl BgpRib {
         let n = self.stale.get(&peer).map_or(0, HashSet::len)
             + self.evpn_stale.get(&peer).map_or(0, HashSet::len)
             + self.flowspec_stale.get(&peer).map_or(0, HashSet::len)
-            + self.vpn_stale.get(&peer).map_or(0, HashSet::len);
+            + self.vpn_stale.get(&peer).map_or(0, HashSet::len)
+            + self.rtc_stale.get(&peer).map_or(0, HashSet::len);
         u32::try_from(n).unwrap_or(u32::MAX)
     }
 
@@ -559,6 +569,10 @@ impl BgpRib {
         self.vpn_stale.entry(peer).or_default().extend(keep);
         for k in drop {
             self.drop_vpn(peer, &k);
+        }
+        // Not listed: `peer_disconnected` already dropped it.
+        if families.contains(&AddressFamily::RtConstraint) {
+            self.mark_rtc_stale(peer);
         }
         let now = Instant::now();
         self.gr_deadline

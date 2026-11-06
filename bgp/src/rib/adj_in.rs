@@ -598,6 +598,16 @@ impl BgpRib {
                 }
             }
         }
+        if let Some(stale) = self.rtc_stale.get_mut(&from) {
+            for n in update
+                .mp_reach
+                .iter()
+                .flat_map(|m| &m.rtc)
+                .chain(update.mp_unreach.iter().flat_map(|m| &m.rtc))
+            {
+                stale.remove(n);
+            }
+        }
         if let Some(stale) = self.vpn_stale.get_mut(&from) {
             for n in update.mp_reach.iter().flat_map(|m| &m.vpn) {
                 stale.remove(&(n.rd, n.prefix));

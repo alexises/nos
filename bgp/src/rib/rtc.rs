@@ -238,6 +238,32 @@ impl BgpRib {
         removed
     }
 
+    /// A graceful restart (or `BoRR`) of `peer`: every membership route held
+    /// from it becomes stale, still counted as interest (Q11).
+    pub(super) fn mark_rtc_stale(&mut self, peer: IpAddr) {
+        if let Some(table) = self.rtc_adj_rib_in.get(&peer) {
+            self.rtc_stale
+                .entry(peer)
+                .or_default()
+                .extend(table.keys().copied());
+        }
+    }
+
+    /// Purges `peer`'s stale membership (through `drop_rtcs`, which
+    /// re-selects, re-advertises and resyncs VPN/EVPN toward the peer);
+    /// returns how many.
+    pub(super) fn purge_stale_rtc(&mut self, peer: IpAddr) -> usize {
+        let keys: Vec<RtcKey> = self
+            .rtc_stale
+            .remove(&peer)
+            .into_iter()
+            .flatten()
+            .collect();
+        let before = self.rtc_adj_rib_in.get(&peer).map_or(0, HashMap::len);
+        self.drop_rtcs(peer, &keys);
+        before - self.rtc_adj_rib_in.get(&peer).map_or(0, HashMap::len)
+    }
+
     /// Withdraws a batch of `peer`'s membership and re-evaluates once.
     pub(super) fn drop_rtcs(&mut self, peer: IpAddr, keys: &[RtcKey]) {
         let removed: Vec<RtcKey> = keys
